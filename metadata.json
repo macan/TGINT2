@@ -1,0 +1,5 @@
+{
+  "name": "Telegram Channel Profile Viewer",
+  "description": "View metadata and latest posts of public Telegram channels",
+  "requestFramePermissions": []
+}
