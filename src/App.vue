@@ -140,10 +140,10 @@ const getFieldIcon = (field: string) => {
   }
 }
 
-const highlightText = (text: string) => {
-  if (!text || searchWords.value.length === 0) return text
+const highlightText = (text: any) => {
+  if (!text || searchWords.value.length === 0) return text ? String(text) : ''
   
-  let highlighted = text
+  let highlighted = String(text)
   searchWords.value.forEach(word => {
     if (!word.trim()) return
     const regex = new RegExp(`(${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi')
