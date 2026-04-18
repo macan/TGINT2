@@ -1,15 +1,16 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import { 
   Search, Loader2, AlertCircle, Users, Calendar, Info, MessageSquare, 
   ExternalLink, Reply, Moon, Sun, Globe, Layout, CheckCircle2, 
   FileText, User, PenTool, Link, ListFilter, Inbox,
-  LayoutGrid, Clock, List, ImageIcon, Video, X, Layers
+  LayoutGrid, Clock, List, ImageIcon, Video, X, Layers, PanelLeftClose, PanelLeft, Phone
 } from 'lucide-vue-next'
-import { format } from 'date-fns'
+import { format, formatDistanceToNow } from 'date-fns'
 
 const isDark = ref(false)
 const activeTab = ref<'explorer' | 'search'>('explorer')
+const isProfileVisible = ref(true)
 
 // Explorer State
 const channelName = ref('')
@@ -19,7 +20,47 @@ const error = ref('')
 const metadata = ref<any>(null)
 const posts = ref<any[]>([])
 const viewMode = ref<'list' | 'masonry' | 'timeline'>('list')
+const isPostModalVisible = ref(false)
+const selectedPost = ref<any>(null)
+
+const openPostModal = (post: any) => {
+  selectedPost.value = post
+  isPostModalVisible.value = true
+}
+
+const closePostModal = () => {
+  isPostModalVisible.value = false
+  selectedPost.value = null
+}
+
+const latestPostTimeDelta = computed(() => {
+  if (!posts.value || posts.value.length === 0) return null
+  const latestDateStr = posts.value[0]?.data?.date
+  if (!latestDateStr) return null
+  
+  try {
+    let dateObj
+    if (typeof latestDateStr === 'number' && latestDateStr < 10000000000) {
+      dateObj = new Date(latestDateStr * 1000)
+    } else {
+      dateObj = new Date(latestDateStr)
+    }
+    
+    if (isNaN(dateObj.getTime())) return null
+    return formatDistanceToNow(dateObj, { addSuffix: true })
+  } catch {
+    return null
+  }
+})
 const lightboxPhoto = ref<string | null>(null)
+const lightboxScale = ref(1)
+
+const handleWheel = (e: WheelEvent) => {
+  if (!lightboxPhoto.value) return
+  const zoomFactor = 0.1
+  const delta = e.deltaY > 0 ? -zoomFactor : zoomFactor
+  lightboxScale.value = Math.min(Math.max(0.5, lightboxScale.value + delta), 6)
+}
 
 // Group Color Helper
 const groupColorMap = [
@@ -210,6 +251,7 @@ const performGlobalSearch = async () => {
     
     if (keys.length === 0) {
       searchResults.value = []
+      hasSearched.value = true
       return
     }
 
@@ -271,6 +313,17 @@ const formatDate = (dateStr: string | number) => {
   }
 }
 
+const formatViews = (views: any) => {
+  if (views == null) return ''
+  if (typeof views === 'number') return views.toLocaleString()
+  if (typeof views === 'string') {
+    const parsed = Number(views)
+    if (!isNaN(parsed)) return parsed.toLocaleString()
+    return views
+  }
+  return String(views)
+}
+
 const telegramLogoUrl = "data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%232AABEE' d='M12 24c6.627 0 12-5.373 12-12S18.627 0 12 0 0 5.373 0 12s5.373 12 12 12z'/%3E%3Cpath fill='%23fff' d='M5.265 11.735l11.953-4.606c.553-.206 1.034.13.844.975l-2.02 9.516c-.15.676-.554.843-1.116.528l-3.085-2.274-1.488 1.433c-.165.165-.303.303-.62.303l.22-3.15 5.734-5.18c.25-.223-.054-.346-.387-.123l-7.09 4.466-3.054-.954c-.664-.208-.678-.664.14-.984z'/%3E%3C/svg%3E"
 
 const loadMorePosts = async () => {
@@ -309,9 +362,23 @@ const loadMorePosts = async () => {
   }
 }
 
+const closeLightbox = () => {
+  lightboxPhoto.value = null
+  lightboxScale.value = 1
+  document.body.style.overflow = 'auto'
+}
+
+const handleKeydown = (e: KeyboardEvent) => {
+  if (e.key === 'Escape' && lightboxPhoto.value) {
+    closeLightbox()
+  }
+}
+
 let observer: IntersectionObserver | null = null
 
 onMounted(() => {
+  window.addEventListener('keydown', handleKeydown)
+  
   observer = new IntersectionObserver((entries) => {
     if (entries[0].isIntersecting && activeTab.value === 'explorer' && !loading.value) {
       loadMorePosts()
@@ -323,6 +390,10 @@ onMounted(() => {
   }
 })
 
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeydown)
+})
+
 watch(() => bottomSentinel.value, (newEl) => {
   if (observer) {
     observer.disconnect()
@@ -332,12 +403,8 @@ watch(() => bottomSentinel.value, (newEl) => {
 
 const openLightbox = (url: string) => {
   lightboxPhoto.value = url
+  lightboxScale.value = 1
   document.body.style.overflow = 'hidden'
-}
-
-const closeLightbox = () => {
-  lightboxPhoto.value = null
-  document.body.style.overflow = 'auto'
 }
 
 const handleImageError = (e: Event) => {
@@ -358,7 +425,7 @@ const mediaPosts = computed(() => {
 
 <template>
   <div class="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200">
-    <div class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
+    <div class="max-w-[96rem] mx-auto p-4 sm:p-6 lg:p-8 xl:p-10">
       
       <!-- Premium Header & Glass Navigation -->
       <header class="mb-12 relative flex flex-col items-center">
@@ -408,22 +475,22 @@ const mediaPosts = computed(() => {
       </header>
 
       <!-- Explorer Tab -->
-      <div v-if="activeTab === 'explorer'">
+      <div v-show="activeTab === 'explorer'">
         <div class="max-w-2xl mx-auto mb-16 px-4 sm:px-0">
           <form @submit.prevent="searchChannel" class="relative group">
-            <div class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-blue-500">
-              <Search class="h-5 w-5 text-gray-400" />
+            <div class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-blue-500 z-10">
+              <Layout class="h-5 w-5 text-gray-400" />
             </div>
             <input
               v-model="channelName"
               type="text"
-              class="block w-full pl-14 pr-32 py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 sm:text-base font-medium shadow-sm hover:shadow-md focus:shadow-xl transition-all duration-300"
+              class="block w-full pl-14 pr-[120px] py-3.5 border border-gray-200 dark:border-gray-700 rounded-xl leading-5 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-sm font-medium shadow-sm hover:shadow-md focus:shadow-xl transition-all duration-300"
               placeholder="Enter channel name (e.g. durov)"
             />
             <button
               type="submit"
               :disabled="loading || !channelName.trim()"
-              class="absolute right-2.5 top-2.5 bottom-2.5 px-6 bg-blue-600 text-white rounded-xl text-sm font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
+              class="absolute right-2 top-2 bottom-2 px-5 bg-blue-600 text-white rounded-[0.65rem] text-xs font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
             >
               <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
               {{ loading ? 'Exploring...' : 'Explore' }}
@@ -439,9 +506,9 @@ const mediaPosts = computed(() => {
         </div>
       </div>
 
-      <div v-if="metadata" class="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12">
+      <div v-if="metadata" class="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 transition-all duration-500 items-start">
         <!-- Profile Sidebar -->
-        <div class="lg:col-span-4 space-y-6">
+        <div v-show="isProfileVisible" class="lg:col-span-4 xl:col-span-3 space-y-6 transition-all duration-500 origin-left">
           <div class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 overflow-hidden relative">
             <div class="h-40 bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-600 relative overflow-hidden">
               <div class="absolute inset-0 bg-white/10 dark:bg-black/10 backdrop-blur-sm"></div>
@@ -488,14 +555,28 @@ const mediaPosts = computed(() => {
         </div>
 
         <!-- Posts Feed -->
-        <div class="lg:col-span-8">
-          <div class="flex items-center justify-between mb-6">
-            <h3 class="text-xl font-extrabold text-gray-900 dark:text-white flex items-center">
-              <MessageSquare class="h-6 w-6 mr-3 text-blue-600 dark:text-blue-400" />
-              {{ viewMode === 'list' ? 'Channel Feed' : 'Medias' }}
+        <div :class="[isProfileVisible ? 'lg:col-span-8 xl:col-span-9' : 'lg:col-span-12', 'transition-all duration-500 ease-in-out min-w-0']">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+            <h3 class="text-xl font-extrabold text-gray-900 dark:text-white flex flex-wrap items-center gap-y-2">
+              <button
+                @click="isProfileVisible = !isProfileVisible"
+                class="hidden lg:flex mr-4 p-2 -ml-2 rounded-xl text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+                :title="isProfileVisible ? 'Hide Sidebar' : 'Show Sidebar'"
+              >
+                <PanelLeftClose v-if="isProfileVisible" class="h-5 w-5" />
+                <PanelLeft v-else class="h-5 w-5" />
+              </button>
+              <div class="flex items-center">
+                <MessageSquare class="h-6 w-6 mr-3 text-blue-600 dark:text-blue-400" />
+                {{ viewMode === 'list' ? 'Channel Feed' : 'Medias' }}
+              </div>
+              <span v-if="latestPostTimeDelta" class="ml-2 sm:ml-4 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 border border-emerald-200/50 dark:border-emerald-800/50 text-[10px] uppercase tracking-widest font-black flex items-center shadow-sm">
+                <Clock class="h-3 w-3 mr-1.5" />
+                Latest Post {{ latestPostTimeDelta }}
+              </span>
             </h3>
             
-            <div class="flex bg-gray-100 dark:bg-gray-900/50 p-1 rounded-xl border border-gray-200 dark:border-gray-700">
+            <div class="flex bg-gray-100 dark:bg-gray-900/50 p-1 rounded-xl border border-gray-200 dark:border-gray-700 self-start sm:self-auto shrink-0">
               <button 
                 @click="viewMode = 'list'"
                 :class="['p-2 rounded-lg transition-all flex items-center justify-center', viewMode === 'list' ? 'bg-white dark:bg-gray-800 text-blue-600 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300']"
@@ -563,9 +644,12 @@ const mediaPosts = computed(() => {
                 
                 <!-- Quoted Reply -->
                 <div v-if="post.data?.reply && post.data.reply.length >= 2" class="mb-4 border-l-4 border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/10 p-4 rounded-r-2xl relative z-10">
-                  <div class="text-[10px] font-black uppercase tracking-widest text-blue-600 dark:text-blue-400 mb-1.5 flex items-center">
-                    <Reply class="h-3 w-3 mr-1" />
-                    Reply to message
+                  <div class="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-blue-600 dark:text-blue-400 mb-1.5">
+                    <div class="flex items-center">
+                      <Reply class="h-3 w-3 mr-1" />
+                      Reply to message
+                    </div>
+                    <span v-if="Array.isArray(post.data?.reply) && post.data.reply[0] != null" class="font-mono bg-blue-100/50 dark:bg-blue-800/30 px-2 py-0.5 rounded border border-blue-200/50 dark:border-blue-700/50 tracking-normal text-[10px] normal-case">ID: {{ post.data._tool ? post.data.reply[0] : String(post.data.reply[0]).split('/').pop() }}</span>
                   </div>
                   <div class="text-gray-700 dark:text-gray-300 text-sm whitespace-pre-wrap break-words italic line-clamp-3">
                     {{ post.data.reply[1] }}
@@ -574,6 +658,30 @@ const mediaPosts = computed(() => {
 
                 <div v-if="post.data?.content" class="text-gray-800 dark:text-gray-200 text-[15px] leading-relaxed whitespace-pre-wrap break-words mb-4 relative z-10">
                   {{ post.data.content }}
+                </div>
+
+                <!-- Contact Subcard -->
+                <div v-if="post.data?.contact && Object.keys(post.data.contact).length > 0" class="mb-4 rounded-xl border border-blue-200/50 dark:border-blue-800/50 bg-blue-50/50 dark:bg-blue-900/20 p-4 relative z-10 shadow-sm">
+                  <div class="flex items-center mb-3">
+                    <div class="h-8 w-8 rounded-full bg-blue-100 dark:bg-blue-800/50 flex flex-shrink-0 items-center justify-center text-blue-600 dark:text-blue-400 mr-3">
+                      <User class="h-4 w-4" />
+                    </div>
+                    <div class="text-[10px] font-black tracking-widest text-blue-500 uppercase">Contact Shared</div>
+                  </div>
+                  <div v-if="typeof post.data.contact === 'object'" class="space-y-2 bg-white/60 dark:bg-gray-900/60 p-3 rounded-lg border border-gray-100/50 dark:border-gray-700/50">
+                    <div v-if="post.data.contact.first_name || post.data.contact.last_name" class="flex items-center text-sm font-bold text-gray-900 dark:text-gray-100">
+                       {{ post.data.contact.first_name }} {{ post.data.contact.last_name }}
+                    </div>
+                    <div v-if="post.data.contact.phone_number" class="flex items-center text-xs text-gray-700 dark:text-gray-300">
+                      <Phone class="h-3.5 w-3.5 mr-1.5 text-blue-500/70" /> {{ post.data.contact.phone_number }}
+                    </div>
+                    <div v-if="!post.data.contact.first_name && !post.data.contact.phone_number" class="text-xs text-gray-700 dark:text-gray-300 font-mono whitespace-pre-wrap break-words">
+                      {{ JSON.stringify(post.data.contact, null, 2).replace(/[\{\}"]/g, '').trim() }}
+                    </div>
+                  </div>
+                  <div v-else class="text-xs text-gray-700 dark:text-gray-300 font-mono whitespace-pre-wrap break-words bg-white/60 dark:bg-gray-900/60 p-3 rounded-lg border border-gray-100/50 dark:border-gray-700/50">
+                    {{ post.data.contact }}
+                  </div>
                 </div>
 
                 <!-- Media Embeds -->
@@ -601,20 +709,27 @@ const mediaPosts = computed(() => {
                   </div>
                 </div>
                 
-                <div class="mt-5 pt-4 border-t border-gray-100 dark:border-gray-700/50 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 relative z-10">
-                  <div class="flex items-center space-x-6">
-                    <span v-if="post.data?.views" class="flex items-center font-semibold border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1 bg-white dark:bg-gray-800">
-                      <Users class="h-3 w-3 mr-1.5 text-gray-400" />
-                      {{ post.data.views.toLocaleString() }}
-                    </span>
+                <div class="mt-5 pt-4 border-t border-gray-100 dark:border-gray-700/50 flex flex-col space-y-4 relative z-10">
+                  <div class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+                    <div class="flex items-center space-x-6">
+                      <span v-if="post.data?.views != null" class="flex items-center font-semibold border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1 bg-white dark:bg-gray-800">
+                        <Users class="h-3 w-3 mr-1.5 text-gray-400" />
+                        {{ formatViews(post.data.views) }}
+                      </span>
+                    </div>
+                    <span v-if="post.key" class="font-mono bg-gray-50/50 dark:bg-gray-900/50 border border-gray-200/50 dark:border-gray-700/50 px-2.5 py-1 rounded-lg text-[10px] font-medium text-gray-400 dark:text-gray-500 backdrop-blur-sm">ID: {{ post.key }}</span>
                   </div>
-                  <span v-if="post.key" class="font-mono bg-gray-50/50 dark:bg-gray-900/50 border border-gray-200/50 dark:border-gray-700/50 px-2.5 py-1 rounded-lg text-[10px] font-medium text-gray-400 dark:text-gray-500 backdrop-blur-sm">ID: {{ post.key }}</span>
+                  <!-- Raw Post Debug -->
+                  <details class="bg-gray-50/50 dark:bg-gray-900/30 rounded-xl border border-gray-200/50 dark:border-gray-700/50 p-4 text-xs transition-colors hover:bg-gray-50 dark:hover:bg-gray-900/50">
+                    <summary class="font-medium text-gray-700 dark:text-gray-400 cursor-pointer outline-none hover:text-gray-900 dark:hover:text-gray-300">View Raw Post Data</summary>
+                    <pre class="mt-3 overflow-x-auto text-gray-600 dark:text-gray-400 custom-scrollbar">{{ JSON.stringify(post, null, 2) }}</pre>
+                  </details>
                 </div>
               </div>
             </div>
 
             <!-- Masonry View -->
-            <div v-else-if="viewMode === 'masonry'" class="columns-1 sm:columns-2 md:columns-3 gap-6 space-y-6">
+            <div v-else-if="viewMode === 'masonry'" class="columns-1 sm:columns-2 md:columns-3 xl:columns-4 2xl:columns-5 min-[1900px]:columns-6 gap-6 space-y-6">
               <div 
                 v-for="(post, index) in mediaPosts" 
                 :key="post.key || index" 
@@ -625,7 +740,7 @@ const mediaPosts = computed(() => {
                     : 'bg-white dark:bg-gray-800 border-gray-100 dark:border-gray-700'
                 ]"
               >
-                <div class="relative overflow-hidden cursor-zoom-in group/inner" @click="openLightbox(post.data?.photos?.length ? `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0` : `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)">
+                <div class="relative overflow-hidden cursor-pointer group/inner" @click="openPostModal(post)">
                   <!-- ID Badge -->
                   <div class="absolute top-4 left-4 z-10 flex flex-col space-y-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
                     <div v-if="post.key" class="font-mono text-[10px] font-bold tracking-tight bg-black/60 backdrop-blur-md text-white px-2.5 py-1 rounded-lg border border-white/10 w-fit shadow-xl">
@@ -676,28 +791,34 @@ const mediaPosts = computed(() => {
             </div>
 
             <!-- Timeline View -->
-            <div v-else-if="viewMode === 'timeline'" class="relative space-y-12 pb-12 before:absolute before:inset-0 before:left-8 md:before:left-1/2 before:-translate-x-px before:h-full before:w-0.5 before:bg-gradient-to-b before:from-blue-500/0 before:via-blue-500/30 before:to-blue-500/0">
-              <div v-for="(post, index) in mediaPosts" :key="post.key || index" class="relative flex flex-col md:flex-row items-center group">
-                <!-- Central Icon -->
-                <div class="flex items-center justify-center w-12 h-12 rounded-full border-4 border-white dark:border-gray-900 bg-blue-600 text-white shadow-xl shadow-blue-500/20 shrink-0 absolute left-2 md:left-1/2 -translate-x-px md:-translate-x-1/2 z-10 transition-all duration-500 group-hover:scale-110 group-hover:bg-blue-500 group-hover:shadow-blue-500/40">
-                  <ImageIcon v-if="post.data?.photos?.length || post.data?.linkPreview?.image" class="h-5 w-5" />
-                  <Video v-else class="h-5 w-5" />
-                  <!-- Hidden ID for screen readers or tech focus -->
-                  <span class="sr-only">Post {{ post.key }}</span>
+            <div v-else-if="viewMode === 'timeline'" class="relative space-y-16 pb-12 before:absolute before:inset-0 before:left-8 md:before:left-1/2 before:-translate-x-px before:h-full before:w-0.5 before:bg-gradient-to-b before:from-blue-500/0 before:via-blue-500/30 before:to-blue-500/0">
+              <div v-for="(post, index) in mediaPosts" :key="post.key || index" class="relative flex flex-col md:flex-row items-start md:justify-between group">
+                <!-- Central Timeline Axis with Date -->
+                <div class="absolute left-8 md:left-1/2 w-48 -mx-24 flex flex-col items-center justify-center z-20 pointer-events-none group-hover:scale-105 transition-transform duration-500">
+                  <div class="flex items-center justify-center w-12 h-12 rounded-full border-4 border-white dark:border-gray-900 bg-blue-600 text-white shadow-xl shadow-blue-500/20 shrink-0 transition-colors duration-500 group-hover:bg-blue-500 group-hover:shadow-blue-500/40">
+                    <ImageIcon v-if="post.data?.photos?.length || post.data?.linkPreview?.image" class="h-5 w-5" />
+                    <Video v-else class="h-5 w-5" />
+                    <!-- Hidden ID for screen readers -->
+                    <span class="sr-only">Post {{ post.key }}</span>
+                  </div>
+                  <!-- Inline Timeline Date Display -->
+                  <div class="mt-2 bg-white/90 dark:bg-gray-800/90 backdrop-blur-md px-3 py-1.5 rounded-xl border border-gray-100 dark:border-gray-700 shadow-sm flex flex-col items-center pointer-events-auto">
+                    <span class="text-[9px] font-black text-blue-600 dark:text-blue-400 uppercase tracking-widest leading-none whitespace-nowrap">{{ formatDate(post.data?.date).split(' ')[0] }}</span>
+                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400 mt-1 leading-none whitespace-nowrap">{{ formatDate(post.data?.date).split(' ').slice(1).join(' ') }}</span>
+                  </div>
                 </div>
                 
-                <!-- Metadata Side (Left on Desktop) -->
-                <div class="w-full pl-16 md:pl-0 md:w-[calc(50%-3rem)] md:text-right pr-0 md:pr-14 order-2 md:order-1 mb-4 md:mb-0">
-                  <div class="flex flex-col md:items-end">
-                    <div class="flex items-center space-x-2 md:flex-row-reverse md:space-x-reverse mb-1">
+                <!-- Metadata Side (Right on Desktop) -->
+                <div class="w-full pl-24 md:pl-0 md:w-[calc(50%-4rem)] md:text-left pr-0 md:pl-16 order-2 md:order-3 mb-4 md:mb-0 mt-3 md:mt-0">
+                  <div class="flex flex-col md:items-start">
+                    <div class="flex items-center space-x-2 md:flex-row mb-1">
                       <span class="text-base font-black text-gray-900 dark:text-white group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors uppercase tracking-tighter">{{ post.data?.author || post.data?.user || metadata.title }}</span>
                       <div v-if="post.data?.grouped?.nr > 0" :class="['flex items-center px-1.5 py-0.5 rounded-md text-[8px] font-black uppercase tracking-wider', getGroupStyles(post.data.grouped.root).badge]">
                         <Layers class="h-2.5 w-2.5 mr-1" />
                         Group: {{ post.data.grouped.root }}
                       </div>
                     </div>
-                    <div class="flex flex-col md:items-end space-y-1 mb-4">
-                      <time class="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-[0.2em]">{{ formatDate(post.data?.date) }}</time>
+                    <div class="flex flex-col flex-start space-y-1 mb-4">
                       <span v-if="post.key" class="text-[9px] font-mono text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-900/40 px-2 rounded-md">ID: {{ post.key.split('.').pop() }}</span>
                     </div>
                     
@@ -707,23 +828,23 @@ const mediaPosts = computed(() => {
                     </div>
 
                     <!-- Link Preview Text -->
-                    <div v-if="post.data?.linkPreview" class="bg-gray-50 dark:bg-gray-900/40 p-3 rounded-2xl border border-gray-100 dark:border-gray-800 mb-4 flex flex-col md:items-end max-w-full">
+                    <div v-if="post.data?.linkPreview" class="bg-gray-50 dark:bg-gray-900/40 p-3 rounded-2xl border border-gray-100 dark:border-gray-800 mb-4 flex flex-col md:items-start max-w-full">
                       <span v-if="post.data.linkPreview.siteName" class="text-[9px] font-black text-blue-500 uppercase tracking-widest mb-1">{{ post.data.linkPreview.siteName }}</span>
                       <h4 v-if="post.data.linkPreview.title" class="text-xs font-bold text-gray-900 dark:text-white mb-1 leading-tight">{{ post.data.linkPreview.title }}</h4>
-                      <p v-if="post.data.linkPreview.description" class="text-[11px] text-gray-500 dark:text-gray-400 line-clamp-3 md:text-right">{{ post.data.linkPreview.description }}</p>
+                      <p v-if="post.data.linkPreview.description" class="text-[11px] text-gray-500 dark:text-gray-400 line-clamp-3 md:text-left">{{ post.data.linkPreview.description }}</p>
                     </div>
 
-                    <div v-if="post.data?.views" class="inline-flex items-center px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded-lg text-[9px] font-bold text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700">
+                    <div v-if="post.data?.views != null" class="inline-flex items-center px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded-lg text-[9px] font-bold text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700">
                       <Users class="h-3 w-3 mr-1" />
-                      {{ post.data.views.toLocaleString() }} Views
+                      {{ formatViews(post.data.views) }} Views
                     </div>
                   </div>
                 </div>
 
-                <!-- Media Content Side (Right on Desktop) -->
-                <div class="w-full pl-16 md:pl-0 md:w-[calc(50%-3rem)] md:pl-14 order-3">
-                  <div class="bg-white dark:bg-gray-800 p-5 rounded-[2.5rem] shadow-xl shadow-blue-500/[0.02] border border-gray-100 dark:border-gray-700 hover:border-blue-500/30 dark:hover:border-blue-400/30 transition-all duration-500 hover:shadow-2xl hover:shadow-blue-500/[0.05] dark:hover:shadow-none bg-clip-padding">
-                    <div class="rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in" @click="openLightbox(post.data?.photos?.length ? `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0` : `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)">
+                <!-- Media Content Side (Left on Desktop) -->
+                <div class="w-full pl-24 md:pl-0 md:w-[calc(50%-4rem)] md:pr-16 order-3 md:order-1 flex items-center justify-center">
+                  <div class="bg-white dark:bg-gray-800 p-5 rounded-[2.5rem] shadow-xl shadow-blue-500/[0.02] border border-gray-100 dark:border-gray-700 hover:border-blue-500/30 dark:hover:border-blue-400/30 transition-all duration-500 hover:shadow-2xl hover:shadow-blue-500/[0.05] dark:hover:shadow-none bg-clip-padding flex flex-col items-center justify-center">
+                    <div class="rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center" @click="openLightbox(post.data?.photos?.length ? `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0` : `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)">
                       <img 
                         v-if="post.data?.photos && post.data.photos.length > 0" 
                         :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`" 
@@ -779,27 +900,27 @@ const mediaPosts = computed(() => {
     </div>
 
     <!-- Global Search Tab -->
-    <div v-if="activeTab === 'search'" class="max-w-4xl mx-auto">
-      <div class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-2xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-6 sm:p-10 mb-12 relative overflow-hidden">
+    <div v-show="activeTab === 'search'" class="max-w-4xl mx-auto">
+      <div class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2rem] shadow-2xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-5 sm:p-8 mb-10 relative overflow-hidden">
         <!-- Background Decoration -->
-        <div class="absolute -top-24 -right-24 w-48 h-48 bg-blue-500/10 dark:bg-blue-500/20 rounded-full blur-3xl pointer-events-none"></div>
-        <div class="absolute -bottom-24 -left-24 w-48 h-48 bg-purple-500/10 dark:bg-purple-500/20 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="absolute -top-20 -right-20 w-40 h-40 bg-blue-500/10 dark:bg-blue-500/20 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="absolute -bottom-20 -left-20 w-40 h-40 bg-purple-500/10 dark:bg-purple-500/20 rounded-full blur-3xl pointer-events-none"></div>
 
         <form @submit.prevent="performGlobalSearch" class="relative z-10">
-          <div class="relative flex items-center mb-8 group">
-            <div class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-blue-500">
-              <Globe class="h-6 w-6 text-gray-400" />
+          <div class="relative flex items-center mb-6 group">
+            <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-blue-500 z-10">
+              <Globe class="h-5 w-5 text-gray-400" />
             </div>
             <input
               v-model="globalSearchQuery"
               type="text"
-              class="block w-full pl-16 pr-36 py-5 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/90 dark:bg-gray-800/90 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-lg font-medium shadow-sm hover:shadow-md focus:shadow-xl transition-all duration-300"
+              class="block w-full pl-12 pr-[120px] py-3.5 border border-gray-200 dark:border-gray-700 rounded-xl leading-5 bg-white/90 dark:bg-gray-800/90 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-sm font-medium shadow-sm hover:shadow-md focus:shadow-xl transition-all duration-300"
               placeholder="Search across all telegram data..."
             />
             <button
               type="submit"
               :disabled="isSearching || !globalSearchQuery.trim()"
-              class="absolute right-3 top-3 bottom-3 px-8 bg-blue-600 text-white rounded-xl text-sm font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
+              class="absolute right-2 top-2 bottom-2 px-5 bg-blue-600 text-white rounded-[0.65rem] text-xs font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
             >
               <Loader2 v-if="isSearching" class="h-5 w-5 animate-spin mr-2" />
               {{ isSearching ? 'Searching...' : 'Search' }}
@@ -808,7 +929,7 @@ const mediaPosts = computed(() => {
 
           <div class="flex flex-col sm:flex-row gap-6 items-start sm:items-center justify-between">
             <div class="flex flex-wrap gap-3 items-center">
-              <span class="text-[10px] font-black text-gray-400 dark:text-gray-500 mr-2 uppercase tracking-widest">Search in</span>
+              <span class="text-[9px] font-black text-gray-400 dark:text-gray-500 mr-2 uppercase tracking-widest">Search in</span>
               <button 
                 v-for="(val, field) in searchFields" 
                 :key="field"
@@ -822,7 +943,7 @@ const mediaPosts = computed(() => {
                 ]"
               >
                 <component :is="getFieldIcon(field)" :class="['h-4 w-4 mr-2 transition-transform duration-300', searchFields[field] ? 'scale-110 drop-shadow-md' : 'group-hover:scale-110']" />
-                <span class="text-sm font-bold capitalize tracking-tight">{{ field === 'content' ? 'Message' : field }}</span>
+                <span class="text-xs font-bold capitalize tracking-tight">{{ field === 'content' ? 'Post' : field }}</span>
                 <div v-if="searchFields[field]" class="absolute inset-0 bg-white/20 animate-pulse pointer-events-none"></div>
               </button>
             </div>
@@ -861,7 +982,17 @@ const mediaPosts = computed(() => {
         </div>
       </div>
 
-      <div v-if="searchResults.length > 0" class="space-y-6">
+      <div v-if="isSearching" class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] border border-gray-100 dark:border-gray-700 p-16 text-center shadow-lg">
+        <div class="inline-flex items-center justify-center w-20 h-20 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-6 shadow-inner ring-1 ring-blue-100 dark:ring-blue-800 border-8 border-white dark:border-gray-900">
+          <Loader2 class="h-8 w-8 text-blue-500 dark:text-blue-400 animate-spin" />
+        </div>
+        <h3 class="text-2xl font-black tracking-tight text-gray-900 dark:text-white mb-3">Searching Telegram...</h3>
+        <p class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium">
+          Querying public dataset, this may take a few seconds.
+        </p>
+      </div>
+
+      <div v-else-if="searchResults.length > 0" class="space-y-6">
         <div class="flex items-center justify-between mb-2">
           <h3 class="text-lg font-bold text-gray-900 dark:text-white flex items-center">
             <MessageSquare class="h-5 w-5 mr-2 text-blue-500 dark:text-blue-400" />
@@ -904,15 +1035,42 @@ const mediaPosts = computed(() => {
             
             <!-- Quoted Reply -->
             <div v-if="post.data?.reply && post.data.reply.length >= 2" class="mb-3 border-l-4 border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 p-3 rounded-r-xl">
-              <div class="text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1 flex items-center">
-                <Reply class="h-3 w-3 mr-1" />
-                Reply to ID: {{ post.data.reply[0] }}
+              <div class="flex items-center justify-between text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1">
+                <div class="flex items-center">
+                  <Reply class="h-3 w-3 mr-1" />
+                  Reply to message
+                </div>
+                <span v-if="Array.isArray(post.data?.reply) && post.data.reply[0] != null" class="font-mono bg-blue-100/50 dark:bg-blue-800/30 px-2 py-0.5 rounded border border-blue-200/50 dark:border-blue-700/50 text-[10px]">ID: {{ post.data._tool ? post.data.reply[0] : String(post.data.reply[0]).split('/').pop() }}</span>
               </div>
               <div class="text-gray-700 dark:text-gray-300 text-sm whitespace-pre-wrap break-words line-clamp-3" v-html="highlightText(post.data.reply[1])">
               </div>
             </div>
 
             <div v-if="post.data?.content" class="text-gray-800 dark:text-gray-200 text-sm whitespace-pre-wrap break-words mb-3" v-html="highlightText(post.data.content)">
+            </div>
+
+            <!-- Contact Subcard -->
+            <div v-if="post.data?.contact && Object.keys(post.data.contact).length > 0" class="mb-3 rounded-lg border border-blue-200/50 dark:border-blue-800/50 bg-blue-50/50 dark:bg-blue-900/20 p-3 relative z-10 shadow-sm">
+              <div class="flex items-center mb-2">
+                <div class="h-7 w-7 rounded-full bg-blue-100 dark:bg-blue-800/50 flex flex-shrink-0 items-center justify-center text-blue-600 dark:text-blue-400 mr-2">
+                  <User class="h-3.5 w-3.5" />
+                </div>
+                <div class="text-[9px] font-black tracking-widest text-blue-500 uppercase">Contact Shared</div>
+              </div>
+              <div v-if="typeof post.data.contact === 'object'" class="space-y-1.5 bg-white/60 dark:bg-gray-900/60 p-2.5 rounded-md border border-gray-100/50 dark:border-gray-700/50">
+                <div v-if="post.data.contact.first_name || post.data.contact.last_name" class="flex items-center text-xs font-bold text-gray-900 dark:text-gray-100">
+                   {{ post.data.contact.first_name }} {{ post.data.contact.last_name }}
+                </div>
+                <div v-if="post.data.contact.phone_number" class="flex items-center text-xs text-gray-700 dark:text-gray-300">
+                  <Phone class="h-3 w-3 mr-1.5 text-blue-500/70" /> {{ post.data.contact.phone_number }}
+                </div>
+                <div v-if="!post.data.contact.first_name && !post.data.contact.phone_number" class="text-[11px] text-gray-700 dark:text-gray-300 font-mono whitespace-pre-wrap break-words">
+                  {{ JSON.stringify(post.data.contact, null, 2).replace(/[\{\}"]/g, '').trim() }}
+                </div>
+              </div>
+              <div v-else class="text-[11px] text-gray-700 dark:text-gray-300 font-mono whitespace-pre-wrap break-words bg-white/60 dark:bg-gray-900/60 p-2.5 rounded-md border border-gray-100/50 dark:border-gray-700/50">
+                {{ post.data.contact }}
+              </div>
             </div>
 
             <!-- Media Embeds -->
@@ -948,7 +1106,7 @@ const mediaPosts = computed(() => {
             
             <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
               <div class="flex items-center space-x-4">
-                <span v-if="post.data?.views">{{ post.data.views.toLocaleString() }} views</span>
+                <span v-if="post.data?.views != null">{{ formatViews(post.data.views) }} views</span>
               </div>
               <span v-if="post.key" class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-gray-400 dark:text-gray-500">ID: {{ post.key }}</span>
             </div>
@@ -990,21 +1148,63 @@ const mediaPosts = computed(() => {
       leave-from-class="opacity-100 scale-100"
       leave-to-class="opacity-0 scale-95"
     >
-      <div v-if="lightboxPhoto" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/95 backdrop-blur-sm p-4 sm:p-8" @click="closeLightbox">
-        <button 
-          @click="closeLightbox" 
-          class="absolute top-6 right-6 p-3 text-white/70 hover:text-white bg-white/10 hover:bg-white/20 rounded-full transition-all z-[110]"
-          aria-label="Close lightbox"
-        >
-          <X class="h-6 w-6" />
-        </button>
-        <div class="relative w-full h-full flex items-center justify-center" @click.stop>
-          <img 
-            :src="lightboxPhoto" 
-            class="max-w-full max-h-full object-contain shadow-2xl rounded-lg" 
-            referrerpolicy="no-referrer"
-            alt="Enlarged view"
-          />
+      <div class="contents">
+        <!-- Post Modal -->
+        <div v-if="isPostModalVisible" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" @click="closePostModal">
+          <div class="bg-white dark:bg-gray-800 rounded-3xl shadow-2xl p-6 sm:p-8 max-w-2xl w-full max-h-[90vh] overflow-y-auto relative" @click.stop>
+            <button @click="closePostModal" class="absolute top-4 right-4 p-2 bg-gray-100 dark:bg-gray-700 rounded-full text-gray-500 hover:text-gray-900 dark:hover:text-white transition-colors">
+              <X class="h-5 w-5" />
+            </button>
+            
+            <div v-if="selectedPost" class="space-y-6">
+              <div class="rounded-2xl overflow-hidden shadow-inner border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
+                <img 
+                  v-if="selectedPost.data?.photos && selectedPost.data.photos.length > 0" 
+                  :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_0`" 
+                  class="w-full h-auto max-h-[400px] object-contain"
+                  referrerpolicy="no-referrer"
+                />
+                <video v-else-if="selectedPost.data?.videos && selectedPost.data.videos.length > 0" controls class="w-full h-auto bg-black max-h-[400px]">
+                  <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${selectedPost.key}-0`" type="video/mp4" />
+                </video>
+                <img 
+                  v-else-if="selectedPost.data?.linkPreview && selectedPost.data.linkPreview.image" 
+                  :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_l_0`" 
+                  class="w-full h-auto max-h-[400px] object-contain"
+                  referrerpolicy="no-referrer"
+                />
+              </div>
+              
+              <div class="space-y-4">
+                 <h2 class="text-xl font-black text-gray-900 dark:text-white">{{ selectedPost.data?.author || selectedPost.data?.user || metadata.title || 'Post details' }}</h2>
+                 <p class="text-gray-600 dark:text-gray-400 text-sm leading-relaxed">{{ selectedPost.data?.content }}</p>
+                 <div class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+                    <span>{{ formatDate(selectedPost.data?.date) }}</span>
+                    <span v-if="selectedPost.data?.views != null">{{ formatViews(selectedPost.data.views) }} views</span>
+                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div v-if="lightboxPhoto" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/95 backdrop-blur-sm p-4 sm:p-8" @click="closeLightbox">
+          <button 
+            @click="closeLightbox" 
+            class="absolute top-6 right-6 p-3 text-white/70 hover:text-white bg-white/10 hover:bg-white/20 rounded-full transition-all z-[110]"
+            aria-label="Close lightbox"
+          >
+            <X class="h-6 w-6" />
+          </button>
+          <div class="relative w-full h-full flex items-center justify-center cursor-pointer overflow-hidden pb-4 pt-8 sm:py-2" @wheel.prevent="handleWheel">
+            <img 
+              :src="lightboxPhoto" 
+              :style="{ transform: `scale(${lightboxScale})`, transition: lightboxScale === 1 ? 'transform 0.3s ease' : 'none' }"
+              class="max-w-full max-h-full object-contain shadow-2xl rounded-lg cursor-grab active:cursor-grabbing origin-center" 
+              referrerpolicy="no-referrer"
+              alt="Enlarged view"
+              @click.stop
+            />
+          </div>
         </div>
       </div>
     </Transition>
