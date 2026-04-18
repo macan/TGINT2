@@ -1,5 +1,6 @@
 {
-  "name": "Telegram Profile Viewer",
-  "description": "View metadata and latest posts of public Telegram channels",
-  "requestFramePermissions": []
+  "name": "Telegram Explorer",
+  "description": "View metadata and latest posts of public Telegram channels. Support general post view, Masonry & Timeline media view. Support content search.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
 }

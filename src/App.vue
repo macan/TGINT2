@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
-import { Search, Loader2, AlertCircle, Users, Calendar, Info, MessageSquare, ExternalLink, Reply, Moon, Sun, Globe, Layout, CheckCircle2, FileText, User, PenTool, Link, ListFilter, Inbox } from 'lucide-vue-next'
+import { ref, onMounted, watch, computed } from 'vue'
+import { 
+  Search, Loader2, AlertCircle, Users, Calendar, Info, MessageSquare, 
+  ExternalLink, Reply, Moon, Sun, Globe, Layout, CheckCircle2, 
+  FileText, User, PenTool, Link, ListFilter, Inbox,
+  LayoutGrid, Clock, List, ImageIcon, Video, X, Layers
+} from 'lucide-vue-next'
 import { format } from 'date-fns'
 
 const isDark = ref(false)
@@ -13,6 +18,34 @@ const loading = ref(false)
 const error = ref('')
 const metadata = ref<any>(null)
 const posts = ref<any[]>([])
+const viewMode = ref<'list' | 'masonry' | 'timeline'>('list')
+const lightboxPhoto = ref<string | null>(null)
+
+// Group Color Helper
+const groupColorMap = [
+  { name: 'indigo', bg: 'bg-indigo-50/30 dark:bg-indigo-900/10', border: 'border-indigo-100 dark:border-indigo-800/50', badge: 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400', masonryBadge: 'bg-indigo-600/80' },
+  { name: 'purple', bg: 'bg-purple-50/30 dark:bg-purple-900/10', border: 'border-purple-100 dark:border-purple-800/50', badge: 'bg-purple-100 dark:bg-purple-900/40 text-purple-600 dark:text-purple-400', masonryBadge: 'bg-purple-600/80' },
+  { name: 'cyan', bg: 'bg-cyan-50/30 dark:bg-cyan-900/10', border: 'border-cyan-100 dark:border-cyan-800/50', badge: 'bg-cyan-100 dark:bg-cyan-900/40 text-cyan-600 dark:text-cyan-400', masonryBadge: 'bg-cyan-600/80' },
+  { name: 'amber', bg: 'bg-amber-50/30 dark:bg-amber-900/10', border: 'border-amber-100 dark:border-amber-800/50', badge: 'bg-amber-100 dark:bg-amber-900/40 text-amber-600 dark:text-amber-400', masonryBadge: 'bg-amber-600/80' },
+  { name: 'rose', bg: 'bg-rose-50/30 dark:bg-rose-900/10', border: 'border-rose-100 dark:border-rose-800/50', badge: 'bg-rose-100 dark:bg-rose-900/40 text-rose-600 dark:text-rose-400', masonryBadge: 'bg-rose-600/80' },
+  { name: 'emerald', bg: 'bg-emerald-50/30 dark:bg-emerald-900/10', border: 'border-emerald-100 dark:border-emerald-800/50', badge: 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400', masonryBadge: 'bg-emerald-600/80' },
+]
+
+const getGroupStyles = (rootId: string | number | undefined) => {
+  if (!rootId) return groupColorMap[0]
+  const idStr = String(rootId)
+  let hash = 0
+  for (let i = 0; i < idStr.length; i++) {
+    hash = idStr.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  const index = Math.abs(hash) % groupColorMap.length
+  return groupColorMap[index]
+}
+
+// Infinite Scroll State
+const isLoadingMore = ref(false)
+const hasMorePosts = ref(true)
+const bottomSentinel = ref<HTMLElement | null>(null)
 
 // Global Search State
 const globalSearchQuery = ref('')
@@ -85,6 +118,7 @@ const searchChannel = async () => {
   error.value = ''
   metadata.value = null
   posts.value = []
+  hasMorePosts.value = true
   
   const name = channelName.value.trim().replace(/^@/, '')
   currentChannelName.value = name
@@ -239,86 +273,163 @@ const formatDate = (dateStr: string | number) => {
 
 const telegramLogoUrl = "data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%232AABEE' d='M12 24c6.627 0 12-5.373 12-12S18.627 0 12 0 0 5.373 0 12s5.373 12 12 12z'/%3E%3Cpath fill='%23fff' d='M5.265 11.735l11.953-4.606c.553-.206 1.034.13.844.975l-2.02 9.516c-.15.676-.554.843-1.116.528l-3.085-2.274-1.488 1.433c-.165.165-.303.303-.62.303l.22-3.15 5.734-5.18c.25-.223-.054-.346-.387-.123l-7.09 4.466-3.054-.954c-.664-.208-.678-.664.14-.984z'/%3E%3C/svg%3E"
 
+const loadMorePosts = async () => {
+  if (isLoadingMore.value || !hasMorePosts.value || !currentChannelName.value || posts.value.length === 0) return
+  
+  isLoadingMore.value = true
+  const lastPost = posts.value[posts.value.length - 1]
+  const lastPostId = lastPost.key
+  
+  if (!lastPostId) {
+    hasMorePosts.value = false
+    isLoadingMore.value = false
+    return
+  }
+
+  try {
+    const numericId = lastPostId.includes('.') ? lastPostId.split('.')[1] : lastPostId
+    const response = await fetch(`https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=25&b=${numericId}`)
+    if (response.ok) {
+      const morePostsData = await response.json()
+      const newPosts = Array.isArray(morePostsData) ? morePostsData : (morePostsData.data || morePostsData.posts || morePostsData.items || [])
+      
+      if (newPosts.length === 0) {
+        hasMorePosts.value = false
+      } else {
+        posts.value = [...posts.value, ...newPosts]
+      }
+    } else {
+      hasMorePosts.value = false
+    }
+  } catch (err) {
+    console.error('Error loading more posts:', err)
+    hasMorePosts.value = false
+  } finally {
+    isLoadingMore.value = false
+  }
+}
+
+let observer: IntersectionObserver | null = null
+
+onMounted(() => {
+  observer = new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting && activeTab.value === 'explorer' && !loading.value) {
+      loadMorePosts()
+    }
+  }, { threshold: 0.1 })
+  
+  if (bottomSentinel.value) {
+    observer.observe(bottomSentinel.value)
+  }
+})
+
+watch(() => bottomSentinel.value, (newEl) => {
+  if (observer) {
+    observer.disconnect()
+    if (newEl) observer.observe(newEl)
+  }
+})
+
+const openLightbox = (url: string) => {
+  lightboxPhoto.value = url
+  document.body.style.overflow = 'hidden'
+}
+
+const closeLightbox = () => {
+  lightboxPhoto.value = null
+  document.body.style.overflow = 'auto'
+}
+
 const handleImageError = (e: Event) => {
   const target = e.target as HTMLImageElement
   if (target.src !== telegramLogoUrl) {
     target.src = telegramLogoUrl
   }
 }
+
+const mediaPosts = computed(() => {
+  return posts.value.filter(post => 
+    (post.data?.photos && post.data.photos.length > 0) || 
+    (post.data?.videos && post.data.videos.length > 0) ||
+    (post.data?.linkPreview && post.data.linkPreview.image)
+  )
+})
 </script>
 
 <template>
   <div class="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200">
     <div class="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
-      <div class="absolute top-4 right-4 sm:top-6 sm:right-6">
-        <button 
-          @click="toggleDark" 
-          class="p-2 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500"
-          aria-label="Toggle dark mode"
-        >
-        <Moon v-if="!isDark" class="h-5 w-5" />
-        <Sun v-else class="h-5 w-5" />
-      </button>
-    </div>
-
-    <header class="mb-8 text-center pt-8 sm:pt-0">
-      <h1 class="text-3xl font-bold tracking-tight text-gray-900 dark:text-white sm:text-4xl mb-2">Telegram Explorer</h1>
-      <p class="text-gray-500 dark:text-gray-400">Discover profiles and search content across public Telegram channels</p>
-    </header>
-
-    <!-- Tabs -->
-    <div class="flex justify-center mb-8">
-      <div class="bg-gray-100 dark:bg-gray-800 p-1 rounded-xl flex space-x-1">
-        <button 
-          @click="activeTab = 'explorer'"
-          :class="[
-            'px-6 py-2 rounded-lg text-sm font-medium transition-all flex items-center',
-            activeTab === 'explorer' 
-              ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-sm' 
-              : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-          ]"
-        >
-          <Layout class="h-4 w-4 mr-2" />
-          Channel Explorer
-        </button>
-        <button 
-          @click="activeTab = 'search'"
-          :class="[
-            'px-6 py-2 rounded-lg text-sm font-medium transition-all flex items-center',
-            activeTab === 'search' 
-              ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-sm' 
-              : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
-          ]"
-        >
-          <Globe class="h-4 w-4 mr-2" />
-          Global Search
-        </button>
-      </div>
-    </div>
-
-    <!-- Explorer Tab -->
-    <div v-if="activeTab === 'explorer'">
-      <div class="max-w-xl mx-auto mb-12">
-        <form @submit.prevent="searchChannel" class="relative flex items-center">
-          <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-            <Search class="h-5 w-5 text-gray-400" />
-          </div>
-          <input
-            v-model="channelName"
-            type="text"
-            class="block w-full pl-10 pr-24 py-3 border border-gray-300 dark:border-gray-600 rounded-xl leading-5 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 sm:text-sm transition-shadow shadow-sm"
-            placeholder="Enter channel name (e.g. durov)"
-          />
-          <button
-            type="submit"
-            :disabled="loading || !channelName.trim()"
-            class="absolute right-2 top-2 bottom-2 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center"
+      
+      <!-- Premium Header & Glass Navigation -->
+      <header class="mb-12 relative flex flex-col items-center">
+        <div class="absolute top-0 right-0 z-50">
+          <button 
+            @click="toggleDark" 
+            class="p-2.5 rounded-full bg-white/50 dark:bg-gray-800/50 backdrop-blur-md border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-white dark:hover:bg-gray-800 transition-all shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 hover:shadow-md"
+            aria-label="Toggle dark mode"
           >
-            <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
-            {{ loading ? 'Searching...' : 'Search' }}
+          <Moon v-if="!isDark" class="h-4 w-4" />
+          <Sun v-else class="h-4 w-4" />
           </button>
-        </form>
-      </div>
+        </div>
+
+        <div class="text-center pt-8 sm:pt-4 mb-8">
+          <h1 class="text-4xl sm:text-5xl font-black tracking-tighter text-gray-900 dark:text-white mb-4">Telegram Explorer</h1>
+          <p class="text-gray-500 dark:text-gray-400 font-medium max-w-lg mx-auto leading-relaxed">Discover profiles and search content across public Telegram channels instantly.</p>
+        </div>
+
+        <!-- Glass Tabs -->
+        <div class="inline-flex bg-gray-200/50 dark:bg-gray-800/50 p-1.5 rounded-2xl backdrop-blur-xl border border-gray-200/50 dark:border-gray-700/50 shadow-inner">
+          <button 
+            @click="activeTab = 'explorer'"
+            :class="[
+              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              activeTab === 'explorer' 
+                ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-md shadow-blue-500/5 ring-1 ring-gray-900/5 dark:ring-white/5' 
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+            ]"
+          >
+            <Layout :class="['h-4 w-4 mr-2 transition-transform duration-300', activeTab === 'explorer' ? 'scale-110' : '']" />
+            Channel Explorer
+          </button>
+          <button 
+            @click="activeTab = 'search'"
+            :class="[
+              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              activeTab === 'search' 
+                ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-md shadow-blue-500/5 ring-1 ring-gray-900/5 dark:ring-white/5' 
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+            ]"
+          >
+            <Globe :class="['h-4 w-4 mr-2 transition-transform duration-300', activeTab === 'search' ? 'scale-110' : '']" />
+            Global Search
+          </button>
+        </div>
+      </header>
+
+      <!-- Explorer Tab -->
+      <div v-if="activeTab === 'explorer'">
+        <div class="max-w-2xl mx-auto mb-16 px-4 sm:px-0">
+          <form @submit.prevent="searchChannel" class="relative group">
+            <div class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-blue-500">
+              <Search class="h-5 w-5 text-gray-400" />
+            </div>
+            <input
+              v-model="channelName"
+              type="text"
+              class="block w-full pl-14 pr-32 py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 sm:text-base font-medium shadow-sm hover:shadow-md focus:shadow-xl transition-all duration-300"
+              placeholder="Enter channel name (e.g. durov)"
+            />
+            <button
+              type="submit"
+              :disabled="loading || !channelName.trim()"
+              class="absolute right-2.5 top-2.5 bottom-2.5 px-6 bg-blue-600 text-white rounded-xl text-sm font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
+            >
+              <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
+              {{ loading ? 'Exploring...' : 'Explore' }}
+            </button>
+          </form>
+        </div>
 
       <div v-if="error" class="rounded-xl bg-red-50 dark:bg-red-900/20 p-4 mb-8 border border-red-100 dark:border-red-900/50 flex items-start">
         <AlertCircle class="h-5 w-5 text-red-400 dark:text-red-500 mt-0.5 mr-3 flex-shrink-0" />
@@ -331,38 +442,38 @@ const handleImageError = (e: Event) => {
       <div v-if="metadata" class="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12">
         <!-- Profile Sidebar -->
         <div class="lg:col-span-4 space-y-6">
-          <div class="bg-white dark:bg-gray-800 rounded-3xl shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 overflow-hidden relative">
-            <div class="h-32 bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-600 relative overflow-hidden">
+          <div class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 overflow-hidden relative">
+            <div class="h-40 bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-600 relative overflow-hidden">
               <div class="absolute inset-0 bg-white/10 dark:bg-black/10 backdrop-blur-sm"></div>
-              <div class="absolute -top-10 -right-10 w-32 h-32 bg-white/20 dark:bg-white/10 rounded-full blur-2xl"></div>
-              <div class="absolute -bottom-10 -left-10 w-32 h-32 bg-black/10 dark:bg-black/20 rounded-full blur-2xl"></div>
+              <div class="absolute -top-10 -right-10 w-40 h-40 bg-white/20 dark:bg-white/10 rounded-full blur-3xl"></div>
+              <div class="absolute -bottom-10 -left-10 w-40 h-40 bg-black/10 dark:bg-black/20 rounded-full blur-3xl"></div>
             </div>
-            <div class="px-8 pb-8 pt-16 relative">
-              <div class="w-24 h-24 rounded-full bg-white dark:bg-gray-800 border-4 border-white dark:border-gray-800 shadow-lg absolute -top-12 flex items-center justify-center text-4xl font-bold text-blue-600 dark:text-blue-400 overflow-hidden ring-4 ring-blue-50/50 dark:ring-blue-900/30">
+            <div class="px-8 pb-10 pt-20 relative">
+              <div class="w-28 h-28 rounded-full bg-white dark:bg-gray-800 border-4 border-white dark:border-gray-800 shadow-2xl absolute -top-16 left-8 flex items-center justify-center text-4xl font-bold text-blue-600 dark:text-blue-400 overflow-hidden ring-4 ring-blue-50 dark:ring-blue-900/30">
                 <img :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${currentChannelName}`" @error="handleImageError" alt="Avatar" class="w-full h-full object-cover" />
               </div>
               
               <div class="mt-2">
-                <h2 class="text-2xl font-extrabold text-gray-900 dark:text-white tracking-tight">{{ metadata.title || metadata.name }}</h2>
-                <p class="text-blue-600 dark:text-blue-400 font-medium text-sm mb-6 flex items-center">
+                <h2 class="text-3xl font-black text-gray-900 dark:text-white tracking-tight leading-none mb-1">{{ metadata.title || metadata.name }}</h2>
+                <p class="text-blue-600 dark:text-blue-400 font-bold text-sm mb-6 flex items-center tracking-wide">
                   @{{ metadata.username || metadata.name || channelName }}
                 </p>
                 
-                <div v-if="metadata.description || metadata.about" class="mb-6">
-                  <p class="text-gray-600 dark:text-gray-300 text-sm leading-relaxed whitespace-pre-wrap break-words bg-gray-50 dark:bg-gray-700/50 p-4 rounded-2xl border border-gray-100 dark:border-gray-600">{{ metadata.description || metadata.about }}</p>
+                <div v-if="metadata.description || metadata.about" class="mb-8">
+                  <p class="text-gray-600 dark:text-gray-300 text-sm leading-relaxed whitespace-pre-wrap break-words bg-gray-50/80 dark:bg-gray-700/30 p-5 rounded-3xl border border-gray-100/50 dark:border-gray-600/50">{{ metadata.description || metadata.about }}</p>
                 </div>
                 
                 <div class="grid grid-cols-2 gap-4">
-                  <div v-if="metadata.subscribers || metadata.members" class="bg-blue-50/50 dark:bg-blue-900/20 p-4 rounded-2xl border border-blue-100/50 dark:border-blue-800/30 flex flex-col items-center justify-center text-center">
-                    <Users class="h-5 w-5 mb-1 text-blue-500 dark:text-blue-400" />
-                    <span class="text-lg font-bold text-gray-900 dark:text-white">{{ (metadata.subscribers || metadata.members).toLocaleString() }}</span>
-                    <span class="text-[10px] font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mt-1">Subscribers</span>
+                  <div v-if="metadata.subscribers || metadata.members" class="bg-blue-50/80 dark:bg-blue-900/20 p-5 rounded-[2rem] border border-blue-100/50 dark:border-blue-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300">
+                    <Users class="h-6 w-6 mb-2 text-blue-500 dark:text-blue-400" />
+                    <span class="text-xl font-black text-gray-900 dark:text-white">{{ (metadata.subscribers || metadata.members).toLocaleString() }}</span>
+                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mt-1">Subscribers</span>
                   </div>
                   
-                  <div v-if="metadata.date || metadata.createdAt" class="bg-purple-50/50 dark:bg-purple-900/20 p-4 rounded-2xl border border-purple-100/50 dark:border-purple-800/30 flex flex-col items-center justify-center text-center">
-                    <Calendar class="h-5 w-5 mb-1 text-purple-500 dark:text-purple-400" />
-                    <span class="text-xs font-bold text-gray-900 dark:text-white">{{ formatDate(metadata.date || metadata.createdAt) }}</span>
-                    <span class="text-[10px] font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mt-1">Created</span>
+                  <div v-if="metadata.date || metadata.createdAt" class="bg-purple-50/80 dark:bg-purple-900/20 p-5 rounded-[2rem] border border-purple-100/50 dark:border-purple-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300">
+                    <Calendar class="h-6 w-6 mb-2 text-purple-500 dark:text-purple-400" />
+                    <span class="text-sm font-black text-gray-900 dark:text-white">{{ formatDate(metadata.date || metadata.createdAt) }}</span>
+                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mt-1">Created</span>
                   </div>
                 </div>
               </div>
@@ -378,131 +489,326 @@ const handleImageError = (e: Event) => {
 
         <!-- Posts Feed -->
         <div class="lg:col-span-8">
-          <h3 class="text-lg font-bold text-gray-900 dark:text-white mb-4 flex items-center">
-            <MessageSquare class="h-5 w-5 mr-2 text-blue-500 dark:text-blue-400" />
-            Latest Posts
-          </h3>
+          <div class="flex items-center justify-between mb-6">
+            <h3 class="text-xl font-extrabold text-gray-900 dark:text-white flex items-center">
+              <MessageSquare class="h-6 w-6 mr-3 text-blue-600 dark:text-blue-400" />
+              {{ viewMode === 'list' ? 'Channel Feed' : 'Medias' }}
+            </h3>
+            
+            <div class="flex bg-gray-100 dark:bg-gray-900/50 p-1 rounded-xl border border-gray-200 dark:border-gray-700">
+              <button 
+                @click="viewMode = 'list'"
+                :class="['p-2 rounded-lg transition-all flex items-center justify-center', viewMode === 'list' ? 'bg-white dark:bg-gray-800 text-blue-600 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300']"
+                title="List View"
+              >
+                <List class="h-4 w-4" />
+              </button>
+              <button 
+                @click="viewMode = 'masonry'"
+                :class="['p-2 rounded-lg transition-all flex items-center justify-center', viewMode === 'masonry' ? 'bg-white dark:bg-gray-800 text-blue-600 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300']"
+                title="Masonry Grid"
+              >
+                <LayoutGrid class="h-4 w-4" />
+              </button>
+              <button 
+                @click="viewMode = 'timeline'"
+                :class="['p-2 rounded-lg transition-all flex items-center justify-center', viewMode === 'timeline' ? 'bg-white dark:bg-gray-800 text-blue-600 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300']"
+                title="Timeline View"
+              >
+                <Clock class="h-4 w-4" />
+              </button>
+            </div>
+          </div>
           
           <div v-if="posts.length === 0" class="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-200 dark:border-gray-700 p-8 text-center text-gray-500 dark:text-gray-400">
             No posts found for this channel.
           </div>
           
-          <div v-else class="space-y-4">
-            <div v-for="(post, index) in posts" :key="post.key || index" class="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-200 dark:border-gray-700 p-5 hover:shadow-md dark:hover:shadow-gray-900/50 transition-shadow">
-              <div class="flex justify-between items-start mb-3">
-                <div class="flex items-center space-x-2">
-                  <div class="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden">
-                    <img :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${currentChannelName}`" @error="handleImageError" alt="Avatar" class="w-full h-full object-cover" />
+          <div v-else>
+            <!-- List View -->
+            <div v-if="viewMode === 'list'" class="space-y-6">
+              <div 
+                v-for="(post, index) in posts" 
+                :key="post.key || index" 
+                :class="[
+                  'rounded-[2rem] shadow-sm border p-6 sm:p-8 hover:shadow-xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden',
+                  post.data?.grouped?.nr > 0 
+                    ? `${getGroupStyles(post.data.grouped.root).bg} ${getGroupStyles(post.data.grouped.root).border}`
+                    : 'bg-white dark:bg-gray-800 border-gray-100 dark:border-gray-700'
+                ]"
+              >
+                <!-- Decorative Corner Glow -->
+                <div class="absolute -top-12 -right-12 w-32 h-32 bg-blue-50/50 dark:bg-blue-900/10 rounded-full blur-3xl pointer-events-none"></div>
+
+                <div class="flex justify-between items-start mb-5 relative z-10">
+                  <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden ring-2 ring-white dark:ring-gray-800 shadow-sm">
+                      <img :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${currentChannelName}`" @error="handleImageError" alt="Avatar" class="w-full h-full object-cover" />
+                    </div>
+                    <div>
+                      <div class="flex items-center space-x-2">
+                        <p class="text-sm font-bold text-gray-900 dark:text-white">{{ post.data?.author || post.data?.user || metadata.title || metadata.name }}</p>
+                        <div v-if="post.data?.grouped?.nr > 0" :class="['flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider', getGroupStyles(post.data.grouped.root).badge]">
+                          <Layers class="h-2.5 w-2.5 mr-1" />
+                          Group: {{ post.data.grouped.root }}
+                        </div>
+                      </div>
+                      <p class="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest mt-0.5">{{ formatDate(post.data?.date) }}</p>
+                    </div>
                   </div>
-                  <div>
-                    <p class="text-sm font-semibold text-gray-900 dark:text-white">{{ post.data?.author || post.data?.user || metadata.title || metadata.name }}</p>
-                    <p class="text-xs text-gray-500 dark:text-gray-400">{{ formatDate(post.data?.date) }}</p>
-                  </div>
-                </div>
-                <a v-if="post.url || post.link" :href="post.url || post.link" target="_blank" class="text-xs text-blue-600 dark:text-blue-400 hover:underline flex items-center">
-                  View <ExternalLink class="h-3 w-3 ml-1" />
-                </a>
-              </div>
-              
-              <!-- Quoted Reply -->
-              <div v-if="post.data?.reply && post.data.reply.length >= 2" class="mb-3 border-l-4 border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 p-3 rounded-r-xl">
-                <div class="text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1 flex items-center">
-                  <Reply class="h-3 w-3 mr-1" />
-                  Reply to ID: {{ post.data.reply[0] }}
-                </div>
-                <div class="text-gray-700 dark:text-gray-300 text-sm whitespace-pre-wrap break-words line-clamp-3">
-                  {{ post.data.reply[1] }}
-                </div>
-              </div>
-
-              <div v-if="post.data?.content" class="text-gray-800 dark:text-gray-200 text-sm whitespace-pre-wrap break-words mb-3">
-                {{ post.data.content }}
-              </div>
-
-              <!-- Media Embeds -->
-              <div v-if="post.data?.photos && post.data.photos.length > 0" class="mb-3 rounded-xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-900">
-                <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`" class="w-full h-auto max-h-[500px] object-contain" alt="Post photo" />
-              </div>
-
-              <div v-if="post.data?.videos && post.data.videos.length > 0" class="mb-3 rounded-xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-black">
-                <video controls class="w-full h-auto max-h-[500px]">
-                  <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`" type="video/mp4" />
-                  Your browser does not support the video tag.
-                </video>
-              </div>
-
-              <!-- Link Preview -->
-              <div v-if="post.data?.linkPreview" class="mb-3 rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 flex flex-col sm:flex-row">
-                <div v-if="post.data.linkPreview.image" class="sm:w-32 sm:h-32 flex-shrink-0 bg-gray-200 dark:bg-gray-700">
-                  <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`" class="w-full h-full object-cover" alt="Link preview image" />
-                </div>
-                <div class="p-3 sm:p-4 flex flex-col justify-center flex-1 min-w-0">
-                  <span v-if="post.data.linkPreview.siteName" class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">{{ post.data.linkPreview.siteName }}</span>
-                  
-                  <a v-if="post.data.linkPreview.href" :href="post.data.linkPreview.href" target="_blank" class="text-sm font-bold text-blue-600 dark:text-blue-400 hover:underline mb-1 line-clamp-2">
-                    {{ post.data.linkPreview.title || post.data.linkPreview.href }}
+                  <a v-if="post.url || post.link" :href="post.url || post.link" target="_blank" class="text-xs font-bold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors flex items-center bg-blue-50 dark:bg-blue-900/20 px-2.5 py-1 rounded-full">
+                    View <ExternalLink class="h-3 w-3 ml-1" />
                   </a>
-                  <h4 v-else-if="post.data.linkPreview.title" class="text-sm font-bold text-gray-900 dark:text-white mb-1 line-clamp-2">
-                    {{ post.data.linkPreview.title }}
-                  </h4>
+                </div>
+                
+                <!-- Quoted Reply -->
+                <div v-if="post.data?.reply && post.data.reply.length >= 2" class="mb-4 border-l-4 border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/10 p-4 rounded-r-2xl relative z-10">
+                  <div class="text-[10px] font-black uppercase tracking-widest text-blue-600 dark:text-blue-400 mb-1.5 flex items-center">
+                    <Reply class="h-3 w-3 mr-1" />
+                    Reply to message
+                  </div>
+                  <div class="text-gray-700 dark:text-gray-300 text-sm whitespace-pre-wrap break-words italic line-clamp-3">
+                    {{ post.data.reply[1] }}
+                  </div>
+                </div>
+
+                <div v-if="post.data?.content" class="text-gray-800 dark:text-gray-200 text-[15px] leading-relaxed whitespace-pre-wrap break-words mb-4 relative z-10">
+                  {{ post.data.content }}
+                </div>
+
+                <!-- Media Embeds -->
+                <div v-if="post.data?.photos && post.data.photos.length > 0" class="mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/50 shadow-inner relative z-10 cursor-zoom-in group" @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`)">
+                  <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`" class="w-full h-auto max-h-[500px] object-contain mx-auto transition-transform duration-700 group-hover:scale-105" alt="Post photo" referrerpolicy="no-referrer" />
+                </div>
+
+                <div v-if="post.data?.videos && post.data.videos.length > 0" class="mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-black shadow-lg relative z-10">
+                  <video controls class="w-full h-auto max-h-[500px] mx-auto">
+                    <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`" type="video/mp4" />
+                  </video>
+                </div>
+
+                <!-- Link Preview -->
+                <div v-if="post.data?.linkPreview" class="mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/50 flex flex-col sm:flex-row shadow-sm hover:shadow-md transition-shadow relative z-10">
+                  <div v-if="post.data.linkPreview.image" class="sm:w-32 sm:h-32 flex-shrink-0 bg-gray-200 dark:bg-gray-800 overflow-hidden">
+                    <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`" class="w-full h-full object-cover" alt="Link preview" referrerpolicy="no-referrer" />
+                  </div>
+                  <div class="p-4 sm:p-5 flex flex-col justify-center flex-1 min-w-0">
+                    <span v-if="post.data.linkPreview.siteName" class="text-[9px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest mb-1.5">{{ post.data.linkPreview.siteName }}</span>
+                    <a v-if="post.data.linkPreview.href" :href="post.data.linkPreview.href" target="_blank" class="text-sm font-bold text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400 mb-1.5 line-clamp-1 transition-colors">
+                      {{ post.data.linkPreview.title || post.data.linkPreview.href }}
+                    </a>
+                    <p v-if="post.data.linkPreview.description" class="text-xs text-gray-600 dark:text-gray-400 line-clamp-2 leading-relaxed">{{ post.data.linkPreview.description }}</p>
+                  </div>
+                </div>
+                
+                <div class="mt-5 pt-4 border-t border-gray-100 dark:border-gray-700/50 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 relative z-10">
+                  <div class="flex items-center space-x-6">
+                    <span v-if="post.data?.views" class="flex items-center font-semibold border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1 bg-white dark:bg-gray-800">
+                      <Users class="h-3 w-3 mr-1.5 text-gray-400" />
+                      {{ post.data.views.toLocaleString() }}
+                    </span>
+                  </div>
+                  <span v-if="post.key" class="font-mono bg-gray-50/50 dark:bg-gray-900/50 border border-gray-200/50 dark:border-gray-700/50 px-2.5 py-1 rounded-lg text-[10px] font-medium text-gray-400 dark:text-gray-500 backdrop-blur-sm">ID: {{ post.key }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Masonry View -->
+            <div v-else-if="viewMode === 'masonry'" class="columns-1 sm:columns-2 md:columns-3 gap-6 space-y-6">
+              <div 
+                v-for="(post, index) in mediaPosts" 
+                :key="post.key || index" 
+                :class="[
+                  'break-inside-avoid rounded-3xl shadow-sm border overflow-hidden group hover:shadow-2xl hover:-translate-y-1 transition-all duration-500',
+                  post.data?.grouped?.nr > 0
+                    ? `${getGroupStyles(post.data.grouped.root).bg.replace('/30', '/10')} border-white/20 dark:border-gray-700`
+                    : 'bg-white dark:bg-gray-800 border-gray-100 dark:border-gray-700'
+                ]"
+              >
+                <div class="relative overflow-hidden cursor-zoom-in group/inner" @click="openLightbox(post.data?.photos?.length ? `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0` : `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)">
+                  <!-- ID Badge -->
+                  <div class="absolute top-4 left-4 z-10 flex flex-col space-y-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                    <div v-if="post.key" class="font-mono text-[10px] font-bold tracking-tight bg-black/60 backdrop-blur-md text-white px-2.5 py-1 rounded-lg border border-white/10 w-fit shadow-xl">
+                      ID: {{ post.key.split('.').pop() }}
+                    </div>
+                    <div v-if="post.data?.grouped?.nr > 0" :class="['flex items-center px-2 py-1 rounded-lg backdrop-blur-md text-white text-[9px] font-black uppercase tracking-widest border border-white/20 w-fit shadow-xl', getGroupStyles(post.data.grouped.root).masonryBadge]">
+                      <Layers class="h-2.5 w-2.5 mr-1.5" />
+                      Group: {{ post.data.grouped.root }}
+                    </div>
+                  </div>
+
+                  <img 
+                    v-if="post.data?.photos && post.data.photos.length > 0" 
+                    :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`" 
+                    class="w-full h-auto object-cover transition-transform duration-1000 group-hover/inner:scale-105" 
+                    referrerpolicy="no-referrer"
+                  />
+                  <div v-else-if="post.data?.videos && post.data.videos.length > 0" class="relative bg-black flex items-center justify-center cursor-default" @click.stop>
+                    <video class="w-full h-auto object-cover max-h-[500px]">
+                      <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`" type="video/mp4" />
+                    </video>
+                  </div>
+                  <img 
+                    v-else-if="post.data?.linkPreview && post.data.linkPreview.image" 
+                    :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`" 
+                    class="w-full h-auto object-cover transition-transform duration-1000 group-hover/inner:scale-105" 
+                    referrerpolicy="no-referrer"
+                  />
                   
-                  <p v-if="post.data.linkPreview.description" class="text-xs text-gray-600 dark:text-gray-300 line-clamp-2 mt-1">{{ post.data.linkPreview.description }}</p>
+                  <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-all duration-500 flex flex-col justify-end p-6 translate-y-2 group-hover:translate-y-0">
+                    <p class="text-white text-sm font-medium line-clamp-3 leading-relaxed mb-4 drop-shadow-sm">{{ post.data?.content || post.data?.linkPreview?.title || 'Media update' }}</p>
+                    <div class="flex items-center justify-between">
+                      <div class="flex flex-col">
+                        <span class="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-0.5">{{ post.data?.author || post.data?.user || metadata.title }}</span>
+                        <span class="text-white/70 text-[9px] font-bold uppercase tracking-wider">{{ formatDate(post.data?.date) }}</span>
+                      </div>
+                      <a :href="post.url || post.link" target="_blank" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl backdrop-blur-md transition-all border border-white/10 shadow-lg">
+                        <ExternalLink class="h-3.5 w-3.5 text-white" />
+                      </a>
+                    </div>
+                  </div>
                 </div>
               </div>
-              
-              <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
-                <div class="flex items-center space-x-4">
-                  <span v-if="post.data?.views">{{ post.data.views.toLocaleString() }} views</span>
-                </div>
-                <span v-if="post.key" class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-gray-400 dark:text-gray-500">ID: {{ post.key }}</span>
+              <div v-if="mediaPosts.length === 0" class="col-span-full py-20 text-center">
+                <ImageIcon class="h-12 w-12 mx-auto text-gray-300 mb-4" />
+                <p class="text-gray-500 dark:text-gray-400">No media posts found in this channel.</p>
               </div>
-              
-              <!-- Raw Post Debug -->
-              <details class="mt-3 text-xs">
-                <summary class="text-gray-400 dark:text-gray-500 cursor-pointer hover:text-gray-600 dark:hover:text-gray-300">Raw Data</summary>
-                <pre class="mt-2 p-2 bg-gray-50 dark:bg-gray-900 rounded overflow-x-auto text-gray-500 dark:text-gray-400">{{ JSON.stringify(post, null, 2) }}</pre>
-              </details>
+            </div>
+
+            <!-- Timeline View -->
+            <div v-else-if="viewMode === 'timeline'" class="relative space-y-12 pb-12 before:absolute before:inset-0 before:left-8 md:before:left-1/2 before:-translate-x-px before:h-full before:w-0.5 before:bg-gradient-to-b before:from-blue-500/0 before:via-blue-500/30 before:to-blue-500/0">
+              <div v-for="(post, index) in mediaPosts" :key="post.key || index" class="relative flex flex-col md:flex-row items-center group">
+                <!-- Central Icon -->
+                <div class="flex items-center justify-center w-12 h-12 rounded-full border-4 border-white dark:border-gray-900 bg-blue-600 text-white shadow-xl shadow-blue-500/20 shrink-0 absolute left-2 md:left-1/2 -translate-x-px md:-translate-x-1/2 z-10 transition-all duration-500 group-hover:scale-110 group-hover:bg-blue-500 group-hover:shadow-blue-500/40">
+                  <ImageIcon v-if="post.data?.photos?.length || post.data?.linkPreview?.image" class="h-5 w-5" />
+                  <Video v-else class="h-5 w-5" />
+                  <!-- Hidden ID for screen readers or tech focus -->
+                  <span class="sr-only">Post {{ post.key }}</span>
+                </div>
+                
+                <!-- Metadata Side (Left on Desktop) -->
+                <div class="w-full pl-16 md:pl-0 md:w-[calc(50%-3rem)] md:text-right pr-0 md:pr-14 order-2 md:order-1 mb-4 md:mb-0">
+                  <div class="flex flex-col md:items-end">
+                    <div class="flex items-center space-x-2 md:flex-row-reverse md:space-x-reverse mb-1">
+                      <span class="text-base font-black text-gray-900 dark:text-white group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors uppercase tracking-tighter">{{ post.data?.author || post.data?.user || metadata.title }}</span>
+                      <div v-if="post.data?.grouped?.nr > 0" :class="['flex items-center px-1.5 py-0.5 rounded-md text-[8px] font-black uppercase tracking-wider', getGroupStyles(post.data.grouped.root).badge]">
+                        <Layers class="h-2.5 w-2.5 mr-1" />
+                        Group: {{ post.data.grouped.root }}
+                      </div>
+                    </div>
+                    <div class="flex flex-col md:items-end space-y-1 mb-4">
+                      <time class="text-[10px] font-bold text-blue-600 dark:text-blue-400 uppercase tracking-[0.2em]">{{ formatDate(post.data?.date) }}</time>
+                      <span v-if="post.key" class="text-[9px] font-mono text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-900/40 px-2 rounded-md">ID: {{ post.key.split('.').pop() }}</span>
+                    </div>
+                    
+                    <!-- Post Content -->
+                    <div v-if="post.data?.content" class="text-gray-700 dark:text-gray-300 text-sm leading-relaxed whitespace-pre-wrap break-words mb-4 md:max-w-md bg-gray-50/50 dark:bg-gray-800/30 p-4 rounded-2xl border border-gray-100/50 dark:border-gray-700/50">
+                      {{ post.data.content }}
+                    </div>
+
+                    <!-- Link Preview Text -->
+                    <div v-if="post.data?.linkPreview" class="bg-gray-50 dark:bg-gray-900/40 p-3 rounded-2xl border border-gray-100 dark:border-gray-800 mb-4 flex flex-col md:items-end max-w-full">
+                      <span v-if="post.data.linkPreview.siteName" class="text-[9px] font-black text-blue-500 uppercase tracking-widest mb-1">{{ post.data.linkPreview.siteName }}</span>
+                      <h4 v-if="post.data.linkPreview.title" class="text-xs font-bold text-gray-900 dark:text-white mb-1 leading-tight">{{ post.data.linkPreview.title }}</h4>
+                      <p v-if="post.data.linkPreview.description" class="text-[11px] text-gray-500 dark:text-gray-400 line-clamp-3 md:text-right">{{ post.data.linkPreview.description }}</p>
+                    </div>
+
+                    <div v-if="post.data?.views" class="inline-flex items-center px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded-lg text-[9px] font-bold text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700">
+                      <Users class="h-3 w-3 mr-1" />
+                      {{ post.data.views.toLocaleString() }} Views
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Media Content Side (Right on Desktop) -->
+                <div class="w-full pl-16 md:pl-0 md:w-[calc(50%-3rem)] md:pl-14 order-3">
+                  <div class="bg-white dark:bg-gray-800 p-5 rounded-[2.5rem] shadow-xl shadow-blue-500/[0.02] border border-gray-100 dark:border-gray-700 hover:border-blue-500/30 dark:hover:border-blue-400/30 transition-all duration-500 hover:shadow-2xl hover:shadow-blue-500/[0.05] dark:hover:shadow-none bg-clip-padding">
+                    <div class="rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in" @click="openLightbox(post.data?.photos?.length ? `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0` : `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)">
+                      <img 
+                        v-if="post.data?.photos && post.data.photos.length > 0" 
+                        :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`" 
+                        class="w-full h-auto object-cover max-h-[400px] transition-transform duration-1000 group-hover/media:scale-105" 
+                        referrerpolicy="no-referrer"
+                      />
+                      <video v-else-if="post.data?.videos && post.data.videos.length > 0" controls class="w-full h-auto bg-black max-h-[400px] cursor-default" @click.stop>
+                        <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`" type="video/mp4" />
+                      </video>
+                      <img 
+                        v-else-if="post.data?.linkPreview && post.data.linkPreview.image" 
+                        :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`" 
+                        class="w-full h-auto object-cover max-h-[400px] transition-transform duration-1000 group-hover/media:scale-105" 
+                        referrerpolicy="no-referrer"
+                      />
+                    </div>
+                    
+                    <div class="mt-4 pt-3 border-t border-gray-50 dark:border-gray-700 flex justify-end">
+                      <a v-if="post.url || post.link" :href="post.url || post.link" target="_blank" class="text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:underline flex items-center">
+                        OPEN IN TELEGRAM <ExternalLink class="h-2.5 w-2.5 ml-1" />
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-if="mediaPosts.length === 0" class="py-20 text-center">
+                <Clock class="h-12 w-12 mx-auto text-gray-300 mb-4" />
+                <p class="text-gray-500 dark:text-gray-400">No media posts found in this channel.</p>
+              </div>
+            </div>
+
+            <!-- Scroll Sentinel -->
+            <div ref="bottomSentinel" class="h-10 mt-4 flex items-center justify-center">
+              <div v-if="isLoadingMore" class="flex items-center space-x-2 text-blue-500">
+                <Loader2 class="h-5 w-5 animate-spin" />
+                <span class="text-sm font-medium">Loading more...</span>
+              </div>
+              <div v-else-if="!hasMorePosts && posts.length > 0" class="text-xs text-gray-400 uppercase tracking-widest font-bold opacity-50">
+                End of feed
+              </div>
             </div>
           </div>
         </div>
       </div>
       
-      <div v-else-if="!loading && !error" class="text-center py-20">
-        <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-4">
+      <div v-else-if="!loading && !error" class="text-center py-24 sm:py-32">
+        <div class="inline-flex items-center justify-center w-20 h-20 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-6 shadow-inner ring-1 ring-blue-100 dark:ring-blue-800 border-8 border-white dark:border-gray-900">
           <Search class="h-8 w-8 text-blue-500 dark:text-blue-400" />
         </div>
-        <h2 class="text-xl font-medium text-gray-900 dark:text-white mb-2">Search for a channel</h2>
-        <p class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto">Enter a Telegram channel username above to view its profile and latest posts.</p>
+        <h2 class="text-2xl font-black tracking-tight text-gray-900 dark:text-white mb-3">Explore Channels</h2>
+        <p class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium">Enter a Telegram channel username above to view its detailed profile and latest media posts.</p>
       </div>
     </div>
 
     <!-- Global Search Tab -->
     <div v-if="activeTab === 'search'" class="max-w-4xl mx-auto">
-      <div class="bg-white dark:bg-gray-800 rounded-3xl shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-6 sm:p-8 mb-8">
-        <form @submit.prevent="performGlobalSearch">
-          <div class="relative flex items-center mb-6">
-            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <Globe class="h-5 w-5 text-gray-400" />
+      <div class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-2xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-6 sm:p-10 mb-12 relative overflow-hidden">
+        <!-- Background Decoration -->
+        <div class="absolute -top-24 -right-24 w-48 h-48 bg-blue-500/10 dark:bg-blue-500/20 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="absolute -bottom-24 -left-24 w-48 h-48 bg-purple-500/10 dark:bg-purple-500/20 rounded-full blur-3xl pointer-events-none"></div>
+
+        <form @submit.prevent="performGlobalSearch" class="relative z-10">
+          <div class="relative flex items-center mb-8 group">
+            <div class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-blue-500">
+              <Globe class="h-6 w-6 text-gray-400" />
             </div>
             <input
               v-model="globalSearchQuery"
               type="text"
-              class="block w-full pl-10 pr-24 py-4 border border-gray-300 dark:border-gray-600 rounded-2xl leading-5 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 sm:text-base transition-shadow shadow-sm"
-              placeholder="Search across Telegram..."
+              class="block w-full pl-16 pr-36 py-5 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/90 dark:bg-gray-800/90 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-lg font-medium shadow-sm hover:shadow-md focus:shadow-xl transition-all duration-300"
+              placeholder="Search across all telegram data..."
             />
             <button
               type="submit"
               :disabled="isSearching || !globalSearchQuery.trim()"
-              class="absolute right-2 top-2 bottom-2 px-6 bg-blue-600 text-white rounded-xl text-sm font-semibold hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center"
+              class="absolute right-3 top-3 bottom-3 px-8 bg-blue-600 text-white rounded-xl text-sm font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
             >
-              <Loader2 v-if="isSearching" class="h-4 w-4 animate-spin mr-2" />
+              <Loader2 v-if="isSearching" class="h-5 w-5 animate-spin mr-2" />
               {{ isSearching ? 'Searching...' : 'Search' }}
             </button>
           </div>
 
           <div class="flex flex-col sm:flex-row gap-6 items-start sm:items-center justify-between">
             <div class="flex flex-wrap gap-3 items-center">
-              <span class="text-sm font-semibold text-gray-400 dark:text-gray-500 mr-1 uppercase tracking-wider">Search in</span>
+              <span class="text-[10px] font-black text-gray-400 dark:text-gray-500 mr-2 uppercase tracking-widest">Search in</span>
               <button 
                 v-for="(val, field) in searchFields" 
                 :key="field"
@@ -511,20 +817,20 @@ const handleImageError = (e: Event) => {
                 :class="[
                   'flex items-center px-4 py-2 rounded-xl border transition-all duration-300 group relative overflow-hidden',
                   searchFields[field] 
-                    ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-500/20 dark:shadow-none' 
-                    : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-900/10'
+                    ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-500/20 dark:shadow-none translate-y-0' 
+                    : 'bg-white/50 dark:bg-gray-800/50 border-gray-200/80 dark:border-gray-700/80 text-gray-600 dark:text-gray-400 hover:border-blue-300 dark:hover:border-blue-500/50 hover:bg-blue-50/50 dark:hover:bg-blue-900/20 hover:-translate-y-0.5'
                 ]"
               >
-                <component :is="getFieldIcon(field)" :class="['h-4 w-4 mr-2 transition-transform duration-300', searchFields[field] ? 'scale-110' : 'group-hover:scale-110']" />
-                <span class="text-sm font-bold capitalize tracking-tight">{{ field }}</span>
-                <div v-if="searchFields[field]" class="absolute inset-0 bg-white/10 animate-pulse pointer-events-none"></div>
+                <component :is="getFieldIcon(field)" :class="['h-4 w-4 mr-2 transition-transform duration-300', searchFields[field] ? 'scale-110 drop-shadow-md' : 'group-hover:scale-110']" />
+                <span class="text-sm font-bold capitalize tracking-tight">{{ field === 'content' ? 'Message' : field }}</span>
+                <div v-if="searchFields[field]" class="absolute inset-0 bg-white/20 animate-pulse pointer-events-none"></div>
               </button>
             </div>
 
-            <div class="flex items-center space-x-3 bg-gray-50 dark:bg-gray-900/50 p-1.5 rounded-2xl border border-gray-100 dark:border-gray-700">
+            <div class="flex items-center space-x-3 bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-2xl border border-gray-200/80 dark:border-gray-700/80 backdrop-blur-sm">
               <div class="flex items-center px-3 text-gray-400 dark:text-gray-500">
                 <ListFilter class="h-4 w-4 mr-2" />
-                <span class="text-xs font-bold uppercase tracking-wider">Limit</span>
+                <span class="text-[10px] font-black uppercase tracking-widest">Limit</span>
               </div>
               <div class="flex space-x-1">
                 <button 
@@ -533,10 +839,10 @@ const handleImageError = (e: Event) => {
                   type="button"
                   @click="searchLimit = limit"
                   :class="[
-                    'px-3 py-1.5 rounded-xl text-xs font-bold transition-all duration-200',
+                    'px-3 py-1.5 rounded-xl text-xs font-bold transition-all duration-300',
                     searchLimit === limit 
-                      ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-sm ring-1 ring-gray-200 dark:ring-gray-600' 
-                      : 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'
+                      ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-sm ring-1 ring-gray-200 dark:ring-gray-600 scale-105' 
+                      : 'text-gray-400 dark:text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-white/50 dark:hover:bg-gray-800'
                   ]"
                 >
                   {{ limit }}
@@ -565,14 +871,29 @@ const handleImageError = (e: Event) => {
         </div>
 
         <div class="space-y-4">
-          <div v-for="(post, index) in searchResults" :key="post.key || index" class="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-200 dark:border-gray-700 p-5 hover:shadow-md dark:hover:shadow-gray-900/50 transition-shadow">
+          <div 
+            v-for="(post, index) in searchResults" 
+            :key="post.key || index" 
+            :class="[
+              'rounded-2xl shadow-sm border p-5 hover:shadow-md transition-all duration-300',
+              post.data?.grouped?.nr > 0 
+                ? `${getGroupStyles(post.data.grouped.root).bg} ${getGroupStyles(post.data.grouped.root).border}`
+                : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700'
+            ]"
+          >
             <div class="flex justify-between items-start mb-3">
               <div class="flex items-center space-x-2">
                 <div class="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden">
                   <img :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${post.data?.user || post.data?.author || 'telegram'}`" @error="handleImageError" alt="Avatar" class="w-full h-full object-cover" />
                 </div>
                 <div>
-                  <p class="text-sm font-semibold text-gray-900 dark:text-white">{{ post.data?.author || post.data?.user || 'Telegram User' }}</p>
+                  <div class="flex items-center space-x-2">
+                    <p class="text-sm font-semibold text-gray-900 dark:text-white">{{ post.data?.author || post.data?.user || 'Telegram User' }}</p>
+                    <div v-if="post.data?.grouped?.nr > 0" :class="['flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider', getGroupStyles(post.data.grouped.root).badge]">
+                      <Layers class="h-2.5 w-2.5 mr-1" />
+                      Group: {{ post.data.grouped.root }}
+                    </div>
+                  </div>
                   <p class="text-xs text-gray-500 dark:text-gray-400">{{ formatDate(post.data?.date) }}</p>
                 </div>
               </div>
@@ -641,24 +962,52 @@ const handleImageError = (e: Event) => {
         </div>
       </div>
 
-      <div v-else-if="hasSearched && !isSearching" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-100 dark:border-gray-700 p-12 text-center shadow-sm">
-        <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gray-50 dark:bg-gray-900 mb-4">
+      <div v-else-if="hasSearched && !isSearching" class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] border border-gray-100 dark:border-gray-700 p-16 text-center shadow-lg">
+        <div class="inline-flex items-center justify-center w-20 h-20 rounded-full bg-gray-50 dark:bg-gray-900 border-8 border-white dark:border-gray-800 mb-6 shadow-inner ring-1 ring-gray-100 dark:ring-gray-700">
           <Inbox class="h-8 w-8 text-gray-400" />
         </div>
-        <h3 class="text-lg font-bold text-gray-900 dark:text-white mb-2">No results found</h3>
-        <p class="text-gray-500 dark:text-gray-400 max-w-xs mx-auto">
+        <h3 class="text-2xl font-black tracking-tight text-gray-900 dark:text-white mb-3">No results found</h3>
+        <p class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium">
           We couldn't find any Telegram posts matching your search criteria. Try adjusting your keywords or filters.
         </p>
       </div>
 
-      <div v-else-if="!isSearching && !searchError" class="text-center py-20">
-        <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-4">
+      <div v-else-if="!isSearching && !searchError" class="text-center py-24 sm:py-32">
+        <div class="inline-flex items-center justify-center w-20 h-20 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-6 shadow-inner ring-1 ring-blue-100 dark:ring-blue-800 border-8 border-white dark:border-gray-900">
           <Globe class="h-8 w-8 text-blue-500 dark:text-blue-400" />
         </div>
-        <h2 class="text-xl font-medium text-gray-900 dark:text-white mb-2">Global Content Search</h2>
-        <p class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto">Search for keywords, users, or authors across all public Telegram data.</p>
+        <h2 class="text-2xl font-black tracking-tight text-gray-900 dark:text-white mb-3">Global Content Search</h2>
+        <p class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium">Search for keywords, users, or authors across all public Telegram data.</p>
       </div>
     </div>
-  </div>
+
+    <!-- Photo Lightbox -->
+    <Transition
+      enter-active-class="transition duration-300 ease-out"
+      enter-from-class="opacity-0 scale-95"
+      enter-to-class="opacity-100 scale-100"
+      leave-active-class="transition duration-200 ease-in"
+      leave-from-class="opacity-100 scale-100"
+      leave-to-class="opacity-0 scale-95"
+    >
+      <div v-if="lightboxPhoto" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/95 backdrop-blur-sm p-4 sm:p-8" @click="closeLightbox">
+        <button 
+          @click="closeLightbox" 
+          class="absolute top-6 right-6 p-3 text-white/70 hover:text-white bg-white/10 hover:bg-white/20 rounded-full transition-all z-[110]"
+          aria-label="Close lightbox"
+        >
+          <X class="h-6 w-6" />
+        </button>
+        <div class="relative w-full h-full flex items-center justify-center" @click.stop>
+          <img 
+            :src="lightboxPhoto" 
+            class="max-w-full max-h-full object-contain shadow-2xl rounded-lg" 
+            referrerpolicy="no-referrer"
+            alt="Enlarged view"
+          />
+        </div>
+      </div>
+    </Transition>
+    </div>
   </div>
 </template>
