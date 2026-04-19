@@ -4,12 +4,29 @@ import {
   Search, Loader2, AlertCircle, Users, Calendar, Info, MessageSquare, 
   ExternalLink, Reply, Moon, Sun, Globe, Layout, CheckCircle2, 
   FileText, User, PenTool, Link, ListFilter, Inbox,
-  LayoutGrid, Clock, List, ImageIcon, Video, X, Layers, PanelLeftClose, PanelLeft, Phone
+  LayoutGrid, Clock, List, ImageIcon, Video, X, Layers, PanelLeftClose, PanelLeft, Phone, ChevronUp
 } from 'lucide-vue-next'
 import { format, formatDistanceToNow } from 'date-fns'
 
 const isDark = ref(false)
+const showBackToTop = ref(false)
 const activeTab = ref<'explorer' | 'search'>('explorer')
+
+const handleScroll = () => {
+  showBackToTop.value = window.scrollY > 500
+}
+
+const scrollToTop = () => {
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+onMounted(() => {
+  window.addEventListener('scroll', handleScroll)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('scroll', handleScroll)
+})
 const isProfileVisible = ref(true)
 
 // Explorer State
@@ -152,6 +169,8 @@ const highlightText = (text: any) => {
   return highlighted
 }
 
+const suggestedChannels = ref<string[]>([])
+
 const searchChannel = async () => {
   if (!channelName.value.trim()) return
   
@@ -160,22 +179,34 @@ const searchChannel = async () => {
   metadata.value = null
   posts.value = []
   hasMorePosts.value = true
+  suggestedChannels.value = []
   
   const name = channelName.value.trim().replace(/^@/, '')
   currentChannelName.value = name
   
   try {
-    const [metaRes, postsRes] = await Promise.all([
-      fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${name}`),
-      fetch(`https://i.gogingko.net/api/v1/last/${name}?n=25`)
-    ])
+    const metaRes = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${name}`)
     
+    if (metaRes.status === 404) {
+      const fallbackRes = await fetch(`https://i.gogingko.net/api/v1/zr/telegram-channel?prefix=${encodeURIComponent(name)}&k=20`)
+      if (fallbackRes.ok) {
+        const data = await fallbackRes.json()
+        suggestedChannels.value = data.keys || []
+      } else {
+        error.value = 'Channel not found and could not fetch suggestions'
+      }
+      loading.value = false
+      return
+    }
+
     if (!metaRes.ok) {
-      throw new Error(`Failed to fetch metadata: ${metaRes.statusText}`)
+        throw new Error(`Failed to fetch metadata: ${metaRes.statusText}`)
     }
     
     const metaData = await metaRes.json()
     metadata.value = metaData
+    
+    const postsRes = await fetch(`https://i.gogingko.net/api/v1/last/${name}?n=25`)
     
     if (postsRes.ok) {
       const postsData = await postsRes.json()
@@ -427,6 +458,25 @@ const mediaPosts = computed(() => {
   <div class="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200">
     <div class="max-w-[96rem] mx-auto p-4 sm:p-6 lg:p-8 xl:p-10">
       
+      <!-- Back to Top Button -->
+      <Transition
+        enter-active-class="transition duration-300 ease-out"
+        enter-from-class="opacity-0 translate-y-10"
+        enter-to-class="opacity-100 translate-y-0"
+        leave-active-class="transition duration-200 ease-in"
+        leave-from-class="opacity-100 translate-y-0"
+        leave-to-class="opacity-0 translate-y-10"
+      >
+        <button 
+          v-if="showBackToTop"
+          @click="scrollToTop"
+          class="fixed bottom-8 right-8 z-50 p-4 rounded-full bg-white/80 dark:bg-gray-800/80 backdrop-blur-lg border border-gray-200 dark:border-gray-700 shadow-xl text-blue-600 dark:text-blue-400 hover:scale-110 transition-all duration-300 hover:shadow-blue-500/20"
+          aria-label="Back to top"
+        >
+          <ChevronUp class="h-6 w-6" />
+        </button>
+      </Transition>
+
       <!-- Premium Header & Glass Navigation -->
       <header class="mb-12 relative flex flex-col items-center">
         <div class="absolute top-0 right-0 z-50">
@@ -496,6 +546,20 @@ const mediaPosts = computed(() => {
               {{ loading ? 'Exploring...' : 'Explore' }}
             </button>
           </form>
+
+          <div v-if="suggestedChannels.length > 0" class="mt-4">
+            <h4 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Did you mean:</h4>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="channel in suggestedChannels"
+                :key="channel"
+                @click="channelName = channel; searchChannel()"
+                class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-800 rounded-full hover:bg-blue-100 dark:hover:bg-blue-900 border border-gray-200 dark:border-gray-700 transition"
+              >
+                {{ channel }}
+              </button>
+            </div>
+          </div>
         </div>
 
       <div v-if="error" class="rounded-xl bg-red-50 dark:bg-red-900/20 p-4 mb-8 border border-red-100 dark:border-red-900/50 flex items-start">
