@@ -171,6 +171,34 @@ const searchTimelineStats = computed(() => {
   }
 })
 
+const postsTimelineStats = computed(() => {
+  if (!posts.value || posts.value.length === 0) return null
+
+  const validResults = posts.value
+    .map(p => ({ post: p, date: new Date(p.data?.date), time: new Date(p.data?.date).getTime() }))
+    .filter(item => !isNaN(item.time) && item.date.getFullYear() >= 2013)
+    .sort((a, b) => b.time - a.time) // Newest first
+
+  if (validResults.length === 0) return null
+
+  const newest = validResults[0].time
+  const oldest = validResults[validResults.length - 1].time
+  const span = newest - oldest
+  
+  const items = validResults.map(item => ({
+    position: span === 0 ? 50 : Math.max(0, Math.min(100, ((newest - item.time) / span) * 100)),
+    post: item.post
+  }))
+
+  return {
+    start: format(validResults[0].date, 'MMM d, HH:mm'),
+    end: format(validResults[validResults.length - 1].date, 'MMM d, HH:mm'),
+    spanText: formatDistanceToNow(validResults[validResults.length - 1].date, { addSuffix: true }),
+    count: validResults.length,
+    items
+  }
+})
+
 onMounted(() => {
   if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
     isDark.value = true
@@ -388,7 +416,8 @@ const performGlobalSearch = async () => {
     searchResults.value = results
     hasSearched.value = true
   } catch (err: any) {
-    searchError.value = err.message || 'An error occurred during search'
+    console.error('Search error details:', err)
+    searchError.value = `Search failed: ${err.message || 'An unknown error occurred'}. Please verify your network connection and query parameters.`
   } finally {
     isSearching.value = false
   }
@@ -654,13 +683,13 @@ const mediaPosts = computed(() => {
               <div class="absolute -top-10 -right-10 w-40 h-40 bg-white/20 dark:bg-white/10 rounded-full blur-3xl"></div>
               <div class="absolute -bottom-10 -left-10 w-40 h-40 bg-black/10 dark:bg-black/20 rounded-full blur-3xl"></div>
             </div>
-            <div class="px-8 pb-10 pt-20 relative">
-              <div class="w-28 h-28 rounded-full bg-white dark:bg-gray-800 border-4 border-white dark:border-gray-800 shadow-2xl absolute -top-16 left-8 flex items-center justify-center text-4xl font-bold text-blue-600 dark:text-blue-400 overflow-hidden ring-4 ring-blue-50 dark:ring-blue-900/30">
+            <div class="px-8 pb-10 pt-12 relative">
+              <div class="w-20 h-20 rounded-full bg-white dark:bg-gray-800 border-4 border-white dark:border-gray-800 shadow-2xl absolute -top-10 left-8 flex items-center justify-center text-4xl font-bold text-blue-600 dark:text-blue-400 overflow-hidden ring-4 ring-blue-50 dark:ring-blue-900/30">
                 <img :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${currentChannelName}`" @error="handleImageError" alt="Avatar" class="w-full h-full object-cover" />
               </div>
               
               <div class="mt-2">
-                <h2 class="text-3xl font-black text-gray-900 dark:text-white tracking-tight leading-none mb-1">{{ metadata.title || metadata.name }}</h2>
+                <h2 class="text-xl font-bold text-gray-900 dark:text-white tracking-tight leading-none mb-1">{{ metadata.title || metadata.name }}</h2>
                 <p class="text-blue-600 dark:text-blue-400 font-bold text-sm mb-6 flex items-center tracking-wide">
                   @{{ metadata.username || metadata.name || channelName }}
                 </p>
@@ -707,7 +736,7 @@ const mediaPosts = computed(() => {
               </button>
               <div class="flex items-center">
                 <MessageSquare class="h-6 w-6 mr-3 text-blue-600 dark:text-blue-400" />
-                {{ viewMode === 'list' ? 'Channel Feed' : 'Medias' }}
+                {{ viewMode === 'list' ? 'Feed' : 'Medias' }}
               </div>
               <span v-if="latestPostTimeDelta" class="ml-2 sm:ml-4 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 border border-emerald-200/50 dark:border-emerald-800/50 text-[10px] uppercase tracking-widest font-black flex items-center shadow-sm">
                 <Clock class="h-3 w-3 mr-1.5" />
@@ -745,6 +774,44 @@ const mediaPosts = computed(() => {
           </div>
           
           <div v-else>
+            <!-- Posts Timeline -->
+            <div v-if="postsTimelineStats && viewMode !== 'timeline'" class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm mb-8">
+              <div class="flex items-center justify-between mb-4">
+                <h4 class="text-sm font-bold text-gray-900 dark:text-white flex items-center">
+                  <Calendar class="h-4 w-4 mr-2 text-blue-500" />
+                  Feed Activity Timeline
+                </h4>
+                <span class="text-xs font-medium text-gray-500 dark:text-gray-400">
+                  {{ postsTimelineStats.count }} dates mapped
+                </span>
+              </div>
+              
+              <div class="relative pt-4 pb-2 px-3">
+                <!-- Timeline track -->
+                <div class="absolute w-full h-1.5 bg-gray-100 dark:bg-gray-700 rounded-full top-1/2 -translate-y-1/2"></div>
+                
+                <!-- Timeline points -->
+                <div 
+                  v-for="(item, idx) in postsTimelineStats.items" 
+                  :key="idx"
+                  class="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-blue-500 border-2 border-white dark:border-gray-800 shadow-[0_0_8px_rgba(59,130,246,0.5)] transition-all duration-300 hover:scale-150 cursor-pointer group"
+                  :style="{ left: `${item.position}%` }"
+                  @click="scrollToPost(item.post.key)"
+                >
+                  <div class="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-900 text-white text-[10px] rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
+                    {{ format(new Date(item.post.data.date), 'MMM d, HH:mm') }}
+                  </div>
+                </div>
+              </div>
+              
+              <!-- Timeline Labels -->
+              <div class="flex justify-between items-center mt-3 text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                <span>{{ postsTimelineStats.start }}</span>
+                <span class="px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded-md">Span: Starts {{ postsTimelineStats.spanText }}</span>
+                <span>{{ postsTimelineStats.end }}</span>
+              </div>
+            </div>
+
             <!-- List View -->
             <div v-if="viewMode === 'list'" class="space-y-6">
               <div 
@@ -1087,10 +1154,10 @@ const mediaPosts = computed(() => {
             </div>
 
             <div class="flex flex-wrap items-center gap-2">
-                <div class="flex items-center bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-xl border border-gray-200 dark:border-gray-700 backdrop-blur-sm">
-                    <input type="datetime-local" v-model="searchStartDate" class="bg-transparent text-[10px] p-0.5 text-gray-600 dark:text-gray-300 focus:outline-none"/>
+                <div class="flex flex-wrap items-center bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-xl border border-gray-200 dark:border-gray-700 backdrop-blur-sm gap-1">
+                    <input type="datetime-local" v-model="searchStartDate" class="bg-transparent text-[10px] p-0.5 text-gray-600 dark:text-gray-300 focus:outline-none w-[130px]"/>
                     <span class="text-[10px] text-gray-400 px-1">to</span>
-                    <input type="datetime-local" v-model="searchEndDate" class="bg-transparent text-[10px] p-0.5 text-gray-600 dark:text-gray-300 focus:outline-none"/>
+                    <input type="datetime-local" v-model="searchEndDate" class="bg-transparent text-[10px] p-0.5 text-gray-600 dark:text-gray-300 focus:outline-none w-[130px]"/>
                 </div>
 
                 <div class="flex items-center bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-xl border border-gray-200 dark:border-gray-700 backdrop-blur-sm">
