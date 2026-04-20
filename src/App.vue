@@ -20,6 +20,13 @@ const scrollToTop = () => {
   window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
+const scrollToPost = (key: string) => {
+  const el = document.getElementById(`post-${key}`)
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+}
+
 onMounted(() => {
   window.addEventListener('scroll', handleScroll)
 })
@@ -117,9 +124,52 @@ const searchResults = ref<any[]>([])
 const isSearching = ref(false)
 const searchError = ref('')
 const searchLimit = ref(25)
-const limitOptions = [10, 25, 50, 100]
+const limitOptions = [10, 25, 50, 100, 250, 500, 1000]
+
+const getLocalFormattedDate = (date: Date) => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}T00:00`
+}
+
+const today = new Date()
+today.setHours(0, 0, 0, 0)
+const tomorrow = new Date(today)
+tomorrow.setDate(tomorrow.getDate() + 1)
+
+const searchStartDate = ref(getLocalFormattedDate(today))
+const searchEndDate = ref(getLocalFormattedDate(tomorrow))
 const hasSearched = ref(false)
 const searchWords = ref<string[]>([])
+
+const searchTimelineStats = computed(() => {
+  if (!searchResults.value || searchResults.value.length === 0) return null
+
+  const validResults = searchResults.value
+    .map(p => ({ post: p, date: new Date(p.data?.date), time: new Date(p.data?.date).getTime() }))
+    .filter(item => !isNaN(item.time) && item.date.getFullYear() >= 2013)
+    .sort((a, b) => b.time - a.time) // Newest first
+
+  if (validResults.length === 0) return null
+
+  const newest = validResults[0].time
+  const oldest = validResults[validResults.length - 1].time
+  const span = newest - oldest
+  
+  const items = validResults.map(item => ({
+    position: span === 0 ? 50 : Math.max(0, Math.min(100, ((newest - item.time) / span) * 100)),
+    post: item.post
+  }))
+
+  return {
+    start: format(validResults[0].date, 'MMM d, HH:mm'),
+    end: format(validResults[validResults.length - 1].date, 'MMM d, HH:mm'),
+    spanText: formatDistanceToNow(validResults[validResults.length - 1].date, { addSuffix: true }),
+    count: validResults.length,
+    items
+  }
+})
 
 onMounted(() => {
   if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
@@ -244,8 +294,12 @@ const performGlobalSearch = async () => {
     const wordQueries = words.map(word => {
       // Escape internal double quotes
       const escapedWord = word.replace(/"/g, '\\"')
+      
       // Use wildcard format for 'user' field, otherwise use double quotes
       if (field === 'user') {
+        return `${field}:*${escapedWord}*`
+      }
+      if (field === 'url') {
         return `${field}:*${escapedWord}*`
       }
       return `${field}:"${escapedWord}"`
@@ -253,9 +307,18 @@ const performGlobalSearch = async () => {
     return `(${wordQueries})`
   })
   
-  // Add default date range for the current day
-  const today = new Date().toISOString().split('T')[0]
-  const dateRange = `date:[to_date("${today}T00:00:00+08:00", "%Y-%m-%dT%H:%M:%S%z") TO to_date("${today}T23:59:59+08:00", "%Y-%m-%dT%H:%M:%S%z")]`
+  // Add date range for the selected range or default to today
+  const start = searchStartDate.value.replace('T', ' ')
+  const end = searchEndDate.value.replace('T', ' ')
+  
+  // Get local timezone offset in format like "+07:00" or "-04:00"
+  const offset = -new Date().getTimezoneOffset()
+  const sign = offset >= 0 ? '+' : '-'
+  const hours = Math.floor(Math.abs(offset) / 60).toString().padStart(2, '0')
+  const minutes = (Math.abs(offset) % 60).toString().padStart(2, '0')
+  const timezoneStr = `${sign}${hours}${minutes}`
+
+  const dateRange = `date:[to_date("${start}:00${timezoneStr}", "%Y-%m-%d %H:%M:%S%z") TO to_date("${end}:59${timezoneStr}", "%Y-%m-%d %H:%M:%S%z")]`
   
   const finalQuery = `(${fieldQueries.join(' OR ')}) AND ${dateRange}`
   
@@ -443,6 +506,18 @@ const handleImageError = (e: Event) => {
   if (target.src !== telegramLogoUrl) {
     target.src = telegramLogoUrl
   }
+}
+
+const getPostAvatarUrl = (post: any) => {
+  const user = post.data?.user
+  if (user) {
+    const parts = String(user).split('/')
+    const username = parts[parts.length - 1]
+    if (username) {
+      return `https://i.gogingko.net/api/v1/v/telegram-profile/${username}`
+    }
+  }
+  return telegramLogoUrl
 }
 
 const mediaPosts = computed(() => {
@@ -688,7 +763,7 @@ const mediaPosts = computed(() => {
                 <div class="flex justify-between items-start mb-5 relative z-10">
                   <div class="flex items-center space-x-3">
                     <div class="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden ring-2 ring-white dark:ring-gray-800 shadow-sm">
-                      <img :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${currentChannelName}`" @error="handleImageError" alt="Avatar" class="w-full h-full object-cover" />
+                      <img :src="getPostAvatarUrl(post)" @error="handleImageError" alt="Avatar" class="w-full h-full object-cover" />
                     </div>
                     <div>
                       <div class="flex items-center space-x-2">
@@ -991,8 +1066,8 @@ const mediaPosts = computed(() => {
             </button>
           </div>
 
-          <div class="flex flex-col sm:flex-row gap-6 items-start sm:items-center justify-between">
-            <div class="flex flex-wrap gap-3 items-center">
+          <div class="flex flex-col gap-4">
+            <div class="flex flex-wrap gap-2 items-center">
               <span class="text-[9px] font-black text-gray-400 dark:text-gray-500 mr-2 uppercase tracking-widest">Search in</span>
               <button 
                 v-for="(val, field) in searchFields" 
@@ -1000,39 +1075,45 @@ const mediaPosts = computed(() => {
                 type="button"
                 @click="toggleField(field)"
                 :class="[
-                  'flex items-center px-4 py-2 rounded-xl border transition-all duration-300 group relative overflow-hidden',
+                  'flex items-center px-2.5 py-1 rounded-lg border transition-all duration-300',
                   searchFields[field] 
-                    ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-500/20 dark:shadow-none translate-y-0' 
-                    : 'bg-white/50 dark:bg-gray-800/50 border-gray-200/80 dark:border-gray-700/80 text-gray-600 dark:text-gray-400 hover:border-blue-300 dark:hover:border-blue-500/50 hover:bg-blue-50/50 dark:hover:bg-blue-900/20 hover:-translate-y-0.5'
+                    ? 'bg-blue-600 border-blue-600 text-white' 
+                    : 'bg-white/50 dark:bg-gray-800/50 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400'
                 ]"
               >
-                <component :is="getFieldIcon(field)" :class="['h-4 w-4 mr-2 transition-transform duration-300', searchFields[field] ? 'scale-110 drop-shadow-md' : 'group-hover:scale-110']" />
-                <span class="text-xs font-bold capitalize tracking-tight">{{ field === 'content' ? 'Post' : field }}</span>
-                <div v-if="searchFields[field]" class="absolute inset-0 bg-white/20 animate-pulse pointer-events-none"></div>
+                <component :is="getFieldIcon(field)" class="h-3 w-3 mr-1.5" />
+                <span class="text-[10px] font-bold capitalize tracking-tight">{{ field === 'content' ? 'Post' : field }}</span>
               </button>
             </div>
 
-            <div class="flex items-center space-x-3 bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-2xl border border-gray-200/80 dark:border-gray-700/80 backdrop-blur-sm">
-              <div class="flex items-center px-3 text-gray-400 dark:text-gray-500">
-                <ListFilter class="h-4 w-4 mr-2" />
-                <span class="text-[10px] font-black uppercase tracking-widest">Limit</span>
-              </div>
-              <div class="flex space-x-1">
-                <button 
-                  v-for="limit in limitOptions" 
-                  :key="limit"
-                  type="button"
-                  @click="searchLimit = limit"
-                  :class="[
-                    'px-3 py-1.5 rounded-xl text-xs font-bold transition-all duration-300',
-                    searchLimit === limit 
-                      ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-sm ring-1 ring-gray-200 dark:ring-gray-600 scale-105' 
-                      : 'text-gray-400 dark:text-gray-500 hover:text-gray-900 dark:hover:text-white hover:bg-white/50 dark:hover:bg-gray-800'
-                  ]"
-                >
-                  {{ limit }}
-                </button>
-              </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <div class="flex items-center bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-xl border border-gray-200 dark:border-gray-700 backdrop-blur-sm">
+                    <input type="datetime-local" v-model="searchStartDate" class="bg-transparent text-[10px] p-0.5 text-gray-600 dark:text-gray-300 focus:outline-none"/>
+                    <span class="text-[10px] text-gray-400 px-1">to</span>
+                    <input type="datetime-local" v-model="searchEndDate" class="bg-transparent text-[10px] p-0.5 text-gray-600 dark:text-gray-300 focus:outline-none"/>
+                </div>
+
+                <div class="flex items-center bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-xl border border-gray-200 dark:border-gray-700 backdrop-blur-sm">
+                  <div class="px-2 text-gray-400 dark:text-gray-500">
+                    <ListFilter class="h-3 w-3" />
+                  </div>
+                  <div class="flex space-x-0.5">
+                    <button 
+                      v-for="limit in limitOptions" 
+                      :key="limit"
+                      type="button"
+                      @click="searchLimit = limit"
+                      :class="[
+                        'px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all',
+                        searchLimit === limit 
+                          ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-sm' 
+                          : 'text-gray-400'
+                      ]"
+                    >
+                      {{ limit }}
+                    </button>
+                  </div>
+                </div>
             </div>
           </div>
         </form>
@@ -1057,6 +1138,45 @@ const mediaPosts = computed(() => {
       </div>
 
       <div v-else-if="searchResults.length > 0" class="space-y-6">
+        
+        <!-- Timeline Widget -->
+        <div v-if="searchTimelineStats" class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm mb-8">
+          <div class="flex items-center justify-between mb-4">
+            <h4 class="text-sm font-bold text-gray-900 dark:text-white flex items-center">
+              <Calendar class="h-4 w-4 mr-2 text-blue-500" />
+              Activity Timeline
+            </h4>
+            <span class="text-xs font-medium text-gray-500 dark:text-gray-400">
+              {{ searchTimelineStats.count }} dates mapped
+            </span>
+          </div>
+          
+          <div class="relative pt-4 pb-2">
+            <!-- Timeline track -->
+            <div class="absolute w-full h-1.5 bg-gray-100 dark:bg-gray-700 rounded-full top-1/2 -translate-y-1/2"></div>
+            
+            <!-- Timeline points -->
+            <div 
+              v-for="(item, idx) in searchTimelineStats.items" 
+              :key="idx"
+              class="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-blue-500 border-2 border-white dark:border-gray-800 shadow-[0_0_8px_rgba(59,130,246,0.5)] transition-all duration-300 hover:scale-150 cursor-pointer group"
+              :style="{ left: `${item.position}%` }"
+              @click="scrollToPost(item.post.key)"
+            >
+              <div class="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-900 text-white text-[10px] rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none">
+                {{ format(new Date(item.post.data.date), 'MMM d, HH:mm') }}
+              </div>
+            </div>
+          </div>
+          
+          <!-- Timeline Labels -->
+          <div class="flex justify-between items-center mt-3 text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+            <span>{{ searchTimelineStats.start }}</span>
+            <span class="px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded-md">Span: Starts {{ searchTimelineStats.spanText }}</span>
+            <span>{{ searchTimelineStats.end }}</span>
+          </div>
+        </div>
+
         <div class="flex items-center justify-between mb-2">
           <h3 class="text-lg font-bold text-gray-900 dark:text-white flex items-center">
             <MessageSquare class="h-5 w-5 mr-2 text-blue-500 dark:text-blue-400" />
@@ -1068,6 +1188,7 @@ const mediaPosts = computed(() => {
         <div class="space-y-4">
           <div 
             v-for="(post, index) in searchResults" 
+            :id="`post-${post.key}`"
             :key="post.key || index" 
             :class="[
               'rounded-2xl shadow-sm border p-5 hover:shadow-md transition-all duration-300',
@@ -1079,7 +1200,7 @@ const mediaPosts = computed(() => {
             <div class="flex justify-between items-start mb-3">
               <div class="flex items-center space-x-2">
                 <div class="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden">
-                  <img :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${post.data?.user || post.data?.author || 'telegram'}`" @error="handleImageError" alt="Avatar" class="w-full h-full object-cover" />
+                  <img :src="getPostAvatarUrl(post)" @error="handleImageError" alt="Avatar" class="w-full h-full object-cover" />
                 </div>
                 <div>
                   <div class="flex items-center space-x-2">
