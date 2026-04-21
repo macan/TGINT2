@@ -4,8 +4,87 @@ import {
   Search, Loader2, AlertCircle, Users, Calendar, Info, MessageSquare, 
   ExternalLink, Reply, Moon, Sun, Globe, Layout, CheckCircle2, 
   FileText, User, PenTool, Link, ListFilter, Inbox,
-  LayoutGrid, Clock, List, ImageIcon, Video, X, Layers, PanelLeftClose, PanelLeft, Phone, ChevronUp
+  LayoutGrid, Clock, List, ImageIcon, Video, X, Layers, PanelLeftClose, PanelLeft, Phone, ChevronUp, BotMessageSquare, GripHorizontal
 } from 'lucide-vue-next'
+
+import MarkdownIt from 'markdown-it'
+const md = new MarkdownIt()
+
+const isAnalyzing = ref(false)
+const analysisResult = ref('')
+const isAnalysisModalVisible = ref(false)
+const analyzedCount = ref(0)
+const renderedMarkdown = computed(() => md.render(analysisResult.value))
+
+// Draggable widget state
+const widgetX = ref(32)
+const widgetY = ref(600)
+const isDragging = ref(false)
+let dragOffsetX = 0
+let dragOffsetY = 0
+
+const startDrag = (e: MouseEvent) => {
+  isDragging.value = true
+  dragOffsetX = e.clientX - widgetX.value
+  dragOffsetY = e.clientY - widgetY.value
+  window.addEventListener('mousemove', onDrag)
+  window.addEventListener('mouseup', endDrag)
+}
+
+const onDrag = (e: MouseEvent) => {
+  if (!isDragging.value) return
+  widgetX.value = e.clientX - dragOffsetX
+  widgetY.value = e.clientY - dragOffsetY
+}
+
+const endDrag = () => {
+  isDragging.value = false
+  window.removeEventListener('mousemove', onDrag)
+  window.removeEventListener('mouseup', endDrag)
+}
+
+const analyzePosts = async () => {
+  const targetPosts = activeTab.value === 'search' ? searchResults.value : posts.value
+  if (!targetPosts || targetPosts.length === 0) return
+
+  isAnalyzing.value = true
+  analyzedCount.value = targetPosts.length
+  try {
+    // Strip unnecessary fields
+    const strippedPosts = targetPosts.map(p => {
+      const { data, key } = p
+      // Keep essential data only
+      return {
+        key,
+        content: data?.content,
+        date: data?.date,
+        author: data?.author || data?.user,
+        reply: data?.reply,
+        linkPreview: data?.linkPreview ? { title: data.linkPreview.title, description: data.linkPreview.description } : undefined
+      }
+    }).filter(p => p.content || p.reply || p.linkPreview)
+
+    const response = await fetch('https://ask.gingkogo.uk/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sender: 'mc',
+        chat_id: 'mc',
+        text: "Please analyze the following posts from a telegram group. All the posts are sent from one person or account. Try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorites. Output the findings in Chinese.\n\n" + JSON.stringify(strippedPosts)
+      })
+    })
+
+    if (!response.ok) throw new Error('Analysis request failed')
+    const data = await response.json()
+    analysisResult.value = data.reply || 'No analysis data received.'
+    isAnalysisModalVisible.value = true
+  } catch (err) {
+    console.error(err)
+    alert('Failed to analyze posts.')
+  } finally {
+    isAnalyzing.value = false
+  }
+}
 import { format, formatDistanceToNow } from 'date-fns'
 
 const isDark = ref(false)
@@ -562,6 +641,19 @@ const mediaPosts = computed(() => {
   <div class="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200">
     <div class="max-w-[96rem] mx-auto p-4 sm:p-6 lg:p-8 xl:p-10">
       
+      <!-- Analysis Button -->
+      <button 
+        v-if="(activeTab === 'explorer' && posts.length > 0) || (activeTab === 'search' && searchResults.length > 0)"
+        @click="analyzePosts"
+        :disabled="isAnalyzing"
+        class="fixed bottom-24 right-8 z-50 p-4 rounded-full bg-blue-600/90 dark:bg-blue-500/90 backdrop-blur-lg border border-blue-400 dark:border-blue-600 shadow-xl text-white hover:scale-110 transition-all duration-300 hover:shadow-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed"
+        aria-label="Analyze posts"
+        :title="isAnalyzing ? 'Analyzing...' : 'Analyze posts'"
+      >
+        <Loader2 v-if="isAnalyzing" class="h-6 w-6 animate-spin" />
+        <BotMessageSquare v-else class="h-6 w-6" />
+      </button>
+
       <!-- Back to Top Button -->
       <Transition
         enter-active-class="transition duration-300 ease-out"
@@ -813,38 +905,38 @@ const mediaPosts = computed(() => {
             </div>
 
             <!-- List View -->
-            <div v-if="viewMode === 'list'" class="space-y-6">
+            <div v-if="viewMode === 'list'" class="space-y-3">
               <div 
                 v-for="(post, index) in posts" 
                 :key="post.key || index" 
                 :class="[
-                  'rounded-[2rem] shadow-sm border p-6 sm:p-8 hover:shadow-xl hover:-translate-y-1 transition-all duration-300 relative overflow-hidden',
+                  'rounded-3xl shadow-sm border p-4 sm:p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden',
                   post.data?.grouped?.nr > 0 
                     ? `${getGroupStyles(post.data.grouped.root).bg} ${getGroupStyles(post.data.grouped.root).border}`
                     : 'bg-white dark:bg-gray-800 border-gray-100 dark:border-gray-700'
                 ]"
               >
                 <!-- Decorative Corner Glow -->
-                <div class="absolute -top-12 -right-12 w-32 h-32 bg-blue-50/50 dark:bg-blue-900/10 rounded-full blur-3xl pointer-events-none"></div>
+                <div class="absolute -top-10 -right-10 w-24 h-24 bg-blue-50/50 dark:bg-blue-900/10 rounded-full blur-2xl pointer-events-none"></div>
 
-                <div class="flex justify-between items-start mb-5 relative z-10">
+                <div class="flex justify-between items-start mb-3 relative z-10">
                   <div class="flex items-center space-x-3">
-                    <div class="w-10 h-10 rounded-full bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden ring-2 ring-white dark:ring-gray-800 shadow-sm">
+                    <div class="w-9 h-9 rounded-full bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden ring-1 ring-white dark:ring-gray-800 shadow-sm">
                       <img :src="getPostAvatarUrl(post)" @error="handleImageError" alt="Avatar" class="w-full h-full object-cover" />
                     </div>
                     <div>
-                      <div class="flex items-center space-x-2">
+                      <div class="flex items-center space-x-1.5">
                         <p class="text-sm font-bold text-gray-900 dark:text-white">{{ post.data?.author || post.data?.user || metadata.title || metadata.name }}</p>
-                        <div v-if="post.data?.grouped?.nr > 0" :class="['flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider', getGroupStyles(post.data.grouped.root).badge]">
-                          <Layers class="h-2.5 w-2.5 mr-1" />
+                        <div v-if="post.data?.grouped?.nr > 0" :class="['flex items-center px-1.5 py-0.5 rounded-sm text-[8px] font-black uppercase tracking-wider', getGroupStyles(post.data.grouped.root).badge]">
+                          <Layers class="h-2 w-2 mr-0.5" />
                           Group: {{ post.data.grouped.root }}
                         </div>
                       </div>
-                      <p class="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest mt-0.5">{{ formatDate(post.data?.date) }}</p>
+                      <p class="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest mt-0">{{ formatDate(post.data?.date) }}</p>
                     </div>
                   </div>
-                  <a v-if="post.url || post.link" :href="post.url || post.link" target="_blank" class="text-xs font-bold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors flex items-center bg-blue-50 dark:bg-blue-900/20 px-2.5 py-1 rounded-full">
-                    View <ExternalLink class="h-3 w-3 ml-1" />
+                  <a v-if="post.url || post.link" :href="post.url || post.link" target="_blank" class="text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors flex items-center bg-blue-50 dark:bg-blue-900/20 px-2 py-0.5 rounded-full">
+                    View <ExternalLink class="h-2.5 w-2.5 ml-0.5" />
                   </a>
                 </div>
                 
@@ -891,8 +983,10 @@ const mediaPosts = computed(() => {
                 </div>
 
                 <!-- Media Embeds -->
-                <div v-if="post.data?.photos && post.data.photos.length > 0" class="mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/50 shadow-inner relative z-10 cursor-zoom-in group" @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`)">
-                  <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`" class="w-full h-auto max-h-[500px] object-contain mx-auto transition-transform duration-700 group-hover:scale-105" alt="Post photo" referrerpolicy="no-referrer" />
+                <div v-if="post.data?.photos && post.data.photos.length > 0" 
+                     class="mb-4 rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center"
+                     @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`)">
+                  <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`" class="w-full h-auto max-h-[500px] object-contain mx-auto transition-transform duration-700 group-hover/media:scale-105" alt="Post photo" referrerpolicy="no-referrer" />
                 </div>
 
                 <div v-if="post.data?.videos && post.data.videos.length > 0" class="mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-black shadow-lg relative z-10">
@@ -903,8 +997,8 @@ const mediaPosts = computed(() => {
 
                 <!-- Link Preview -->
                 <div v-if="post.data?.linkPreview" class="mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/50 flex flex-col sm:flex-row shadow-sm hover:shadow-md transition-shadow relative z-10">
-                  <div v-if="post.data.linkPreview.image" class="sm:w-32 sm:h-32 flex-shrink-0 bg-gray-200 dark:bg-gray-800 overflow-hidden">
-                    <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`" class="w-full h-full object-cover" alt="Link preview" referrerpolicy="no-referrer" />
+                  <div v-if="post.data.linkPreview.image" class="sm:w-32 sm:h-32 flex-shrink-0 bg-gray-200 dark:bg-gray-800 overflow-hidden cursor-zoom-in" @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)">
+                    <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`" class="w-full h-full object-cover transition-transform duration-700 hover:scale-105" alt="Link preview" referrerpolicy="no-referrer" />
                   </div>
                   <div class="p-4 sm:p-5 flex flex-col justify-center flex-1 min-w-0">
                     <span v-if="post.data.linkPreview.siteName" class="text-[9px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest mb-1.5">{{ post.data.linkPreview.siteName }}</span>
@@ -1326,8 +1420,8 @@ const mediaPosts = computed(() => {
             </div>
 
             <!-- Media Embeds -->
-            <div v-if="post.data?.photos && post.data.photos.length > 0" class="mb-3 rounded-xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-900">
-              <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`" class="w-full h-auto max-h-[500px] object-contain" alt="Post photo" />
+            <div v-if="post.data?.photos && post.data.photos.length > 0" class="mb-3 rounded-xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 cursor-zoom-in group" @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`)">
+              <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`" class="w-full h-auto max-h-[500px] object-contain transition-transform duration-700 group-hover:scale-105" alt="Post photo" />
             </div>
 
             <div v-if="post.data?.videos && post.data.videos.length > 0" class="mb-3 rounded-xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-black">
@@ -1339,8 +1433,8 @@ const mediaPosts = computed(() => {
 
             <!-- Link Preview -->
             <div v-if="post.data?.linkPreview" class="mb-3 rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 flex flex-col sm:flex-row">
-              <div v-if="post.data.linkPreview.image" class="sm:w-32 sm:h-32 flex-shrink-0 bg-gray-200 dark:bg-gray-700">
-                <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`" class="w-full h-full object-cover" alt="Link preview image" />
+              <div v-if="post.data.linkPreview.image" class="sm:w-32 sm:h-32 flex-shrink-0 bg-gray-200 dark:bg-gray-700 cursor-zoom-in" @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)">
+                <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`" class="w-full h-full object-cover transition-transform duration-700 hover:scale-105" alt="Link preview image" />
               </div>
               <div class="p-3 sm:p-4 flex flex-col justify-center flex-1 min-w-0">
                 <span v-if="post.data.linkPreview.siteName" class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">{{ post.data.linkPreview.siteName }}</span>
@@ -1460,6 +1554,23 @@ const mediaPosts = computed(() => {
         </div>
       </div>
     </Transition>
+      <!-- Analysis Floating Widget -->
+      <div v-if="isAnalysisModalVisible" 
+           :style="{ position: 'fixed', left: widgetX + 'px', top: widgetY + 'px', zIndex: 200 }"
+           class="w-96 max-w-[90vw] h-[60vh] bg-white/95 dark:bg-gray-800/95 backdrop-blur-xl rounded-3xl shadow-2xl flex flex-col border border-gray-200 dark:border-gray-700">
+        <div class="cursor-grab p-3 bg-blue-500/10 border-b border-blue-500/20 flex justify-between items-center" @mousedown="startDrag">
+          <div class="flex items-center gap-2">
+            <GripHorizontal class="h-4 w-4 text-blue-500" />
+            <h2 class="text-sm font-black text-gray-900 dark:text-white">Analysis Result ({{ analyzedCount }})</h2>
+          </div>
+          <button @click="isAnalysisModalVisible = false" class="p-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-600 transition">
+            <X class="h-4 w-4" />
+          </button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-6 text-gray-700 dark:text-gray-300 prose dark:prose-invert prose-sm prose-p:leading-relaxed prose-headings:font-black prose-a:text-blue-500 prose-ul:my-2" v-html="renderedMarkdown">
+        </div>
+      </div>
+
     </div>
   </div>
 </template>
