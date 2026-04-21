@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
+import { ref, onMounted, onUnmounted, watch, computed, nextTick } from 'vue'
 import { 
   Search, Loader2, AlertCircle, Users, Calendar, Info, MessageSquare, 
   ExternalLink, Reply, Moon, Sun, Globe, Layout, CheckCircle2, 
@@ -70,7 +70,7 @@ const analyzePosts = async () => {
       body: JSON.stringify({
         sender: 'mc',
         chat_id: 'mc',
-        text: "Please analyze the following posts from a telegram group. All the posts are sent from one person or account. Try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorites. Output the findings in Chinese.\n\n" + JSON.stringify(strippedPosts)
+        text: "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state. Output the findings in Chinese.\n\n" + JSON.stringify(strippedPosts)
       })
     })
 
@@ -85,11 +85,108 @@ const analyzePosts = async () => {
     isAnalyzing.value = false
   }
 }
+
+const runAutoFinding = async () => {
+  if (!autoChannelName.value.trim()) return
+  
+  isAutoFinding.value = true
+  autoCells.value = [] // Reset cells
+  
+  const name = autoChannelName.value.trim().replace(/^@/, '')
+  let minId: string | null = null
+  let iteration = 0
+  
+  try {
+    while (iteration < 3) {
+      iteration++
+      const cell: AutoFindingCell = { id: iteration, logs: [`Iteration ${iteration}: Fetching posts...`] }
+      autoCells.value.push(cell)
+      autoCells.value = [...autoCells.value]
+      await nextTick()
+      
+      let url = `https://i.gogingko.net/api/v1/last/${name}?n=50`
+      if (minId) url += `&b=${minId}`
+      
+      const res = await fetch(url)
+      if (!res.ok) throw new Error('Fetch failed')
+      
+      const data = await res.json()
+      const posts = Array.isArray(data) ? data : (data.data || data.posts || data.items || [])
+      
+      if (posts.length === 0) { cell.logs.push('No more posts found.'); break }
+      
+      const lastPostId = posts[posts.length - 1].key.split('.').pop()
+      minId = lastPostId
+      cell.logs.push(`Fetched posts. Lowest ID: ${minId}`)
+      autoCells.value = [...autoCells.value]
+      await nextTick()
+      
+      const strippedPosts = posts.map((p: any) => ({
+        key: p.key, content: p.data?.content, date: p.data?.date,
+        author: p.data?.author || p.data?.user, reply: p.data?.reply
+      })).filter((p: any) => p.content || p.reply)
+      
+      const analysisRes = await fetch('https://ask.gingkogo.uk/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sender: 'mc', chat_id: 'mc',
+          text: "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state. Output the findings in Chinese with post id range hint in proper place.\n " + JSON.stringify(strippedPosts)
+        })
+      })
+      if (!analysisRes.ok) throw new Error('Analysis failed')
+      const analysisData = await analysisRes.json()
+      cell.analysisResult = analysisData.reply
+      cell.logs.push('Analysis received.')
+      autoCells.value = [...autoCells.value]
+      await nextTick()
+
+      cell.logs.push('Sending for verification...')
+      autoCells.value = [...autoCells.value]
+      await nextTick()
+      const checkRes = await fetch('https://ask.gingkogo.uk/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sender: 'mc', chat_id: 'mc',
+          text: "Consider the following text, can you find any deterministic or definitive evidence for any user or account. If you can find it, return them and mask them in highlight color. Otherwise just answer No Evidence. the following are REPLY text: " + cell.analysisResult
+        })
+      })
+      if (!checkRes.ok) throw new Error('Verification failed')
+      const checkData = await checkRes.json()
+      cell.verificationResult = checkData.reply
+      cell.logs.push('Verification finished.')
+      autoCells.value = [...autoCells.value]
+      await nextTick()
+      
+      if (cell.verificationResult && !cell.verificationResult.includes('No Evidence') && !cell.verificationResult.includes('无证据')) {
+        cell.logs.push('Evidence found!')
+        break
+      }
+      cell.logs.push('Continuing...')
+    }
+  } catch (err: any) {
+    autoCells.value.push({ id: iteration + 1, logs: [`Error: ${err.message}`] })
+  } finally {
+    isAutoFinding.value = false
+  }
+}
 import { format, formatDistanceToNow } from 'date-fns'
 
 const isDark = ref(false)
 const showBackToTop = ref(false)
-const activeTab = ref<'explorer' | 'search'>('explorer')
+const activeTab = ref<'explorer' | 'search' | 'auto-finding'>('explorer')
+
+// Auto Finding State
+interface AutoFindingCell {
+  id: number
+  logs: string[]
+  analysisResult?: string
+  verificationResult?: string
+}
+const autoCells = ref<AutoFindingCell[]>([])
+const autoChannelName = ref('')
+const isAutoFinding = ref(false)
 
 const handleScroll = () => {
   showBackToTop.value = window.scrollY > 500
@@ -716,6 +813,18 @@ const mediaPosts = computed(() => {
           >
             <Globe :class="['h-4 w-4 mr-2 transition-transform duration-300', activeTab === 'search' ? 'scale-110' : '']" />
             Global Search
+          </button>
+          <button 
+            @click="activeTab = 'auto-finding'"
+            :class="[
+              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              activeTab === 'auto-finding' 
+                ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-md shadow-blue-500/5 ring-1 ring-gray-900/5 dark:ring-white/5' 
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+            ]"
+          >
+            <BotMessageSquare :class="['h-4 w-4 mr-2 transition-transform duration-300', activeTab === 'auto-finding' ? 'scale-110' : '']" />
+            Auto Finding
           </button>
         </div>
       </header>
@@ -1568,6 +1677,49 @@ const mediaPosts = computed(() => {
           </button>
         </div>
         <div class="flex-1 overflow-y-auto p-6 text-gray-700 dark:text-gray-300 prose dark:prose-invert prose-sm prose-p:leading-relaxed prose-headings:font-black prose-a:text-blue-500 prose-ul:my-2" v-html="renderedMarkdown">
+        </div>
+      </div>
+
+      <!-- Auto Finding Tab -->
+      <div v-show="activeTab === 'auto-finding'" class="space-y-6">
+        <div class="max-w-xl mx-auto mb-8 px-4 sm:px-0">
+          <form @submit.prevent="runAutoFinding" class="relative group">
+            <input
+              v-model="autoChannelName"
+              type="text"
+              class="block w-full pl-6 pr-[120px] py-3.5 border border-gray-200 dark:border-gray-700 rounded-xl bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-sm font-medium shadow-sm transition-all duration-300"
+              placeholder="Enter channel name to automatically find..."
+            />
+            <button
+              type="submit"
+              :disabled="isAutoFinding || !autoChannelName.trim()"
+              class="absolute right-2 top-2 bottom-2 px-5 bg-blue-600 text-white rounded-[0.65rem] text-xs font-bold tracking-wide hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-blue-500/30 flex items-center"
+            >
+              <Loader2 v-if="isAutoFinding" class="h-4 w-4 animate-spin mr-2" />
+              {{ isAutoFinding ? 'Finding...' : 'Start Finding' }}
+            </button>
+          </form>
+        </div>
+
+        <div class="bg-white dark:bg-gray-800 rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm space-y-4">
+          <h3 class="text-sm font-bold text-gray-900 dark:text-white mb-4">Finding Logs & Results</h3>
+          
+          <div v-for="cell in autoCells" :key="cell.id" class="border border-gray-200 dark:border-gray-700 rounded-xl p-4 bg-gray-50 dark:bg-gray-900">
+            <h4 class="font-bold text-xs text-gray-500 mb-2">Cell {{ cell.id }}</h4>
+            <div class="space-y-2">
+              <div class="bg-gray-100 dark:bg-gray-950 p-3 rounded font-mono text-xs text-gray-600 dark:text-gray-400">
+                <div v-for="(log, i) in cell.logs" :key="i">{{ log }}</div>
+              </div>
+              <div v-if="cell.analysisResult" class="bg-blue-50 dark:bg-blue-900/10 p-3 rounded border border-blue-100 dark:border-blue-900">
+                <h5 class="text-[10px] font-black text-blue-800 dark:text-blue-400 uppercase mb-1">Analysis</h5>
+                <div class="prose dark:prose-invert prose-xs" v-html="md.render(cell.analysisResult)"></div>
+              </div>
+              <div v-if="cell.verificationResult" class="bg-green-50 dark:bg-green-900/10 p-3 rounded border border-green-100 dark:border-green-900">
+                <h5 class="text-[10px] font-black text-green-800 dark:text-green-400 uppercase mb-1">Verification</h5>
+                <div class="prose dark:prose-invert prose-xs" v-html="md.render(cell.verificationResult)"></div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
