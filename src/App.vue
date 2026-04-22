@@ -19,26 +19,38 @@ const renderedMarkdown = computed(() => md.render(analysisResult.value))
 // Draggable widget state
 const widgetX = ref(32)
 const widgetY = ref(600)
+const postWidgetX = ref(400)
+const postWidgetY = ref(600)
 const isDragging = ref(false)
 let dragOffsetX = 0
 let dragOffsetY = 0
+let currentDragWidget: 'analysis' | 'post' | null = null
 
-const startDrag = (e: MouseEvent) => {
+const startDrag = (e: MouseEvent, widgetType: 'analysis' | 'post') => {
   isDragging.value = true
-  dragOffsetX = e.clientX - widgetX.value
-  dragOffsetY = e.clientY - widgetY.value
+  currentDragWidget = widgetType
+  const targetX = widgetType === 'analysis' ? widgetX.value : postWidgetX.value
+  const targetY = widgetType === 'analysis' ? widgetY.value : postWidgetY.value
+  dragOffsetX = e.clientX - targetX
+  dragOffsetY = e.clientY - targetY
   window.addEventListener('mousemove', onDrag)
   window.addEventListener('mouseup', endDrag)
 }
 
 const onDrag = (e: MouseEvent) => {
-  if (!isDragging.value) return
-  widgetX.value = e.clientX - dragOffsetX
-  widgetY.value = e.clientY - dragOffsetY
+  if (!isDragging.value || !currentDragWidget) return
+  if (currentDragWidget === 'analysis') {
+    widgetX.value = e.clientX - dragOffsetX
+    widgetY.value = e.clientY - dragOffsetY
+  } else if (currentDragWidget === 'post') {
+    postWidgetX.value = e.clientX - dragOffsetX
+    postWidgetY.value = e.clientY - dragOffsetY
+  }
 }
 
 const endDrag = () => {
   isDragging.value = false
+  currentDragWidget = null
   window.removeEventListener('mousemove', onDrag)
   window.removeEventListener('mouseup', endDrag)
 }
@@ -99,12 +111,12 @@ const runAutoFinding = async () => {
   try {
     while (iteration < 3) {
       iteration++
-      const cell: AutoFindingCell = { id: iteration, logs: [`Iteration ${iteration}: Fetching posts...`] }
+      const cell: AutoFindingCell = { id: iteration, logs: [`Iteration ${iteration}:\nFetching 150 posts...`] }
       autoCells.value.push(cell)
       autoCells.value = [...autoCells.value]
       await nextTick()
       
-      let url = `https://i.gogingko.net/api/v1/last/${name}?n=50`
+      let url = `https://i.gogingko.net/api/v1/last/${name}?n=150`
       if (minId) url += `&b=${minId}`
       
       const res = await fetch(url)
@@ -117,7 +129,7 @@ const runAutoFinding = async () => {
       
       const lastPostId = posts[posts.length - 1].key.split('.').pop()
       minId = lastPostId
-      cell.logs.push(`Fetched posts. Lowest ID: ${minId}`)
+      cell.logs.push(`Fetched ${posts.length} posts. Lowest ID: ${minId}`)
       autoCells.value = [...autoCells.value]
       await nextTick()
       
@@ -137,7 +149,7 @@ const runAutoFinding = async () => {
       if (!analysisRes.ok) throw new Error('Analysis failed')
       const analysisData = await analysisRes.json()
       cell.analysisResult = analysisData.reply
-      cell.logs.push('Analysis received.')
+      cell.logs.push(`Analysis received: ${analysisRes.status}`)
       autoCells.value = [...autoCells.value]
       await nextTick()
 
@@ -149,7 +161,7 @@ const runAutoFinding = async () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sender: 'mc', chat_id: 'mc',
-          text: "Consider the following text, can you find any deterministic or definitive evidence for any user or account. If you can find it, return them and mask them in highlight color. Otherwise just answer No Evidence. the following are REPLY text: " + cell.analysisResult
+          text: "Consider the following text, can you find any deterministic or definitive personality evidence for any user or account. If you can find it, return them and mask them in highlight color. Otherwise just answer No Evidence. the following are REPLY text: " + cell.analysisResult
         })
       })
       if (!checkRes.ok) throw new Error('Verification failed')
@@ -186,7 +198,30 @@ interface AutoFindingCell {
 }
 const autoCells = ref<AutoFindingCell[]>([])
 const autoChannelName = ref('')
+const singlePostId = ref('')
+const singlePost = ref<any>(null)
+const isFetchingPost = ref(false)
 const isAutoFinding = ref(false)
+
+const fetchSinglePost = async () => {
+    if (!autoChannelName.value.trim() || !singlePostId.value.trim()) return
+    isFetchingPost.value = true
+    singlePost.value = null
+    const name = autoChannelName.value.trim().replace(/^@/, '')
+    try {
+        const url = `https://i.gogingko.net/api/v1/v/telegram-post/${name}.${singlePostId.value.trim()}`
+        const res = await fetch(url)
+        if (!res.ok) throw new Error('Post not found')
+        singlePost.value = {
+          key: `${name}.${singlePostId.value.trim()}`,
+          data: await res.json(),
+        }
+    } catch (err: any) {
+        alert('Failed to fetch post: ' + err.message)
+    } finally {
+        isFetchingPost.value = false
+    }
+}
 
 const handleScroll = () => {
   showBackToTop.value = window.scrollY > 500
@@ -1667,7 +1702,7 @@ const mediaPosts = computed(() => {
       <div v-if="isAnalysisModalVisible" 
            :style="{ position: 'fixed', left: widgetX + 'px', top: widgetY + 'px', zIndex: 200 }"
            class="w-96 max-w-[90vw] h-[60vh] bg-white/95 dark:bg-gray-800/95 backdrop-blur-xl rounded-3xl shadow-2xl flex flex-col border border-gray-200 dark:border-gray-700">
-        <div class="cursor-grab p-3 bg-blue-500/10 border-b border-blue-500/20 flex justify-between items-center" @mousedown="startDrag">
+        <div class="cursor-grab p-3 bg-blue-500/10 border-b border-blue-500/20 flex justify-between items-center" @mousedown.prevent="startDrag($event, 'analysis')">
           <div class="flex items-center gap-2">
             <GripHorizontal class="h-4 w-4 text-blue-500" />
             <h2 class="text-sm font-black text-gray-900 dark:text-white">Analysis Result ({{ analyzedCount }})</h2>
@@ -1682,13 +1717,13 @@ const mediaPosts = computed(() => {
 
       <!-- Auto Finding Tab -->
       <div v-show="activeTab === 'auto-finding'" class="space-y-6">
-        <div class="max-w-xl mx-auto mb-8 px-4 sm:px-0">
+        <div class="max-w-xl mx-auto mb-8 px-4 sm:px-0 space-y-4">
           <form @submit.prevent="runAutoFinding" class="relative group">
             <input
               v-model="autoChannelName"
               type="text"
               class="block w-full pl-6 pr-[120px] py-3.5 border border-gray-200 dark:border-gray-700 rounded-xl bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-sm font-medium shadow-sm transition-all duration-300"
-              placeholder="Enter channel name to automatically find..."
+              placeholder="Enter channel name..."
             />
             <button
               type="submit"
@@ -1701,11 +1736,99 @@ const mediaPosts = computed(() => {
           </form>
         </div>
 
-        <div class="bg-white dark:bg-gray-800 rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm space-y-4">
-          <h3 class="text-sm font-bold text-gray-900 dark:text-white mb-4">Finding Logs & Results</h3>
-          
-          <div v-for="cell in autoCells" :key="cell.id" class="border border-gray-200 dark:border-gray-700 rounded-xl p-4 bg-gray-50 dark:bg-gray-900">
-            <h4 class="font-bold text-xs text-gray-500 mb-2">Cell {{ cell.id }}</h4>
+      <!-- Floating Post Tool Widget -->
+      <div v-show="activeTab === 'auto-finding'" 
+           :style="{ position: 'fixed', left: postWidgetX + 'px', top: postWidgetY + 'px', zIndex: 100 }"
+           class="w-80 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xl rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 flex flex-col p-4 cursor-default">
+           <div class="cursor-grab p-2 mb-2 bg-purple-500/10 border-b border-purple-500/20 flex justify-between items-center rounded-lg" @mousedown.prevent="startDrag($event, 'post')">
+              <h2 class="text-xs font-black text-purple-700 dark:text-purple-300">Post Fetcher</h2>
+              <GripHorizontal class="h-3 w-3 text-purple-400" />
+           </div>
+           
+           <form @submit.prevent="fetchSinglePost" class="relative group">
+            <input v-model="singlePostId" type="text" class="block w-full pl-3 pr-20 py-2 border border-gray-200 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-900" placeholder="Post ID..." />
+            <button type="submit" :disabled="isFetchingPost" class="absolute right-1 top-1 bottom-1 px-3 bg-purple-600 text-white rounded-md text-[10px] font-bold">
+              {{ isFetchingPost ? '...' : 'Fetch' }}
+            </button>
+          </form>
+          <div v-if="singlePost" class="mt-3 flex-1 overflow-y-auto max-h-[300px] border border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/50 backdrop-blur-sm rounded-xl">
+            <div class="p-3">
+              <!-- Header -->
+              <div class="flex justify-between items-start mb-2.5">
+                <div class="flex items-center space-x-2 min-w-0 pr-2">
+                  <div class="h-7 w-7 rounded-full bg-blue-100 dark:bg-blue-900/40 flex-shrink-0 flex items-center justify-center text-blue-600 dark:text-blue-400">
+                    <User class="h-3.5 w-3.5" />
+                  </div>
+                  <div class="min-w-0">
+                    <h4 class="text-xs font-bold text-gray-900 dark:text-gray-100 truncate">
+                      {{ singlePost.data?.author || singlePost.data?.user || 'Anonymous' }}
+                    </h4>
+                    <p class="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">{{ formatDate(singlePost.data?.date) }}</p>
+                  </div>
+                </div>
+                <span v-if="singlePost.key" class="font-mono bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-1.5 py-0.5 rounded shadow-sm text-[9px] text-gray-500 flex-shrink-0">
+                  #{{ singlePost.key }}
+                </span>
+              </div>
+
+              <!-- Quoted Reply -->
+              <div v-if="singlePost.data?.reply && singlePost.data.reply.length >= 2" class="mb-3 border-l-4 border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 p-3 rounded-r-xl">
+                <div class="flex items-center justify-between text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1">
+                  <div class="flex items-center">
+                    <Reply class="h-3 w-3 mr-1" />
+                    Reply to
+                  </div>
+                  <span v-if="Array.isArray(singlePost.data?.reply) && singlePost.data.reply[0] != null" class="font-mono bg-blue-100/50 dark:bg-blue-800/30 px-2 py-0.5 rounded border border-blue-200/50 dark:border-blue-700/50 text-[10px]">ID: {{ singlePost.data._tool ? singlePost.data.reply[0] : String(singlePost.data.reply[0]).split('/').pop() }}</span>
+                </div>
+                <div class="text-gray-700 dark:text-gray-300 text-xs leading-relaxed whitespace-pre-wrap break-words" v-html="highlightText(singlePost.data.reply[1])">
+                </div>
+              </div>
+
+              <!-- Media Embedding (Photos, Videos, Links) -->
+              <div v-if="singlePost.data?.photos && singlePost.data.photos.length > 0" class="mb-2.5 rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700 bg-black cursor-zoom-in group" @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${singlePost.key}_0`)">
+                <img :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${singlePost.key}_0`" class="w-full h-32 object-cover opacity-90 group-hover:opacity-100 transition-opacity" />
+              </div>
+              <div v-else-if="singlePost.data?.videos && singlePost.data.videos.length > 0" class="mb-2.5 rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700 bg-black">
+                <video controls class="w-full h-32 object-cover">
+                  <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${singlePost.key}-0`" type="video/mp4" />
+                </video>
+              </div>
+
+              <!-- Content Body -->
+              <div class="text-xs leading-relaxed text-gray-800 dark:text-gray-200 whitespace-pre-wrap break-words" v-html="highlightText(singlePost.data?.content || '')">
+              </div>
+
+              <!-- Contact & Extras if needed -->
+              <div v-if="singlePost.data?.contact" class="mt-2 text-[10px] p-2 bg-white dark:bg-gray-800 border border-blue-100 dark:border-blue-900 rounded flex items-center text-blue-600 dark:text-blue-400">
+                <Phone class="h-3 w-3 mr-1.5" /> Contact Card Attached
+              </div>
+
+              <!-- Footer Stats / Links -->
+              <div class="mt-3 pt-2 border-t border-gray-200 dark:border-gray-700 text-[10px] text-gray-500 dark:text-gray-400 flex items-center justify-between">
+                <span>{{ singlePost.data?.views != null ? formatViews(singlePost.data.views) + ' views' : '' }}</span>
+                <a v-if="singlePost.url || singlePost.link" :href="singlePost.url || singlePost.link" target="_blank" class="text-blue-500 dark:text-blue-400 hover:underline flex items-center">
+                   View original <ExternalLink class="h-2.5 w-2.5 ml-1" />
+                </a>
+              </div>
+            </div>
+          </div>
+      </div>
+
+      <div v-if="autoCells.length === 0 && !isAutoFinding" class="text-center py-24 sm:py-32">
+        <div class="inline-flex items-center justify-center w-20 h-20 rounded-full bg-purple-50 dark:bg-purple-900/20 mb-6 shadow-inner ring-1 ring-purple-100 dark:ring-purple-800 border-8 border-white dark:border-gray-900">
+          <BotMessageSquare class="h-8 w-8 text-purple-500 dark:text-purple-400" />
+        </div>
+        <h2 class="text-2xl font-black tracking-tight text-gray-900 dark:text-white mb-3">Auto Sequence Finding</h2>
+        <p class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium">Enter a channel name to automatically fetch, analyze, and verify consecutive posts for evidence.</p>
+      </div>
+
+      <div v-else class="w-full max-w-full lg:max-w-7xl xl:max-w-[90rem] mx-auto space-y-4">
+        <h3 class="text-sm font-bold text-gray-900 dark:text-white mb-4">Finding Logs & Results</h3>
+        <div v-for="cell in autoCells" :key="cell.id" class="border border-gray-200 dark:border-gray-700 rounded-xl p-4 bg-gray-50 dark:bg-gray-900">
+            <h4 class="font-bold text-xs text-gray-500 mb-2 flex items-center">
+              Cell {{ cell.id }}
+              <Loader2 v-if="!cell.verificationResult" class="h-3 w-3 ml-2 animate-spin text-blue-500" />
+            </h4>
             <div class="space-y-2">
               <div class="bg-gray-100 dark:bg-gray-950 p-3 rounded font-mono text-xs text-gray-600 dark:text-gray-400">
                 <div v-for="(log, i) in cell.logs" :key="i">{{ log }}</div>
@@ -1722,7 +1845,6 @@ const mediaPosts = computed(() => {
           </div>
         </div>
       </div>
-
     </div>
   </div>
 </template>
