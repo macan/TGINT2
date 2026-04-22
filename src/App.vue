@@ -106,84 +106,225 @@ const runAutoFinding = async () => {
   
   const name = autoChannelName.value.trim().replace(/^@/, '')
   let minId: string | null = null
+  let currentDateForUser = new Date()
   let iteration = 0
   
   try {
     while (iteration < 3) {
       iteration++
-      const cell: AutoFindingCell = { id: iteration, logs: [`Iteration ${iteration}:\nFetching 150 posts...`] }
+      const cell: AutoFindingCell = { id: iteration, logs: [`Iteration ${iteration}: Initializing...`], status: 'running' }
       autoCells.value.push(cell)
       autoCells.value = [...autoCells.value]
       await nextTick()
       
-      let url = `https://i.gogingko.net/api/v1/last/${name}?n=150`
-      if (minId) url += `&b=${minId}`
+      let posts: any[] = []
       
-      const res = await fetch(url)
-      if (!res.ok) throw new Error('Fetch failed')
-      
-      const data = await res.json()
-      const posts = Array.isArray(data) ? data : (data.data || data.posts || data.items || [])
-      
-      if (posts.length === 0) { cell.logs.push('No more posts found.'); break }
-      
-      const lastPostId = posts[posts.length - 1].key.split('.').pop()
-      minId = lastPostId
-      cell.logs.push(`Fetched ${posts.length} posts. Lowest ID: ${minId}`)
-      autoCells.value = [...autoCells.value]
-      await nextTick()
-      
-      const strippedPosts = posts.map((p: any) => ({
-        key: p.key, content: p.data?.content, date: p.data?.date,
-        author: p.data?.author || p.data?.user, reply: p.data?.reply
-      })).filter((p: any) => p.content || p.reply)
-      
-      const analysisRes = await fetch('https://ask.gingkogo.uk/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sender: 'mc', chat_id: 'mc',
-          text: "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state. Output the findings in Chinese with post id range hint in proper place.\n " + JSON.stringify(strippedPosts)
-        })
-      })
-      if (!analysisRes.ok) throw new Error('Analysis failed')
-      const analysisData = await analysisRes.json()
-      cell.analysisResult = analysisData.reply
-      cell.logs.push(`Analysis received: ${analysisRes.status}`)
-      autoCells.value = [...autoCells.value]
-      await nextTick()
+      try {
+        if (searchMode.value === 'channel') {
+          cell.logs[0] = `Iteration ${iteration}:\nFetching 150 posts (${searchMode.value})...`
+          let url = `https://i.gogingko.net/api/v1/last/${name}?n=150`
+          if (minId) url += `&b=${minId}`
+          
+          const res = await fetch(url)
+          if (!res.ok) throw new Error('Fetch failed')
+          
+          const data = await res.json()
+          posts = Array.isArray(data) ? data : (data.data || data.posts || data.items || [])
+          
+          if (posts.length === 0) { 
+            cell.logs.push('No more posts found.'); 
+            cell.status = 'completed'; 
+            if (iteration === 1) break; else continue;
+          }
+          
+          const lastPostId = posts[posts.length - 1].key.split('.').pop()
+          minId = lastPostId
+          cell.logs.push(`Fetched ${posts.length} posts. Lowest ID: ${minId}`)
+        } else {
+          cell.logs[0] = `Iteration ${iteration}:\nSearching 500 posts (${searchMode.value})...`
+          // Build time range for day X
+          const day = subDays(currentDateForUser, iteration - 1)
+          const start = format(startOfDay(day), 'yyyy-MM-dd HH:mm:ss')
+          const end = format(endOfDay(day), 'yyyy-MM-dd HH:mm:ss')
+          
+          // Get local timezone offset
+          const offset = -new Date().getTimezoneOffset()
+          const sign = offset >= 0 ? '+' : '-'
+          const hours = Math.floor(Math.abs(offset) / 60).toString().padStart(2, '0')
+          const minutes = (Math.abs(offset) % 60).toString().padStart(2, '0')
+          const timezoneStr = `${sign}${hours}${minutes}`
+          
+          const dateRange = `date:[to_date("${start}${timezoneStr}", "%Y-%m-%d %H:%M:%S%z") TO to_date("${end}${timezoneStr}", "%Y-%m-%d %H:%M:%S%z")]`
+          const query = `user:*${name}* AND ${dateRange}`
+          
+          let data: any = null
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 100000); // 100s timeout
 
-      cell.logs.push('Sending for verification...')
-      autoCells.value = [...autoCells.value]
-      await nextTick()
-      const checkRes = await fetch('https://ask.gingkogo.uk/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sender: 'mc', chat_id: 'mc',
-          text: "Consider the following text, can you find any deterministic or definitive personality evidence for any user or account. If you can find it, return them and mask them in highlight color. Otherwise just answer No Evidence. the following are REPLY text: " + cell.analysisResult
-        })
-      })
-      if (!checkRes.ok) throw new Error('Verification failed')
-      const checkData = await checkRes.json()
-      cell.verificationResult = checkData.reply
-      cell.logs.push('Verification finished.')
-      autoCells.value = [...autoCells.value]
-      await nextTick()
-      
-      if (cell.verificationResult && !cell.verificationResult.includes('No Evidence') && !cell.verificationResult.includes('无证据')) {
-        cell.logs.push('Evidence found!')
-        break
+            try {
+              const res = await fetch('https://i.gogingko.net/api/v1/ft/telegram', {
+                method: 'GET',
+                headers: {
+                  'x-gos-ft-query': encodeURIComponent(query),
+                  'x-gos-ft-sort': 'date-',
+                  'x-gos-ft-topk': '500'
+                },
+                signal: controller.signal
+              })
+              
+              if (!res.ok) {
+                const err = new Error(`Search failed: ${res.statusText}`) as any
+                err.url = 'https://i.gogingko.net/api/v1/ft/telegram'
+                err.status = res.status
+                err.statusText = res.statusText
+                throw err
+              }
+              
+              data = await res.json()
+              console.log('Search API Response:', data);
+              posts = data.data || data.posts || data.items || []
+            } finally {
+              clearTimeout(timeoutId);
+            }
+          } catch(err: any) {
+             console.error('Fetch/Parsing error:', err);
+             if (!err.url) err.url = 'https://i.gogingko.net/api/v1/ft/telegram'
+             if (err.name === 'AbortError') {
+               const newErr = new Error('Network error: Request timed out after 100s from ' + err.url);
+               (newErr as any).url = err.url;
+               throw newErr;
+             } else if (err.message && err.message.toLowerCase().includes('failed to fetch')) {
+               const newErr = new Error('Network error or CORS issue: Failed to fetch from ' + err.url);
+               (newErr as any).url = err.url;
+               throw newErr;
+             }
+             throw err
+          }
+          
+          if (!data || !data.keys || data.keys.length === 0) {
+            cell.logs.push(`No posts found for ${format(day, 'yyyy-MM-dd')}. Searching previous day...`);
+            if (iteration === 1) {
+              cell.status = 'completed';
+              break;
+            } else {
+              continue;
+            }
+          }
+          
+          const keys = data.keys[0].map((fullKey: string) => {
+            const idx = fullKey.indexOf('.')
+            return { ns: fullKey.slice(0, idx), key: fullKey.slice(idx + 1) }
+          })
+          
+          let mgetResponse;
+          try {
+            mgetResponse = await fetch('https://i.gogingko.net/api/v1/mget/_', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(keys)
+            })
+          } catch(err: any) {
+            const newErr = new Error((err.message && err.message.toLowerCase().includes('failed to fetch')) ? 'MGET Network error or CORS issue: Failed to fetch from https://i.gogingko.net/api/v1/mget/_' : err.message);
+            (newErr as any).url = 'https://i.gogingko.net/api/v1/mget/_';
+            throw newErr;
+          }
+          if (!mgetResponse.ok) throw new Error('MGET failed')
+          posts = await mgetResponse.json()
+          cell.logs.push(`Fetched ${posts.length} posts for ${format(day, 'yyyy-MM-dd')}.`)
+        }
+        
+        autoCells.value = [...autoCells.value]
+        await nextTick()
+        
+        const strippedPosts = posts.map((p: any) => ({
+          key: p.key, content: p.data?.content, date: p.data?.date,
+          author: p.data?.author || p.data?.user, reply: p.data?.reply
+        })).filter((p: any) => p.content || p.reply)
+        
+        let analysisRes;
+        try {
+          analysisRes = await fetch('https://ask.gingkogo.uk/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sender: 'mc', chat_id: 'mc',
+              text: "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state. Output the findings in Chinese with post id range hint in proper place.\n " + JSON.stringify(strippedPosts)
+            })
+          })
+        } catch(err: any) {
+          const newErr = new Error((err.message && err.message.toLowerCase().includes('failed to fetch')) ? 'Analysis Network error or CORS issue: Failed to fetch from https://ask.gingkogo.uk/' : err.message);
+          (newErr as any).url = 'https://ask.gingkogo.uk/';
+          throw newErr;
+        }
+        if (!analysisRes.ok) throw new Error('Analysis failed')
+        const analysisData = await analysisRes.json()
+        cell.analysisResult = analysisData.reply
+        cell.logs.push(`Analysis received: ${analysisRes.status}`)
+        autoCells.value = [...autoCells.value]
+        await nextTick()
+
+        cell.logs.push('Sending for verification...')
+        autoCells.value = [...autoCells.value]
+        await nextTick()
+        let checkRes;
+        try {
+          checkRes = await fetch('https://ask.gingkogo.uk/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sender: 'mc', chat_id: 'mc',
+              text: "Consider the following text, can you find any deterministic or definitive personality evidence for any user or account. If you can find it, return them and mask them in highlight color. Otherwise just answer No Evidence. the following are REPLY text: " + cell.analysisResult
+            })
+          })
+        } catch(err: any) {
+          const newErr = new Error((err.message && err.message.toLowerCase().includes('failed to fetch')) ? 'Verification Network error or CORS issue: Failed to fetch from https://ask.gingkogo.uk/' : err.message);
+          (newErr as any).url = 'https://ask.gingkogo.uk/';
+          throw newErr;
+        }
+        if (!checkRes.ok) throw new Error('Verification failed')
+        const checkData = await checkRes.json()
+        cell.verificationResult = checkData.reply
+        cell.logs.push('Verification finished.')
+        cell.status = 'completed'
+        autoCells.value = [...autoCells.value]
+        await nextTick()
+        
+        if (cell.verificationResult && !cell.verificationResult.includes('No Evidence') && !cell.verificationResult.includes('无证据')) {
+          cell.logs.push('Evidence found!')
+          break
+        }
+        cell.logs.push('Continuing...')
+      } catch (err: any) {
+        cell.status = 'error'
+        cell.logs.push(`Error: ${err.message}`)
+        
+        // Log to console for better visibility
+        console.error('AutoFinding Error:', err);
+        
+        debugInfo.value = { 
+          request: `URL: ${err.url || 'N/A'}, Mode: ${searchMode.value}`, 
+          response: err.status 
+            ? `${err.status} ${err.statusText} | Headers: ${JSON.stringify(err.headers || {})}` 
+            : (err.message || 'Unknown error')
+        }
+        showDebugPanel.value = true
+        autoCells.value = [...autoCells.value]
+        throw err 
       }
-      cell.logs.push('Continuing...')
     }
   } catch (err: any) {
-    autoCells.value.push({ id: iteration + 1, logs: [`Error: ${err.message}`] })
+    // Already logged error in each iteration/check
   } finally {
     isAutoFinding.value = false
   }
 }
-import { format, formatDistanceToNow } from 'date-fns'
+//...
+// (Rendering debug panel)
+// <div v-if="showDebugPanel" class="fixed bottom-4 right-4 z-50 p-6 bg-red-900 text-white rounded-xl shadow-2xl w-96 max-h-[80vh] overflow-y-auto">
+//   ...
+// </div>
+import { format, formatDistanceToNow, subDays, startOfDay, endOfDay } from 'date-fns'
 
 const isDark = ref(false)
 const showBackToTop = ref(false)
@@ -195,9 +336,13 @@ interface AutoFindingCell {
   logs: string[]
   analysisResult?: string
   verificationResult?: string
+  status: 'running' | 'completed' | 'error'
 }
 const autoCells = ref<AutoFindingCell[]>([])
 const autoChannelName = ref('')
+const searchMode = ref<'channel' | 'user'>('channel')
+const showDebugPanel = ref(false)
+const debugInfo = ref({ request: '', response: '' })
 const singlePostId = ref('')
 const singlePost = ref<any>(null)
 const isFetchingPost = ref(false)
@@ -232,10 +377,16 @@ const scrollToTop = () => {
 }
 
 const scrollToPost = (key: string) => {
-  const el = document.getElementById(`post-${key}`)
-  if (el) {
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
+  console.log('Scrolling to:', key);
+  viewMode.value = 'list'
+  nextTick(() => {
+    const el = document.getElementById(`post-${key}`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    } else {
+      console.log('Post element not found for key:', key);
+    }
+  })
 }
 
 onMounted(() => {
@@ -1052,6 +1203,7 @@ const mediaPosts = computed(() => {
             <div v-if="viewMode === 'list'" class="space-y-3">
               <div 
                 v-for="(post, index) in posts" 
+                :id="`post-${post.key}`"
                 :key="post.key || index" 
                 :class="[
                   'rounded-3xl shadow-sm border p-4 sm:p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden',
@@ -1239,7 +1391,7 @@ const mediaPosts = computed(() => {
               <div v-for="(post, index) in mediaPosts" :key="post.key || index" class="relative flex flex-col md:flex-row items-start md:justify-between group">
                 <!-- Central Timeline Axis with Date -->
                 <div class="absolute left-8 md:left-1/2 w-48 -mx-24 flex flex-col items-center justify-center z-20 pointer-events-none group-hover:scale-105 transition-transform duration-500">
-                  <div class="flex items-center justify-center w-12 h-12 rounded-full border-4 border-white dark:border-gray-900 bg-blue-600 text-white shadow-xl shadow-blue-500/20 shrink-0 transition-colors duration-500 group-hover:bg-blue-500 group-hover:shadow-blue-500/40">
+                  <div @click="scrollToPost(post.key)" class="pointer-events-auto cursor-pointer flex items-center justify-center w-12 h-12 rounded-full border-4 border-white dark:border-gray-900 bg-blue-600 text-white shadow-xl shadow-blue-500/20 shrink-0 transition-colors duration-500 group-hover:bg-blue-500 group-hover:shadow-blue-500/40">
                     <ImageIcon v-if="post.data?.photos?.length || post.data?.linkPreview?.image" class="h-5 w-5" />
                     <Video v-else class="h-5 w-5" />
                     <!-- Hidden ID for screen readers -->
@@ -1715,15 +1867,31 @@ const mediaPosts = computed(() => {
         </div>
       </div>
 
+      <!-- Debug Panel -->
+      <div v-if="showDebugPanel" class="fixed bottom-4 right-4 z-[300] p-6 bg-gray-900 text-white rounded-2xl shadow-2xl w-96 max-h-[80vh] overflow-y-auto border border-red-500">
+        <div class="flex justify-between items-center mb-4">
+          <h3 class="font-black text-red-500">Debug Api Error</h3>
+          <button @click="showDebugPanel = false" class="text-white hover:text-gray-400">Close</button>
+        </div>
+        <div class="text-xs space-y-2">
+          <p><strong>Request:</strong> {{ debugInfo.request }}</p>
+          <p><strong>Response:</strong> {{ debugInfo.response }}</p>
+        </div>
+      </div>
+      
       <!-- Auto Finding Tab -->
       <div v-show="activeTab === 'auto-finding'" class="space-y-6">
         <div class="max-w-xl mx-auto mb-8 px-4 sm:px-0 space-y-4">
+          <div class="flex items-center gap-4 bg-gray-100 dark:bg-gray-800 p-1 rounded-xl">
+             <button @click="searchMode = 'channel'" :disabled="isAutoFinding" :class="['flex-1 py-2 text-xs font-bold rounded-lg transition', isAutoFinding ? 'opacity-50 cursor-not-allowed' : '', searchMode === 'channel' ? 'bg-white dark:bg-gray-700 shadow-sm' : 'text-gray-500']">Channel</button>
+             <button @click="searchMode = 'user'" :disabled="isAutoFinding" :class="['flex-1 py-2 text-xs font-bold rounded-lg transition', isAutoFinding ? 'opacity-50 cursor-not-allowed' : '', searchMode === 'user' ? 'bg-white dark:bg-gray-700 shadow-sm' : 'text-gray-500']">User</button>
+          </div>
           <form @submit.prevent="runAutoFinding" class="relative group">
             <input
               v-model="autoChannelName"
               type="text"
               class="block w-full pl-6 pr-[120px] py-3.5 border border-gray-200 dark:border-gray-700 rounded-xl bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-sm font-medium shadow-sm transition-all duration-300"
-              placeholder="Enter channel name..."
+              :placeholder="searchMode === 'channel' ? 'Enter channel name...' : 'Enter user name...'"
             />
             <button
               type="submit"
@@ -1827,7 +1995,8 @@ const mediaPosts = computed(() => {
         <div v-for="cell in autoCells" :key="cell.id" class="border border-gray-200 dark:border-gray-700 rounded-xl p-4 bg-gray-50 dark:bg-gray-900">
             <h4 class="font-bold text-xs text-gray-500 mb-2 flex items-center">
               Cell {{ cell.id }}
-              <Loader2 v-if="!cell.verificationResult" class="h-3 w-3 ml-2 animate-spin text-blue-500" />
+              <Loader2 v-if="cell.status === 'running'" class="h-3 w-3 ml-2 animate-spin text-blue-500" />
+              <span v-if="cell.status === 'error'" class="ml-2 text-red-500 text-[10px]">Error</span>
             </h4>
             <div class="space-y-2">
               <div class="bg-gray-100 dark:bg-gray-950 p-3 rounded font-mono text-xs text-gray-600 dark:text-gray-400">
