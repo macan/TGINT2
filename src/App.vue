@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted, watch, computed, nextTick } from 'vue'
 import { 
   Search, Loader2, AlertCircle, Users, Calendar, Info, MessageSquare, 
   ExternalLink, Reply, Moon, Sun, Globe, Layout, CheckCircle2, 
-  FileText, User, PenTool, Link, ListFilter, Inbox,
+  FileText, User, PenTool, Link, ListFilter, Inbox, Filter,
   LayoutGrid, Clock, List, ImageIcon, Video, X, Layers, PanelLeftClose, PanelLeft, Phone, ChevronUp, BotMessageSquare, GripHorizontal
 } from 'lucide-vue-next'
 
@@ -15,6 +15,43 @@ const analysisResult = ref('')
 const isAnalysisModalVisible = ref(false)
 const analyzedCount = ref(0)
 const renderedMarkdown = computed(() => md.render(analysisResult.value))
+
+// Filtering state
+const filterAuthor = ref('')
+const filterStartDate = ref('')
+const filterEndDate = ref('')
+const filterMedia = ref({ photos: false, videos: false, links: false })
+
+const filteredPosts = computed(() => {
+  let result = posts.value
+  
+  if (filterAuthor.value) {
+    const author = filterAuthor.value.toLowerCase()
+    result = result.filter(p => (p.data?.author || p.data?.user || '').toLowerCase().includes(author))
+  }
+  
+  if (filterStartDate.value) {
+    const start = new Date(filterStartDate.value).getTime()
+    result = result.filter(p => p.data?.date && new Date(p.data.date).getTime() >= start)
+  }
+  
+  if (filterEndDate.value) {
+    const end = new Date(filterEndDate.value).getTime()
+    result = result.filter(p => p.data?.date && new Date(p.data.date).getTime() <= end)
+  }
+  
+  if (filterMedia.value.photos) {
+    result = result.filter(p => p.data?.photos && p.data.photos.length > 0)
+  }
+  if (filterMedia.value.videos) {
+    result = result.filter(p => p.data?.videos && p.data.videos.length > 0)
+  }
+  if (filterMedia.value.links) {
+    result = result.filter(p => !!p.data?.linkPreview)
+  }
+  
+  return result
+})
 
 // Draggable widget state
 const widgetX = ref(32)
@@ -110,7 +147,7 @@ const runAutoFinding = async () => {
   let iteration = 0
   
   try {
-    while (iteration < 3) {
+    while (iteration < 5) {
       iteration++
       const cell: AutoFindingCell = { id: iteration, logs: [`Iteration ${iteration}: Initializing...`], status: 'running' }
       autoCells.value.push(cell)
@@ -134,7 +171,7 @@ const runAutoFinding = async () => {
           if (posts.length === 0) { 
             cell.logs.push('No more posts found.'); 
             cell.status = 'completed'; 
-            if (iteration === 1) break; else continue;
+            continue;
           }
           
           const lastPostId = posts[posts.length - 1].key.split('.').pop()
@@ -204,12 +241,7 @@ const runAutoFinding = async () => {
           
           if (!data || !data.keys || data.keys.length === 0) {
             cell.logs.push(`No posts found for ${format(day, 'yyyy-MM-dd')}. Searching previous day...`);
-            if (iteration === 1) {
-              cell.status = 'completed';
-              break;
-            } else {
-              continue;
-            }
+            continue;
           }
           
           const keys = data.keys[0].map((fullKey: string) => {
@@ -292,7 +324,6 @@ const runAutoFinding = async () => {
         
         if (cell.verificationResult && !cell.verificationResult.includes('No Evidence') && !cell.verificationResult.includes('无证据')) {
           cell.logs.push('Evidence found!')
-          break
         }
         cell.logs.push('Continuing...')
       } catch (err: any) {
@@ -534,9 +565,9 @@ const searchTimelineStats = computed(() => {
 })
 
 const postsTimelineStats = computed(() => {
-  if (!posts.value || posts.value.length === 0) return null
+  if (!filteredPosts.value || filteredPosts.value.length === 0) return null
 
-  const validResults = posts.value
+  const validResults = filteredPosts.value
     .map(p => ({ post: p, date: new Date(p.data?.date), time: new Date(p.data?.date).getTime() }))
     .filter(item => !isNaN(item.time) && item.date.getFullYear() >= 2013)
     .sort((a, b) => b.time - a.time) // Newest first
@@ -912,7 +943,7 @@ const getPostAvatarUrl = (post: any) => {
 }
 
 const mediaPosts = computed(() => {
-  return posts.value.filter(post => 
+  return filteredPosts.value.filter(post => 
     (post.data?.photos && post.data.photos.length > 0) || 
     (post.data?.videos && post.data.videos.length > 0) ||
     (post.data?.linkPreview && post.data.linkPreview.image)
@@ -1161,6 +1192,22 @@ const mediaPosts = computed(() => {
           </div>
           
           <div v-else>
+            <div class="mb-8 p-6 bg-gray-50 dark:bg-gray-800/50 rounded-2xl border border-gray-100 dark:border-gray-700 w-full">
+              <div class="flex items-center gap-2 mb-4 text-gray-900 dark:text-gray-100 font-semibold">
+                <Filter class="h-4 w-4 text-blue-500" />
+                <h4 class="text-sm">Filter Posts</h4>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <input v-model="filterAuthor" placeholder="Filter by author..." class="w-full px-4 py-2.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 transition-all outline-none" />
+                <input v-model="filterStartDate" type="date" class="w-full px-4 py-2.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 transition-all outline-none" />
+                <input v-model="filterEndDate" type="date" class="w-full px-4 py-2.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 transition-all outline-none" />
+                <div class="flex flex-wrap items-center gap-3 text-sm text-gray-600 dark:text-gray-400">
+                  <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" v-model="filterMedia.photos" class="rounded text-blue-600" /> Photos</label>
+                  <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" v-model="filterMedia.videos" class="rounded text-blue-600" /> Videos</label>
+                  <label class="flex items-center gap-2 cursor-pointer"><input type="checkbox" v-model="filterMedia.links" class="rounded text-blue-600" /> Links</label>
+                </div>
+              </div>
+            </div>
             <!-- Posts Timeline -->
             <div v-if="postsTimelineStats && viewMode !== 'timeline'" class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm mb-8">
               <div class="flex items-center justify-between mb-4">
@@ -1202,7 +1249,7 @@ const mediaPosts = computed(() => {
             <!-- List View -->
             <div v-if="viewMode === 'list'" class="space-y-3">
               <div 
-                v-for="(post, index) in posts" 
+                v-for="(post, index) in filteredPosts" 
                 :id="`post-${post.key}`"
                 :key="post.key || index" 
                 :class="[
