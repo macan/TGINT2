@@ -12,6 +12,9 @@
   body {
     @apply bg-[#F9FAFB] dark:bg-[#09090B] text-gray-900 dark:text-gray-100 transition-colors duration-300 font-sans antialiased selection:bg-blue-500/30;
   }
+  mark {
+    @apply bg-yellow-200 dark:bg-yellow-800 text-inherit;
+  }
 }
 
 /* Custom Scrollbar for better UX */

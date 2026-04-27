@@ -8,7 +8,8 @@ import {
 } from 'lucide-vue-next'
 
 import MarkdownIt from 'markdown-it'
-const md = new MarkdownIt()
+import markdownItMark from 'markdown-it-mark'
+const md = new MarkdownIt({ html: true }).use(markdownItMark)
 
 const isAnalyzing = ref(false)
 const analysisResult = ref('')
@@ -211,7 +212,7 @@ const runAutoFinding = async () => {
               })
               
               if (!res.ok) {
-                const err = new Error(`Search failed: ${res.statusText}`) as any
+                const err = new Error(`Search failed: ${res.status} ${res.statusText || ''}`) as any
                 err.url = 'https://i.gogingko.net/api/v1/ft/telegram'
                 err.status = res.status
                 err.statusText = res.statusText
@@ -269,6 +270,15 @@ const runAutoFinding = async () => {
         autoCells.value = [...autoCells.value]
         await nextTick()
         
+        
+        if (posts.length === 0) {
+          cell.logs.push('No posts to analyze.');
+          cell.status = 'completed';
+          autoCells.value = [...autoCells.value];
+          await nextTick();
+          continue;
+        }
+
         const strippedPosts = posts.map((p: any) => ({
           key: p.key, content: p.data?.content, date: p.data?.date,
           author: p.data?.author || p.data?.user, reply: p.data?.reply
@@ -281,7 +291,7 @@ const runAutoFinding = async () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               sender: 'mc', chat_id: 'mc',
-              text: "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state. Output the findings in Chinese with post id range hint in proper place.\n " + JSON.stringify(strippedPosts)
+              text: "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures. For each grouped account, try hard to find anything that represented the personality of the account in life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state, social relations, or any rules you found. Output the findings in Chinese with post id range hint in proper place.\n " + JSON.stringify(strippedPosts)
             })
           })
         } catch(err: any) {
@@ -306,7 +316,7 @@ const runAutoFinding = async () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               sender: 'mc', chat_id: 'mc',
-              text: "Consider the following text, can you find any deterministic or definitive personality evidence for any user or account. If you can find it, return them and mask them in highlight color. Otherwise just answer No Evidence. the following are REPLY text: " + cell.analysisResult
+              text: "Consider the following text, can you find any deterministic or definitive personality evidence for any user or account. If you can find it, return the evidence. Otherwise just answer No Evidence. the following are REPLY text: " + cell.analysisResult
             })
           })
         } catch(err: any) {
@@ -314,7 +324,7 @@ const runAutoFinding = async () => {
           (newErr as any).url = 'https://ask.gingkogo.uk/';
           throw newErr;
         }
-        if (!checkRes.ok) throw new Error('Verification failed')
+        if (!checkRes.ok) throw new Error(`Verification failed: ${checkRes.status} ${checkRes.statusText || ''}`)
         const checkData = await checkRes.json()
         cell.verificationResult = checkData.reply
         cell.logs.push('Verification finished.')
@@ -385,11 +395,15 @@ const fetchSinglePost = async () => {
     singlePost.value = null
     const name = autoChannelName.value.trim().replace(/^@/, '')
     try {
-        const url = `https://i.gogingko.net/api/v1/v/telegram-post/${name}.${singlePostId.value.trim()}`
+        let _key = `${name}.${singlePostId.value.trim()}`
+        if (singlePostId.value.includes('.')) {
+          _key = singlePostId.value.trim()
+        }
+        const url = `https://i.gogingko.net/api/v1/v/telegram-post/${_key}`
         const res = await fetch(url)
         if (!res.ok) throw new Error('Post not found')
         singlePost.value = {
-          key: `${name}.${singlePostId.value.trim()}`,
+          key: _key,
           data: await res.json(),
         }
     } catch (err: any) {
@@ -612,6 +626,27 @@ const toggleDark = () => {
   isDark.value = !isDark.value
 }
 
+const isScrapingDisabled = ref(false)
+
+const scheduleScrape = async () => {
+    if (!currentChannelName.value || isScrapingDisabled.value) return;
+    try {
+        const res = await fetch(`https://i.gogingko.net/api/v1/lq/${encodeURIComponent(currentChannelName.value)}`, {
+            method: 'POST'
+        });
+        if (!res.ok) throw new Error(`Failed to schedule scrape: ${res.statusText}`);
+        alert('Scrape scheduled successfully');
+        
+        isScrapingDisabled.value = true
+        setTimeout(() => {
+            isScrapingDisabled.value = false
+        }, 5000)
+    } catch (err: any) {
+        console.error(err);
+        alert('Failed to schedule scrape: ' + err.message);
+    }
+}
+
 const toggleField = (field: keyof typeof searchFields.value) => {
   const selectedCount = Object.values(searchFields.value).filter(Boolean).length
   if (searchFields.value[field] && selectedCount <= 1) return
@@ -758,7 +793,7 @@ const performGlobalSearch = async () => {
     })
     
     if (!response.ok) {
-      throw new Error(`Search failed: ${response.statusText}`)
+      throw new Error(`Search failed: ${response.status} ${response.statusText || ''}`)
     }
     
     const data = await response.json()
@@ -1183,6 +1218,15 @@ const mediaPosts = computed(() => {
                 title="Timeline View"
               >
                 <Clock class="h-4 w-4" />
+              </button>
+              <button 
+                @click="scheduleScrape"
+                :disabled="isScrapingDisabled"
+                class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Schedule this channel for scraping"
+              >
+                <ListFilter class="h-3 w-3" />
+                {{ isScrapingDisabled ? 'Scheduled' : 'Scheduled to Scrape' }}
               </button>
             </div>
           </div>
