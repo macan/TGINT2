@@ -4,7 +4,7 @@ import {
   Search, Loader2, AlertCircle, Users, Calendar, Info, MessageSquare, 
   ExternalLink, Reply, Moon, Sun, Globe, Layout, CheckCircle2, 
   FileText, User, PenTool, Link, ListFilter, Inbox, Filter,
-  LayoutGrid, Clock, List, ImageIcon, Video, X, Layers, PanelLeftClose, PanelLeft, Phone, ChevronUp, BotMessageSquare, GripHorizontal, Sparkles
+  LayoutGrid, Clock, List, ImageIcon, Video, X, Layers, PanelLeftClose, PanelLeft, Phone, ChevronUp, BotMessageSquare, GripHorizontal, Sparkles, Pin
 } from 'lucide-vue-next'
 
 import MarkdownIt from 'markdown-it'
@@ -148,7 +148,7 @@ const runAutoFinding = async () => {
   let iteration = 0
   
   try {
-    while (iteration < 5) {
+    while (iteration < numIterations.value) {
       iteration++
       const cell: AutoFindingCell = { id: iteration, logs: [`Iteration ${iteration}: Initializing...`], status: 'running' }
       autoCells.value.push(cell)
@@ -423,6 +423,7 @@ const generateFinalTable = async () => {
 }
 
 const isAutoFinding = ref(false)
+const numIterations = ref(5)
 
 const fetchSinglePost = async () => {
     if (!autoChannelName.value.trim() || !singlePostId.value.trim()) return
@@ -565,6 +566,45 @@ const searchFields = ref({
 })
 const searchResults = ref<any[]>([])
 const selectedUsernames = ref<string[]>([])
+const lastVisitedChannels = ref<{ name: string, isPinned: boolean }[]>([]);
+
+const addToLastVisited = (name: string) => {
+  const index = lastVisitedChannels.value.findIndex(c => c.name === name);
+  let channel = { name, isPinned: false };
+  if (index !== -1) {
+    channel = lastVisitedChannels.value[index];
+    lastVisitedChannels.value.splice(index, 1);
+  }
+  lastVisitedChannels.value.unshift(channel);
+  
+  // Keep up to 20 channels, prioritizing pinned ones
+  const pinned = lastVisitedChannels.value.filter(c => c.isPinned);
+  const unpinned = lastVisitedChannels.value.filter(c => !c.isPinned);
+  
+  if (unpinned.length > 20 - pinned.length) {
+      lastVisitedChannels.value = pinned.concat(unpinned.slice(0, 20 - pinned.length));
+  }
+  
+  localStorage.setItem('lastVisitedChannels', JSON.stringify(lastVisitedChannels.value));
+}
+
+const removeVisitedChannel = (name: string) => {
+    lastVisitedChannels.value = lastVisitedChannels.value.filter(c => c.name !== name);
+    localStorage.setItem('lastVisitedChannels', JSON.stringify(lastVisitedChannels.value));
+}
+
+const togglePin = (name: string) => {
+    const channel = lastVisitedChannels.value.find(c => c.name === name);
+    if(channel) {
+        channel.isPinned = !channel.isPinned;
+        localStorage.setItem('lastVisitedChannels', JSON.stringify(lastVisitedChannels.value));
+    }
+}
+
+const clearAllChannels = () => {
+    lastVisitedChannels.value = lastVisitedChannels.value.filter(c => c.isPinned);
+    localStorage.setItem('lastVisitedChannels', JSON.stringify(lastVisitedChannels.value));
+}
 
 const allUsernames = computed(() => {
   const users = new Set<string>()
@@ -700,6 +740,10 @@ onMounted(() => {
   if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
     isDark.value = true
   }
+  const saved = localStorage.getItem('lastVisitedChannels');
+  if (saved) {
+    lastVisitedChannels.value = JSON.parse(saved);
+  }
 })
 
 watch(isDark, (val) => {
@@ -778,6 +822,8 @@ const searchChannel = async () => {
   
   const name = channelName.value.trim().replace(/^@/, '')
   currentChannelName.value = name
+  
+  addToLastVisited(name);
   
   try {
     const metaRes = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${name}`)
@@ -981,7 +1027,7 @@ const loadMorePosts = async () => {
 
   try {
     const numericId = lastPostId.includes('.') ? lastPostId.split('.')[1] : lastPostId
-    const response = await fetch(`https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=25&b=${numericId}`)
+    const response = await fetch(`https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=50&b=${numericId}`)
     if (response.ok) {
       const morePostsData = await response.json()
       const newPosts = Array.isArray(morePostsData) ? morePostsData : (morePostsData.data || morePostsData.posts || morePostsData.items || [])
@@ -1262,6 +1308,29 @@ const mediaPosts = computed(() => {
             <summary class="font-medium text-gray-700 dark:text-gray-300 cursor-pointer outline-none">View Raw Metadata</summary>
             <pre class="mt-2 overflow-x-auto text-gray-600 dark:text-gray-400">{{ JSON.stringify(metadata, null, 2) }}</pre>
           </details>
+          
+          <!-- Last Visited Channels Widget -->
+          <div v-show="isProfileVisible && lastVisitedChannels.length > 0" class="mt-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-8">
+            <div class="flex items-center justify-between mb-6">
+                <h3 class="text-xs font-black text-gray-400 uppercase tracking-widest">Last Visited</h3>
+                <button @click="clearAllChannels" class="text-[10px] font-bold text-gray-500 hover:text-red-500 dark:text-gray-400 dark:hover:text-red-400 uppercase tracking-widest">Clear</button>
+            </div>
+            <div class="space-y-3">
+                <div v-for="channel in lastVisitedChannels" :key="channel.name" class="flex items-center justify-between group py-1">
+                    <button @click="channelName = channel.name; searchChannel()" class="text-sm text-gray-600 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 truncate flex-1 text-left">
+                        {{ channel.name }}
+                    </button>
+                    <div class="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button @click="togglePin(channel.name)">
+                            <Pin :class="{'text-blue-500 fill-blue-500': channel.isPinned, 'text-gray-400': !channel.isPinned}" class="h-3.5 w-3.5" />
+                        </button>
+                        <button @click="removeVisitedChannel(channel.name)">
+                            <X class="h-3.5 w-3.5 text-gray-400 hover:text-red-500" />
+                        </button>
+                    </div>
+                </div>
+            </div>
+          </div>
         </div>
 
         <!-- Posts Feed -->
@@ -2083,6 +2152,13 @@ const mediaPosts = computed(() => {
              <button @click="searchMode = 'channel'" :disabled="isAutoFinding" :class="['flex-1 py-2 text-xs font-bold rounded-lg transition', isAutoFinding ? 'opacity-50 cursor-not-allowed' : '', searchMode === 'channel' ? 'bg-white dark:bg-gray-700 shadow-sm' : 'text-gray-500']">Channel</button>
              <button @click="searchMode = 'user'" :disabled="isAutoFinding" :class="['flex-1 py-2 text-xs font-bold rounded-lg transition', isAutoFinding ? 'opacity-50 cursor-not-allowed' : '', searchMode === 'user' ? 'bg-white dark:bg-gray-700 shadow-sm' : 'text-gray-500']">User</button>
           </div>
+          <div class="mb-4 px-1">
+             <div class="flex justify-between items-center mb-1">
+               <label class="block text-[10px] font-black text-gray-500 uppercase tracking-widest">Iterations</label>
+               <span class="text-[10px] font-bold text-blue-600 dark:text-blue-400">{{ numIterations }}</span>
+             </div>
+             <input type="range" min="1" max="25" v-model="numIterations" class="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full appearance-none cursor-pointer accent-blue-600" />
+           </div>
           <form @submit.prevent="runAutoFinding" class="relative group">
             <input
               v-model="autoChannelName"
