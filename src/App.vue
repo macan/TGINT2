@@ -4,7 +4,7 @@ import {
   Search, Loader2, AlertCircle, Users, Calendar, Info, MessageSquare, 
   ExternalLink, Reply, Moon, Sun, Globe, Layout, CheckCircle2, 
   FileText, User, PenTool, Link, ListFilter, Inbox, Filter,
-  LayoutGrid, Clock, List, ImageIcon, Video, X, Layers, PanelLeftClose, PanelLeft, Phone, ChevronUp, BotMessageSquare, GripHorizontal
+  LayoutGrid, Clock, List, ImageIcon, Video, X, Layers, PanelLeftClose, PanelLeft, Phone, ChevronUp, BotMessageSquare, GripHorizontal, Sparkles
 } from 'lucide-vue-next'
 
 import MarkdownIt from 'markdown-it'
@@ -120,7 +120,7 @@ const analyzePosts = async () => {
       body: JSON.stringify({
         sender: 'mc',
         chat_id: 'mc',
-        text: "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state. Output the findings in Chinese.\n\n" + JSON.stringify(strippedPosts)
+        text: "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state. Output the findings in Chinese.\n\n" + JSON.stringify(strippedPosts)
       })
     })
 
@@ -291,7 +291,7 @@ const runAutoFinding = async () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               sender: 'mc', chat_id: 'mc',
-              text: "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures. For each grouped account, try hard to find anything that represented the personality of the account in life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state, social relations, or any rules you found. Output the findings in Chinese with post id range hint in proper place.\n " + JSON.stringify(strippedPosts)
+              text: "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state, social relations, or any rules you found. Output the findings in Chinese with post id range hint in proper place.\n " + JSON.stringify(strippedPosts)
             })
           })
         } catch(err: any) {
@@ -354,6 +354,7 @@ const runAutoFinding = async () => {
         throw err 
       }
     }
+    await generateFinalTable()
   } catch (err: any) {
     // Already logged error in each iteration/check
   } finally {
@@ -387,6 +388,40 @@ const debugInfo = ref({ request: '', response: '' })
 const singlePostId = ref('')
 const singlePost = ref<any>(null)
 const isFetchingPost = ref(false)
+const summaryResults = computed(() => {
+  const completedCells = autoCells.value.filter(c => c.status === 'completed')
+  return completedCells.map(c => ({
+    id: c.id,
+    analysis: c.analysisResult || '',
+    verification: c.verificationResult || ''
+  }))
+})
+
+const finalTableHtml = ref('')
+const isGeneratingFinalTable = ref(false)
+
+const generateFinalTable = async () => {
+    isGeneratingFinalTable.value = true;
+    try {
+        const context = JSON.stringify(summaryResults.value);
+        const response = await fetch('https://ask.gingkogo.uk/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                sender: 'mc', chat_id: 'mc',
+                text: 'Generate a table from the following results of iterations with columns while each row stand for a active user in the results and each column stand for different evidence type. Make sure to contains all the appeared users. Here is the context input: ' + context
+            })
+        });
+        const data = await response.json();
+        finalTableHtml.value = md.render(data.reply);
+    } catch (err) {
+        console.error(err);
+        finalTableHtml.value = '<p class="text-red-500">Failed to generate table.</p>'
+    } finally {
+        isGeneratingFinalTable.value = false;
+    }
+}
+
 const isAutoFinding = ref(false)
 
 const fetchSinglePost = async () => {
@@ -575,6 +610,13 @@ const getVideoUrl = (post: any) => {
     return `https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`
   }
   return `https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`
+}
+
+const getUsername = (post: any) => {
+  const rawUser = post.data?.user
+  if (!rawUser || typeof rawUser !== 'string') return 'Telegram User'
+  const parts = rawUser.split('/')
+  return parts[parts.length - 1]
 }
 const isSearching = ref(false)
 const searchError = ref('')
@@ -1799,12 +1841,15 @@ const mediaPosts = computed(() => {
             :id="`post-${post.key}`"
             :key="post.key || index" 
             :class="[
-              'rounded-2xl shadow-sm border p-5 hover:shadow-md transition-all duration-300',
+              'relative rounded-2xl shadow-sm border p-5 hover:shadow-md transition-all duration-300',
               post.data?.grouped?.nr > 0 
                 ? `${getGroupStyles(post.data.grouped.root).bg} ${getGroupStyles(post.data.grouped.root).border}`
                 : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700'
             ]"
           >
+            <span class="absolute top-4 right-4 text-[10px] font-bold text-gray-400 bg-gray-50 dark:bg-gray-700/50 px-2 py-0.5 rounded-full">
+              {{ getUsername(post) }}
+            </span>
             <div class="flex justify-between items-start mb-3">
               <div class="flex items-center space-x-2">
                 <div class="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden">
@@ -2143,6 +2188,32 @@ const mediaPosts = computed(() => {
       </div>
 
       <div v-else class="w-full max-w-full lg:max-w-7xl xl:max-w-[90rem] mx-auto space-y-4">
+        <!-- Final Result Area -->
+        <div v-if="autoCells.length > 0" class="w-full max-w-full lg:max-w-7xl xl:max-w-[90rem] mx-auto bg-white dark:bg-gray-800 rounded-2xl p-6 shadow-sm border border-gray-200 dark:border-gray-700 mb-8">
+           <h3 class="text-lg font-bold text-gray-900 dark:text-white mb-4 flex items-center">
+             <CheckCircle2 class="h-5 w-5 mr-2 text-green-500" />
+             Final Analysis Summary
+           </h3>
+           <div class="text-sm text-gray-600 dark:text-gray-300">
+             <p>{{ autoCells.filter(c => c.status === 'completed').length }} / {{ autoCells.length }} iterations completed.</p>
+             
+             <div v-if="isGeneratingFinalTable" class="mt-4 flex items-center text-blue-500">
+                <Loader2 class="h-4 w-4 mr-2 animate-spin" />
+                Generating table...
+             </div>
+             
+             <div v-if="finalTableHtml" class="mt-8 bg-gradient-to-br from-white to-blue-50/50 dark:bg-gray-900 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm">
+               <div class="flex items-center gap-2 mb-4">
+                 <div class="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center">
+                    <Sparkles class="w-4 h-4 text-white" />
+                 </div>
+                 <h5 class="text-sm font-black text-blue-900 dark:text-blue-100 uppercase tracking-wider">Final Analysis Insights</h5>
+               </div>
+               <div v-html="finalTableHtml" class="prose-sm"></div>
+             </div>
+           </div>
+        </div>
+
         <h3 class="text-sm font-bold text-gray-900 dark:text-white mb-4">Finding Logs & Results</h3>
         <div v-for="cell in autoCells" :key="cell.id" class="border border-gray-200 dark:border-gray-700 rounded-xl p-4 bg-gray-50 dark:bg-gray-900">
             <h4 class="font-bold text-xs text-gray-500 mb-2 flex items-center">
