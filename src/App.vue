@@ -519,6 +519,7 @@ const isLoadingMore = ref(false)
 const hasMorePosts = ref(true)
 const bottomSentinel = ref<HTMLElement | null>(null)
 
+
 // Global Search State
 const globalSearchQuery = ref('')
 const searchFields = ref({
@@ -528,6 +529,53 @@ const searchFields = ref({
   url: false
 })
 const searchResults = ref<any[]>([])
+const selectedUsernames = ref<string[]>([])
+
+const allUsernames = computed(() => {
+  const users = new Set<string>()
+  searchResults.value.forEach(p => {
+    const rawUser = p.data?.user
+    if (rawUser) {
+      const parts = rawUser.split('/')
+      users.add(parts[parts.length - 1])
+    }
+  })
+  return Array.from(users).sort()
+})
+
+const filteredSearchResults = computed(() => {
+  if (selectedUsernames.value.length === 0) return searchResults.value
+  
+  return searchResults.value.filter(p => {
+    const rawUser = p.data?.user
+    if (!rawUser) return false
+    const parts = rawUser.split('/')
+    const username = parts[parts.length - 1]
+    return selectedUsernames.value.includes(username)
+  })
+})
+
+const toggleUsername = (username: string) => {
+  const index = selectedUsernames.value.indexOf(username)
+  if (index > -1) {
+    selectedUsernames.value.splice(index, 1)
+  } else {
+    selectedUsernames.value.push(username)
+  }
+}
+
+const getVideoUrl = (post: any) => {
+  if (
+    post.data?.videos && 
+    post.data.videos.length > 0 &&
+    post.data?.documents && 
+    post.data.documents.length > 0 &&
+    post.data.documents[0].mime_type?.startsWith('video/')
+  ) {
+    return `https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`
+  }
+  return `https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`
+}
 const isSearching = ref(false)
 const searchError = ref('')
 const searchLimit = ref(25)
@@ -551,9 +599,9 @@ const hasSearched = ref(false)
 const searchWords = ref<string[]>([])
 
 const searchTimelineStats = computed(() => {
-  if (!searchResults.value || searchResults.value.length === 0) return null
+  if (!filteredSearchResults.value || filteredSearchResults.value.length === 0) return null
 
-  const validResults = searchResults.value
+  const validResults = filteredSearchResults.value
     .map(p => ({ post: p, date: new Date(p.data?.date), time: new Date(p.data?.date).getTime() }))
     .filter(item => !isNaN(item.time) && item.date.getFullYear() >= 2013)
     .sort((a, b) => b.time - a.time) // Newest first
@@ -635,7 +683,6 @@ const scheduleScrape = async () => {
             method: 'POST'
         });
         if (!res.ok) throw new Error(`Failed to schedule scrape: ${res.statusText}`);
-        alert('Scrape scheduled successfully');
         
         isScrapingDisabled.value = true
         setTimeout(() => {
@@ -1378,7 +1425,7 @@ const mediaPosts = computed(() => {
 
                 <div v-if="post.data?.videos && post.data.videos.length > 0" class="mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-black shadow-lg relative z-10">
                   <video controls class="w-full h-auto max-h-[500px] mx-auto">
-                    <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`" type="video/mp4" />
+                    <source :src="getVideoUrl(post)" type="video/mp4" />
                   </video>
                 </div>
 
@@ -1447,7 +1494,7 @@ const mediaPosts = computed(() => {
                   />
                   <div v-else-if="post.data?.videos && post.data.videos.length > 0" class="relative bg-black flex items-center justify-center cursor-default" @click.stop>
                     <video class="w-full h-auto object-cover max-h-[500px]">
-                      <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`" type="video/mp4" />
+                      <source :src="getVideoUrl(post)" type="video/mp4" />
                     </video>
                   </div>
                   <img 
@@ -1539,7 +1586,7 @@ const mediaPosts = computed(() => {
                         referrerpolicy="no-referrer"
                       />
                       <video v-else-if="post.data?.videos && post.data.videos.length > 0" controls class="w-full h-auto bg-black max-h-[400px] cursor-default" @click.stop>
-                        <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`" type="video/mp4" />
+                        <source :src="getVideoUrl(post)" type="video/mp4" />
                       </video>
                       <img 
                         v-else-if="post.data?.linkPreview && post.data.linkPreview.image" 
@@ -1587,7 +1634,7 @@ const mediaPosts = computed(() => {
     </div>
 
     <!-- Global Search Tab -->
-    <div v-show="activeTab === 'search'" class="max-w-4xl mx-auto">
+    <div v-show="activeTab === 'search'" class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10">
       <div class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2rem] shadow-2xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-5 sm:p-8 mb-10 relative overflow-hidden">
         <!-- Background Decoration -->
         <div class="absolute -top-20 -right-20 w-40 h-40 bg-blue-500/10 dark:bg-blue-500/20 rounded-full blur-3xl pointer-events-none"></div>
@@ -1681,14 +1728,27 @@ const mediaPosts = computed(() => {
         </div>
         <h3 class="text-2xl font-black tracking-tight text-gray-900 dark:text-white mb-3">Searching Telegram...</h3>
         <p class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium">
-          Querying public dataset, this may take a few seconds.
+          Querying internal dataset, this may take a few seconds.
         </p>
       </div>
 
-      <div v-else-if="searchResults.length > 0" class="space-y-6">
+      <div v-else-if="filteredSearchResults.length > 0" class="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-start px-4 sm:px-0">
         
-        <!-- Timeline Widget -->
-        <div v-if="searchTimelineStats" class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm mb-8">
+        <!-- Usernames Widget -->
+        <div class="lg:col-span-4 xl:col-span-3 space-y-4 h-fit sticky top-20 flex-shrink-0">
+          <div class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm">
+            <h3 class="text-xs font-black text-gray-400 uppercase tracking-wider mb-4">Usernames</h3>
+            <div class="max-h-[calc(100vh-15rem)] overflow-y-auto space-y-1 pr-2 custom-scrollbar">
+                <button v-for="username in allUsernames" :key="username" @click="toggleUsername(username)" 
+                     :class="['w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all', selectedUsernames.includes(username) ? 'bg-blue-600 text-white shadow-sm' : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700']">
+                    {{ username }}
+                </button>
+            </div>
+          </div>
+        </div>
+        
+        <div class="lg:col-span-8 xl:col-span-9 space-y-6">
+          <div v-if="searchTimelineStats" class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm mb-8">
           <div class="flex items-center justify-between mb-4">
             <h4 class="text-sm font-bold text-gray-900 dark:text-white flex items-center">
               <Calendar class="h-4 w-4 mr-2 text-blue-500" />
@@ -1730,12 +1790,12 @@ const mediaPosts = computed(() => {
             <MessageSquare class="h-5 w-5 mr-2 text-blue-500 dark:text-blue-400" />
             Search Results
           </h3>
-          <span class="text-xs text-gray-500 dark:text-gray-400">{{ searchResults.length }} results found</span>
+          <span class="text-xs text-gray-500 dark:text-gray-400">{{ filteredSearchResults.length }} results found</span>
         </div>
 
         <div class="space-y-4">
           <div 
-            v-for="(post, index) in searchResults" 
+            v-for="(post, index) in filteredSearchResults" 
             :id="`post-${post.key}`"
             :key="post.key || index" 
             :class="[
@@ -1813,7 +1873,7 @@ const mediaPosts = computed(() => {
 
             <div v-if="post.data?.videos && post.data.videos.length > 0" class="mb-3 rounded-xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-black">
               <video controls class="w-full h-auto max-h-[500px]">
-                <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`" type="video/mp4" />
+                <source :src="getVideoUrl(post)" type="video/mp4" />
                 Your browser does not support the video tag.
               </video>
             </div>
@@ -1851,6 +1911,7 @@ const mediaPosts = computed(() => {
             </details>
           </div>
         </div>
+      </div>
       </div>
 
       <div v-else-if="hasSearched && !isSearching" class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] border border-gray-100 dark:border-gray-700 p-16 text-center shadow-lg">
@@ -1898,7 +1959,7 @@ const mediaPosts = computed(() => {
                   referrerpolicy="no-referrer"
                 />
                 <video v-else-if="selectedPost.data?.videos && selectedPost.data.videos.length > 0" controls class="w-full h-auto bg-black max-h-[400px]">
-                  <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${selectedPost.key}-0`" type="video/mp4" />
+                  <source :src="getVideoUrl(selectedPost)" type="video/mp4" />
                 </video>
                 <img 
                   v-else-if="selectedPost.data?.linkPreview && selectedPost.data.linkPreview.image" 
@@ -2049,7 +2110,7 @@ const mediaPosts = computed(() => {
               </div>
               <div v-else-if="singlePost.data?.videos && singlePost.data.videos.length > 0" class="mb-2.5 rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700 bg-black">
                 <video controls class="w-full h-32 object-cover">
-                  <source :src="`https://i.gogingko.net/api/v1/v/telegram-video/${singlePost.key}-0`" type="video/mp4" />
+                  <source :src="getVideoUrl(singlePost)" type="video/mp4" />
                 </video>
               </div>
 
