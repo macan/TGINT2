@@ -658,6 +658,14 @@ const getUsername = (post: any) => {
   const parts = rawUser.split('/')
   return parts[parts.length - 1]
 }
+
+const getToolName = (post: any) => {
+  const tool = post.data?._tool;
+  if (typeof tool === 'string' && tool.startsWith('tgb.')) {
+    return 'TGB';
+  }
+  return 'TG';
+}
 const isSearching = ref(false)
 const searchError = ref('')
 const searchLimit = ref(25)
@@ -1464,18 +1472,27 @@ const mediaPosts = computed(() => {
                 <!-- Decorative Corner Glow -->
                 <div class="absolute -top-10 -right-10 w-24 h-24 bg-blue-50/50 dark:bg-blue-900/10 rounded-full blur-2xl pointer-events-none"></div>
 
+                <!-- Badges -->
+                <div class="absolute top-4 right-4 flex space-x-1 z-20">
+                  <span class="text-[10px] font-bold px-2 py-0.5 rounded-full" 
+                    :class="getToolName(post) === 'TGB' ? 'bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400' : 'bg-gray-50 dark:bg-gray-700/50 text-gray-400'">
+                    {{ getToolName(post) }}
+                  </span>
+                  <span class="text-[10px] font-bold text-gray-400 bg-gray-50 dark:bg-gray-700/50 px-2 py-0.5 rounded-full">
+                    {{ getUsername(post) }}
+                  </span>
+                </div>
+
                 <div class="flex justify-between items-start mb-3 relative z-10">
                   <div class="flex items-center space-x-3">
                     <div class="w-9 h-9 rounded-full bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden ring-1 ring-white dark:ring-gray-800 shadow-sm">
                       <img :src="getPostAvatarUrl(post)" @error="handleImageError" alt="Avatar" class="w-full h-full object-cover" />
                     </div>
                     <div>
-                      <div class="flex items-center space-x-1.5">
-                        <p class="text-sm font-bold text-gray-900 dark:text-white">{{ post.data?.author || post.data?.user || metadata.title || metadata.name }}</p>
-                        <div v-if="post.data?.grouped?.nr > 0" :class="['flex items-center px-1.5 py-0.5 rounded-sm text-[8px] font-black uppercase tracking-wider', getGroupStyles(post.data.grouped.root).badge]">
-                          <Layers class="h-2 w-2 mr-0.5" />
-                          Group: {{ post.data.grouped.root }}
-                        </div>
+                      <p class="text-sm font-bold text-gray-900 dark:text-white">{{ post.data?.author || post.data?.user || metadata.title || metadata.name }}</p>
+                      <div v-if="post.data?.grouped?.nr > 0" :class="['flex items-center px-1.5 py-0.5 rounded-sm text-[8px] font-black uppercase tracking-wider', getGroupStyles(post.data.grouped.root).badge]">
+                        <Layers class="h-2 w-2 mr-0.5" />
+                        Group: {{ post.data.grouped.root }}
                       </div>
                       <p class="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest mt-0">{{ formatDate(post.data?.date) }}</p>
                     </div>
@@ -1619,7 +1636,13 @@ const mediaPosts = computed(() => {
                     <p class="text-white text-sm font-medium line-clamp-3 leading-relaxed mb-4 drop-shadow-sm">{{ post.data?.content || post.data?.linkPreview?.title || 'Media update' }}</p>
                     <div class="flex items-center justify-between">
                       <div class="flex flex-col">
-                        <span class="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-0.5">{{ post.data?.author || post.data?.user || metadata.title }}</span>
+                        <div class="flex items-center gap-1.5 mb-0.5">
+                          <span class="text-[9px] font-black px-1.5 py-0.5 rounded-full" 
+                            :class="getToolName(post) === 'TGB' ? 'bg-purple-500/20 text-purple-200' : 'bg-white/10 text-white/50'">
+                            {{ getToolName(post) }}
+                          </span>
+                          <span class="text-[10px] font-black text-blue-400 uppercase tracking-widest">{{ post.data?.author || post.data?.user || metadata.title }}</span>
+                        </div>
                         <span class="text-white/70 text-[9px] font-bold uppercase tracking-wider">{{ formatDate(post.data?.date) }}</span>
                       </div>
                       <a :href="post.url || post.link" target="_blank" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl backdrop-blur-md transition-all border border-white/10 shadow-lg">
@@ -1916,9 +1939,15 @@ const mediaPosts = computed(() => {
                 : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700'
             ]"
           >
-            <span class="absolute top-4 right-4 text-[10px] font-bold text-gray-400 bg-gray-50 dark:bg-gray-700/50 px-2 py-0.5 rounded-full">
-              {{ getUsername(post) }}
-            </span>
+            <div class="absolute top-4 right-4 flex space-x-1">
+              <span class="text-[10px] font-bold px-2 py-0.5 rounded-full" 
+                :class="getToolName(post) === 'TGB' ? 'bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400' : 'bg-gray-50 dark:bg-gray-700/50 text-gray-400'">
+                  {{ getToolName(post) }}
+              </span>
+              <span class="text-[10px] font-bold text-gray-400 bg-gray-50 dark:bg-gray-700/50 px-2 py-0.5 rounded-full">
+                {{ getUsername(post) }}
+              </span>
+            </div>
             <div class="flex justify-between items-start mb-3">
               <div class="flex items-center space-x-2">
                 <div class="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden">
