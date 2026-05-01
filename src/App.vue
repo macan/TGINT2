@@ -3314,11 +3314,23 @@ const mediaPosts = computed(() => {
                       >{{ formatViews(post.data.views) }} views</span
                     >
                   </div>
-                  <span
-                    v-if="post.key"
-                    class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-gray-400 dark:text-gray-500"
-                    >ID: {{ post.key }}</span
-                  >
+                  <div class="flex items-center gap-2">
+                    <button
+                      class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-blue-500 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
+                      @click="
+                        activeTab = 'explorer';
+                        channelName = post.key.split('.')[0];
+                        searchChannel();
+                      "
+                    >
+                      {{ post.key.split('.')[0] }}
+                    </button>
+                    <span
+                      v-if="post.key"
+                      class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-gray-400 dark:text-gray-500"
+                      >ID: {{ post.key }}</span
+                    >
+                  </div>
                 </div>
 
                 <!-- Raw Post Debug -->
