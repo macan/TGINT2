@@ -49,6 +49,29 @@ const isAnalysisModalVisible = ref(false);
 const analyzedCount = ref(0);
 const renderedMarkdown = computed(() => md.render(analysisResult.value));
 
+const counters = ref<Record<string, number>>({});
+const frequencies = ref<Record<string, number>>({});
+let counterTimer: any = null;
+
+const fetchCounters = async () => {
+  try {
+    const yyyymmdd = format(new Date(), "yyyyMMdd");
+    const response = await fetch(`https://i.gogingko.net/api/v1/v/counter/${yyyymmdd}`);
+    if (response.ok) {
+      const newCounters = await response.json();
+      for (const type in newCounters) {
+        const oldVal = counters.value[type] || 0;
+        const newVal = newCounters[type];
+        frequencies.value[type] = Math.max(0, (newVal - oldVal) / 30);
+      }
+      counters.value = newCounters;
+    }
+  } catch (err) {
+    console.error("Failed to fetch counters:", err);
+  }
+};
+
+
 // Filtering state
 const filterAuthor = ref("");
 const filterStartDate = ref("");
@@ -622,10 +645,13 @@ const scrollToPost = (key: string) => {
 
 onMounted(() => {
   window.addEventListener("scroll", handleScroll);
+  fetchCounters();
+  counterTimer = setInterval(fetchCounters, 30000);
 });
 
 onUnmounted(() => {
   window.removeEventListener("scroll", handleScroll);
+  if (counterTimer) clearInterval(counterTimer);
 });
 const isProfileVisible = ref(true);
 
@@ -1493,11 +1519,35 @@ const mediaPosts = computed(() => {
             Telegram Explorer
           </h1>
           <p
-            class="text-gray-500 dark:text-gray-400 font-medium max-w-lg mx-auto leading-relaxed"
+            class="text-gray-500 dark:text-gray-400 font-medium max-w-lg mx-auto leading-relaxed mb-8"
           >
-            Discover profiles and search content across public Telegram channels
+            Discover profiles, posts and search content across public Telegram channels
             instantly.
           </p>
+          <div
+            v-if="Object.keys(counters).length > 0"
+            class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 mb-8 max-w-6xl mx-auto"
+          >
+            <div
+              v-for="(count, type) in counters"
+              :key="type"
+              class="px-4 py-3 bg-white/50 dark:bg-gray-800/50 backdrop-blur rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col items-center justify-center gap-1 transition-transform hover:scale-105"
+            >
+              <span
+                class="text-[10px] font-black text-gray-500 dark:text-gray-400 uppercase tracking-widest"
+                >{{ type }}</span
+              >
+              <span
+                class="text-lg font-black text-blue-600 dark:text-blue-400 tabular-nums"
+                >{{ count.toLocaleString() }}</span
+              >
+              <span
+                v-if="frequencies[type] !== undefined"
+                class="text-[10px] text-gray-400 dark:text-gray-500"
+                >{{ frequencies[type].toFixed(1) }} obj/s</span
+              >
+            </div>
+          </div>
         </div>
 
         <!-- Glass Tabs -->
