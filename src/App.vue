@@ -572,8 +572,13 @@ const xSearchResults = ref<any[]>([]);
 const isSearchingX = ref(false);
 const xSearchInput = ref("");
 
+const searchOnGoogle = (text: string) => {
+  if (text) {
+    window.open(`https://www.google.com/search?q=${encodeURIComponent(text)}`, '_blank');
+  }
+};
+
 const searchXUser = async (term: string) => {
-  isSearchingX.value = true;
   xSearchResults.value = [];
   try {
     const response = await fetch("https://i.gogingko.net/api/v1/es/x", {
@@ -2276,9 +2281,20 @@ const mediaPosts = computed(() => {
 
                     <div
                       v-if="post.data?.content"
-                      class="text-gray-800 dark:text-gray-200 text-[15px] leading-relaxed whitespace-pre-wrap break-words mb-4 relative z-10"
+                      class="flex items-start gap-2 mb-4 relative z-10"
                     >
-                      {{ post.data.content }}
+                      <div
+                        class="text-gray-800 dark:text-gray-200 text-[15px] leading-relaxed whitespace-pre-wrap break-words flex-1"
+                      >
+                        {{ post.data.content }}
+                      </div>
+                      <button
+                        @click="searchOnGoogle(post.data.content)"
+                        class="p-1 -mt-1 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors flex-shrink-0"
+                        title="Search on Google"
+                      >
+                        <Search class="h-4 w-4" />
+                      </button>
                     </div>
 
                     <!-- Contact Subcard -->
@@ -3206,9 +3222,20 @@ const mediaPosts = computed(() => {
 
                 <div
                   v-if="post.data?.content"
-                  class="text-gray-800 dark:text-gray-200 text-sm whitespace-pre-wrap break-words mb-3"
-                  v-html="highlightText(post.data.content)"
-                ></div>
+                  class="flex items-start gap-2 mb-3"
+                >
+                  <div
+                    class="text-gray-800 dark:text-gray-200 text-sm whitespace-pre-wrap break-words flex-1"
+                    v-html="highlightText(post.data.content)"
+                  ></div>
+                  <button
+                    @click="searchOnGoogle(post.data.content)"
+                    class="p-1 -mt-1 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors flex-shrink-0"
+                    title="Search on Google"
+                  >
+                    <Search class="h-4 w-4" />
+                  </button>
+                </div>
 
                 <!-- Contact Subcard -->
                 <div
