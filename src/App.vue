@@ -37,6 +37,7 @@ import {
   GripHorizontal,
   Sparkles,
   Pin,
+  LoaderCircle,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -51,7 +52,9 @@ const renderedMarkdown = computed(() => md.render(analysisResult.value));
 
 const counters = ref<Record<string, number>>({});
 const frequencies = ref<Record<string, number>>({});
+const pendingJobs = ref<number | null>(null);
 let counterTimer: any = null;
+let pendingJobsTimer: any = null;
 
 const fetchCounters = async () => {
   try {
@@ -68,6 +71,22 @@ const fetchCounters = async () => {
     }
   } catch (err) {
     console.error("Failed to fetch counters:", err);
+  }
+};
+
+const fetchPendingJobs = async () => {
+  try {
+    const response = await fetch("https://i.gogingko.net/api/v1/z/test2/set0", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      pendingJobs.value = data.gso?.result ?? 0;
+    }
+  } catch (err) {
+    console.error("Failed to fetch pending jobs:", err);
   }
 };
 
@@ -579,6 +598,7 @@ const searchOnGoogle = (text: string) => {
 };
 
 const searchXUser = async (term: string) => {
+  isSearchingX.value = true;
   xSearchResults.value = [];
   try {
     const response = await fetch("https://i.gogingko.net/api/v1/es/x", {
@@ -652,11 +672,14 @@ onMounted(() => {
   window.addEventListener("scroll", handleScroll);
   fetchCounters();
   counterTimer = setInterval(fetchCounters, 30000);
+  fetchPendingJobs();
+  pendingJobsTimer = setInterval(fetchPendingJobs, 30000);
 });
 
 onUnmounted(() => {
   window.removeEventListener("scroll", handleScroll);
   if (counterTimer) clearInterval(counterTimer);
+  if (pendingJobsTimer) clearInterval(pendingJobsTimer);
 });
 const isProfileVisible = ref(true);
 
@@ -1519,9 +1542,15 @@ const mediaPosts = computed(() => {
 
         <div class="text-center pt-8 sm:pt-4 mb-8">
           <h1
-            class="text-4xl sm:text-5xl font-black tracking-tighter text-gray-900 dark:text-white mb-4"
+            class="text-4xl sm:text-5xl font-black tracking-tighter text-gray-900 dark:text-white mb-4 flex items-center justify-center gap-3"
           >
             Telegram Explorer
+            <span
+              v-if="pendingJobs !== null"
+              class="text-sm font-medium text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 px-2.5 py-0.5 rounded-full"
+            >
+              {{ pendingJobs }}
+            </span>
           </h1>
           <p
             class="text-gray-500 dark:text-gray-400 font-medium max-w-lg mx-auto leading-relaxed mb-8"
@@ -1851,17 +1880,25 @@ const mediaPosts = computed(() => {
             <!-- X Similar Users Widget -->
             <div
               v-show="isProfileVisible"
-              class="mt-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-8 sticky top-20"
+              class="mt-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-8 sticky top-20 relative"
             >
-              <div class="flex items-center justify-between mb-6">
-                <h3
-                  class="text-xs font-black text-gray-400 uppercase tracking-widest"
-                >
-                  X Similar Users
-                </h3>
-                <Loader2
+              <div class="flex items-center justify-between mb-6 relative">
+                <div class="flex items-center gap-2">
+                  <h3
+                    class="text-xs font-black text-gray-400 uppercase tracking-widest"
+                  >
+                    X Similar Users
+                  </h3>
+                  <div class="group relative inline-block">
+                    <Info class="h-4 w-4 text-gray-400 cursor-help" />
+                    <div class="absolute -left-2 top-full mt-2 w-48 p-2 bg-gray-900 border border-gray-700 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10">
+                      Search for similar users on X to find matching profiles.
+                    </div>
+                  </div>
+                </div>
+                <LoaderCircle
                   v-if="isSearchingX"
-                  class="h-4 w-4 animate-spin text-blue-500"
+                  class="h-5 w-5 animate-spin text-blue-500 absolute top-0 -right-2"
                 />
               </div>
 
