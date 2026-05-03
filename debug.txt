@@ -1,0 +1,35 @@
+                      >
+                        View <ExternalLink class="h-2.5 w-2.5 ml-0.5" />
+                      </a>
+                    </div>
+
+                    <!-- Quoted Reply -->
+                    <div
+                      v-if="post.data?.reply && post.data.reply.length >= 2"
+                      class="mb-4 border-l-4 border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/10 p-4 rounded-r-2xl relative z-10"
+                    >
+                      <div
+--
+                  >
+                    View <ExternalLink class="h-3 w-3 ml-1" />
+                  </a>
+                </div>
+
+                <!-- Quoted Reply -->
+                <div
+                  v-if="post.data?.reply && post.data.reply.length >= 2"
+                  class="mb-3 border-l-4 border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 p-3 rounded-r-xl"
+                >
+                  <div
+--
+                >
+                  #{{ singlePost.key }}
+                </span>
+              </div>
+
+              <!-- Quoted Reply -->
+              <div
+                v-if="
+                  singlePost.data?.reply && singlePost.data.reply.length >= 2
+                "
+                class="mb-3 border-l-4 border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 p-3 rounded-r-xl"

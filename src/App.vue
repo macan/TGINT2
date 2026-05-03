@@ -38,6 +38,7 @@ import {
   Sparkles,
   Pin,
   LoaderCircle,
+  Forward,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -620,6 +621,33 @@ const searchXUser = async (term: string) => {
     console.error("X Search Failed", e);
   } finally {
     isSearchingX.value = false;
+  }
+};
+
+const formatScrapedDate = (mtime: number) => {
+  if (!mtime) return "";
+  const date = new Date(mtime * 1000);
+  const utcDate = new Date(date.getTime() + (date.getTimezoneOffset() * 60000));
+  const utc8Date = new Date(utcDate.getTime() + (8 * 3600000));
+  return format(utc8Date, "yyyy-MM-dd HH:mm:ss");
+};
+
+const getForwardInfo = (post: any) => {
+  if (!post.data?.forward_url || !post.data?.forward_from) return null;
+  
+  if (typeof post.data.forward_from === 'string') {
+    const parts = post.data.forward_url.split('/').filter(Boolean);
+    const yyyy = parts[parts.length - 2] || 'unknown';
+    const zzzz = parts[parts.length - 1] || 'unknown';
+    return {
+      text: `Forward from ${post.data.forward_from} (ID: ${yyyy}.${zzzz})`,
+      date: null
+    };
+  } else {
+    return {
+      text: `Forward from ${post.data.forward_from.title} (ID: ${post.data.forward_from.username}.${post.data.forward_from.post})`,
+      date: post.data.forward_from.date
+    };
   }
 };
 
@@ -1547,7 +1575,7 @@ const mediaPosts = computed(() => {
             Telegram Explorer
             <span
               v-if="pendingJobs !== null"
-              class="text-sm font-medium text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 px-2.5 py-0.5 rounded-full"
+              class="text-xs font-bold font-mono tabular-nums text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/50 px-3 py-1 rounded-full border border-blue-200 dark:border-blue-700 shadow-sm"
             >
               {{ pendingJobs }}
             </span>
@@ -2267,9 +2295,12 @@ const mediaPosts = computed(() => {
                             Group: {{ post.data.grouped.root }}
                           </div>
                           <p
-                            class="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest mt-0"
+                            class="flex justify-between items-center text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest mt-0"
                           >
-                            {{ formatDate(post.data?.date) }}
+                            <span>{{ formatDate(post.data?.date) }}</span>
+                            <span v-if="post.mtime" class="text-[9px] text-blue-500 dark:text-blue-400 ml-2">
+                              Scraped: {{ formatScrapedDate(post.mtime) }}
+                            </span>
                           </p>
                         </div>
                       </div>
@@ -2313,6 +2344,27 @@ const mediaPosts = computed(() => {
                         class="text-gray-700 dark:text-gray-300 text-sm whitespace-pre-wrap break-words italic line-clamp-3"
                       >
                         {{ post.data.reply[1] }}
+                      </div>
+                    </div>
+
+                    <!-- Forward Area -->
+                    <div
+                      v-if="post.data?.forward_url"
+                      class="mb-4 border-l-4 border-purple-400 dark:border-purple-500 bg-purple-50/50 dark:bg-purple-900/10 p-4 rounded-r-2xl relative z-10"
+                    >
+                      <div
+                        class="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-purple-600 dark:text-purple-400 mb-1.5"
+                      >
+                        <div class="flex items-center">
+                          <Forward class="h-3 w-3 mr-1" />
+                          Forward
+                        </div>
+                        <span v-if="getForwardInfo(post)?.date" class="font-mono bg-purple-100/50 dark:bg-purple-800/30 px-2 py-0.5 rounded border border-purple-200/50 dark:border-purple-700/50 tracking-normal text-[10px] normal-case">
+                          {{ getForwardInfo(post)?.date }}
+                        </span>
+                      </div>
+                      <div class="text-gray-800 dark:text-gray-200 text-sm font-medium whitespace-pre-wrap break-words italic line-clamp-3">
+                        {{ getForwardInfo(post)?.text }}
                       </div>
                     </div>
 
@@ -3255,6 +3307,29 @@ const mediaPosts = computed(() => {
                     class="text-gray-700 dark:text-gray-300 text-sm whitespace-pre-wrap break-words line-clamp-3"
                     v-html="highlightText(post.data.reply[1])"
                   ></div>
+                </div>
+
+                <!-- Forward Area -->
+                <div
+                  v-if="post.data?.forward_url"
+                  class="mb-3 border-l-4 border-purple-400 dark:border-purple-500 bg-purple-50/50 dark:bg-purple-900/20 p-3 rounded-r-xl"
+                >
+                  <div
+                    class="flex items-center justify-between text-xs font-semibold text-purple-600 dark:text-purple-400 mb-1"
+                  >
+                    <div class="flex items-center">
+                      <Forward class="h-3 w-3 mr-1" />
+                      Forward
+                    </div>
+                    <span v-if="getForwardInfo(post)?.date" class="font-mono bg-purple-100/50 dark:bg-purple-800/30 px-2 py-0.5 rounded border border-purple-200/50 dark:border-purple-700/50 text-[10px]">
+                      {{ getForwardInfo(post)?.date }}
+                    </span>
+                  </div>
+                  <div
+                    class="text-gray-800 dark:text-gray-200 text-sm font-medium whitespace-pre-wrap break-words line-clamp-3"
+                  >
+                    {{ getForwardInfo(post)?.text }}
+                  </div>
                 </div>
 
                 <div
