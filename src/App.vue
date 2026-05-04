@@ -39,6 +39,7 @@ import {
   Pin,
   LoaderCircle,
   Forward,
+  Share2,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -595,6 +596,23 @@ const xSearchInput = ref("");
 const searchOnGoogle = (text: string) => {
   if (text) {
     window.open(`https://www.google.com/search?q=${encodeURIComponent(text)}`, '_blank');
+  }
+};
+
+const sharePost = async (post: any) => {
+  const postUrl = `https://i.gogingko.net/api/v1/v/telegram-post/${post.key}`;
+  try {
+    if (navigator.share) {
+      await navigator.share({
+        title: 'Shared Telegram Post',
+        url: postUrl
+      });
+    } else {
+      await navigator.clipboard.writeText(postUrl);
+      console.log('Link copied to clipboard!');
+    }
+  } catch (err) {
+    console.error('Error sharing:', err);
   }
 };
 
@@ -2235,6 +2253,13 @@ const mediaPosts = computed(() => {
 
                     <!-- Badges -->
                     <div class="absolute top-4 right-4 flex space-x-1 z-20">
+                      <button
+                        @click.stop="sharePost(post)"
+                        class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full"
+                        title="Share"
+                      >
+                        <Share2 class="h-3 w-3 mr-1" /> Share
+                      </button>
                       <span
                         class="text-[10px] font-bold px-2 py-0.5 rounded-full"
                         :class="
@@ -2683,6 +2708,12 @@ const mediaPosts = computed(() => {
                           >
                             <ExternalLink class="h-3.5 w-3.5 text-white" />
                           </a>
+                          <button
+                            @click.stop="sharePost(post)"
+                            class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl backdrop-blur-md transition-all border border-white/10 shadow-lg ml-2"
+                          >
+                            <Share2 class="h-3.5 w-3.5 text-white" />
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -2890,6 +2921,13 @@ const mediaPosts = computed(() => {
                             OPEN IN TELEGRAM
                             <ExternalLink class="h-2.5 w-2.5 ml-1" />
                           </a>
+                          <button
+                            @click.stop="sharePost(post)"
+                            class="text-[10px] font-bold text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:underline flex items-center ml-4"
+                          >
+                            SHARE
+                            <Share2 class="h-2.5 w-2.5 ml-1" />
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -3212,6 +3250,13 @@ const mediaPosts = computed(() => {
                 ]"
               >
                 <div class="absolute top-4 right-4 flex space-x-1">
+                  <button
+                    @click.stop="sharePost(post)"
+                    class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full"
+                    title="Share"
+                  >
+                    <Share2 class="h-3 w-3 mr-1" /> Share
+                  </button>
                   <span
                     class="text-[10px] font-bold px-2 py-0.5 rounded-full"
                     :class="
