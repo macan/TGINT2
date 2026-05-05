@@ -714,18 +714,84 @@ const scrollToPost = (key: string) => {
   });
 };
 
+const pollLatestPosts = async () => {
+  if (!currentChannelName.value || activeTab.value !== 'explorer') return;
+  
+  try {
+    const res = await fetch(`https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=25`);
+    if (!res.ok) return;
+
+    const latestPostsVal = await res.json();
+    const newPostsData = Array.isArray(latestPostsVal)
+      ? latestPostsVal
+      : latestPostsVal.data || latestPostsVal.posts || latestPostsVal.items || [];
+
+    if (newPostsData.length === 0) return;
+
+    // Ensure new posts are sorted DSC by ID component
+    newPostsData.sort((a: any, b: any) => {
+      const idA = parseInt(a.key.split('.')[1]);
+      const idB = parseInt(b.key.split('.')[1]);
+      return idB - idA;
+    });
+
+    // Get max ID from existing posts to compare
+    let maxOldId = -1;
+    if (posts.value.length > 0) {
+      const parts = posts.value[0].key.split('.');
+      if (parts.length > 1) {
+        maxOldId = parseInt(parts[1]);
+      }
+    }
+
+    // Filter new posts that are > maxOldId
+    const postsToInsert = newPostsData.filter(p => {
+      const parts = p.key.split('.');
+      if (parts.length <= 1) return false;
+      return parseInt(parts[1]) > maxOldId;
+    });
+
+    if (postsToInsert.length > 0) {
+      // Mark as newly inserted for visual emphasis
+      const emphasizedPosts = postsToInsert.map((p: any) => ({ ...p, isNewEmphasized: true }));
+      
+      posts.value = [...emphasizedPosts, ...posts.value];
+
+      // Remove emphasis after a few seconds
+      setTimeout(() => {
+        posts.value.forEach(p => delete p.isNewEmphasized);
+      }, 15000);
+    }
+  } catch (err) {
+    console.error("Failed to poll latest posts:", err);
+  }
+};
+
+let pollingTimer: any = null;
+watch(activeTab, (newTab) => {
+  if (newTab === 'explorer') {
+    pollingTimer = setInterval(pollLatestPosts, 30000);
+  } else {
+    if (pollingTimer) clearInterval(pollingTimer);
+  }
+});
+
 onMounted(() => {
   window.addEventListener("scroll", handleScroll);
   fetchCounters();
   counterTimer = setInterval(fetchCounters, 30000);
   fetchPendingJobs();
   pendingJobsTimer = setInterval(fetchPendingJobs, 30000);
+  if (activeTab.value === 'explorer') {
+    pollingTimer = setInterval(pollLatestPosts, 30000);
+  }
 });
 
 onUnmounted(() => {
   window.removeEventListener("scroll", handleScroll);
   if (counterTimer) clearInterval(counterTimer);
   if (pendingJobsTimer) clearInterval(pendingJobsTimer);
+  if (pollingTimer) clearInterval(pollingTimer);
 });
 const isProfileVisible = ref(true);
 
@@ -2244,6 +2310,7 @@ const mediaPosts = computed(() => {
                             getGroupStyles(post.data.grouped.root).border
                           }`
                         : 'bg-white dark:bg-gray-800 border-gray-100 dark:border-gray-700',
+                      post.isNewEmphasized ? 'ring-2 ring-blue-500' : '',
                     ]"
                   >
                     <!-- Decorative Corner Glow -->
