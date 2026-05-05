@@ -657,6 +657,12 @@ const getForwardInfo = (post: any) => {
     const parts = post.data.forward_url.split('/').filter(Boolean);
     const yyyy = parts[parts.length - 2] || 'unknown';
     const zzzz = parts[parts.length - 1] || 'unknown';
+    if (yyyy == 't.me') {
+      return {
+        text: `Forward from ${post.data.forward_from} (ID: ${zzzz})`,
+        date: null
+      }
+    }
     return {
       text: `Forward from ${post.data.forward_from} (ID: ${yyyy}.${zzzz})`,
       date: null
@@ -1113,6 +1119,29 @@ const postsTimelineStats = computed(() => {
 
   if (validResults.length === 0) return null;
 
+  const gaps = [];
+  for (let i = 0; i < validResults.length - 1; i++) {
+    gaps.push(validResults[i].time - validResults[i + 1].time);
+  }
+  const avgGapMs = gaps.length > 0 ? gaps.reduce((a, b) => a + b, 0) / gaps.length : 0;
+  let maxGap = 0;
+  let maxGapIndex = -1;
+  for (let i = 0; i < gaps.length; i++) {
+    if (gaps[i] > maxGap) {
+      maxGap = gaps[i];
+      maxGapIndex = i;
+    }
+  }
+
+  const hourlyMap: Record<string, number> = {};
+  for (const item of validResults) {
+    const hour = format(item.date, "yyyy-MM-dd HH:00");
+    hourlyMap[hour] = (hourlyMap[hour] || 0) + 1;
+  }
+  const hourlyData = Object.entries(hourlyMap)
+    .sort((a, b) => new Date(b[0]).getTime() - new Date(a[0]).getTime())
+    .map(([hour, count]) => ({ hour, count }));
+
   const newest = validResults[0].time;
   const oldest = validResults[validResults.length - 1].time;
   const span = newest - oldest;
@@ -1133,6 +1162,9 @@ const postsTimelineStats = computed(() => {
     }),
     count: validResults.length,
     items,
+    avgGap: (avgGapMs / 1000 / 60).toFixed(1) + " min",
+    maxGap: maxGapIndex !== -1 ? Math.round(maxGap / 1000 / 60 / 60) + " hours" : "N/A",
+    hourlyData,
   };
 });
 
@@ -2244,7 +2276,7 @@ const mediaPosts = computed(() => {
                 <!-- Posts Timeline -->
                 <div
                   v-if="postsTimelineStats && viewMode !== 'timeline'"
-                  class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm mb-8"
+                  class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-[#cfd5df] p-6 shadow-sm mb-8"
                 >
                   <div class="flex items-center justify-between mb-4">
                     <h4
@@ -2253,11 +2285,26 @@ const mediaPosts = computed(() => {
                       <Calendar class="h-4 w-4 mr-2 text-blue-500" />
                       Feed Activity Timeline
                     </h4>
-                    <span
-                      class="text-xs font-medium text-gray-500 dark:text-gray-400"
-                    >
-                      {{ postsTimelineStats.count }} dates mapped
-                    </span>
+                    <div class="flex items-center gap-4">
+                      <div class="h-8 w-20 flex items-end gap-0.5 mr-2 bg-gray-100 dark:bg-gray-700 p-1 rounded-lg">
+                        <div v-for="(item, idx) in postsTimelineStats.hourlyData" :key="idx" 
+                             class="w-1 bg-blue-500 rounded-t-sm hover:bg-blue-600 transition-all cursor-pointer"
+                             :title="`${item.hour}: ${item.count} posts`"
+                             :style="{ height: `${(item.count / Math.max(...postsTimelineStats.hourlyData.map(d => d.count))) * 100}%` }">
+                        </div>
+                      </div>
+                      <div class="text-[10px] bg-gray-100 dark:bg-gray-700 p-2 rounded-lg text-gray-600 dark:text-gray-300">
+                        <span class="font-bold">Avg Gap:</span> {{ postsTimelineStats.avgGap }}
+                      </div>
+                      <div class="text-[10px] bg-gray-100 dark:bg-gray-700 p-2 rounded-lg text-gray-600 dark:text-gray-300">
+                        <span class="font-bold">Max Sleep:</span> {{ postsTimelineStats.maxGap }}
+                      </div>
+                      <span
+                        class="text-xs font-medium text-gray-500 dark:text-gray-400"
+                      >
+                        {{ postsTimelineStats.count }} dates
+                      </span>
+                    </div>
                   </div>
 
                   <div class="relative pt-4 pb-2 px-3">
