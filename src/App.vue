@@ -1133,19 +1133,24 @@ const postsTimelineStats = computed(() => {
     }
   }
 
-  const hourlyMap: Record<string, number> = {};
+  const newest = validResults[0].time;
+  const oldest = validResults[validResults.length - 1].time;
+  const spanMs = newest - oldest;
+  const spanHours = spanMs / (1000 * 60 * 60);
+  const bucketHours = Math.max(1, Math.ceil(spanHours / 20));
+
+  const bucketMap: Record<string, number> = {};
   for (const item of validResults) {
-    const hour = format(item.date, "yyyy-MM-dd HH:00");
-    hourlyMap[hour] = (hourlyMap[hour] || 0) + 1;
+    const hoursFromEpoch = Math.floor(item.time / (1000 * 60 * 60));
+    const bucketStartHour = Math.floor(hoursFromEpoch / bucketHours) * bucketHours;
+    const bucketKey = format(new Date(bucketStartHour * 1000 * 60 * 60), "yyyy-MM-dd HH:00");
+    bucketMap[bucketKey] = (bucketMap[bucketKey] || 0) + 1;
   }
-  const hourlyData = Object.entries(hourlyMap)
+  const hourlyData = Object.entries(bucketMap)
     .sort((a, b) => new Date(b[0]).getTime() - new Date(a[0]).getTime())
     .map(([hour, count]) => ({ hour, count }));
 
-  const newest = validResults[0].time;
-  const oldest = validResults[validResults.length - 1].time;
-  const span = newest - oldest;
-
+  const span = spanMs;
   const items = validResults.map((item) => ({
     position:
       span === 0
