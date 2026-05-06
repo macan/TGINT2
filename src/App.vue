@@ -653,8 +653,11 @@ const addToWorkspaceFromPost = (post: any) => {
         return;
     }
     const channelUsername = post.key.split('.')[0];
-    const userUsername = getUsername(post);
+    let userUsername = getUsername(post);
 
+    if (userUsername == 'Telegram User') {
+      userUsername = `Telegram User ${Math.random().toString(36).substring(2, 7)}`
+    }
     if (workspaceGraph.value.getElementById(channelUsername).length === 0) {
         addNode(channelUsername, 'channel', { id: channelUsername, label: post.data?.owner });
     }
@@ -663,7 +666,7 @@ const addToWorkspaceFromPost = (post: any) => {
     }
     
     if (workspaceGraph.value.edges(`[source="${userUsername}"][target="${channelUsername}"]`).length === 0) {
-        addEdge(userUsername, channelUsername, {label: 'post in', facts: `post id: ${post.key}\npost conent: ${post.data?.content}`});
+        addEdge(userUsername, channelUsername, {label: 'post in', facts: `post id: ${post.key}\npost date: ${post.data?.date}\npost conent: ${post.data?.content}`});
     }
 
     const personNodes = workspaceGraph.value.nodes('[type="person"]');
@@ -802,6 +805,7 @@ const initGraph = () => {
     workspaceGraph.value = cytoscape({
       container: container,
       elements: elements,
+      pixelRatio: 1,
       style: [
         {
           selector: 'node[type="person"]',
@@ -810,8 +814,8 @@ const initGraph = () => {
             'label': 'data(label)',
             'color': '#1e293b',
             'shape': 'ellipse',
-            'width': 20,
-            'height': 20,
+            'width': 30,
+            'height': 30,
             'font-size': '10px'
           }
         },
@@ -822,8 +826,8 @@ const initGraph = () => {
             'label': 'data(label)',
             'color': '#1e293b',
             'shape': 'round-rectangle',
-            'width': 20,
-            'height': 20,
+            'width': 30,
+            'height': 30,
             'font-size': '10px'
           }
         },
@@ -834,8 +838,8 @@ const initGraph = () => {
             'label': 'data(label)',
             'color': '#1e293b',
             'shape': 'diamond',
-            'width': 20,
-            'height': 20,
+            'width': 30,
+            'height': 30,
             'font-size': '10px'
           }
         },
@@ -4492,7 +4496,7 @@ const mediaPosts = computed(() => {
                  <hr class="my-1 border-gray-200 dark:border-gray-700" />
                  <button @click="contextMenu.visible = false" class="block w-full text-left px-3 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-sm text-gray-500">Close</button>
              </div>
-             <div id="workspace-canvas" class="w-full h-full min-h-[600px] bg-[#f8fafc] dark:bg-[#0f172a] relative z-0">
+             <div id="workspace-canvas" class="w-full flex-1 bg-[#f8fafc] dark:bg-[#0f172a] relative z-0">
              </div>
           </div>
           <!-- Property Viewer -->
