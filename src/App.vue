@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, computed, nextTick } from "vue";
 import cytoscape from "cytoscape";
+import pako from "pako";
 import {
   Search,
   Loader2,
@@ -598,8 +599,13 @@ const shareGraph = () => {
     if (!workspaceGraph.value) return;
     const graphData = workspaceGraph.value.json();
     const str = JSON.stringify(graphData);
-    const compressed = btoa(String.fromCharCode(...new TextEncoder().encode(str)));
-    const url = `${window.location.origin}${window.location.pathname}?graph=${encodeURIComponent(compressed)}`;
+    const compressed = pako.deflate(str);
+    let binary = '';
+    for (let i = 0; i < compressed.length; i++) {
+        binary += String.fromCharCode(compressed[i]);
+    }
+    const encoded = btoa(binary);
+    const url = `${window.location.origin}${window.location.pathname}?graph=${encodeURIComponent(encoded)}`;
     navigator.clipboard.writeText(url).then(() => {
         toastMessage.value = 'Link copied to clipboard!';
         toastType.value = 'success';
@@ -777,12 +783,9 @@ const initGraph = () => {
     if (sharedGraph) {
         try {
             const binaryString = atob(decodeURIComponent(sharedGraph));
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            const text = new TextDecoder().decode(bytes);
-            const data = JSON.parse(text);
+            const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
+            const decompressed = pako.inflate(bytes, { to: 'string' });
+            const data = JSON.parse(decompressed);
             elements = data.elements;
         } catch (e) {
             console.error('Failed to parse shared graph', e);
