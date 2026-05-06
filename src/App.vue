@@ -656,7 +656,11 @@ const addToWorkspaceFromPost = (post: any) => {
     let userUsername = getUsername(post);
 
     if (userUsername == 'Telegram User') {
-      userUsername = `Telegram User ${Math.random().toString(36).substring(2, 7)}`
+      if (post.data?.uid === undefined) {
+        userUsername = `Telegram User ${Math.random().toString(36).substring(2, 7)}`
+      } else {
+        userUsername = `${post.data?.uid}`
+      }
     }
     if (workspaceGraph.value.getElementById(channelUsername).length === 0) {
         addNode(channelUsername, 'channel', { id: channelUsername, label: post.data?.owner });
@@ -1436,6 +1440,7 @@ const searchFields = ref({
 });
 const searchResults = ref<any[]>([]);
 const selectedUsernames = ref<string[]>([]);
+const selectedChannels = ref<string[]>([]);
 const lastVisitedChannels = ref<{ name: string; isPinned: boolean }[]>([]);
 
 const addToLastVisited = (name: string) => {
@@ -1494,6 +1499,16 @@ const clearAllChannels = () => {
   );
 };
 
+const allChannels = computed(() => {
+  const channels = new Set<string>();
+  searchResults.value.forEach((p) => {
+    if (p.key) {
+      channels.add(p.key.split('.')[0]);
+    }
+  });
+  return Array.from(channels).sort();
+});
+
 const allUsernames = computed(() => {
   const users = new Set<string>();
   searchResults.value.forEach((p) => {
@@ -1507,15 +1522,27 @@ const allUsernames = computed(() => {
 });
 
 const filteredSearchResults = computed(() => {
-  if (selectedUsernames.value.length === 0) return searchResults.value;
+  let result = searchResults.value;
 
-  return searchResults.value.filter((p) => {
-    const rawUser = p.data?.user;
-    if (!rawUser) return false;
-    const parts = rawUser.split("/");
-    const username = parts[parts.length - 1];
-    return selectedUsernames.value.includes(username);
-  });
+  if (selectedUsernames.value.length > 0) {
+    result = result.filter((p) => {
+      const rawUser = p.data?.user;
+      if (!rawUser) return false;
+      const parts = rawUser.split("/");
+      const username = parts[parts.length - 1];
+      return selectedUsernames.value.includes(username);
+    });
+  }
+
+  if (selectedChannels.value.length > 0) {
+    result = result.filter((p) => {
+      if (!p.key) return false;
+      const channel = p.key.split('.')[0];
+      return selectedChannels.value.includes(channel);
+    });
+  }
+
+  return result;
 });
 
 const toggleUsername = (username: string) => {
@@ -1524,6 +1551,15 @@ const toggleUsername = (username: string) => {
     selectedUsernames.value.splice(index, 1);
   } else {
     selectedUsernames.value.push(username);
+  }
+};
+
+const toggleChannel = (channel: string) => {
+  const index = selectedChannels.value.indexOf(channel);
+  if (index > -1) {
+    selectedChannels.value.splice(index, 1);
+  } else {
+    selectedChannels.value.push(channel);
   }
 };
 
@@ -3813,6 +3849,32 @@ const mediaPosts = computed(() => {
                   ]"
                 >
                   {{ username }}
+                </button>
+              </div>
+            </div>
+            <div
+              class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm"
+            >
+              <h3
+                class="text-xs font-black text-gray-400 uppercase tracking-wider mb-4"
+              >
+                Channels
+              </h3>
+              <div
+                class="max-h-[calc(100vh-15rem)] overflow-y-auto space-y-1 pr-2 custom-scrollbar"
+              >
+                <button
+                  v-for="channel in allChannels"
+                  :key="channel"
+                  @click="toggleChannel(channel)"
+                  :class="[
+                    'w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all',
+                    selectedChannels.includes(channel)
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
+                  ]"
+                >
+                  {{ channel }}
                 </button>
               </div>
             </div>
