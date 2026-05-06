@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, computed, nextTick } from "vue";
+import cytoscape from "cytoscape";
 import {
   Search,
   Loader2,
@@ -529,7 +530,508 @@ import {
 
 const isDark = ref(false);
 const showBackToTop = ref(false);
-const activeTab = ref<"explorer" | "search" | "auto-finding">("explorer");
+const activeTab = ref<"explorer" | "search" | "auto-finding" | "workspace">("explorer");
+
+// Workspace State & Logic
+const workspaceGraph = ref<any>(null);
+const graphState = ref<any>(null);
+const toastMessage = ref("");
+const toastType = ref<'error' | 'success'>('error');
+const contextMenu = ref({ visible: false, x: 0, y: 0, node: null });
+const nodeSearchQuery = ref("");
+const findNode = () => {
+  if (!workspaceGraph.value || !nodeSearchQuery.value) return;
+  const node = workspaceGraph.value.getElementById(nodeSearchQuery.value);
+  if (node.length > 0) {
+    workspaceGraph.value.animate({
+        center: { eles: node },
+        zoom: 2
+    });
+    selectedNode.value = node;
+    toastMessage.value = `Node ${nodeSearchQuery.value} found.`;
+    toastType.value = 'success';
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  } else {
+    toastMessage.value = `Node ${nodeSearchQuery.value} not found.`;
+    toastType.value = 'error';
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  }
+};
+
+const saveGraph = () => {
+    if (!workspaceGraph.value) return;
+    const data = JSON.stringify(workspaceGraph.value.json());
+    localStorage.setItem('graphData', data);
+    toastMessage.value = 'Graph saved.';
+    toastType.value = 'success';
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+};
+
+const loadGraph = () => {
+    const data = localStorage.getItem('graphData');
+    if (data && workspaceGraph.value) {
+        workspaceGraph.value.json(JSON.parse(data));
+        toastMessage.value = 'Graph loaded.';
+        toastType.value = 'success';
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+    } else {
+        toastMessage.value = 'No saved graph found.';
+        toastType.value = 'error';
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+    }
+};
+
+const reLayoutGraph = () => {
+    if (!workspaceGraph.value) return;
+    
+    workspaceGraph.value.layout({
+        name: 'breadthfirst',
+        fit: true,
+        padding: 50,
+        roots: workspaceGraph.value.nodes('[type="person"]'),
+        directed: true,
+        animate: true,
+    }).run();
+};
+
+const shareGraph = () => {
+    if (!workspaceGraph.value) return;
+    const graphData = workspaceGraph.value.json();
+    const str = JSON.stringify(graphData);
+    const compressed = btoa(String.fromCharCode(...new TextEncoder().encode(str)));
+    const url = `${window.location.origin}${window.location.pathname}?graph=${encodeURIComponent(compressed)}`;
+    navigator.clipboard.writeText(url).then(() => {
+        toastMessage.value = 'Link copied to clipboard!';
+        toastType.value = 'success';
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+    });
+};
+
+const fetchNodeMetadata = async (nodeId: string) => {
+    try {
+        const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${nodeId}`);
+        if (!response.ok) throw new Error('Failed to fetch');
+        const data = await response.json();
+        
+        if (data.title) {
+          editingNodeData.value.label = data.title;
+        } 
+        editingNodeData.value.username = data.username || '';
+        editingNodeData.value.link = `https://t.me/${data.username || ''}`;
+
+        // Facts array
+        const facts = [];
+        if (data.username) facts.push(`Username: ${data.username}`);
+        if (data.description) facts.push(`Description: ${data.description || ''}`);
+        if (data.subscribers) facts.push(`Subscribers: ${data.subscribers}`);
+        if (data.members) facts.push(`Members: ${data.members}`);
+        editingNodeData.value.facts = facts.join('\n');
+        
+        saveChanges();
+        
+        toastMessage.value = 'Metadata fetched!';
+        toastType.value = 'success';
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+    } catch (e) {
+        toastMessage.value = 'Fetch failed.';
+        toastType.value = 'error';
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+    }
+};
+
+const addToWorkspaceFromPost = (post: any) => {
+    if (!workspaceGraph.value) {
+        toastMessage.value = 'Workspace not initiated, try to switch to it.';
+        toastType.value = 'error';
+        setTimeout(() => { toastMessage.value = ""; }, 5000);
+        return;
+    }
+    const channelUsername = post.key.split('.')[0];
+    const userUsername = getUsername(post);
+
+    if (workspaceGraph.value.getElementById(channelUsername).length === 0) {
+        addNode(channelUsername, 'channel', { id: channelUsername, label: post.data?.owner });
+    }
+    if (workspaceGraph.value.getElementById(userUsername).length === 0) {
+        addNode(userUsername, 'user', { id: userUsername, label: post.data?.author });
+    }
+    
+    if (workspaceGraph.value.edges(`[source="${userUsername}"][target="${channelUsername}"]`).length === 0) {
+        addEdge(userUsername, channelUsername, {label: 'post in', facts: `post id: ${post.key}\npost conent: ${post.data?.content}`});
+    }
+
+    const personNodes = workspaceGraph.value.nodes('[type="person"]');
+    if (personNodes.length === 1) {
+        const personId = personNodes[0].id();
+        if (workspaceGraph.value.edges(`[source="${personId}"][target="${userUsername}"]`).length === 0) {
+            addEdge(personId, userUsername, {label: 'account'});
+        }
+    }
+    
+    toastMessage.value = 'Added post data to workspace!';
+    toastType.value = 'success';
+    setTimeout(() => { toastMessage.value = ""; }, 5000);
+};
+
+const startAddEdge = () => {
+    if (contextMenu.value.node) {
+        addingEdge.value = true;
+        sourceNode.value = contextMenu.value.node;
+        contextMenu.value.visible = false;
+        toastMessage.value = 'Select target node to add edge.';
+        toastType.value = 'success';
+        setTimeout(() => { toastMessage.value = ""; }, 5000);
+    }
+};
+
+const deleteNode = () => {
+    if (contextMenu.value.node && workspaceGraph.value) {
+        workspaceGraph.value.remove(contextMenu.value.node);
+        contextMenu.value.visible = false;
+        graphState.value = workspaceGraph.value.json();
+        toastMessage.value = 'Node deleted.';
+        toastType.value = 'success';
+        setTimeout(() => { toastMessage.value = ""; }, 5000);
+    }
+};
+
+const deleteEdge = (edge: any) => {
+    if (workspaceGraph.value) {
+        workspaceGraph.value.remove(edge);
+        graphState.value = workspaceGraph.value.json();
+        toastMessage.value = 'Edge deleted.';
+        toastType.value = 'success';
+        setTimeout(() => { toastMessage.value = ""; }, 5000);
+    }
+};
+const addingEdge = ref(false);
+const sourceNode = ref<any>(null);
+const lastContainerSize = ref({ width: 0, height: 0 });
+const selectedNode = ref<any>(null);
+const selectedEdge = ref<any>(null);
+const editingNodeData = ref<any>({});
+const editingEdgeData = ref<any>({});
+
+const saveChanges = () => {
+  if (selectedNode.value) {
+    selectedNode.value.data(editingNodeData.value);
+  }
+  if (selectedEdge.value) {
+    const oldData = selectedEdge.value.data();
+    const newData = editingEdgeData.value;
+    
+    if (oldData.source !== newData.source || oldData.target !== newData.target) {
+        // Recreate edge if structural connection changed
+        const id = oldData.id;
+        selectedEdge.value.remove();
+        const addedEdge = workspaceGraph.value.add({
+            group: 'edges',
+            data: { ...newData, id }
+        });
+        selectedEdge.value = addedEdge;
+    } else {
+        selectedEdge.value.data(newData);
+    }
+  }
+};
+
+const getEdges = computed(() => {
+    if (!selectedNode.value) return { incoming: [], outgoing: [] };
+    const node = selectedNode.value;
+    return {
+        incoming: node.incomers('edge').toArray(),
+        outgoing: node.outgoers('edge').toArray()
+    };
+});
+
+watch(selectedNode, (newSelectedNode) => {
+  if (newSelectedNode) {
+    editingNodeData.value = { ...newSelectedNode.data() };
+    selectedEdge.value = null;
+  } else {
+    editingNodeData.value = {};
+  }
+});
+
+watch(selectedEdge, (newSelectedEdge) => {
+  if (newSelectedEdge) {
+    editingEdgeData.value = { ...newSelectedEdge.data() };
+    selectedNode.value = null;
+  } else {
+    editingEdgeData.value = {};
+  }
+});
+
+const selectEdge = (edge: any) => {
+    selectedEdge.value = edge;
+};
+
+const initGraph = () => {
+  const container = document.getElementById('workspace-canvas');
+  if (!container) return;
+  if (!workspaceGraph.value) {
+    const urlParams = new URLSearchParams(window.location.search);
+    const sharedGraph = urlParams.get('graph');
+    
+    let elements;
+    if (sharedGraph) {
+        try {
+            const binaryString = atob(decodeURIComponent(sharedGraph));
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            const text = new TextDecoder().decode(bytes);
+            const data = JSON.parse(text);
+            elements = data.elements;
+        } catch (e) {
+            console.error('Failed to parse shared graph', e);
+        }
+    }
+    
+    if (!elements) {
+        const savedGraph = localStorage.getItem('graphData');
+        elements = savedGraph ? JSON.parse(savedGraph).elements : [
+            { data: { id: 'a', label: 'Person A', type: 'person' } },
+        ];
+    }
+
+    workspaceGraph.value = cytoscape({
+      container: container,
+      elements: elements,
+      style: [
+        {
+          selector: 'node[type="person"]',
+          style: {
+            'background-color': '#ec4899', // Pink-500
+            'label': 'data(label)',
+            'color': '#1e293b',
+            'shape': 'ellipse',
+            'width': 20,
+            'height': 20,
+            'font-size': '10px'
+          }
+        },
+        {
+          selector: 'node[type="user"]',
+          style: {
+            'background-color': '#10b981', // Emerald-500
+            'label': 'data(label)',
+            'color': '#1e293b',
+            'shape': 'round-rectangle',
+            'width': 20,
+            'height': 20,
+            'font-size': '10px'
+          }
+        },
+        {
+          selector: 'node[type="channel"]',
+          style: {
+            'background-color': '#f59e0b', // Amber-500
+            'label': 'data(label)',
+            'color': '#1e293b',
+            'shape': 'diamond',
+            'width': 20,
+            'height': 20,
+            'font-size': '10px'
+          }
+        },
+        {
+          selector: 'edge',
+          style: {
+            'width': 2,
+            'line-color': '#cbd5e1',
+            'target-arrow-color': '#cbd5e1',
+            'target-arrow-shape': 'triangle',
+            'curve-style': 'bezier',
+            'label': 'data(label)',
+            'font-size': '10px',
+            'text-background-color': '#ffffff',
+            'text-background-opacity': 0.8,
+            'text-background-padding': '2px',
+            'text-border-color': '#e2e8f0',
+            'text-border-width': 1,
+            'text-border-opacity': 1,
+            'text-wrap': 'wrap',
+            'text-max-width': '100px'
+          }
+        }
+      ],
+      layout: { 
+        name: 'cose', 
+        padding: 50, 
+        fit: true,
+        stop: () => {
+          if (workspaceGraph.value.zoom() > 1.5) {
+            workspaceGraph.value.zoom(1.5);
+            workspaceGraph.value.center();
+          }
+        }
+      }
+    });
+
+    lastContainerSize.value = { width: container.clientWidth, height: container.clientHeight };
+
+    workspaceGraph.value.on('tap', 'node', (evt: any) => {
+      selectedNode.value = evt.target;
+      contextMenu.value.visible = false;
+      if (addingEdge.value && sourceNode.value) {
+          if (sourceNode.value !== evt.target) {
+              addEdge(sourceNode.value.id(), evt.target.id());
+              addingEdge.value = false;
+              sourceNode.value = null;
+          }
+      }
+    });
+    workspaceGraph.value.on('cxttap', 'node', (evt: any) => {
+        console.log('Right-clicked node');
+        const pos = evt.renderedPosition;
+        contextMenu.value = {
+            visible: true,
+            x: pos.x,
+            y: pos.y,
+            node: evt.target
+        };
+    });
+    
+    workspaceGraph.value.on('tap', 'edge', (evt: any) => {
+      selectedEdge.value = evt.target;
+      contextMenu.value.visible = false;
+    });
+    workspaceGraph.value.on('tap', (evt: any) => {
+      if (evt.target === evt.cy) {
+        selectedNode.value = null;
+        selectedEdge.value = null;
+        contextMenu.value.visible = false;
+      }
+    });
+    workspaceGraph.value.on('cxttap', (evt: any) => {
+      if (evt.originalEvent && evt.originalEvent.preventDefault) {
+        evt.originalEvent.preventDefault();
+      }
+      if (evt.target === evt.cy) {
+        if (addingEdge.value) {
+            addingEdge.value = false;
+            sourceNode.value = null;
+            toastMessage.value = 'Cancelled adding edge.';
+            toastType.value = 'error';
+            setTimeout(() => { toastMessage.value = ""; }, 3000);
+        }
+      }
+    });
+  } else {
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    if (width !== lastContainerSize.value.width || height !== lastContainerSize.value.height) {
+        workspaceGraph.value.resize();
+        workspaceGraph.value.layout({ 
+          name: 'cose', 
+          padding: 50, 
+          fit: true,
+          stop: () => {
+            if (workspaceGraph.value.zoom() > 1.5) {
+              workspaceGraph.value.zoom(1.5);
+              workspaceGraph.value.center();
+            }
+          }
+        }).run();
+        lastContainerSize.value = { width, height };
+    }
+  }
+};
+
+const addNode = (label: string, type: 'person' | 'user' | 'channel', data: any = {}) => {
+  if (!workspaceGraph.value) return;
+  const id = data.id || ('n' + Date.now());
+  workspaceGraph.value.add({
+    group: 'nodes',
+    data: { id, label, type, ...data }
+  });
+  
+  // Update state if it exists
+  if (workspaceGraph.value) {
+      graphState.value = workspaceGraph.value.json();
+  }
+};
+
+const addToWorkspace = () => {
+    if (!metadata.value) return;
+
+    if (!workspaceGraph.value) {
+        toastMessage.value = 'Workspace not initiated, try to switch to it.';
+        toastType.value = 'error';
+        setTimeout(() => { toastMessage.value = ""; }, 5000);
+        return;
+    }
+
+    const m = metadata.value;
+    const username = m.username || m.name || channelName.value;
+    
+    // Check if node already exists
+    if (username && workspaceGraph.value.getElementById(username).length > 0) {
+        toastMessage.value = `Node ${username} already exists`;
+        toastType.value = 'error';
+        setTimeout(() => { toastMessage.value = ""; }, 5000);
+        return;
+    }
+
+    const label = m.title || m.name || channelName.value;
+    
+    // Facts array
+    const facts = [];
+    if (m.username) facts.push(`Username: ${m.username}`);
+    if (m.description) facts.push(`Description: ${m.description || ''}`);
+    if (m.subscribers) facts.push(`Subscribers: ${m.subscribers}`);
+    if (m.members) facts.push(`Members: ${m.members}`);
+    
+    addNode(label, 'channel', {
+      id: username, // Custom ID used by Cytoscape graph
+      username: username,
+      link: `https://t.me/${username}`,
+      facts: facts.join('\n')
+    });
+
+    // Automatically connect to Person node if only one exists
+    const personNodes = workspaceGraph.value.nodes('[type="person"]');
+    if (personNodes.length === 1) {
+        addEdge(personNodes[0].id(), username, {label: 'channel'});
+    }
+    
+    toastMessage.value = `Added ${label} to workspace!`;
+    toastType.value = 'success';
+    setTimeout(() => { toastMessage.value = ""; }, 5000);
+};
+
+const addEdge = (source: string, target: string, data: any = {}) => {
+  if (!workspaceGraph.value) return;
+  const edgeData = { label: '', ...data };
+  workspaceGraph.value.add({
+    group: 'edges',
+    data: { source, target, createdAt: new Date().toISOString(), ...edgeData }
+  });
+  
+  // Update state to trigger reactivity
+  if (workspaceGraph.value) {
+      graphState.value = workspaceGraph.value.json();
+  }
+};
+
+watch(activeTab, (newTab, oldTab) => {
+  // If we are leaving workspace, save state
+  if (oldTab === 'workspace' && workspaceGraph.value) {
+    graphState.value = workspaceGraph.value.json();
+  }
+  
+  // If we are entering workspace, init or restore
+  if (newTab === 'workspace') {
+    nextTick(() => {
+      initGraph();
+      if (graphState.value && workspaceGraph.value) {
+        workspaceGraph.value.json(graphState.value);
+      }
+    });
+  }
+});
 
 // Auto Finding State
 interface AutoFindingCell {
@@ -1788,6 +2290,23 @@ const mediaPosts = computed(() => {
             />
             Auto Finding
           </button>
+          <button
+            @click="activeTab = 'workspace'"
+            :class="[
+              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              activeTab === 'workspace'
+                ? 'bg-white dark:bg-gray-700 text-purple-600 dark:text-purple-400 shadow-md shadow-purple-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+            ]"
+          >
+            <Layers
+              :class="[
+                'h-4 w-4 mr-2 transition-transform duration-300',
+                activeTab === 'workspace' ? 'scale-110' : '',
+              ]"
+            />
+            Workspace
+          </button>
         </div>
       </header>
 
@@ -1896,10 +2415,15 @@ const mediaPosts = computed(() => {
                   >
                     {{ metadata.title || metadata.name }}
                   </h2>
+                  
                   <p
                     class="text-blue-600 dark:text-blue-400 font-bold text-sm mb-6 flex items-center tracking-wide"
                   >
                     @{{ metadata.username || metadata.name || channelName }}
+                    <button @click="addToWorkspace" class="ml-2 flex items-center gap-1.5 px-2 py-1 bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 rounded-lg border border-blue-200 dark:border-blue-700 text-[10px] font-bold hover:bg-blue-50 dark:hover:bg-gray-700 transition-all shadow-sm">
+                      <Layout class="h-3 w-3" />
+                      Add
+                    </button>
                   </p>
 
                   <div
@@ -1915,7 +2439,7 @@ const mediaPosts = computed(() => {
 
                   <div class="grid grid-cols-2 gap-4">
                     <div
-                      v-if="metadata.subscribers || metadata.members"
+                      v-if="metadata.subscribers || metadata.members || metadata.participants_count"
                       class="bg-blue-50/80 dark:bg-blue-900/20 p-5 rounded-[2rem] border border-blue-100/50 dark:border-blue-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
                     >
                       <Users
@@ -1925,7 +2449,7 @@ const mediaPosts = computed(() => {
                         class="text-xl font-black text-gray-900 dark:text-white"
                         >{{
                           (
-                            metadata.subscribers || metadata.members
+                            metadata.subscribers || metadata.members || metadata.participants_count
                           ).toLocaleString()
                         }}</span
                       >
@@ -3370,6 +3894,13 @@ const mediaPosts = computed(() => {
               >
                 <div class="absolute top-4 right-4 flex space-x-1">
                   <button
+                    @click.stop="addToWorkspaceFromPost(post)"
+                    class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full"
+                    title="Add to Workspace"
+                  >
+                    <Layout class="h-3 w-3 mr-1" /> Add
+                  </button>
+                  <button
                     @click.stop="sharePost(post)"
                     class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full"
                     title="Share"
@@ -3902,6 +4433,12 @@ const mediaPosts = computed(() => {
         ></div>
       </div>
 
+      <!-- Toast Message -->
+      <div v-if="toastMessage" class="fixed top-5 right-5 z-[100] px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 text-white" :class="toastType === 'success' ? 'bg-green-500' : 'bg-red-500'">
+        <AlertCircle class="w-5 h-5" />
+        {{ toastMessage }}
+      </div>
+
       <!-- Debug Panel -->
       <div
         v-if="showDebugPanel"
@@ -3919,6 +4456,113 @@ const mediaPosts = computed(() => {
         <div class="text-xs space-y-2">
           <p><strong>Request:</strong> {{ debugInfo.request }}</p>
           <p><strong>Response:</strong> {{ debugInfo.response }}</p>
+        </div>
+      </div>
+
+      <!-- Workspace Tab -->
+      <div v-show="activeTab === 'workspace'" class="w-full relative py-6 flex flex-col min-h-[800px]">
+        <div class="flex-1 w-full bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 flex flex-col relative overflow-hidden shadow-sm">
+          <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm z-10">
+            <h2 class="text-lg font-bold text-gray-900 dark:text-white flex items-center">
+              <Layers class="w-4 h-4 mr-2 text-purple-500" />
+              Workspace Graph
+            </h2>
+            <div class="flex gap-2">
+              <div class="relative">
+                <Search class="w-4 h-4 absolute left-2 top-2.5 text-gray-400" />
+                <input type="text" v-model="nodeSearchQuery" @keyup.enter="findNode" placeholder="Find node (id)..." class="pl-8 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-800 text-sm text-gray-900 dark:text-white" />
+              </div>
+              <button @click="saveGraph" class="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700">Save</button>
+              <button @click="loadGraph" class="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-sm hover:bg-gray-300 dark:hover:bg-gray-600">Load</button>
+              <button @click="reLayoutGraph" class="px-3 py-1.5 bg-purple-600 text-white rounded text-sm hover:bg-purple-700">Re-layout</button>
+              <button @click="shareGraph" class="px-3 py-1.5 bg-green-600 text-white rounded text-sm hover:bg-green-700">Share</button>
+            </div>
+          </div>
+          <div class="flex-1 relative flex flex-col h-full z-0 overflow-hidden">
+             <!-- Hint Message (moved here) -->
+             <div v-if="addingEdge" class="absolute top-2 left-2 z-[100] px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 text-white bg-blue-600 pointer-events-none">
+                <span class="font-bold">Hint:</span> Select target node to add edge.
+             </div>
+             <div v-if="contextMenu.visible" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop @contextmenu.stop.prevent :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }" class="absolute z-50 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 p-1 w-32 shadow-xl">
+                 <button @click="startAddEdge" class="block w-full text-left px-3 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-sm text-gray-900 dark:text-white">Add Edge</button>
+                 <button @click="deleteNode" class="block w-full text-left px-3 py-1 hover:bg-red-100 dark:hover:bg-red-900 rounded text-sm text-red-600 dark:text-red-400">Delete Node</button>
+                 <hr class="my-1 border-gray-200 dark:border-gray-700" />
+                 <button @click="contextMenu.visible = false" class="block w-full text-left px-3 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-sm text-gray-500">Close</button>
+             </div>
+             <div id="workspace-canvas" class="w-full h-full min-h-[600px] bg-[#f8fafc] dark:bg-[#0f172a] relative z-0">
+             </div>
+          </div>
+          <!-- Property Viewer -->
+          <div class="absolute top-20 right-6 w-72 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xl p-4 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 z-10 pointer-events-auto transition-transform">
+            <h3 class="text-xs font-black mb-2 uppercase tracking-widest text-gray-500 dark:text-gray-400">Property Viewer</h3>
+            
+            <!-- Node Viewer -->
+            <div v-if="selectedNode" class="bg-gray-50 dark:bg-gray-900 rounded-xl p-3 border border-gray-100 dark:border-gray-800 space-y-3">
+              <div class="flex justify-between items-start">
+                  <div>
+                      <p class="text-sm font-bold text-gray-900 dark:text-white">{{ editingNodeData.label }}</p>
+                      <p class="text-[10px] text-gray-400 font-mono">ID: {{ editingNodeData.id }}</p>
+                  </div>
+                  <div class="flex flex-col items-end gap-1">
+                      <span class="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-bold uppercase">{{ editingNodeData.type }}</span>
+                      <button v-if="editingNodeData.type === 'channel'" @click="fetchNodeMetadata(editingNodeData.id)" class="text-[10px] bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 px-2 py-0.5 rounded-full font-bold hover:bg-green-200">
+                          Fetch
+                      </button>
+                  </div>
+              </div>
+              
+              <div class="space-y-1">
+                  <label class="text-[10px] font-semibold text-gray-500 uppercase">Label</label>
+                  <input v-model="editingNodeData.label" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md p-1.5 text-xs" />
+              
+                  <div v-if="editingNodeData.type !== 'person'">
+                      <label class="text-[10px] font-semibold text-gray-500 uppercase">Username</label>
+                      <input v-model="editingNodeData.username" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md p-1.5 text-xs" />
+                  </div>
+                  
+                  <div v-if="editingNodeData.type !== 'person'">
+                      <label class="text-[10px] font-semibold text-gray-500 uppercase">Link</label>
+                      <input v-model="editingNodeData.link" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md p-1.5 text-xs" />
+                  </div>
+
+                  <label class="text-[10px] font-semibold text-gray-500 uppercase">Facts</label>
+                  <textarea v-model="editingNodeData.facts" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md p-1.5 text-xs h-16" />
+              </div>
+
+              <!-- In/Out Edges List -->
+              <div class="pt-2 border-t border-gray-200 dark:border-gray-700 space-y-1">
+                  <p class="text-[10px] font-bold text-gray-500 uppercase">Incoming</p>
+                  <button v-for="edge in getEdges.incoming" :key="edge.id()" @click="selectEdge(edge)" class="w-full bg-white dark:bg-gray-800 p-1 rounded text-[10px] border truncate text-left hover:border-blue-300 flex justify-between items-center">
+                       <span>{{edge.source().id()}} → {{edge.target().id()}}</span>
+                       <span @click.stop="deleteEdge(edge)" class="text-red-500 hover:text-red-700 font-bold">×</span>
+                   </button>
+                  
+                  <p class="text-[10px] font-bold text-gray-500 uppercase mt-1">Outgoing</p>
+                  <button v-for="edge in getEdges.outgoing" :key="edge.id()" @click="selectEdge(edge)" class="w-full bg-white dark:bg-gray-800 p-1 rounded text-[10px] border truncate text-left hover:border-purple-300 flex justify-between items-center">
+                       <span>{{edge.source().id()}} → {{edge.target().id()}}</span>
+                       <span @click.stop="deleteEdge(edge)" class="text-red-500 hover:text-red-700 font-bold">×</span>
+                   </button>
+              </div>
+            </div>
+
+            <!-- Edge Viewer -->
+            <div v-else-if="selectedEdge" class="bg-gray-50 dark:bg-gray-900 rounded-xl p-3 border border-gray-100 dark:border-gray-800 space-y-2">
+                <p class="text-sm font-bold text-gray-900 dark:text-white">Edge {{editingEdgeData.id}}</p>
+                <label class="block text-xs font-semibold text-gray-500">Source Node</label>
+                <input v-model="editingEdgeData.source" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-2 text-sm text-gray-900 dark:text-white" />
+                <label class="block text-xs font-semibold text-gray-500">Target Node</label>
+                <input v-model="editingEdgeData.target" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-2 text-sm text-gray-900 dark:text-white" />
+                <label class="block text-xs font-semibold text-gray-500">Label</label>
+                <input v-model="editingEdgeData.label" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-2 text-sm text-gray-900 dark:text-white" />
+                <label class="block text-xs font-semibold text-gray-500">Facts</label>
+                <textarea v-model="editingEdgeData.facts" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-2 text-sm h-24 text-gray-900 dark:text-white" />
+                <p class="text-xs text-gray-400">Created: {{editingEdgeData.createdAt}}</p>
+            </div>
+            
+            <div v-else class="bg-gray-50 dark:bg-gray-900 rounded-xl p-3 border border-gray-100 dark:border-gray-800">
+              <p class="text-xs text-gray-400 dark:text-gray-500 text-center font-medium py-4">Select a node or edge</p>
+            </div>
+          </div>
         </div>
       </div>
 
