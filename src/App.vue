@@ -48,6 +48,22 @@ import MarkdownIt from "markdown-it";
 import markdownItMark from "markdown-it-mark";
 const md = new MarkdownIt({ html: true }).use(markdownItMark);
 
+const isAddingAll = ref(false);
+const addAllToWorkspace = async () => {
+    if (isAddingAll.value || filteredSearchResults.value.length === 0) return;
+    
+    isAddingAll.value = true;
+    for (const post of filteredSearchResults.value) {
+        await addToWorkspaceFromPost(post);
+        // Small delay to allow graph updates and prevent UI locking if necessary
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    isAddingAll.value = false;
+    toastMessage.value = `Added ${filteredSearchResults.value.length} posts to workspace!`;
+    toastType.value = 'success';
+    setTimeout(() => { toastMessage.value = ""; }, 5000);
+};
+
 const isAnalyzing = ref(false);
 const analysisResult = ref("");
 const isAnalysisModalVisible = ref(false);
@@ -586,12 +602,16 @@ const reLayoutGraph = () => {
     if (!workspaceGraph.value) return;
     
     workspaceGraph.value.layout({
-        name: 'breadthfirst',
+        name: 'cose',
         fit: true,
         padding: 50,
-        roots: workspaceGraph.value.nodes('[type="person"]'),
-        directed: true,
         animate: true,
+        stop: () => {
+             if (workspaceGraph.value.zoom() > 1.5) {
+               workspaceGraph.value.zoom(1.5);
+               workspaceGraph.value.center();
+             }
+        }
     }).run();
 };
 
@@ -645,6 +665,20 @@ const fetchNodeMetadata = async (nodeId: string) => {
     }
 };
 
+const generateHash5 = (seed) => {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0, ch; i < seed.length; i++) {
+    ch = seed.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  
+  // Convert the resulting 64-bit integer to a base36 string and slice
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36).substring(0, 5);
+};
+
 const addToWorkspaceFromPost = (post: any) => {
     if (!workspaceGraph.value) {
         toastMessage.value = 'Workspace not initiated, try to switch to it.';
@@ -657,7 +691,7 @@ const addToWorkspaceFromPost = (post: any) => {
 
     if (userUsername == 'Telegram User') {
       if (post.data?.uid === undefined) {
-        userUsername = `Telegram User ${Math.random().toString(36).substring(2, 7)}`
+        userUsername = `Telegram User ${generateHash5(post.data?.author)}`
       } else {
         userUsername = `${post.data?.uid}`
       }
@@ -669,8 +703,66 @@ const addToWorkspaceFromPost = (post: any) => {
         addNode(userUsername, 'user', { id: userUsername, label: post.data?.author });
     }
     
-    if (workspaceGraph.value.edges(`[source="${userUsername}"][target="${channelUsername}"]`).length === 0) {
-        addEdge(userUsername, channelUsername, {label: 'post in', facts: `post id: ${post.key}\npost date: ${post.data?.date}\npost conent: ${post.data?.content}`});
+    const existingEdges = workspaceGraph.value.edges(`[source="${userUsername}"][target="${channelUsername}"]`);
+    if (existingEdges.length === 0) {
+        addEdge(userUsername, channelUsername, {label: 'post in', facts: `post date: ${post.data?.date}\npost id: ${post.key}`});
+    } else {
+        const edge = existingEdges[0];
+        const oldFacts = edge.data('facts') || '';
+        
+        let oldDateStr = '';
+        let oldIdsStr = '';
+        
+        const lines = oldFacts.split('\n');
+        for (const line of lines) {
+            if (line.startsWith('post date:')) oldDateStr = line.replace('post date:', '').trim();
+            if (line.startsWith('post id:')) oldIdsStr = line.replace('post id:', '').trim();
+        }
+        
+        let minDate = post.data?.date;
+        let maxDate = post.data?.date;
+        
+        if (oldDateStr) {
+            const dates = oldDateStr.split(' to ');
+            if (dates.length === 1) {
+                const oldDate = new Date(dates[0]);
+                const newDate = new Date(post.data?.date);
+                if (!isNaN(oldDate.getTime()) && !isNaN(newDate.getTime())) {
+                    minDate = oldDate < newDate ? dates[0] : post.data?.date;
+                    maxDate = oldDate > newDate ? dates[0] : post.data?.date;
+                } else {
+                    minDate = dates[0];
+                    maxDate = minDate;
+                }
+            } else if (dates.length === 2) {
+                const minD = new Date(dates[0]);
+                const maxD = new Date(dates[1]);
+                const newD = new Date(post.data?.date);
+                
+                if (!isNaN(newD.getTime())) {
+                    minDate = newD < minD ? post.data?.date : dates[0];
+                    maxDate = newD > maxD ? post.data?.date : dates[1];
+                } else {
+                    minDate = dates[0];
+                    maxDate = dates[1];
+                }
+            }
+        }
+        const newDateStr = (minDate && maxDate && minDate !== maxDate) ? `${minDate} to ${maxDate}` : minDate;
+        
+        const idSet = new Set(oldIdsStr ? oldIdsStr.split(', ') : []);
+        if (post.key) idSet.add(post.key);
+        const newIdsStr = Array.from(idSet).join(', ');
+        
+        const newFacts = `post date: ${newDateStr}\npost id: ${newIdsStr}`;
+        edge.data('facts', newFacts);
+
+        // Ensure graph state is persisted and UI is updated if the edge is selected
+        graphState.value = workspaceGraph.value.json();
+        
+        if (selectedEdge.value && selectedEdge.value.id() === edge.id()) {
+            editingEdgeData.value = { ...edge.data() };
+        }
     }
 
     const personNodes = workspaceGraph.value.nodes('[type="person"]');
@@ -1516,6 +1608,8 @@ const allUsernames = computed(() => {
     if (rawUser) {
       const parts = rawUser.split("/");
       users.add(parts[parts.length - 1]);
+    } else if (p.data?.uid !== undefined) {
+      users.add(p.data?.uid)
     }
   });
   return Array.from(users).sort();
@@ -1527,7 +1621,12 @@ const filteredSearchResults = computed(() => {
   if (selectedUsernames.value.length > 0) {
     result = result.filter((p) => {
       const rawUser = p.data?.user;
-      if (!rawUser) return false;
+      if (!rawUser) {
+        if (p.data?.uid !== undefined) {
+          return selectedUsernames.value.includes(p.data?.uid);
+        }
+        return false;
+      }
       const parts = rawUser.split("/");
       const username = parts[parts.length - 1];
       return selectedUsernames.value.includes(username);
@@ -1578,7 +1677,12 @@ const getVideoUrl = (post: any) => {
 
 const getUsername = (post: any) => {
   const rawUser = post.data?.user;
-  if (!rawUser || typeof rawUser !== "string") return "Telegram User";
+  if (!rawUser || typeof rawUser !== "string") {
+    if (post.data?.uid !== undefined) {
+      return post.data?.uid;
+    }
+    return "Telegram User";
+  }
   const parts = rawUser.split("/");
   return parts[parts.length - 1];
 };
@@ -2179,6 +2283,201 @@ const mediaPosts = computed(() => {
       (post.data?.linkPreview && post.data.linkPreview.image)
   );
 });
+
+const timelineData = computed(() => {
+    if (!workspaceGraph.value) return [];
+    
+    const edges = workspaceGraph.value.edges();
+    const result: any[] = [];
+    
+    edges.forEach((edge: any) => {
+        if (edge.data('label') === 'post in') {
+            const facts = edge.data('facts') || '';
+            const postDateLine = facts.split('\n').find((l: string) => l.startsWith('post date:'));
+            
+            if (postDateLine) {
+                const dateStr = postDateLine.replace('post date:', '').trim();
+                let start, end;
+                
+                if (dateStr.includes(' to ')) {
+                    const [s, e] = dateStr.split(' to ');
+                    start = new Date(s);
+                    end = new Date(e);
+                } else {
+                    start = new Date(dateStr);
+                    end = start;
+                }
+                
+                if (!isNaN(start.getTime()) && !isNaN(end.getTime())) {
+                    result.push({
+                        id: edge.id(),
+                        source: edge.source().id(),
+                        start: start.getTime(),
+                        end: end.getTime(),
+                        color: 'bg-blue-500' // Simple default
+                    });
+                }
+            }
+        }
+    });
+    return result;
+});
+
+const timelineRange = computed(() => {
+    if (timelineData.value.length === 0) return { min: 0, max: 1 };
+    const starts = timelineData.value.map(d => d.start);
+    const ends = timelineData.value.map(d => d.end);
+    const min = Math.min(...starts, ...ends);
+    const max = Math.max(...starts, ...ends);
+    // Add buffer for "all available" view (expanded for better panning)
+    const buffer = (max - min) * 5.0 || 86400000; // default 1 day buffer
+    return {
+        min: min - buffer,
+        max: max + buffer
+    };
+});
+
+const timelineRows = computed(() => {
+    const data = timelineData.value.sort((a,b) => a.start - b.start);
+    const rows: any[][] = [];
+    
+    for (const item of data) {
+        let rowIdx = 0;
+        while(rowIdx < rows.length) {
+            // Check overlaps
+            if (!rows[rowIdx].some(existing => item.start < existing.end && item.end > existing.start)) {
+                break;
+            }
+            rowIdx++;
+        }
+        if (rowIdx === rows.length) rows.push([]);
+        rows[rowIdx].push({...item, row: rowIdx});
+    }
+    return rows;
+});
+
+const zoomLevel = ref(1);
+const hoveredItem = ref<any>(null);
+const timelineContainer = ref<HTMLElement | null>(null);
+const isTimelineDragging = ref(false);
+const panOffset = ref(0);
+let startX = 0;
+let startPanOffset = 0;
+
+const onTimelineWheel = (e: WheelEvent) => {
+    e.preventDefault();
+    if (!timelineContainer.value) return;
+
+    const oldZoom = zoomLevel.value;
+    const rect = timelineContainer.value.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    
+    const sensitivity = 0.001;
+    const delta = -e.deltaY;
+    const newZoom = Math.max(0.5, Math.min(100, oldZoom + delta * sensitivity));
+    
+    zoomLevel.value = newZoom;
+    
+    // Update panOffset to keep timestamp constant
+    panOffset.value = (mouseX + panOffset.value) * (newZoom / oldZoom) - mouseX;
+};
+
+const resetZoom = () => {
+    zoomLevel.value = 1;
+    panOffset.value = 0;
+};
+
+const onTimelineMouseDown = (e: MouseEvent) => {
+    isTimelineDragging.value = true;
+    startX = e.pageX;
+    startPanOffset = panOffset.value;
+};
+
+const onTimelineMouseMove = (e: MouseEvent) => {
+    if (!isTimelineDragging.value) return;
+    const dx = e.pageX - startX;
+    panOffset.value = startPanOffset - dx;
+};
+
+const onTimelineMouseUp = () => { isTimelineDragging.value = false; };
+const onTimelineMouseLeave = () => { isTimelineDragging.value = false; };
+
+const focusNode = (nodeId: string) => {
+    if (!workspaceGraph.value) return;
+    const node = workspaceGraph.value.getElementById(nodeId);
+    if (node.length > 0) {
+        workspaceGraph.value.animate({
+            center: { eles: node },
+            zoom: 2
+        });
+        selectedNode.value = node;
+        activeTab.value = 'workspace';
+    }
+};
+
+const timelineTicks = computed(() => {
+    const { min, max } = timelineRange.value;
+    const span = max - min;
+    const containerWidth = timelineContainer.value?.clientWidth || 1000;
+    
+    // Target approx 1 tick per 70 pixels to keep it readable.
+    const targetTickCount = Math.max(2, Math.floor(containerWidth / 70));
+    
+    // Time interval that gives approx the targetTickCount in visible span
+    const visibleSpan = span / Math.max(1, zoomLevel.value);
+    const interval = visibleSpan / targetTickCount;
+
+    // Nearest "nice" interval
+    const ONE_MINUTE = 60000;
+    const ONE_HOUR = 60 * ONE_MINUTE;
+    const ONE_DAY = 24 * ONE_HOUR;
+    const ONE_WEEK = 7 * ONE_DAY;
+    const ONE_MONTH = 30 * ONE_DAY;
+    const ONE_YEAR = 365 * ONE_DAY;
+
+    const niceIntervals = [
+        1000, 5000, 10000, 30000, // 1s, 5s, 10s, 30s
+        ONE_MINUTE, 5 * ONE_MINUTE, 15 * ONE_MINUTE, 30 * ONE_MINUTE, // 1m, 5m, 15m, 30m
+        ONE_HOUR, 2 * ONE_HOUR, 4 * ONE_HOUR, 6 * ONE_HOUR, 12 * ONE_HOUR, // 1h, 2h, ...
+        ONE_DAY, // 1d
+        ONE_WEEK, // 1w
+        ONE_MONTH, // 1m
+        ONE_YEAR // 1y
+    ];
+    const bestInterval = niceIntervals.find(i => i >= interval) || niceIntervals[niceIntervals.length - 1];
+
+    const ticks = [];
+    
+    // Start tick at the first major interval after min
+    let current = Math.ceil(min / bestInterval) * bestInterval;
+    
+    while (current <= max) {
+        const date = new Date(current);
+        let label = '';
+        if (bestInterval < ONE_MINUTE) {
+            label = date.toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+        } else if (bestInterval < ONE_HOUR) {
+            label = date.toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit'});
+        } else if (bestInterval < ONE_DAY) {
+            label = date.toLocaleString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+        } else if (bestInterval < ONE_MONTH) {
+            label = date.toLocaleDateString(undefined, {month: 'short', day: 'numeric'});
+        } else if (bestInterval < ONE_YEAR) {
+            label = date.toLocaleDateString(undefined, {month: 'short', year: 'numeric'});
+        } else {
+            label = date.toLocaleDateString(undefined, {year: 'numeric'});
+        }
+        
+        ticks.push({
+            time: current,
+            position: ((current - min) / span) * 100,
+            label
+        });
+        current += bestInterval;
+    }
+    
+    return ticks;
+});
 </script>
 
 <template>
@@ -2221,9 +2520,56 @@ const mediaPosts = computed(() => {
         </button>
       </Transition>
 
-      <!-- Premium Header & Glass Navigation -->
-      <header class="mb-12 relative flex flex-col items-center">
-        <div class="absolute top-0 right-0 z-50">
+      <!-- Title & Counters (non-sticky) -->
+      <div class="text-center pt-8 sm:pt-4 mb-8">
+        <h1
+          class="text-4xl sm:text-5xl font-black tracking-tighter text-gray-900 dark:text-white mb-4 flex items-center justify-center gap-3"
+        >
+          Telegram Explorer
+          <span
+            v-if="pendingJobs !== null"
+            class="text-xs font-bold font-mono tabular-nums text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/50 px-3 py-1 rounded-full border border-blue-200 dark:border-blue-700 shadow-sm"
+          >
+            {{ pendingJobs }}
+          </span>
+        </h1>
+        <p
+          class="text-gray-500 dark:text-gray-400 font-medium max-w-lg mx-auto leading-relaxed mb-8"
+        >
+          Discover profiles, posts and search content across public Telegram channels
+          instantly.
+        </p>
+        <div
+          v-if="Object.keys(counters).length > 0"
+          class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 mb-8 max-w-6xl mx-auto"
+        >
+          <div
+            v-for="(count, type) in counters"
+            :key="type"
+            class="px-4 py-3 bg-white/50 dark:bg-gray-800/50 backdrop-blur rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col items-center justify-center gap-1 transition-transform hover:scale-105"
+          >
+            <span
+              class="text-[10px] font-black text-gray-500 dark:text-gray-400 uppercase tracking-widest"
+              >{{ type }}</span
+            >
+            <span
+              class="text-lg font-black text-blue-600 dark:text-blue-400 tabular-nums"
+              >{{ count.toLocaleString() }}</span
+            >
+            <span
+              v-if="frequencies[type] !== undefined"
+              class="text-[10px] text-gray-400 dark:text-gray-500"
+              >{{ frequencies[type].toFixed(1) }} obj/s</span
+            >
+          </div>
+        </div>
+      </div>
+
+      <!-- Sticky Navigation Header -->
+      <header
+        class="sticky top-0 z-50 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-md mb-12 relative flex items-center justify-center border-b border-gray-200 dark:border-gray-800 py-3"
+      >
+        <div class="absolute right-4 z-50">
           <button
             @click="toggleDark"
             class="p-2.5 rounded-full bg-white/50 dark:bg-gray-800/50 backdrop-blur-md border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-white dark:hover:bg-gray-800 transition-all shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 hover:shadow-md"
@@ -2232,50 +2578,6 @@ const mediaPosts = computed(() => {
             <Moon v-if="!isDark" class="h-4 w-4" />
             <Sun v-else class="h-4 w-4" />
           </button>
-        </div>
-
-        <div class="text-center pt-8 sm:pt-4 mb-8">
-          <h1
-            class="text-4xl sm:text-5xl font-black tracking-tighter text-gray-900 dark:text-white mb-4 flex items-center justify-center gap-3"
-          >
-            Telegram Explorer
-            <span
-              v-if="pendingJobs !== null"
-              class="text-xs font-bold font-mono tabular-nums text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/50 px-3 py-1 rounded-full border border-blue-200 dark:border-blue-700 shadow-sm"
-            >
-              {{ pendingJobs }}
-            </span>
-          </h1>
-          <p
-            class="text-gray-500 dark:text-gray-400 font-medium max-w-lg mx-auto leading-relaxed mb-8"
-          >
-            Discover profiles, posts and search content across public Telegram channels
-            instantly.
-          </p>
-          <div
-            v-if="Object.keys(counters).length > 0"
-            class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 mb-8 max-w-6xl mx-auto"
-          >
-            <div
-              v-for="(count, type) in counters"
-              :key="type"
-              class="px-4 py-3 bg-white/50 dark:bg-gray-800/50 backdrop-blur rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col items-center justify-center gap-1 transition-transform hover:scale-105"
-            >
-              <span
-                class="text-[10px] font-black text-gray-500 dark:text-gray-400 uppercase tracking-widest"
-                >{{ type }}</span
-              >
-              <span
-                class="text-lg font-black text-blue-600 dark:text-blue-400 tabular-nums"
-                >{{ count.toLocaleString() }}</span
-              >
-              <span
-                v-if="frequencies[type] !== undefined"
-                class="text-[10px] text-gray-400 dark:text-gray-500"
-                >{{ frequencies[type].toFixed(1) }} obj/s</span
-              >
-            </div>
-          </div>
         </div>
 
         <!-- Glass Tabs -->
@@ -3818,10 +4120,25 @@ const mediaPosts = computed(() => {
           </p>
         </div>
 
-        <div
-          v-else-if="filteredSearchResults.length > 0"
-          class="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-start px-4 sm:px-0"
-        >
+        <div v-if="filteredSearchResults.length > 0" class="flex items-center justify-between mb-4">
+              <h3 class="text-sm font-bold text-gray-900 dark:text-white">
+                Search Results ({{ filteredSearchResults.length }})
+              </h3>
+              <button
+                @click="addAllToWorkspace"
+                :disabled="isAddingAll"
+                class="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center shadow-lg shadow-purple-500/30 hover:shadow-purple-500/50 hover:-translate-y-0.5 active:translate-y-0"
+              >
+                <Loader2 v-if="isAddingAll" class="h-3 w-3 animate-spin mr-2" />
+                <Layers v-else class="h-3 w-3 mr-2" />
+                {{ isAddingAll ? 'Adding...' : 'Add All to Workspace' }}
+              </button>
+            </div>
+          
+            <div
+              v-if="filteredSearchResults.length > 0"
+              class="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-start px-4 sm:px-0"
+            >
           <!-- Usernames Widget -->
           <div
             class="lg:col-span-4 xl:col-span-3 space-y-4 h-fit sticky top-20 flex-shrink-0"
@@ -4529,7 +4846,7 @@ const mediaPosts = computed(() => {
       </div>
 
       <!-- Workspace Tab -->
-      <div v-show="activeTab === 'workspace'" class="w-full relative py-6 flex flex-col min-h-[800px]">
+      <div v-show="activeTab === 'workspace'" class="w-full relative py-6 flex flex-col h-[1200px]">
         <div class="flex-1 w-full bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 flex flex-col relative overflow-hidden shadow-sm">
           <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm z-10">
             <h2 class="text-lg font-bold text-gray-900 dark:text-white flex items-center">
@@ -4560,56 +4877,51 @@ const mediaPosts = computed(() => {
              </div>
              <div id="workspace-canvas" class="w-full flex-1 bg-[#f8fafc] dark:bg-[#0f172a] relative z-0">
              </div>
+             
+             <!-- TIMELINE REMOVED FROM HERE -->
           </div>
           <!-- Property Viewer -->
           <div class="absolute top-20 right-6 w-72 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xl p-4 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 z-10 pointer-events-auto transition-transform">
-            <h3 class="text-xs font-black mb-2 uppercase tracking-widest text-gray-500 dark:text-gray-400">Property Viewer</h3>
+            <h3 class="text-[10px] font-black mb-1 uppercase tracking-widest text-gray-500 dark:text-gray-400">Property</h3>
             
             <!-- Node Viewer -->
-            <div v-if="selectedNode" class="bg-gray-50 dark:bg-gray-900 rounded-xl p-3 border border-gray-100 dark:border-gray-800 space-y-3">
-              <div class="flex justify-between items-start">
+            <div v-if="selectedNode" class="bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-100 dark:border-gray-800 space-y-2">
+              <div class="flex justify-between items-center">
                   <div>
-                      <p class="text-sm font-bold text-gray-900 dark:text-white">{{ editingNodeData.label }}</p>
-                      <p class="text-[10px] text-gray-400 font-mono">ID: {{ editingNodeData.id }}</p>
+                      <p class="text-xs font-bold text-gray-900 dark:text-white truncate">{{ editingNodeData.label }}</p>
+                      <p class="text-[9px] text-gray-400 font-mono">{{ editingNodeData.id }}</p>
                   </div>
-                  <div class="flex flex-col items-end gap-1">
-                      <span class="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-bold uppercase">{{ editingNodeData.type }}</span>
-                      <button v-if="editingNodeData.type === 'channel'" @click="fetchNodeMetadata(editingNodeData.id)" class="text-[10px] bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 px-2 py-0.5 rounded-full font-bold hover:bg-green-200">
+                  <div class="flex flex-col items-end gap-0.5">
+                      <span class="text-[9px] bg-blue-100 text-blue-700 px-1.5 rounded-full font-bold uppercase">{{ editingNodeData.type }}</span>
+                      <button v-if="editingNodeData.type === 'channel'" @click="fetchNodeMetadata(editingNodeData.id)" class="text-[9px] bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 px-1.5 rounded-full font-bold hover:bg-green-200">
                           Fetch
                       </button>
                   </div>
               </div>
               
               <div class="space-y-1">
-                  <label class="text-[10px] font-semibold text-gray-500 uppercase">Label</label>
-                  <input v-model="editingNodeData.label" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md p-1.5 text-xs" />
+                  <input v-model="editingNodeData.label" @input="saveChanges" placeholder="Label" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
               
-                  <div v-if="editingNodeData.type !== 'person'">
-                      <label class="text-[10px] font-semibold text-gray-500 uppercase">Username</label>
-                      <input v-model="editingNodeData.username" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md p-1.5 text-xs" />
-                  </div>
-                  
-                  <div v-if="editingNodeData.type !== 'person'">
-                      <label class="text-[10px] font-semibold text-gray-500 uppercase">Link</label>
-                      <input v-model="editingNodeData.link" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md p-1.5 text-xs" />
+                  <div v-if="editingNodeData.type !== 'person'" class="grid grid-cols-2 gap-1">
+                      <input v-model="editingNodeData.username" @input="saveChanges" placeholder="User" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
+                      <input v-model="editingNodeData.link" @input="saveChanges" placeholder="Link" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
                   </div>
 
-                  <label class="text-[10px] font-semibold text-gray-500 uppercase">Facts</label>
-                  <textarea v-model="editingNodeData.facts" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md p-1.5 text-xs h-16" />
+                  <textarea v-model="editingNodeData.facts" @input="saveChanges" placeholder="Facts" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px] h-12" />
               </div>
 
               <!-- In/Out Edges List -->
-              <div class="pt-2 border-t border-gray-200 dark:border-gray-700 space-y-1">
-                  <p class="text-[10px] font-bold text-gray-500 uppercase">Incoming</p>
-                  <button v-for="edge in getEdges.incoming" :key="edge.id()" @click="selectEdge(edge)" class="w-full bg-white dark:bg-gray-800 p-1 rounded text-[10px] border truncate text-left hover:border-blue-300 flex justify-between items-center">
-                       <span>{{edge.source().id()}} → {{edge.target().id()}}</span>
-                       <span @click.stop="deleteEdge(edge)" class="text-red-500 hover:text-red-700 font-bold">×</span>
+              <div class="pt-1 border-t border-gray-200 dark:border-gray-700 space-y-0.5 mt-1">
+                  <p class="text-[9px] font-bold text-gray-500 uppercase">Incoming</p>
+                  <button v-for="edge in getEdges.incoming" :key="edge.id()" @click="selectEdge(edge)" class="w-full bg-white dark:bg-gray-800 p-0.5 rounded text-[9px] border truncate text-left hover:border-blue-300 flex justify-between items-center">
+                       <span class="truncate">{{edge.source().id()}} → {{edge.target().id()}}</span>
+                       <span @click.stop="deleteEdge(edge)" class="text-red-500 hover:text-red-700 font-bold px-1">×</span>
                    </button>
                   
-                  <p class="text-[10px] font-bold text-gray-500 uppercase mt-1">Outgoing</p>
-                  <button v-for="edge in getEdges.outgoing" :key="edge.id()" @click="selectEdge(edge)" class="w-full bg-white dark:bg-gray-800 p-1 rounded text-[10px] border truncate text-left hover:border-purple-300 flex justify-between items-center">
-                       <span>{{edge.source().id()}} → {{edge.target().id()}}</span>
-                       <span @click.stop="deleteEdge(edge)" class="text-red-500 hover:text-red-700 font-bold">×</span>
+                  <p class="text-[9px] font-bold text-gray-500 uppercase mt-0.5">Outgoing</p>
+                  <button v-for="edge in getEdges.outgoing" :key="edge.id()" @click="selectEdge(edge)" class="w-full bg-white dark:bg-gray-800 p-0.5 rounded text-[9px] border truncate text-left hover:border-purple-300 flex justify-between items-center">
+                       <span class="truncate">{{edge.source().id()}} → {{edge.target().id()}}</span>
+                       <span @click.stop="deleteEdge(edge)" class="text-red-500 hover:text-red-700 font-bold px-1">×</span>
                    </button>
               </div>
             </div>
@@ -4632,6 +4944,61 @@ const mediaPosts = computed(() => {
               <p class="text-xs text-gray-400 dark:text-gray-500 text-center font-medium py-4">Select a node or edge</p>
             </div>
           </div>
+        </div>
+        
+        <!-- Timeline Viewer -->
+        <div class="min-h-[300px] border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 rounded-3xl mt-4 p-4 overflow-hidden relative" :style="{ height: `${Math.max(300, timelineRows.length * 56 + 150)}px` }">
+           <div class="flex items-center justify-between mb-2 sticky left-0 right-0">
+               <h3 class="text-xs font-black uppercase tracking-widest text-gray-500 dark:text-gray-400">Timeline Viewer</h3>
+                <div class="flex items-center gap-2">
+                    <span class="text-[9px] text-gray-500">Zoom: {{ zoomLevel.toFixed(1) }}x</span>
+                    <button @click="resetZoom" class="text-[9px] px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300">Reset</button>
+                </div>
+           </div>
+           
+           <div 
+             ref="timelineContainer"
+             class="relative h-full cursor-grab active:cursor-grabbing overflow-hidden"
+             @wheel.prevent="onTimelineWheel"
+             @mousedown="onTimelineMouseDown"
+             @mousemove="onTimelineMouseMove"
+             @mouseup="onTimelineMouseUp"
+             @mouseleave="onTimelineMouseLeave"
+           >
+              <div id="timeline-canvas" class="relative min-w-[max-content] p-2 pb-20" :style="{ 
+                width: `${100 * zoomLevel}%`,
+                left: `${-panOffset}px`
+              }">                
+                <div v-for="(row, rowIdx) in timelineRows" :key="rowIdx" class="relative h-8 mt-2">
+                    <div v-for="item in row" :key="item.id" 
+                          class="absolute h-5 rounded-md flex items-center px-2 text-[10px] text-white font-medium whitespace-nowrap cursor-pointer shadow-sm hover:shadow-md transition-all duration-200 hover:scale-[1.02] hover:z-10" 
+                          :style="{ 
+                             left: `${((item.start - timelineRange.min) / (timelineRange.max - timelineRange.min)) * 100}%`,
+                             width: `${Math.max(0.2, (((item.start === item.end ? item.start + 3600000 : item.end) - item.start) / Math.max(1, (timelineRange.max - timelineRange.min))) * 100)}%`
+                          }"
+                          :class="[item.color, 'bg-opacity-90 hover:bg-opacity-100']"
+                          @mouseenter="hoveredItem = item"
+                          @mouseleave="hoveredItem = null"
+                          @click.stop="focusNode(item.source)"
+                          ">
+                          {{ item.source }}
+                    </div>
+                </div>
+
+                <!-- Axis -->
+                <div class="absolute bottom-0 left-0 w-full h-8 flex text-[9px] text-gray-400 dark:text-gray-500 font-mono pointer-events-none">
+                    <div v-for="tick in timelineTicks" :key="tick.time" class="absolute border-l border-gray-400/30 h-3" :style="{ left: `${tick.position}%` }">
+                        <span class="absolute top-4 -translate-x-1/2 text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 px-1 rounded whitespace-nowrap">{{ tick.label }}</span>
+                    </div>
+                </div>
+              </div>
+           </div>
+
+           <!-- Hover Label -->
+           <div v-if="hoveredItem" class="absolute left-1/2 -translate-x-1/2 top-2 bg-black/80 text-white text-[10px] px-3 py-1.5 rounded-full shadow-lg z-50 pointer-events-none whitespace-nowrap">
+               <span class="font-bold border-r border-gray-500 pr-2 mr-2">{{ hoveredItem.source }}</span>
+               <span>{{ new Date(hoveredItem.start).toLocaleString() }} - {{ new Date(hoveredItem.end).toLocaleString() }}</span>
+           </div>
         </div>
       </div>
 
