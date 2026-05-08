@@ -702,80 +702,96 @@ const addToWorkspaceFromPost = (post: any) => {
     if (workspaceGraph.value.getElementById(userUsername).length === 0) {
         addNode(userUsername, 'user', { id: userUsername, label: post.data?.author });
     }
-    
-    const existingEdges = workspaceGraph.value.edges(`[source="${userUsername}"][target="${channelUsername}"]`);
-    if (existingEdges.length === 0) {
-        addEdge(userUsername, channelUsername, {label: 'post in', facts: `post date: ${post.data?.date}\npost id: ${post.key}`});
+
+    if (channelUsername != userUsername) {
+      // if source and target is not the same object, add edge
+      const existingEdges = workspaceGraph.value.edges(`[source="${userUsername}"][target="${channelUsername}"]`);
+      if (existingEdges.length === 0) {
+          addEdge(userUsername, channelUsername, {label: 'post in', facts: `post date: ${post.data?.date}\npost id: ${post.key}`});
+      } else {
+          const edge = existingEdges[0];
+          const oldFacts = edge.data('facts') || '';
+          
+          let oldDateStr = '';
+          let oldIdsStr = '';
+          
+          const lines = oldFacts.split('\n');
+          for (const line of lines) {
+              if (line.startsWith('post date:')) oldDateStr = line.replace('post date:', '').trim();
+              if (line.startsWith('post id:')) oldIdsStr = line.replace('post id:', '').trim();
+          }
+          
+          let minDate = post.data?.date;
+          let maxDate = post.data?.date;
+          
+          if (oldDateStr) {
+              const dates = oldDateStr.split(' to ');
+              if (dates.length === 1) {
+                  const oldDate = new Date(dates[0]);
+                  const newDate = new Date(post.data?.date);
+                  if (!isNaN(oldDate.getTime()) && !isNaN(newDate.getTime())) {
+                      minDate = oldDate < newDate ? dates[0] : post.data?.date;
+                      maxDate = oldDate > newDate ? dates[0] : post.data?.date;
+                  } else {
+                      minDate = dates[0];
+                      maxDate = minDate;
+                  }
+              } else if (dates.length === 2) {
+                  const minD = new Date(dates[0]);
+                  const maxD = new Date(dates[1]);
+                  const newD = new Date(post.data?.date);
+                  
+                  if (!isNaN(newD.getTime())) {
+                      minDate = newD < minD ? post.data?.date : dates[0];
+                      maxDate = newD > maxD ? post.data?.date : dates[1];
+                  } else {
+                      minDate = dates[0];
+                      maxDate = dates[1];
+                  }
+              }
+          }
+          const newDateStr = (minDate && maxDate && minDate !== maxDate) ? `${minDate} to ${maxDate}` : minDate;
+          
+          const idSet = new Set(oldIdsStr ? oldIdsStr.split(', ') : []);
+          if (post.key) idSet.add(post.key);
+          const newIdsStr = Array.from(idSet).join(', ');
+          
+          const newFacts = `post date: ${newDateStr}\npost id: ${newIdsStr}`;
+          edge.data('facts', newFacts);
+
+          // Ensure graph state is persisted and UI is updated if the edge is selected
+          graphState.value = workspaceGraph.value.json();
+          
+          if (selectedEdge.value && selectedEdge.value.id() === edge.id()) {
+              editingEdgeData.value = { ...edge.data() };
+          }
+      }
+
+      const personNodes = workspaceGraph.value.nodes('[type="person"]');
+      if (personNodes.length === 1) {
+          const personId = personNodes[0].id();
+          if (workspaceGraph.value.edges(`[source="${personId}"][target="${userUsername}"]`).length === 0) {
+              addEdge(personId, userUsername, {label: 'account'});
+          }
+      }
+      
+      toastMessage.value = `Added ${userUsername} to workspace with edge!`;
+      toastType.value = 'success';
+      setTimeout(() => { toastMessage.value = ""; }, 5000);
     } else {
-        const edge = existingEdges[0];
-        const oldFacts = edge.data('facts') || '';
-        
-        let oldDateStr = '';
-        let oldIdsStr = '';
-        
-        const lines = oldFacts.split('\n');
-        for (const line of lines) {
-            if (line.startsWith('post date:')) oldDateStr = line.replace('post date:', '').trim();
-            if (line.startsWith('post id:')) oldIdsStr = line.replace('post id:', '').trim();
-        }
-        
-        let minDate = post.data?.date;
-        let maxDate = post.data?.date;
-        
-        if (oldDateStr) {
-            const dates = oldDateStr.split(' to ');
-            if (dates.length === 1) {
-                const oldDate = new Date(dates[0]);
-                const newDate = new Date(post.data?.date);
-                if (!isNaN(oldDate.getTime()) && !isNaN(newDate.getTime())) {
-                    minDate = oldDate < newDate ? dates[0] : post.data?.date;
-                    maxDate = oldDate > newDate ? dates[0] : post.data?.date;
-                } else {
-                    minDate = dates[0];
-                    maxDate = minDate;
-                }
-            } else if (dates.length === 2) {
-                const minD = new Date(dates[0]);
-                const maxD = new Date(dates[1]);
-                const newD = new Date(post.data?.date);
-                
-                if (!isNaN(newD.getTime())) {
-                    minDate = newD < minD ? post.data?.date : dates[0];
-                    maxDate = newD > maxD ? post.data?.date : dates[1];
-                } else {
-                    minDate = dates[0];
-                    maxDate = dates[1];
-                }
-            }
-        }
-        const newDateStr = (minDate && maxDate && minDate !== maxDate) ? `${minDate} to ${maxDate}` : minDate;
-        
-        const idSet = new Set(oldIdsStr ? oldIdsStr.split(', ') : []);
-        if (post.key) idSet.add(post.key);
-        const newIdsStr = Array.from(idSet).join(', ');
-        
-        const newFacts = `post date: ${newDateStr}\npost id: ${newIdsStr}`;
-        edge.data('facts', newFacts);
+      // if source and target is the same object, do not add s->t edge
+      const personNodes = workspaceGraph.value.nodes('[type="person"]');
+      if (personNodes.length === 1) {
+          const personId = personNodes[0].id();
+          if (workspaceGraph.value.edges(`[source="${personId}"][target="${channelUsername}"]`).length === 0) {
+              addEdge(personId, channelUsername, {label: 'channel'});
+          }
+      }
 
-        // Ensure graph state is persisted and UI is updated if the edge is selected
-        graphState.value = workspaceGraph.value.json();
-        
-        if (selectedEdge.value && selectedEdge.value.id() === edge.id()) {
-            editingEdgeData.value = { ...edge.data() };
-        }
+      toastMessage.value = `Added ${channelUsername} to workspace without edge!`;
+      toastType.value = 'success';
+      setTimeout(() => { toastMessage.value = ""; }, 5000);
     }
-
-    const personNodes = workspaceGraph.value.nodes('[type="person"]');
-    if (personNodes.length === 1) {
-        const personId = personNodes[0].id();
-        if (workspaceGraph.value.edges(`[source="${personId}"][target="${userUsername}"]`).length === 0) {
-            addEdge(personId, userUsername, {label: 'account'});
-        }
-    }
-    
-    toastMessage.value = 'Added post data to workspace!';
-    toastType.value = 'success';
-    setTimeout(() => { toastMessage.value = ""; }, 5000);
 };
 
 const startAddEdge = () => {
@@ -942,7 +958,7 @@ const initGraph = () => {
         {
           selector: 'edge',
           style: {
-            'width': 2,
+            'width': 1,
             'line-color': '#cbd5e1',
             'target-arrow-color': '#cbd5e1',
             'target-arrow-shape': 'triangle',
@@ -956,7 +972,9 @@ const initGraph = () => {
             'text-border-width': 1,
             'text-border-opacity': 1,
             'text-wrap': 'wrap',
-            'text-max-width': '100px'
+            'text-max-width': '100px',
+            'curve-style': 'bezier', 
+            'control-point-step-size': 10
           }
         }
       ],
@@ -2284,6 +2302,18 @@ const mediaPosts = computed(() => {
   );
 });
 
+const colors = ['blue', 'red', 'green', 'purple', 'indigo', 'emerald', 'rose', 'cyan'];
+
+const getColorFromSeed = (seed) => {
+  const hash = String(seed).split('').reduce((a, b) => {
+    a = ((a << 5) - a) + b.charCodeAt(0);
+    return a & a;
+  }, 0);
+  
+  // Use the absolute hash value to pick an index
+  return colors[Math.abs(hash) % colors.length];
+};
+
 const timelineData = computed(() => {
     if (!workspaceGraph.value) return [];
     
@@ -2314,7 +2344,7 @@ const timelineData = computed(() => {
                         source: edge.source().id(),
                         start: start.getTime(),
                         end: end.getTime(),
-                        color: 'bg-blue-500' // Simple default
+                        color: `bg-${getColorFromSeed(edge.id())}-700`
                     });
                 }
             }
@@ -2330,7 +2360,7 @@ const timelineRange = computed(() => {
     const min = Math.min(...starts, ...ends);
     const max = Math.max(...starts, ...ends);
     // Add buffer for "all available" view (expanded for better panning)
-    const buffer = (max - min) * 5.0 || 86400000; // default 1 day buffer
+    const buffer = (max - min) * 0.05 || 86400000; // default 1 day buffer
     return {
         min: min - buffer,
         max: max + buffer
@@ -4947,7 +4977,7 @@ const timelineTicks = computed(() => {
         </div>
         
         <!-- Timeline Viewer -->
-        <div class="min-h-[300px] border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 rounded-3xl mt-4 p-4 overflow-hidden relative" :style="{ height: `${Math.max(300, timelineRows.length * 56 + 150)}px` }">
+        <div class="min-h-[300px] border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 rounded-3xl mt-4 p-4 overflow-hidden relative" :style="{ height: `${Math.max(300, timelineRows.length * 56 + 150)}px` }">
            <div class="flex items-center justify-between mb-2 sticky left-0 right-0">
                <h3 class="text-xs font-black uppercase tracking-widest text-gray-500 dark:text-gray-400">Timeline Viewer</h3>
                 <div class="flex items-center gap-2">
@@ -4969,6 +4999,7 @@ const timelineTicks = computed(() => {
                 width: `${100 * zoomLevel}%`,
                 left: `${-panOffset}px`
               }">                
+                <div class="hidden bg-green-700 bg-blue-700 bg-red-700 bg-purple-700 bg-indigo-700 bg-emerald-700 bg-rose-700 bg-cyan-700"></div>
                 <div v-for="(row, rowIdx) in timelineRows" :key="rowIdx" class="relative h-8 mt-2">
                     <div v-for="item in row" :key="item.id" 
                           class="absolute h-5 rounded-md flex items-center px-2 text-[10px] text-white font-medium whitespace-nowrap cursor-pointer shadow-sm hover:shadow-md transition-all duration-200 hover:scale-[1.02] hover:z-10" 
@@ -4976,7 +5007,7 @@ const timelineTicks = computed(() => {
                              left: `${((item.start - timelineRange.min) / (timelineRange.max - timelineRange.min)) * 100}%`,
                              width: `${Math.max(0.2, (((item.start === item.end ? item.start + 3600000 : item.end) - item.start) / Math.max(1, (timelineRange.max - timelineRange.min))) * 100)}%`
                           }"
-                          :class="[item.color, 'bg-opacity-90 hover:bg-opacity-100']"
+                          :class="[item.color]"
                           @mouseenter="hoveredItem = item"
                           @mouseleave="hoveredItem = null"
                           @click.stop="focusNode(item.source)"
@@ -4988,7 +5019,7 @@ const timelineTicks = computed(() => {
                 <!-- Axis -->
                 <div class="absolute bottom-0 left-0 w-full h-8 flex text-[9px] text-gray-400 dark:text-gray-500 font-mono pointer-events-none">
                     <div v-for="tick in timelineTicks" :key="tick.time" class="absolute border-l border-gray-400/30 h-3" :style="{ left: `${tick.position}%` }">
-                        <span class="absolute top-4 -translate-x-1/2 text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 px-1 rounded whitespace-nowrap">{{ tick.label }}</span>
+                        <span class="absolute top-4 -translate-x-1/2 text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 px-1 rounded whitespace-nowrap">{{ tick.label }}</span>
                     </div>
                 </div>
               </div>
