@@ -64,8 +64,9 @@ const addAllToWorkspace = async () => {
     setTimeout(() => { toastMessage.value = ""; }, 5000);
 };
 
-const isAnalyzing = ref(false);
 const analysisResult = ref("");
+const isAnalyzing = ref(false);
+const isAnalyzingGraph = ref(false);
 const isAnalysisModalVisible = ref(false);
 const analyzedCount = ref(0);
 const renderedMarkdown = computed(() => md.render(analysisResult.value));
@@ -149,6 +150,22 @@ const filteredPosts = computed(() => {
   }
   if (filterMedia.value.links) {
     result = result.filter((p) => !!p.data?.linkPreview);
+  }
+  
+  // filter the selected Usernames
+  if (selectedUsernamesExplorer.value.length > 0) {
+    result = result.filter((p) => {
+      const rawUser = p.data?.user;
+      if (!rawUser) {
+        if (p.data?.uid !== undefined) {
+          return selectedUsernamesExplorer.value.includes(p.data?.uid);
+        }
+        return false;
+      }
+      const parts = rawUser.split("/");
+      const username = parts[parts.length - 1];
+      return selectedUsernamesExplorer.value.includes(username);
+    });
   }
 
   return result;
@@ -427,6 +444,7 @@ const runAutoFinding = async () => {
             date: p.data?.date,
             author: p.data?.author || p.data?.user,
             reply: p.data?.reply,
+            forward_from: p.data?.forward_from,
           }))
           .filter((p: any) => p.content || p.reply);
 
@@ -633,6 +651,90 @@ const shareGraph = () => {
     });
 };
 
+const analyzeGraph = async () => {
+    if (!workspaceGraph.value || isAnalyzingGraph.value) return;                
+    isAnalyzingGraph.value = true;
+    try {
+        const postInEdges = workspaceGraph.value.edges('[label="post in"]');
+        
+        toastMessage.value = `Filtered ${postInEdges.length} "post in" edges.`;
+        toastType.value = 'success';
+        setTimeout(() => { toastMessage.value = ""; }, 5000);
+
+        let ids: string[] = [];
+        postInEdges.forEach((edge: any) => {
+          const lines = (edge.data('facts') || '').split('\n');
+          let oldIdsStr = '';
+
+          for (const line of lines) {
+            if (line.startsWith('post id:')) oldIdsStr = line.replace('post id:', '').trim();
+          }
+          if (oldIdsStr) {
+            ids.push(...oldIdsStr.split(', '))
+          }
+        });
+        console.log(ids)
+        // Transform keys into { ns, key } objects by splitting at the first dot
+        const mgetPayload = ids.map((fullKey: string) => {
+          return {
+            ns: 'telegram-post',
+            key: fullKey,
+          };
+        });
+
+        // Fetch full post data
+        const mgetResponse = await fetch("https://i.gogingko.net/api/v1/mget/_", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(mgetPayload),
+        });
+
+        if (!mgetResponse.ok) {
+          throw new Error(
+            `Failed to fetch post details: ${mgetResponse.statusText}`
+          );
+        }
+
+        const postsData = await mgetResponse.json();
+        const results = Array.isArray(postsData) ? postsData : postsData.data || [];
+
+        const strippedPosts = results
+         .map((p: any) => ({
+           key: p.key,
+           content: p.data?.content,
+           date: p.data?.date,
+           author: p.data?.author || p.data?.user,
+           reply: p.data?.reply,
+           forward_from: p.data?.forward_from,
+         }))
+         .filter((p: any) => p.content || p.reply);
+
+        const response = await fetch("https://ask.gingkogo.uk/", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sender: "mc",
+            chat_id: "mc",
+            text:
+              "Please analyze the following posts that MIGHT from one user. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state. Output the findings for each grouped account or user in Chinese, for any confirmed evidence please attach with the post id.\n\n" +
+              JSON.stringify(strippedPosts),
+          }),
+        });
+
+        if (!response.ok) throw new Error("Analysis request failed");
+        const data = await response.json();
+        analysisResult.value = data.reply;
+    } catch (error) {
+        toastMessage.value = "Analysis failed.";
+        toastType.value = "error";
+        console.error(error);
+    } finally {
+        isAnalyzingGraph.value = false;
+    }
+};
+
 const fetchNodeMetadata = async (nodeId: string) => {
     try {
         const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${nodeId}`);
@@ -656,6 +758,57 @@ const fetchNodeMetadata = async (nodeId: string) => {
         saveChanges();
         
         toastMessage.value = 'Metadata fetched!';
+        toastType.value = 'success';
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+    } catch (e) {
+        toastMessage.value = 'Fetch failed.';
+        toastType.value = 'error';
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+    }
+};
+
+const fetchChannelDates = async (nodeId: string) => {
+    try {
+        let response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=100`);
+        if (!response.ok) throw new Error('Failed to fetch');
+        let data = await response.json();
+        
+        // Assuming posts are returned in data.posts
+        let posts = data || [];
+        if (posts.length === 0) {
+           toastMessage.value = 'No posts found in channel.';
+           toastType.value = 'error';
+           setTimeout(() => { toastMessage.value = ""; }, 3000);
+           return;
+        }
+        
+        let dates = posts.map((p: any) => new Date(p.date || p.data?.date).getTime());
+        let min = new Date(Math.min(...dates)).toISOString();
+        const max = new Date(Math.max(...dates)).toISOString();
+
+        response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=100&b=100`);
+        if (!response.ok) throw new Error('Failed to fetch');
+        data = await response.json();
+        
+        // Assuming posts are returned in data.posts
+        posts = data || [];
+        if (posts.length != 0) {
+          dates = posts.map((p: any) => new Date(p.date || p.data?.date).getTime());
+          min = new Date(Math.min(...dates)).toISOString();
+        }
+        
+        // Update facts
+        let factsStr = editingEdgeData.value.facts || '';
+        const dateLine = `post date: ${min} to ${max}`;
+        
+        const lines = factsStr.split('\n');
+        const newLines = lines.filter((l: string) => !l.startsWith('post date:'));
+        newLines.push(dateLine);
+        
+        editingEdgeData.value.facts = newLines.join('\n');
+        saveChanges();
+        
+        toastMessage.value = 'Dates detected!';
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 3000);
     } catch (e) {
@@ -1434,6 +1587,7 @@ const posts = ref<any[]>([]);
 const viewMode = ref<"list" | "masonry" | "timeline">("list");
 const isPostModalVisible = ref(false);
 const selectedPost = ref<any>(null);
+const selectedUsernamesExplorer = ref<string[]>([]);
 
 const openPostModal = (post: any) => {
   selectedPost.value = post;
@@ -1619,6 +1773,20 @@ const allChannels = computed(() => {
   return Array.from(channels).sort();
 });
 
+const allUsernamesExplorer = computed(() => {
+  const users = new Set<string>();
+  posts.value.forEach((p) => {
+    const rawUser = p.data?.user;
+    if (rawUser) {
+      const parts = rawUser.split("/");
+      users.add(parts[parts.length - 1]);
+    } else if (p.data?.uid !== undefined) {
+      users.add(p.data?.uid)
+    }
+  });
+  return Array.from(users).sort();
+});
+
 const allUsernames = computed(() => {
   const users = new Set<string>();
   searchResults.value.forEach((p) => {
@@ -1661,6 +1829,15 @@ const filteredSearchResults = computed(() => {
 
   return result;
 });
+
+const toggleUsernameExplorer = (username: string) => {
+  const index = selectedUsernamesExplorer.value.indexOf(username);
+  if (index > -1) {
+    selectedUsernamesExplorer.value.splice(index, 1);
+  } else {
+    selectedUsernamesExplorer.value.push(username);
+  }
+};
 
 const toggleUsername = (username: string) => {
   const index = selectedUsernames.value.indexOf(username);
@@ -1990,6 +2167,8 @@ const searchChannel = async () => {
 
     if (postsRes.ok) {
       const postsData = await postsRes.json();
+      // need to reset the selectedUsernamesExplorer
+      selectedUsernamesExplorer.value = []
       posts.value = Array.isArray(postsData)
         ? postsData
         : postsData.data || postsData.posts || postsData.items || [];
@@ -2344,7 +2523,34 @@ const timelineData = computed(() => {
                         source: edge.source().id(),
                         start: start.getTime(),
                         end: end.getTime(),
-                        color: `bg-${getColorFromSeed(edge.id())}-700`
+                        color: `bg-${getColorFromSeed(edge.source().id())}-700`
+                    });
+                }
+            }
+        } else if (edge.data('label') === 'channel') {
+          const facts = edge.data('facts') || '';
+            const postDateLine = facts.split('\n').find((l: string) => l.startsWith('post date:'));
+            
+            if (postDateLine) {
+                const dateStr = postDateLine.replace('post date:', '').trim();
+                let start, end;
+                
+                if (dateStr.includes(' to ')) {
+                    const [s, e] = dateStr.split(' to ');
+                    start = new Date(s);
+                    end = new Date(e);
+                } else {
+                    start = new Date(dateStr);
+                    end = start;
+                }
+                
+                if (!isNaN(start.getTime()) && !isNaN(end.getTime())) {
+                    result.push({
+                        id: edge.id(),
+                        source: edge.target().id(),
+                        start: start.getTime(),
+                        end: end.getTime(),
+                        color: `bg-${getColorFromSeed(edge.target().id())}-700`
                     });
                 }
             }
@@ -2442,6 +2648,21 @@ const focusNode = (nodeId: string) => {
         });
         selectedNode.value = node;
         activeTab.value = 'workspace';
+
+        // Highlight logic
+        node.style({
+            'border-width': '4px',
+            'border-color': '#EAB308', // Tailwind yellow-500
+            'border-style': 'solid'
+        });
+        
+        // After 5 seconds, remove the style overrides
+        setTimeout(() => {
+            if (!node || node.removed()) return; // node might be deleted in the meantime
+            node.removeStyle('border-width');
+            node.removeStyle('border-color');
+            node.removeStyle('border-style');
+        }, 5000);
     }
 };
 
@@ -2688,49 +2909,49 @@ const timelineTicks = computed(() => {
       <!-- Explorer Tab -->
       <div v-show="activeTab === 'explorer'">
         <div class="max-w-2xl mx-auto mb-16 px-4 sm:px-0">
-          <form @submit.prevent="searchChannel" class="relative group">
-            <div
-              class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-blue-500 z-10"
-            >
-              <Layout class="h-5 w-5 text-gray-400" />
-            </div>
-            <input
-              v-model="channelName"
-              type="text"
-              class="block w-full pl-14 pr-[120px] py-3.5 border border-gray-200 dark:border-gray-700 rounded-xl leading-5 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-sm font-medium shadow-sm hover:shadow-md focus:shadow-xl transition-all duration-300"
-              placeholder="Enter channel name (e.g. durov)"
-            />
-            <button
-              type="submit"
-              :disabled="loading || !channelName.trim()"
-              class="absolute right-2 top-2 bottom-2 px-5 bg-blue-600 text-white rounded-[0.65rem] text-xs font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
-            >
-              <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
-              {{ loading ? "Exploring..." : "Explore" }}
-            </button>
-          </form>
+              <form @submit.prevent="searchChannel" class="relative group">
+                <div
+                  class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-blue-500 z-10"
+                >
+                  <Layout class="h-5 w-5 text-gray-400" />
+                </div>
+                <input
+                  v-model="channelName"
+                  type="text"
+                  class="block w-full pl-14 pr-[120px] py-3.5 border border-gray-200 dark:border-gray-700 rounded-xl leading-5 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-sm font-medium shadow-sm hover:shadow-md focus:shadow-xl transition-all duration-300"
+                  placeholder="Enter channel name (e.g. durov)"
+                />
+                <button
+                  type="submit"
+                  :disabled="loading || !channelName.trim()"
+                  class="absolute right-2 top-2 bottom-2 px-5 bg-blue-600 text-white rounded-[0.65rem] text-xs font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
+                >
+                  <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
+                  {{ loading ? "Exploring..." : "Explore" }}
+                </button>
+              </form>
 
-          <div v-if="suggestedChannels.length > 0" class="mt-4">
-            <h4
-              class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3"
-            >
-              Did you mean:
-            </h4>
-            <div class="flex flex-wrap gap-2">
-              <button
-                v-for="channel in suggestedChannels"
-                :key="channel"
-                @click="
-                  channelName = channel;
-                  searchChannel();
-                "
-                class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-800 rounded-full hover:bg-blue-100 dark:hover:bg-blue-900 border border-gray-200 dark:border-gray-700 transition"
-              >
-                {{ channel }}
-              </button>
-            </div>
+              <div v-if="suggestedChannels.length > 0" class="mt-4">
+                <h4
+                  class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3"
+                >
+                  Did you mean:
+                </h4>
+                <div class="flex flex-wrap gap-2">
+                  <button
+                    v-for="channel in suggestedChannels"
+                    :key="channel"
+                    @click="
+                      channelName = channel;
+                      searchChannel();
+                    "
+                    class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-800 rounded-full hover:bg-blue-100 dark:hover:bg-blue-900 border border-gray-200 dark:border-gray-700 transition"
+                  >
+                    {{ channel }}
+                  </button>
+                </div>
+              </div>
           </div>
-        </div>
 
         <div
           v-if="error"
@@ -2921,6 +3142,38 @@ const timelineTicks = computed(() => {
                       <X class="h-3.5 w-3.5 text-gray-400 hover:text-red-500" />
                     </button>
                   </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Usernames Widget -->
+            <div
+              class="space-y-4 h-fit flex-shrink-0"
+            >
+              <div
+                class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm"
+              >
+                <h3
+                  class="text-xs font-black text-gray-400 uppercase tracking-wider mb-4"
+                >
+                  Usernames
+                </h3>
+                <div
+                  class="max-h-[calc(100vh-15rem)] overflow-y-auto space-y-1 pr-2 custom-scrollbar"
+                >
+                  <button
+                    v-for="username in allUsernamesExplorer"
+                    :key="username"
+                    @click="toggleUsernameExplorer(username)"
+                    :class="[
+                      'w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all',
+                      selectedUsernamesExplorer.includes(username)
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
+                    ]"
+                  >
+                    {{ username }}
+                  </button>
                 </div>
               </div>
             </div>
@@ -4876,8 +5129,8 @@ const timelineTicks = computed(() => {
       </div>
 
       <!-- Workspace Tab -->
-      <div v-show="activeTab === 'workspace'" class="w-full relative py-6 flex flex-col h-[1200px]">
-        <div class="flex-1 w-full bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 flex flex-col relative overflow-hidden shadow-sm">
+      <div v-show="activeTab === 'workspace'" class="w-full relative py-6 flex flex-col h-full overflow-y-auto">
+        <div class="h-[960px] w-full flex-none bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 flex flex-col relative overflow-hidden shadow-sm">
           <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm z-10">
             <h2 class="text-lg font-bold text-gray-900 dark:text-white flex items-center">
               <Layers class="w-4 h-4 mr-2 text-purple-500" />
@@ -4892,6 +5145,9 @@ const timelineTicks = computed(() => {
               <button @click="loadGraph" class="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-sm hover:bg-gray-300 dark:hover:bg-gray-600">Load</button>
               <button @click="reLayoutGraph" class="px-3 py-1.5 bg-purple-600 text-white rounded text-sm hover:bg-purple-700">Re-layout</button>
               <button @click="shareGraph" class="px-3 py-1.5 bg-green-600 text-white rounded text-sm hover:bg-green-700">Share</button>
+              <button @click="analyzeGraph" :disabled="isAnalyzingGraph" class="px-3 py-1.5 bg-yellow-600 text-white rounded text-sm hover:bg-yellow-700 disabled:opacity-50">
+                {{ isAnalyzingGraph ? 'Analyzing...' : 'Analysis' }}
+              </button>
             </div>
           </div>
           <div class="flex-1 relative flex flex-col h-full z-0 overflow-hidden">
@@ -4905,7 +5161,7 @@ const timelineTicks = computed(() => {
                  <hr class="my-1 border-gray-200 dark:border-gray-700" />
                  <button @click="contextMenu.visible = false" class="block w-full text-left px-3 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-sm text-gray-500">Close</button>
              </div>
-             <div id="workspace-canvas" class="w-full flex-1 bg-[#f8fafc] dark:bg-[#0f172a] relative z-0">
+             <div id="workspace-canvas" class="w-full h-[900px] flex-none bg-[#f8fafc] dark:bg-[#0f172a] relative z-0">
              </div>
              
              <!-- TIMELINE REMOVED FROM HERE -->
@@ -4917,8 +5173,8 @@ const timelineTicks = computed(() => {
             <!-- Node Viewer -->
             <div v-if="selectedNode" class="bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-100 dark:border-gray-800 space-y-2">
               <div class="flex justify-between items-center">
-                  <div>
-                      <p class="text-xs font-bold text-gray-900 dark:text-white truncate">{{ editingNodeData.label }}</p>
+                  <div class="max-w-[70%]">
+                      <p class="text-xs font-bold text-gray-900 dark:text-white break-words">{{ editingNodeData.label }}</p>
                       <p class="text-[9px] text-gray-400 font-mono">{{ editingNodeData.id }}</p>
                   </div>
                   <div class="flex flex-col items-end gap-0.5">
@@ -4957,17 +5213,18 @@ const timelineTicks = computed(() => {
             </div>
 
             <!-- Edge Viewer -->
-            <div v-else-if="selectedEdge" class="bg-gray-50 dark:bg-gray-900 rounded-xl p-3 border border-gray-100 dark:border-gray-800 space-y-2">
-                <p class="text-sm font-bold text-gray-900 dark:text-white">Edge {{editingEdgeData.id}}</p>
-                <label class="block text-xs font-semibold text-gray-500">Source Node</label>
-                <input v-model="editingEdgeData.source" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-2 text-sm text-gray-900 dark:text-white" />
-                <label class="block text-xs font-semibold text-gray-500">Target Node</label>
-                <input v-model="editingEdgeData.target" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-2 text-sm text-gray-900 dark:text-white" />
-                <label class="block text-xs font-semibold text-gray-500">Label</label>
-                <input v-model="editingEdgeData.label" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-2 text-sm text-gray-900 dark:text-white" />
-                <label class="block text-xs font-semibold text-gray-500">Facts</label>
-                <textarea v-model="editingEdgeData.facts" @input="saveChanges" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-2 text-sm h-24 text-gray-900 dark:text-white" />
-                <p class="text-xs text-gray-400">Created: {{editingEdgeData.createdAt}}</p>
+            <div v-else-if="selectedEdge" class="bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-100 dark:border-gray-800 space-y-1">
+                <div class="flex justify-between items-center">
+                    <p class="text-[10px] font-bold text-gray-900 dark:text-white">Edge {{editingEdgeData.id}}</p>
+                    <button v-if="editingEdgeData.label === 'channel'" @click="fetchChannelDates(editingEdgeData.target)" class="text-[9px] bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 px-1.5 rounded-full font-bold hover:bg-green-200">Fetch</button>
+                </div>
+                <div class="grid grid-cols-2 gap-1">
+                    <input v-model="editingEdgeData.source" @input="saveChanges" placeholder="Source" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
+                    <input v-model="editingEdgeData.target" @input="saveChanges" placeholder="Target" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
+                </div>
+                <input v-model="editingEdgeData.label" @input="saveChanges" placeholder="Label" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
+                <textarea v-model="editingEdgeData.facts" @input="saveChanges" placeholder="Facts" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px] h-12" />
+                <p class="text-[9px] text-gray-400">Created: {{editingEdgeData.createdAt}}</p>
             </div>
             
             <div v-else class="bg-gray-50 dark:bg-gray-900 rounded-xl p-3 border border-gray-100 dark:border-gray-800">
@@ -5030,6 +5287,12 @@ const timelineTicks = computed(() => {
                <span class="font-bold border-r border-gray-500 pr-2 mr-2">{{ hoveredItem.source }}</span>
                <span>{{ new Date(hoveredItem.start).toLocaleString() }} - {{ new Date(hoveredItem.end).toLocaleString() }}</span>
            </div>
+        </div>
+        
+        <!-- Analysis Result Section -->
+        <div v-if="analysisResult" class="mt-4 p-4 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700">
+           <h3 class="text-xs font-black uppercase tracking-widest text-gray-500 dark:text-gray-400 mb-2">Analysis Result</h3>
+           <div class="prose dark:prose-invert text-sm text-gray-800 dark:text-gray-200" v-html="renderedMarkdown"></div>
         </div>
       </div>
 
