@@ -1579,7 +1579,11 @@ const isProfileVisible = ref(true);
 
 // Explorer State
 const channelName = ref("");
+const isInputFocused = ref(false);
 const currentChannelName = ref("");
+const forwardsChannels = ref<string[]>([]);
+const userProfile = ref<any>(null);
+const loadingUserProfile = ref(false);
 const loading = ref(false);
 const error = ref("");
 const metadata = ref<any>(null);
@@ -1837,6 +1841,12 @@ const toggleUsernameExplorer = (username: string) => {
   } else {
     selectedUsernamesExplorer.value.push(username);
   }
+};
+
+const handleBlur = () => {
+  setTimeout(() => {
+    isInputFocused.value = false;
+  }, 200);
 };
 
 const toggleUsername = (username: string) => {
@@ -2118,20 +2128,67 @@ const highlightText = (text: any) => {
 
 const suggestedChannels = ref<string[]>([]);
 
+const fetchUserProfile = async (name: string) => {
+  loadingUserProfile.value = true;
+  userProfile.value = null;
+  try {
+    const [userRes, avatarRes] = await Promise.all([
+      fetch(`https://i.gogingko.net/api/v1/v/telegram-user/${name}`),
+      fetch(`https://i.gogingko.net/api/v1/v/telegram-profile/${name}`)
+    ]);
+
+    if (userRes.ok) {
+      const userData = await userRes.json();
+      if (userData._tool) {
+        userProfile.value = {
+            username: userData.username,
+            id: userData.id,
+            about: userData.about,
+            firstName: userData.first_name,
+            lastName: userData.last_name,
+            phone: userData.phone,
+            status: userData.status,
+            lang: userData.lang,
+            verified: userData.verified
+        };
+      } else {
+        userProfile.value = {
+            username: userData.username,
+            title: userData.title
+        };
+      }
+    }
+    if (avatarRes.ok) {
+        userProfile.value = { ...userProfile.value, avatarUrl: avatarRes.url };
+    }
+  } catch (e) {
+    console.error("Failed to fetch user profile", e);
+  } finally {
+    loadingUserProfile.value = false;
+  }
+};
+
 const searchChannel = async () => {
   if (!channelName.value.trim()) return;
 
+  isInputFocused.value = false;
   loading.value = true;
   error.value = "";
   metadata.value = null;
   posts.value = [];
+  forwardsChannels.value = [];
   hasMorePosts.value = true;
   suggestedChannels.value = [];
-
+  
   const name = channelName.value.trim().replace(/^@/, "");
   currentChannelName.value = name;
-
   addToLastVisited(name);
+
+  if (searchMode.value === 'user') {
+      await fetchUserProfile(name);
+      loading.value = false;
+      return;
+  }
 
   try {
     const metaRes = await fetch(
@@ -2160,6 +2217,16 @@ const searchChannel = async () => {
 
     const metaData = await metaRes.json();
     metadata.value = metaData;
+
+    try {
+      const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${name}`);
+      if (profileRes.ok) {
+        const profileData = await profileRes.json();
+        forwardsChannels.value = profileData.forwards || [];
+      }
+    } catch (e) {
+      console.error("Failed to fetch forwards", e);
+    }
 
     const postsRes = await fetch(
       `https://i.gogingko.net/api/v1/last/${name}?n=25`
@@ -2735,7 +2802,7 @@ const timelineTicks = computed(() => {
   <div
     class="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200"
   >
-    <div class="max-w-[96rem] mx-auto p-4 sm:p-6 lg:p-8 xl:p-10">
+    <div class="max-w-[98%] mx-auto p-4 sm:p-6 lg:p-8 xl:p-10">
       <!-- Analysis Button -->
       <button
         v-if="
@@ -2908,7 +2975,7 @@ const timelineTicks = computed(() => {
 
       <!-- Explorer Tab -->
       <div v-show="activeTab === 'explorer'">
-        <div class="max-w-2xl mx-auto mb-16 px-4 sm:px-0">
+        <div class="max-w-[95%] mx-auto mb-16 px-4 sm:px-0">
               <form @submit.prevent="searchChannel" class="relative group">
                 <div
                   class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-blue-500 z-10"
@@ -2917,6 +2984,8 @@ const timelineTicks = computed(() => {
                 </div>
                 <input
                   v-model="channelName"
+                  @focus="isInputFocused = true"
+                  @blur="handleBlur"
                   type="text"
                   class="block w-full pl-14 pr-[120px] py-3.5 border border-gray-200 dark:border-gray-700 rounded-xl leading-5 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-sm font-medium shadow-sm hover:shadow-md focus:shadow-xl transition-all duration-300"
                   placeholder="Enter channel name (e.g. durov)"
@@ -2924,11 +2993,47 @@ const timelineTicks = computed(() => {
                 <button
                   type="submit"
                   :disabled="loading || !channelName.trim()"
+                  @mousedown.prevent
                   class="absolute right-2 top-2 bottom-2 px-5 bg-blue-600 text-white rounded-[0.65rem] text-xs font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
                 >
                   <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
                   {{ loading ? "Exploring..." : "Explore" }}
                 </button>
+                
+                <!-- Autocomplete Dropdown -->
+                <div
+                  v-if="isInputFocused && lastVisitedChannels.length > 0"
+                  class="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden"
+                >
+                   <div class="px-4 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
+                     Last Visited
+                   </div>
+                   <div class="max-h-60 overflow-y-auto">
+                     <button
+                       v-for="channel in lastVisitedChannels"
+                       :key="channel.name"
+                       class="flex items-center justify-between w-full text-left px-4 py-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 text-sm text-gray-700 dark:text-gray-200 transition-colors"
+                     >
+                       <span
+                         @click.prevent="
+                           channelName = channel.name;
+                           isInputFocused = false;
+                           searchChannel();
+                         "
+                         class="flex-1"
+                       >
+                         {{ channel.name }}
+                       </span>
+                       <button
+                         @click.stop.prevent="removeVisitedChannel(channel.name)"
+                         class="ml-2 text-gray-400 hover:text-red-500"
+                         title="Remove"
+                       >
+                         <X class="h-3 w-3" />
+                       </button>
+                     </button>
+                   </div>
+                </div>
               </form>
 
               <div v-if="suggestedChannels.length > 0" class="mt-4">
@@ -3093,58 +3198,6 @@ const timelineTicks = computed(() => {
               >
             </details>
 
-            <!-- Last Visited Channels Widget -->
-            <div
-              v-show="isProfileVisible && lastVisitedChannels.length > 0"
-              class="mt-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-8"
-            >
-              <div class="flex items-center justify-between mb-6">
-                <h3
-                  class="text-xs font-black text-gray-400 uppercase tracking-widest"
-                >
-                  Last Visited
-                </h3>
-                <button
-                  @click="clearAllChannels"
-                  class="text-[10px] font-bold text-gray-500 hover:text-red-500 dark:text-gray-400 dark:hover:text-red-400 uppercase tracking-widest"
-                >
-                  Clear
-                </button>
-              </div>
-              <div class="space-y-3">
-                <div
-                  v-for="channel in lastVisitedChannels"
-                  :key="channel.name"
-                  class="flex items-center justify-between group py-1"
-                >
-                  <button
-                    @click="
-                      channelName = channel.name;
-                      searchChannel();
-                    "
-                    class="text-sm text-gray-600 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 truncate flex-1 text-left"
-                  >
-                    {{ channel.name }}
-                  </button>
-                  <div
-                    class="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity"
-                  >
-                    <button @click="togglePin(channel.name)">
-                      <Pin
-                        :class="{
-                          'text-blue-500 fill-blue-500': channel.isPinned,
-                          'text-gray-400': !channel.isPinned,
-                        }"
-                        class="h-3.5 w-3.5"
-                      />
-                    </button>
-                    <button @click="removeVisitedChannel(channel.name)">
-                      <X class="h-3.5 w-3.5 text-gray-400 hover:text-red-500" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
 
             <!-- Usernames Widget -->
             <div
@@ -3178,10 +3231,37 @@ const timelineTicks = computed(() => {
               </div>
             </div>
 
+            <!-- Forwards From Widget -->
+            <div
+              v-show="isProfileVisible && forwardsChannels.length > 0"
+              class="mt-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-8"
+            >
+              <div class="flex items-center justify-between mb-6 relative">
+                <h3
+                  class="text-xs font-black text-gray-400 uppercase tracking-widest"
+                >
+                  Forwards From
+                </h3>
+              </div>
+              <div class="space-y-2 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+                <button
+                  v-for="channelNameForward in forwardsChannels"
+                  :key="channelNameForward"
+                  @click="
+                    channelName = channelNameForward;
+                    searchChannel();
+                  "
+                  class="w-full text-left p-2.5 rounded-lg text-xs font-medium bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-200 hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors"
+                >
+                  {{ channelNameForward }}
+                </button>
+              </div>
+            </div>
+
             <!-- X Similar Users Widget -->
             <div
               v-show="isProfileVisible"
-              class="mt-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-8 sticky top-20 relative"
+              class="mt-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-8 sticky top-20"
             >
               <div class="flex items-center justify-between mb-6 relative">
                 <div class="flex items-center gap-2">
@@ -4422,10 +4502,26 @@ const timelineTicks = computed(() => {
               v-if="filteredSearchResults.length > 0"
               class="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-start px-4 sm:px-0"
             >
-          <!-- Usernames Widget -->
+
           <div
             class="lg:col-span-4 xl:col-span-3 space-y-4 h-fit sticky top-20 flex-shrink-0"
           >
+            <!-- User Profile Widget -->
+            <div
+              v-if="userProfile || loadingUserProfile"
+              class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm"
+            >
+                <h3 class="text-xs font-black text-gray-400 uppercase tracking-wider mb-4">User Profile</h3>
+                <div v-if="loadingUserProfile" class="text-sm text-gray-500">Loading...</div>
+                <div v-else-if="userProfile" class="text-sm text-gray-700 dark:text-gray-200">
+                    <img v-if="userProfile.avatarUrl" :src="userProfile.avatarUrl" alt="Avatar" class="w-16 h-16 rounded-full mb-3" />
+                    <p class="font-bold">{{ userProfile.username }}</p>
+                    <p>{{ userProfile.firstName }} {{ userProfile.lastName }}</p>
+                    <p v-if="userProfile.about" class="text-xs mt-1 text-gray-500">{{ userProfile.about }}</p>
+                </div>
+            </div>
+
+            <!-- Usernames Widget -->
             <div
               class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm"
             >
@@ -5134,7 +5230,7 @@ const timelineTicks = computed(() => {
           <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm z-10">
             <h2 class="text-lg font-bold text-gray-900 dark:text-white flex items-center">
               <Layers class="w-4 h-4 mr-2 text-purple-500" />
-              Workspace Graph
+              Graph
             </h2>
             <div class="flex gap-2">
               <div class="relative">
