@@ -48,6 +48,30 @@ import MarkdownIt from "markdown-it";
 import markdownItMark from "markdown-it-mark";
 const md = new MarkdownIt({ html: true }).use(markdownItMark);
 
+// Login State Logic
+const showLoginModal = ref(false);
+const loginName = ref("");
+const loginToken = ref("");
+
+const saveLogin = () => {
+  localStorage.setItem("user-login-name", loginName.value);
+  localStorage.setItem("user-login-token", loginToken.value);
+  showLoginModal.value = false;
+  toastMessage.value = "Access Token info saved!";
+  toastType.value = "success";
+  setTimeout(() => { toastMessage.value = ""; }, 3000);
+};
+
+const loadLogin = () => {
+  loginName.value = localStorage.getItem("user-login-name") || "";
+  loginToken.value = localStorage.getItem("user-login-token") || "";
+  if (loginToken.value) {
+    toastMessage.value = "Access Token info retrieved ok!";
+    toastType.value = "success";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  }
+}
+
 const isAddingAll = ref(false);
 const addAllToWorkspace = async () => {
     if (isAddingAll.value || filteredSearchResults.value.length === 0) return;
@@ -246,7 +270,7 @@ const analyzePosts = async () => {
         sender: "mc",
         chat_id: "mc",
         text:
-          "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state. Output the findings in Chinese.\n\n" +
+          "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state. Output the findings in Chinese, , for any confirmed evidence please attach with the post id.\n\n" +
           JSON.stringify(strippedPosts),
       }),
     });
@@ -457,7 +481,7 @@ const runAutoFinding = async () => {
               sender: "mc",
               chat_id: "mc",
               text:
-                "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in life, for example living city or country, post date that reflect the active hours, job postion, career, location, language, education, interests, favorite things, troubles, cognitive state, social relations, or any rules you found. Output the findings in Chinese with post id range hint in proper place.\n " +
+                "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state, social relations, or any rules you found. Output the findings in Chinese with post id range hint in proper place.\n " +
                 JSON.stringify(strippedPosts),
             }),
           });
@@ -565,7 +589,7 @@ import {
 
 const isDark = ref(false);
 const showBackToTop = ref(false);
-const activeTab = ref<"explorer" | "search" | "auto-finding" | "workspace">("explorer");
+const activeTab = ref<"explorer" | "search" | "auto-finding" | "workspace" | "profile">("explorer");
 
 // Workspace State & Logic
 const workspaceGraph = ref<any>(null);
@@ -726,6 +750,14 @@ const analyzeGraph = async () => {
         if (!response.ok) throw new Error("Analysis request failed");
         const data = await response.json();
         analysisResult.value = data.reply;
+        // save the analysis result to localStorage
+        const personNodes = workspaceGraph.value.nodes('[type="person"]');
+        if (personNodes.length === 1) {
+          localStorage.setItem(`profile-person-${personNodes[0].data('label')}`, JSON.stringify(data));
+          if (loginToken.value) {
+            await saveProfileRemotely(`profile-person-${personNodes[0].data('label')}`, loginToken.value, JSON.stringify(data));
+          }
+        }
     } catch (error) {
         toastMessage.value = "Analysis failed.";
         toastType.value = "error";
@@ -1077,7 +1109,7 @@ const initGraph = () => {
           style: {
             'background-color': '#ec4899', // Pink-500
             'label': 'data(label)',
-            'color': '#1e293b',
+            'color': isDark.value ? '#f8fafc' : '#1e293b',
             'shape': 'ellipse',
             'width': 30,
             'height': 30,
@@ -1089,7 +1121,7 @@ const initGraph = () => {
           style: {
             'background-color': '#10b981', // Emerald-500
             'label': 'data(label)',
-            'color': '#1e293b',
+            'color': isDark.value ? '#f8fafc' : '#1e293b',
             'shape': 'round-rectangle',
             'width': 30,
             'height': 30,
@@ -1101,7 +1133,7 @@ const initGraph = () => {
           style: {
             'background-color': '#f59e0b', // Amber-500
             'label': 'data(label)',
-            'color': '#1e293b',
+            'color': isDark.value ? '#f8fafc' : '#1e293b',
             'shape': 'diamond',
             'width': 30,
             'height': 30,
@@ -1117,11 +1149,12 @@ const initGraph = () => {
             'target-arrow-shape': 'triangle',
             'curve-style': 'bezier',
             'label': 'data(label)',
+            'color': isDark.value ? '#f8fafc' : '#1e293b',
             'font-size': '10px',
-            'text-background-color': '#ffffff',
+            'text-background-color': isDark.value ? '#1e293b' : '#ffffff',
             'text-background-opacity': 0.8,
             'text-background-padding': '2px',
-            'text-border-color': '#e2e8f0',
+            'text-border-color': isDark.value ? '#334155' : '#e2e8f0',
             'text-border-width': 1,
             'text-border-opacity': 1,
             'text-wrap': 'wrap',
@@ -1141,6 +1174,19 @@ const initGraph = () => {
             workspaceGraph.value.center();
           }
         }
+      }
+    });
+
+    watch(isDark, (newDark) => {
+      if (workspaceGraph.value) {
+        workspaceGraph.value.style()
+          .selector('node')
+            .style('color', newDark ? '#f8fafc' : '#1e293b')
+          .selector('edge')
+            .style('color', newDark ? '#f8fafc' : '#1e293b')
+            .style('text-background-color', newDark ? '#1e293b' : '#ffffff')
+            .style('text-border-color', newDark ? '#334155' : '#e2e8f0')
+          .update();
       }
     });
 
@@ -1348,12 +1394,20 @@ const generateFinalTable = async () => {
         sender: "mc",
         chat_id: "mc",
         text:
-          "Generate a table from the following results of iterations with columns while each row stand for a active user in the results and each column stand for different evidence type. Make sure to contains all the appeared users. Here is the context input: " +
+          "Generate a table from the following results of iterations with columns while each row stand for a active user in the results and each column stand for different evidence type. Make sure to contains all the appeared users and keep the post id ranges. Here is the context input: \n" +
           context,
       }),
     });
     const data = await response.json();
     finalTableHtml.value = md.render(data.reply);
+    // save the results to localStorage
+    localStorage.setItem(
+      `profile-${searchMode.value}-${autoChannelName.value.trim().replace(/^@/, "")}`,
+      JSON.stringify(data)
+    );
+    if (loginToken.value) {
+        await saveProfileRemotely(`profile-${searchMode.value}-${autoChannelName.value.trim().replace(/^@/, "")}`, loginToken.value, JSON.stringify(data));
+    }
   } catch (err) {
     console.error(err);
     finalTableHtml.value =
@@ -1556,6 +1610,13 @@ watch(activeTab, (newTab) => {
   } else {
     if (pollingTimer) clearInterval(pollingTimer);
   }
+
+  if (newTab === 'search' || newTab === 'auto-finding' || newTab === 'workspace' || newTab === 'profile') {
+    loadSavedProfiles();
+  }
+  if (newTab === 'profile') {
+    fetchRemoteProfiles();
+  }
 });
 
 onMounted(() => {
@@ -1567,6 +1628,8 @@ onMounted(() => {
   if (activeTab.value === 'explorer') {
     pollingTimer = setInterval(pollLatestPosts, 30000);
   }
+  loadSavedProfiles();
+  loadLogin();
 });
 
 onUnmounted(() => {
@@ -1584,6 +1647,9 @@ const currentChannelName = ref("");
 const forwardsChannels = ref<string[]>([]);
 const userProfile = ref<any>(null);
 const loadingUserProfile = ref(false);
+const savedProfiles = ref<{channel: string[], user: string[], person: string[]}>({ channel: [], user: [], person: [] });
+const savedFinalTableHtml = ref("")
+const savedPersonProfileHtml = ref("")
 const loading = ref(false);
 const error = ref("");
 const metadata = ref<any>(null);
@@ -2167,6 +2233,108 @@ const fetchUserProfile = async (name: string) => {
     loadingUserProfile.value = false;
   }
 };
+
+const saveProfileRemotely = async (profileName: string, gosToken: string, dataContent: any) => {
+  try {
+    const response = await fetch(`https://i.gogingko.net/api/v1/p/profiles/${profileName}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-gos-token': gosToken,
+      },
+      body: JSON.stringify(dataContent),
+    });
+    
+    if (!response.ok) {
+        throw new Error(`Failed to save profile remotely: ${response.statusText}`);
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error("Error saving profile remotely:", error);
+    throw error;
+  }
+};
+
+const remoteProfiles = ref<string[]>([]);
+const selectedRemoteProfileContent = ref("");
+const loadingRemoteProfiles = ref(false);
+
+const fetchRemoteProfiles = async () => {
+  if (!loginToken.value) return;
+  
+  loadingRemoteProfiles.value = true;
+  try {
+    const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=profile-`, {
+      method: 'GET',
+      headers: {
+        'x-gos-token': loginToken.value,
+      },
+    });
+    
+    if (!response.ok) {
+        throw new Error(`Failed to fetch profiles remotely: ${response.statusText}`);
+    }
+    const res = await response.json()
+    if (res.state == 0) {
+      remoteProfiles.value = res.keys.map(item => decodeURIComponent(item));
+    }
+  } catch (error) {
+    console.error("Error fetching remote profiles:", error);
+  } finally {
+    loadingRemoteProfiles.value = false;
+  }
+};
+
+const viewRemoteProfile = async (profileName: string) => {
+    loadingRemoteProfiles.value = true;
+    try {
+        const response = await fetch(`https://i.gogingko.net/api/v1/v/profiles/${profileName}`, {
+            method: 'GET',
+        });
+        if (!response.ok) throw new Error("Failed to load profile");
+        const data = JSON.parse(await response.json());
+        // Assuming data structure: { reply: "markdown content" }
+        selectedRemoteProfileContent.value = md.render(data.reply);
+    } catch(e) {
+        console.error(e);
+        toastMessage.value = "Failed to load profile.";
+        toastType.value = "error";
+    } finally {
+        loadingRemoteProfiles.value = false;
+    }
+}
+
+const loadSavedProfiles = () => {
+  const profiles = { channel: [] as string[], user: [] as string[], person: [] as string[] };
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith('profile-')) {
+      const parts = key.split('-');
+      const type = parts[1];
+      const name = parts.slice(2).join('-');
+      if (type === 'channel' || type === 'user' || type === 'person') {
+          profiles[type as 'channel' | 'user' | 'person'].push(name);
+      }
+    }
+  }
+  savedProfiles.value = profiles;
+}
+
+const viewSavedProfile = (type: string, name: string) => {
+    const data = localStorage.getItem(`profile-${type}-${name}`);
+    if (data) {
+        const parsed = JSON.parse(data);
+        if (type == 'person') {
+          savedPersonProfileHtml.value = md.render(parsed.reply);
+          activeTab.value = 'workspace'; // Make sure we are in the right tab or just display it
+        } else {
+          savedFinalTableHtml.value = md.render(parsed.reply);
+          activeTab.value = 'auto-finding'; // Make sure we are in the right tab or just display it
+        }
+        
+    }
+}
 
 const searchChannel = async () => {
   if (!channelName.value.trim()) return;
@@ -2887,7 +3055,14 @@ const timelineTicks = computed(() => {
       <header
         class="sticky top-0 z-50 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-md mb-12 relative flex items-center justify-center border-b border-gray-200 dark:border-gray-800 py-3"
       >
-        <div class="absolute right-4 z-50">
+        <div class="absolute right-4 z-50 flex items-center space-x-2">
+          <button
+            @click="showLoginModal = true"
+            class="h-10 w-10 rounded-full bg-blue-100 dark:bg-blue-900 border border-blue-200 dark:border-blue-800 flex items-center justify-center text-blue-600 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-800 transition shadow-sm"
+            aria-label="Access Tokens"
+          >
+            <User class="h-5 w-5" />
+          </button>
           <button
             @click="toggleDark"
             class="p-2.5 rounded-full bg-white/50 dark:bg-gray-800/50 backdrop-blur-md border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-white dark:hover:bg-gray-800 transition-all shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 hover:shadow-md"
@@ -2896,6 +3071,19 @@ const timelineTicks = computed(() => {
             <Moon v-if="!isDark" class="h-4 w-4" />
             <Sun v-else class="h-4 w-4" />
           </button>
+        </div>
+
+        <!-- Login Modal -->
+        <div v-if="showLoginModal" class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+           <div class="w-full max-w-sm bg-white dark:bg-gray-800 rounded-2xl p-6 shadow-2xl border border-gray-200 dark:border-gray-700">
+               <h2 class="text-lg font-bold mb-4 text-gray-900 dark:text-gray-100">Access Tokens</h2>
+               <input v-model="loginName" placeholder="User Name" class="w-full mb-3 p-2 border border-gray-300 rounded dark:bg-gray-900" />
+               <input v-model="loginToken" type="password" placeholder="Access Token" class="w-full mb-4 p-2 border border-gray-300 rounded dark:bg-gray-900" />
+               <div class="flex justify-end gap-2">
+                   <button @click="showLoginModal = false" class="px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded">Cancel</button>
+                   <button @click="saveLogin" class="px-4 py-2 bg-blue-600 text-white rounded">Save</button>
+               </div>
+           </div>
         </div>
 
         <!-- Glass Tabs -->
@@ -2924,7 +3112,7 @@ const timelineTicks = computed(() => {
             :class="[
               'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
               activeTab === 'search'
-                ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-md shadow-blue-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
+                ? 'bg-white dark:bg-gray-700 text-cyan-600 dark:text-cyan-400 shadow-md shadow-cyan-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
             ]"
           >
@@ -2941,7 +3129,7 @@ const timelineTicks = computed(() => {
             :class="[
               'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
               activeTab === 'auto-finding'
-                ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-md shadow-blue-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
+                ? 'bg-white dark:bg-gray-700 text-green-600 dark:text-green-400 shadow-md shadow-green-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
             ]"
           >
@@ -2969,6 +3157,24 @@ const timelineTicks = computed(() => {
               ]"
             />
             Workspace
+          </button>
+          <button
+            v-show="loginToken"
+            @click="activeTab = 'profile'"
+            :class="[
+              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              activeTab === 'profile'
+                ? 'bg-white dark:bg-gray-700 text-orange-600 dark:text-orange-400 shadow-md shadow-orange-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+            ]"
+          >
+            <Layers
+              :class="[
+                'h-4 w-4 mr-2 transition-transform duration-300',
+                activeTab === 'profile' ? 'scale-110' : '',
+              ]"
+            />
+            Profiles
           </button>
         </div>
       </header>
@@ -5225,8 +5431,36 @@ const timelineTicks = computed(() => {
       </div>
 
       <!-- Workspace Tab -->
-      <div v-show="activeTab === 'workspace'" class="w-full relative py-6 flex flex-col h-full overflow-y-auto">
-        <div class="h-[960px] w-full flex-none bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 flex flex-col relative overflow-hidden shadow-sm">
+      <div v-show="activeTab === 'workspace'" class="w-full relative pt-2 pb-6 flex flex-col h-full overflow-y-auto">
+        <!-- Saved Profiles -->
+          <div v-if="savedProfiles.person.length > 0" class="space-y-2 px-4">
+            <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Persons</h4>
+            <div class="flex flex-wrap gap-2">
+                <button v-for="name in savedProfiles.person" :key="name" @click="viewSavedProfile('person', name)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900">{{ name }}</button>
+            </div>
+          </div>
+          
+          <div
+            v-if="savedPersonProfileHtml"
+            class="w-full max-w-6xl mx-auto my-8 bg-gradient-to-br from-white to-blue-50/50 dark:bg-gray-900 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
+          >
+            <div class="flex items-center gap-2 mb-4">
+              <div
+                class="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center"
+              >
+                <Sparkles class="w-4 h-4 text-white" />
+              </div>
+              <h5
+                class="text-sm font-black text-blue-900 dark:text-blue-100 uppercase tracking-wider"
+              >
+                Saved Person Profile
+              </h5>
+            </div>
+          
+            <div v-html="savedPersonProfileHtml" class="prose-sm"></div>
+          </div>
+
+        <div class="mt-8 h-[960px] w-full flex-none bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 flex flex-col relative overflow-hidden shadow-sm">
           <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm z-10">
             <h2 class="text-lg font-bold text-gray-900 dark:text-white flex items-center">
               <Layers class="w-4 h-4 mr-2 text-purple-500" />
@@ -5259,8 +5493,6 @@ const timelineTicks = computed(() => {
              </div>
              <div id="workspace-canvas" class="w-full h-[900px] flex-none bg-[#f8fafc] dark:bg-[#0f172a] relative z-0">
              </div>
-             
-             <!-- TIMELINE REMOVED FROM HERE -->
           </div>
           <!-- Property Viewer -->
           <div class="absolute top-20 right-6 w-72 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xl p-4 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 z-10 pointer-events-auto transition-transform">
@@ -5394,7 +5626,7 @@ const timelineTicks = computed(() => {
 
       <!-- Auto Finding Tab -->
       <div v-show="activeTab === 'auto-finding'" class="space-y-6">
-        <div class="max-w-xl mx-auto mb-8 px-4 sm:px-0 space-y-4">
+        <div class="max-w-6xl mx-auto mb-8 px-4 sm:px-0 space-y-4">
           <div
             class="flex items-center gap-4 bg-gray-100 dark:bg-gray-800 p-1 rounded-xl"
           >
@@ -5464,6 +5696,42 @@ const timelineTicks = computed(() => {
               {{ isAutoFinding ? "Finding..." : "Start Finding" }}
             </button>
           </form>
+
+          <!-- Saved Profiles -->
+          <div v-if="savedProfiles.channel.length > 0 || savedProfiles.user.length > 0" class="mt-8 space-y-4">
+              <div v-if="savedProfiles.channel.length > 0">
+                <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Channels</h4>
+                <div class="flex flex-wrap gap-2">
+                    <button v-for="name in savedProfiles.channel" :key="name" @click="viewSavedProfile('channel', name)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900">{{ name }}</button>
+                </div>
+              </div>
+              <div v-if="savedProfiles.user.length > 0">
+                <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Users</h4>
+                <div class="flex flex-wrap gap-2">
+                    <button v-for="name in savedProfiles.user" :key="name" @click="viewSavedProfile('user', name)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900">{{ name }}</button>
+                </div>
+              </div>
+          </div>
+          
+          <div
+            v-if="savedFinalTableHtml"
+            class="w-full max-w-6xl mx-auto mt-8 bg-gradient-to-br from-white to-blue-50/50 dark:bg-gray-900 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
+          >
+            <div class="flex items-center gap-2 mb-4">
+              <div
+                class="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center"
+              >
+                <Sparkles class="w-4 h-4 text-white" />
+              </div>
+              <h5
+                class="text-sm font-black text-blue-900 dark:text-blue-100 uppercase tracking-wider"
+              >
+                Saved Final Analysis Insights
+              </h5>
+            </div>
+          
+            <div v-html="savedFinalTableHtml" class="prose-sm"></div>
+          </div>
         </div>
 
         <!-- Floating Post Tool Widget -->
@@ -5770,6 +6038,27 @@ const timelineTicks = computed(() => {
           </div>
         </div>
       </div>
+
+      <!-- Profile Tab -->
+      <div v-show="activeTab === 'profile'" class="w-full relative pt-2 pb-6 flex flex-col h-full overflow-y-auto px-6">
+        <h2 class="text-xl font-bold mb-6 text-gray-900 dark:text-white">Remote Profiles</h2>
+  
+        <div v-if="loadingRemoteProfiles" class="text-center py-10">
+          <Loader2 class="w-8 h-8 animate-spin mx-auto text-blue-500" />
+        </div>
+
+        <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+          <button v-for="profile in remoteProfiles" :key="profile" @click="viewRemoteProfile(profile)" 
+            class="p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition-all text-sm font-medium shadow-sm">
+            {{ profile }}
+          </button>
+        </div>
+
+        <div v-if="selectedRemoteProfileContent" class="bg-white dark:bg-gray-800 rounded-2xl p-6 border border-gray-200 dark:border-gray-700 shadow-xl prose dark:prose-invert max-w-none">
+          <div v-html="selectedRemoteProfileContent" class="prose-sm"></div>
+        </div>
+      </div>
+
     </div>
   </div>
 </template>
