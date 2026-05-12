@@ -1649,6 +1649,7 @@ const userProfile = ref<any>(null);
 const loadingUserProfile = ref(false);
 const savedProfiles = ref<{channel: string[], user: string[], person: string[]}>({ channel: [], user: [], person: [] });
 const savedFinalTableHtml = ref("")
+const savedProfileName = ref("")
 const savedPersonProfileHtml = ref("")
 const loading = ref(false);
 const error = ref("");
@@ -2258,6 +2259,7 @@ const saveProfileRemotely = async (profileName: string, gosToken: string, dataCo
 
 const remoteProfiles = ref<string[]>([]);
 const selectedRemoteProfileContent = ref("");
+const selectedRemoteProfileName = ref("");
 const loadingRemoteProfiles = ref(false);
 
 const fetchRemoteProfiles = async () => {
@@ -2286,6 +2288,26 @@ const fetchRemoteProfiles = async () => {
   }
 };
 
+const handleSaveRemote = async (profileName: string) => {
+    const data = localStorage.getItem(profileName);
+    if (!data) {
+        toastMessage.value = "No data found to save.";
+        toastType.value = "error";
+        return;
+    }
+    try {
+        await saveProfileRemotely(profileName, loginToken.value, JSON.stringify(JSON.parse(data)));
+        toastMessage.value = "Profile saved remotely!";
+        toastType.value = "success";
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+    } catch (e) {
+        toastMessage.value = "Failed to save remotely.";
+        toastType.value = "error";
+        console.error(e);
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+    }
+}
+
 const viewRemoteProfile = async (profileName: string) => {
     loadingRemoteProfiles.value = true;
     try {
@@ -2295,6 +2317,7 @@ const viewRemoteProfile = async (profileName: string) => {
         if (!response.ok) throw new Error("Failed to load profile");
         const data = JSON.parse(await response.json());
         // Assuming data structure: { reply: "markdown content" }
+        selectedRemoteProfileName.value = profileName;
         selectedRemoteProfileContent.value = md.render(data.reply);
     } catch(e) {
         console.error(e);
@@ -2325,6 +2348,7 @@ const viewSavedProfile = (type: string, name: string) => {
     const data = localStorage.getItem(`profile-${type}-${name}`);
     if (data) {
         const parsed = JSON.parse(data);
+        savedProfileName.value = `profile-${type}-${name}`
         if (type == 'person') {
           savedPersonProfileHtml.value = md.render(parsed.reply);
           activeTab.value = 'workspace'; // Make sure we are in the right tab or just display it
@@ -5457,6 +5481,10 @@ const timelineTicks = computed(() => {
               </h5>
             </div>
           
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">{{ savedProfileName }}</h3>
+                <button @click="handleSaveRemote(savedProfileName)" class="text-xs bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700">Save Remotely</button>
+            </div>
             <div v-html="savedPersonProfileHtml" class="prose-sm"></div>
           </div>
 
@@ -5730,6 +5758,10 @@ const timelineTicks = computed(() => {
               </h5>
             </div>
           
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">{{ savedProfileName }}</h3>
+                <button @click="handleSaveRemote(savedProfileName)" class="text-xs bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700">Save Remotely</button>
+            </div>
             <div v-html="savedFinalTableHtml" class="prose-sm"></div>
           </div>
         </div>
@@ -6055,6 +6087,7 @@ const timelineTicks = computed(() => {
         </div>
 
         <div v-if="selectedRemoteProfileContent" class="bg-white dark:bg-gray-800 rounded-2xl p-6 border border-gray-200 dark:border-gray-700 shadow-xl prose dark:prose-invert max-w-none">
+          <h3 class="text-lg font-bold mb-4 text-gray-900 dark:text-gray-100">{{ selectedRemoteProfileName }}</h3>
           <div v-html="selectedRemoteProfileContent" class="prose-sm"></div>
         </div>
       </div>
