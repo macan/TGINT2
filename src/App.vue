@@ -52,6 +52,7 @@ const md = new MarkdownIt({ html: true }).use(markdownItMark);
 const showLoginModal = ref(false);
 const loginName = ref("");
 const loginToken = ref("");
+const isLoginTokenValid = ref(false);
 
 const saveLogin = () => {
   localStorage.setItem("user-login-name", loginName.value);
@@ -588,6 +589,9 @@ import {
 } from "date-fns";
 
 const isDark = ref(false);
+const suggestedChannels = ref<string[]>([]);
+let searchTimeout: ReturnType<typeof setTimeout> | null = null;
+
 const showBackToTop = ref(false);
 const activeTab = ref<"explorer" | "search" | "auto-finding" | "workspace" | "profile">("explorer");
 
@@ -753,9 +757,9 @@ const analyzeGraph = async () => {
         // save the analysis result to localStorage
         const personNodes = workspaceGraph.value.nodes('[type="person"]');
         if (personNodes.length === 1) {
-          localStorage.setItem(`profile-person-${personNodes[0].data('label')}`, JSON.stringify(data));
+          localStorage.setItem(`profile-person-${personNodes[0].data('label')}-${new Date().toISOString().slice(0, 13)}`, JSON.stringify(data));
           if (loginToken.value) {
-            await saveProfileRemotely(`profile-person-${personNodes[0].data('label')}`, loginToken.value, JSON.stringify(data));
+            await saveProfileRemotely(`profile-person-${personNodes[0].data('label')}-${new Date().toISOString().slice(0, 13)}`, loginToken.value, JSON.stringify(data));
           }
         }
     } catch (error) {
@@ -989,6 +993,32 @@ const startAddEdge = () => {
         setTimeout(() => { toastMessage.value = ""; }, 5000);
     }
 };
+
+const addForwardFrom = async () => {
+  if (contextMenu.value.node) {
+    try {
+      const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${contextMenu.value.node.id()}`);
+      if (profileRes.ok) {
+        const profileData = await profileRes.json();
+        const forwards = profileData.forwards || [];
+        forwards.map(item => {
+          // add a new node to the graph
+          addNode(item, 'channel', {
+            id: item, // Custom ID used by Cytoscape graph
+            username: item,
+            link: `https://t.me/${item}`,
+            facts: ''
+         });
+         // add a new edge
+         addEdge(contextMenu.value.node.id(), item, {label: 'forward from'});
+        })
+      }
+    } catch (e) {
+      console.error("Failed to fetch forwards", e);
+    }
+    contextMenu.value.visible = false;
+  }
+}
 
 const deleteNode = () => {
     if (contextMenu.value.node && workspaceGraph.value) {
@@ -1402,11 +1432,11 @@ const generateFinalTable = async () => {
     finalTableHtml.value = md.render(data.reply);
     // save the results to localStorage
     localStorage.setItem(
-      `profile-${searchMode.value}-${autoChannelName.value.trim().replace(/^@/, "")}`,
+      `profile-${searchMode.value}-${autoChannelName.value.trim().replace(/^@/, "")}-${new Date().toISOString().slice(0, 13)}`,
       JSON.stringify(data)
     );
     if (loginToken.value) {
-        await saveProfileRemotely(`profile-${searchMode.value}-${autoChannelName.value.trim().replace(/^@/, "")}`, loginToken.value, JSON.stringify(data));
+        await saveProfileRemotely(`profile-${searchMode.value}-${autoChannelName.value.trim().replace(/^@/, "")}-${new Date().toISOString().slice(0, 13)}`, loginToken.value, JSON.stringify(data));
     }
   } catch (err) {
     console.error(err);
@@ -2108,6 +2138,29 @@ onMounted(() => {
   }
 });
 
+
+watch(channelName, (newVal) => {
+    if (searchTimeout) clearTimeout(searchTimeout);
+    if (newVal.trim().length === 0 || !isLoginTokenValid) {
+        suggestedChannels.value = [];
+        return;
+    }
+
+    searchTimeout = setTimeout(async () => {
+         try {
+            const response = await fetch(`https://i.gogingko.net/api/v1/zr/telegram-channel?prefix=${encodeURIComponent(newVal)}`, {
+                headers: { 'x-gos-token': loginToken.value }
+            });
+            if (response.ok) {
+                const data = await response.json();
+                suggestedChannels.value = data.keys || [];
+            }
+         } catch (e) {
+             console.error(e);
+         }
+    }, 1000);
+});
+
 watch(
   isDark,
   (val) => {
@@ -2127,6 +2180,29 @@ const toggleDark = () => {
 };
 
 const isScrapingDisabled = ref(false);
+const isRepeatScheduleMode = ref(false);
+let longPressTimer: ReturnType<typeof setTimeout> | null = null;
+const startLongPress = () => {
+    longPressTimer = setTimeout(() => {
+        isRepeatScheduleMode.value = !isRepeatScheduleMode.value;
+        toastMessage.value = isRepeatScheduleMode.value ? "Mode: Repeatly" : "Mode: Once";
+        toastType.value = "info";
+        setTimeout(() => { toastMessage.value = ""; }, 2000);
+    }, 500);
+};
+const cancelLongPress = () => {
+    if (longPressTimer) {
+        clearTimeout(longPressTimer);
+        longPressTimer = null;
+    }
+};
+const handleScrapeClick = async () => {
+    if (isRepeatScheduleMode.value) {
+        await scheduleScrapeRepeatly();
+    } else {
+        await scheduleScrape();
+    }
+};
 
 const scheduleScrape = async () => {
   if (!currentChannelName.value || isScrapingDisabled.value) return;
@@ -2149,6 +2225,34 @@ const scheduleScrape = async () => {
   } catch (err: any) {
     console.error(err);
     alert("Failed to schedule scrape: " + err.message);
+  }
+};
+
+const scheduleScrapeRepeatly = async () => {
+  if (!currentChannelName.value || isScrapingDisabled.value) return;
+  try {
+    const res = await fetch(
+      `https://i.gogingko.net/api/v1/lq/${encodeURIComponent(
+        currentChannelName.value
+      )}?qn=q1`,
+      {
+        method: "POST",
+      }
+    );
+    if (!res.ok)
+      throw new Error(`Failed to schedule scrape repeatly: ${res.statusText}`);
+
+    toastMessage.value = `Schedule scrape ${currentChannelName.value} repeatly.`;
+    toastType.value = 'success';
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+
+    isScrapingDisabled.value = true;
+    setTimeout(() => {
+      isScrapingDisabled.value = false;
+    }, 5000);
+  } catch (err: any) {
+    console.error(err);
+    alert("Failed to schedule scrape repeatly: " + err.message);
   }
 };
 
@@ -2192,8 +2296,6 @@ const highlightText = (text: any) => {
   });
   return highlighted;
 };
-
-const suggestedChannels = ref<string[]>([]);
 
 const fetchUserProfile = async (name: string) => {
   loadingUserProfile.value = true;
@@ -2247,8 +2349,10 @@ const saveProfileRemotely = async (profileName: string, gosToken: string, dataCo
     });
     
     if (!response.ok) {
+        isLoginTokenValid.value = false;
         throw new Error(`Failed to save profile remotely: ${response.statusText}`);
     }
+    isLoginTokenValid.value = true;
     
     return await response.json();
   } catch (error) {
@@ -2275,12 +2379,14 @@ const fetchRemoteProfiles = async () => {
     });
     
     if (!response.ok) {
+        isLoginTokenValid.value = false;
         throw new Error(`Failed to fetch profiles remotely: ${response.statusText}`);
     }
     const res = await response.json()
     if (res.state == 0) {
       remoteProfiles.value = res.keys.map(item => decodeURIComponent(item));
     }
+    isLoginTokenValid.value = true;
   } catch (error) {
     console.error("Error fetching remote profiles:", error);
   } finally {
@@ -3232,9 +3338,31 @@ const timelineTicks = computed(() => {
                 
                 <!-- Autocomplete Dropdown -->
                 <div
-                  v-if="isInputFocused && lastVisitedChannels.length > 0"
+                  v-if="isInputFocused && (lastVisitedChannels.length > 0 || suggestedChannels.length > 0)"
                   class="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden"
                 >
+                   <div v-show="isLoginTokenValid && suggestedChannels.length > 0" class="px-4 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
+                     Auto completed
+                   </div>
+                   <div v-if="isLoginTokenValid && suggestedChannels.length > 0" class="max-h-60 overflow-y-auto">
+                     <button
+                       v-for="channel in suggestedChannels"
+                       :key="channel"
+                       class="flex items-center justify-between w-full text-left px-4 py-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 text-sm text-gray-700 dark:text-gray-200 transition-colors"
+                     >
+                       <span
+                         @click.prevent="
+                           channelName = channel;
+                           isInputFocused = false;
+                           searchChannel();
+                         "
+                         class="flex-1"
+                       >
+                         {{ channel }}
+                       </span>
+                     </button>
+                   </div>
+
                    <div class="px-4 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
                      Last Visited
                    </div>
@@ -3266,26 +3394,6 @@ const timelineTicks = computed(() => {
                 </div>
               </form>
 
-              <div v-if="suggestedChannels.length > 0" class="mt-4">
-                <h4
-                  class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3"
-                >
-                  Did you mean:
-                </h4>
-                <div class="flex flex-wrap gap-2">
-                  <button
-                    v-for="channel in suggestedChannels"
-                    :key="channel"
-                    @click="
-                      channelName = channel;
-                      searchChannel();
-                    "
-                    class="px-3 py-1.5 text-sm bg-gray-100 dark:bg-gray-800 rounded-full hover:bg-blue-100 dark:hover:bg-blue-900 border border-gray-200 dark:border-gray-700 transition"
-                  >
-                    {{ channel }}
-                  </button>
-                </div>
-              </div>
           </div>
 
         <div
@@ -3662,14 +3770,19 @@ const timelineTicks = computed(() => {
                     <Clock class="h-4 w-4" />
                   </button>
                   <button
-                    @click="scheduleScrape"
+                    @mousedown="startLongPress"
+                    @mouseup="cancelLongPress"
+                    @mouseleave="cancelLongPress"
+                    @touchstart="startLongPress"
+                    @touchend="cancelLongPress"
+                    @click="handleScrapeClick"
                     :disabled="isScrapingDisabled"
                     class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Schedule this channel for scraping"
+                    :title="isRepeatScheduleMode ? 'Schedule repeatly' : 'Schedule this channel for scraping'"
                   >
                     <ListFilter class="h-3 w-3" />
                     {{
-                      isScrapingDisabled ? "Scheduled" : "Scheduled to Scrape"
+                      isRepeatScheduleMode ? "Schedule Repeatly" : (isScrapingDisabled ? "Scheduled" : "Schedule Once")
                     }}
                   </button>
                 </div>
@@ -5515,6 +5628,7 @@ const timelineTicks = computed(() => {
              </div>
              <div v-if="contextMenu.visible" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop @contextmenu.stop.prevent :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }" class="absolute z-50 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 p-1 w-32 shadow-xl">
                  <button @click="startAddEdge" class="block w-full text-left px-3 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-sm text-gray-900 dark:text-white">Add Edge</button>
+                 <button v-if="contextMenu.node.data('type') === 'channel'" @click="addForwardFrom" class="block w-full text-left px-3 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-sm text-gray-900 dark:text-white">Add Forward</button>
                  <button @click="deleteNode" class="block w-full text-left px-3 py-1 hover:bg-red-100 dark:hover:bg-red-900 rounded text-sm text-red-600 dark:text-red-400">Delete Node</button>
                  <hr class="my-1 border-gray-200 dark:border-gray-700" />
                  <button @click="contextMenu.visible = false" class="block w-full text-left px-3 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-sm text-gray-500">Close</button>
