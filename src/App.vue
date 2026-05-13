@@ -602,6 +602,8 @@ const toastMessage = ref("");
 const toastType = ref<'error' | 'success'>('error');
 const contextMenu = ref({ visible: false, x: 0, y: 0, node: null });
 const nodeSearchQuery = ref("");
+const graphNameInput = ref("");
+
 const findNode = () => {
   if (!workspaceGraph.value || !nodeSearchQuery.value) return;
   const node = workspaceGraph.value.getElementById(nodeSearchQuery.value);
@@ -621,26 +623,79 @@ const findNode = () => {
   }
 };
 
-const saveGraph = () => {
-    if (!workspaceGraph.value) return;
-    const data = JSON.stringify(workspaceGraph.value.json());
-    localStorage.setItem('graphData', data);
-    toastMessage.value = 'Graph saved.';
-    toastType.value = 'success';
-    setTimeout(() => { toastMessage.value = ""; }, 3000);
-};
-
-const loadGraph = () => {
-    const data = localStorage.getItem('graphData');
-    if (data && workspaceGraph.value) {
-        workspaceGraph.value.json(JSON.parse(data));
-        toastMessage.value = 'Graph loaded.';
+const saveGraph = async () => {
+    if (!graphNameInput.value) {
+        toastMessage.value = "Please enter a graph name.";
+        toastType.value = "error";
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+        return;
+    }
+    const name = graphNameInput.value;
+    if (isLoginTokenValid.value) {
+        if (!workspaceGraph.value) return;
+        const data = JSON.stringify(workspaceGraph.value.json());
+        try {
+            await saveProfileRemotely(`graph-${name}`, loginToken.value, data);
+            toastMessage.value = 'Graph saved remotely.';
+            toastType.value = 'success';
+            setTimeout(() => { toastMessage.value = ""; }, 3000);
+        } catch (e: any) {
+            toastMessage.value = 'Failed to save remotely.';
+            toastType.value = 'error';
+            console.error(e);
+            setTimeout(() => { toastMessage.value = ""; }, 3000);
+        }
+    } else {
+        if (!workspaceGraph.value) return;
+        const data = JSON.stringify(workspaceGraph.value.json());
+        localStorage.setItem('graphData', data);
+        toastMessage.value = 'Graph saved.';
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 3000);
-    } else {
-        toastMessage.value = 'No saved graph found.';
-        toastType.value = 'error';
+    }
+};
+
+const loadGraph = async () => {
+    if (!graphNameInput.value && isLoginTokenValid.value) {
+        toastMessage.value = "Please enter a graph name.";
+        toastType.value = "error";
         setTimeout(() => { toastMessage.value = ""; }, 3000);
+        return;
+    }
+
+    if (isLoginTokenValid.value && graphNameInput.value) {
+        try {
+            // Reusing profile loading logic as it seems to return content directly
+            const response = await fetch(`https://i.gogingko.net/api/v1/v/profiles/graph-${graphNameInput.value}`, {
+                method: 'GET',
+                headers: { 'x-gos-token': loginToken.value }
+            });
+            if (!response.ok) throw new Error("Failed to load graph");
+            const data = await response.json();
+            if (workspaceGraph.value) {
+                workspaceGraph.value.json(JSON.parse(data));
+                toastMessage.value = 'Graph loaded remotely.';
+                toastType.value = 'success';
+                setTimeout(() => { toastMessage.value = ""; }, 3000);
+            }
+        } catch (e: any) {
+             toastMessage.value = 'Failed to load graph remotely.';
+             toastType.value = 'error';
+             console.error(e);
+             setTimeout(() => { toastMessage.value = ""; }, 3000);
+        }
+    } else {
+        const data = localStorage.getItem('graphData');
+        if (data && workspaceGraph.value) {
+            workspaceGraph.value.json(JSON.parse(data));
+            toastMessage.value = 'Graph loaded.';
+            toastType.value = 'success';
+            setTimeout(() => { toastMessage.value = ""; }, 3000);
+        } else {
+            toastMessage.value = 'No saved graph found.';
+            toastType.value = 'error';
+            setTimeout(() => { toastMessage.value = ""; }, 3000);
+        }
     }
 };
 
@@ -1452,6 +1507,9 @@ const numIterations = ref(5);
 const xSearchResults = ref<any[]>([]);
 const isSearchingX = ref(false);
 const xSearchInput = ref("");
+const channelProfile = ref("");
+const channelProfileDate = ref("");
+const loadingChannelProfile = ref(false);
 
 const searchOnGoogle = (text: string) => {
   if (text) {
@@ -1683,12 +1741,64 @@ const savedProfileName = ref("")
 const savedPersonProfileHtml = ref("")
 const loading = ref(false);
 const error = ref("");
+const profileError = ref("");
 const metadata = ref<any>(null);
 const posts = ref<any[]>([]);
 const viewMode = ref<"list" | "masonry" | "timeline">("list");
 const isPostModalVisible = ref(false);
 const selectedPost = ref<any>(null);
 const selectedUsernamesExplorer = ref<string[]>([]);
+
+const fetchChannelProfile = async (channel: string) => {
+  if (!channel) return;
+  loadingChannelProfile.value = true;
+  channelProfile.value = "";
+  channelProfileDate.value = "";
+  try {
+    const profileName = `profile-channel-${channel}`;
+    let response = await fetch(`https://i.gogingko.net/api/v1/v/profiles/${profileName}`, {
+        method: 'GET',
+        headers: { 'x-gos-token': loginToken.value }
+    });
+    if (response.status === 404) {
+      const clistResponse = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=${profileName}-`, {
+          method: 'GET',
+          headers: { 'x-gos-token': loginToken.value }
+      });
+      if (clistResponse.ok) {
+        const clistRes = await clistResponse.json()
+        const clist = clistRes.keys.map(item => decodeURIComponent(item)).sort((a, b) => {
+          const dateA = new Date(a.replace(`${profileName}-`, '') + ':00')
+          const dateB = new Date(b.replace(`${profileName}-`, '') + ':00')
+          return dateB - dateA
+        })
+        console.log(clistRes.keys)
+        console.log(clist)
+        if (clist.length > 0) {
+          channelProfileDate.value = clist[0].replace(`${profileName}-`, '')
+          response = await fetch(`https://i.gogingko.net/api/v1/v/profiles/${clist[0]}`, {
+            method: 'GET',
+            headers: { 'x-gos-token': loginToken.value }
+        });
+        }
+      } else {
+        response = clistResponse
+      }
+    }
+    if (!response.ok) throw new Error("Failed to load channel profile");
+    const data = JSON.parse(await response.json());
+    channelProfile.value = md.render(data.reply);
+  } catch(e) {
+    console.error("Failed to load profile", e);
+    channelProfile.value = "Channel profile un-generated or not found.";
+  } finally {
+    loadingChannelProfile.value = false;
+  }
+};
+
+watch(channelName, (newChannel) => {
+    if (newChannel) fetchChannelProfile(newChannel);
+});
 
 const openPostModal = (post: any) => {
   selectedPost.value = post;
@@ -2350,7 +2460,7 @@ const saveProfileRemotely = async (profileName: string, gosToken: string, dataCo
     
     if (!response.ok) {
         isLoginTokenValid.value = false;
-        throw new Error(`Failed to save profile remotely: ${response.statusText}`);
+        throw new Error(`Failed to save profile remotely: ${response.status} ${response.statusText}`);
     }
     isLoginTokenValid.value = true;
     
@@ -2369,6 +2479,7 @@ const loadingRemoteProfiles = ref(false);
 const fetchRemoteProfiles = async () => {
   if (!loginToken.value) return;
   
+  profileError.value = "";
   loadingRemoteProfiles.value = true;
   try {
     const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=profile-`, {
@@ -2380,15 +2491,16 @@ const fetchRemoteProfiles = async () => {
     
     if (!response.ok) {
         isLoginTokenValid.value = false;
-        throw new Error(`Failed to fetch profiles remotely: ${response.statusText}`);
+        throw new Error(`Failed to fetch profiles remotely: ${response.status} ${response.statusText}`);
     }
     const res = await response.json()
     if (res.state == 0) {
       remoteProfiles.value = res.keys.map(item => decodeURIComponent(item));
     }
     isLoginTokenValid.value = true;
-  } catch (error) {
-    console.error("Error fetching remote profiles:", error);
+  } catch (err) {
+    console.error("Error fetching remote profiles:", err);
+    profileError.value = err.message || "An error occurred while fetching data";
   } finally {
     loadingRemoteProfiles.value = false;
   }
@@ -2435,19 +2547,19 @@ const viewRemoteProfile = async (profileName: string) => {
 }
 
 const loadSavedProfiles = () => {
-  const profiles = { channel: [] as string[], user: [] as string[], person: [] as string[] };
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key?.startsWith('profile-')) {
-      const parts = key.split('-');
-      const type = parts[1];
-      const name = parts.slice(2).join('-');
-      if (type === 'channel' || type === 'user' || type === 'person') {
-          profiles[type as 'channel' | 'user' | 'person'].push(name);
+    const profiles = { channel: [] as string[], user: [] as string[], person: [] as string[] };
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith('profile-')) {
+        const parts = key.split('-');
+        const type = parts[1];
+        const name = parts.slice(2).join('-');
+        if (type === 'channel' || type === 'user' || type === 'person') {
+            profiles[type as 'channel' | 'user' | 'person'].push(name);
+        }
       }
     }
-  }
-  savedProfiles.value = profiles;
+    savedProfiles.value = profiles;
 }
 
 const viewSavedProfile = (type: string, name: string) => {
@@ -2489,10 +2601,15 @@ const searchChannel = async () => {
   }
 
   try {
-    const metaRes = await fetch(
+    let metaRes = await fetch(
       `https://i.gogingko.net/api/v1/v/telegram-channel/${name}`
     );
-
+    // need to check if it is private channel id if 404
+    if (metaRes.status === 404 && name.startsWith('-100')) {
+      metaRes = await fetch(
+        `https://i.gogingko.net/api/v1/v/telegram-channel/${name.slice(4)}`
+      );
+    }
     if (metaRes.status === 404) {
       const fallbackRes = await fetch(
         `https://i.gogingko.net/api/v1/zr/telegram-channel?prefix=${encodeURIComponent(
@@ -3593,6 +3710,27 @@ const timelineTicks = computed(() => {
                 >
                   {{ channelNameForward }}
                 </button>
+              </div>
+            </div>
+
+            <!-- Profile Widget -->
+            <div
+              v-show="isProfileVisible && channelProfile"
+              class="mt-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-8"
+            >
+              <div class="flex items-center justify-between mb-6 relative">
+                <h3
+                  class="text-xs font-black text-gray-400 uppercase tracking-widest"
+                >
+                  Channel Profile
+                </h3>
+                <span v-if="channelProfileDate" class="text-xs font-bold text-gray-500 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded-lg">
+                    {{ channelProfileDate }}
+                </span>
+              </div>
+              <div v-if="loadingChannelProfile" class="text-sm text-gray-500">Loading profile...</div>
+              <div v-else class="overflow-x-auto">
+                <div v-html="channelProfile" class="prose prose-sm dark:prose-invert"></div>
               </div>
             </div>
 
@@ -5571,7 +5709,7 @@ const timelineTicks = computed(() => {
       <div v-show="activeTab === 'workspace'" class="w-full relative pt-2 pb-6 flex flex-col h-full overflow-y-auto">
         <!-- Saved Profiles -->
           <div v-if="savedProfiles.person.length > 0" class="space-y-2 px-4">
-            <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Persons</h4>
+            <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Persons at Local</h4>
             <div class="flex flex-wrap gap-2">
                 <button v-for="name in savedProfiles.person" :key="name" @click="viewSavedProfile('person', name)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900">{{ name }}</button>
             </div>
@@ -5605,13 +5743,14 @@ const timelineTicks = computed(() => {
           <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm z-10">
             <h2 class="text-lg font-bold text-gray-900 dark:text-white flex items-center">
               <Layers class="w-4 h-4 mr-2 text-purple-500" />
-              Graph
+              {{ isLoginTokenValid ? 'Graph Remote' : 'Graph Local' }}
             </h2>
             <div class="flex gap-2">
               <div class="relative">
                 <Search class="w-4 h-4 absolute left-2 top-2.5 text-gray-400" />
                 <input type="text" v-model="nodeSearchQuery" @keyup.enter="findNode" placeholder="Find node (id)..." class="pl-8 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-800 text-sm text-gray-900 dark:text-white" />
               </div>
+              <input type="text" v-model="graphNameInput" placeholder="Graph name..." class="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-800 text-sm text-gray-900 dark:text-white w-32" />
               <button @click="saveGraph" class="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700">Save</button>
               <button @click="loadGraph" class="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-sm hover:bg-gray-300 dark:hover:bg-gray-600">Load</button>
               <button @click="reLayoutGraph" class="px-3 py-1.5 bg-purple-600 text-white rounded text-sm hover:bg-purple-700">Re-layout</button>
@@ -6203,6 +6342,21 @@ const timelineTicks = computed(() => {
         <div v-if="selectedRemoteProfileContent" class="bg-white dark:bg-gray-800 rounded-2xl p-6 border border-gray-200 dark:border-gray-700 shadow-xl prose dark:prose-invert max-w-none">
           <h3 class="text-lg font-bold mb-4 text-gray-900 dark:text-gray-100">{{ selectedRemoteProfileName }}</h3>
           <div v-html="selectedRemoteProfileContent" class="prose-sm"></div>
+        </div>
+
+        <div
+          v-if="profileError"
+          class="rounded-xl bg-red-50 dark:bg-red-900/20 p-4 mb-8 border border-red-100 dark:border-red-900/50 flex items-start"
+        >
+          <AlertCircle
+            class="h-5 w-5 text-red-400 dark:text-red-500 mt-0.5 mr-3 flex-shrink-0"
+          />
+          <div class="text-sm text-red-700 dark:text-red-400">
+            <h3 class="font-medium text-red-800 dark:text-red-300 mb-1">
+              Error fetching channel
+            </h3>
+            <p>{{ profileError }}</p>
+          </div>
         </div>
       </div>
 
