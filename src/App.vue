@@ -91,6 +91,7 @@ const addAllToWorkspace = async () => {
 };
 
 const analysisResult = ref("");
+const analysisResultOfGraph = ref("");
 const isAnalyzing = ref(false);
 const isSummarizing = ref(false);
 const longPressTimerInSummarize = ref<number | null>(null);
@@ -99,6 +100,7 @@ const isAnalyzingGraph = ref(false);
 const isAnalysisModalVisible = ref(false);
 const analyzedCount = ref(0);
 const renderedMarkdown = computed(() => md.render(analysisResult.value));
+const renderedMarkdownOfGraph = computed(() => md.render(analysisResultOfGraph.value));
 
 const counters = ref<Record<string, number>>({});
 const frequencies = ref<Record<string, number>>({});
@@ -811,6 +813,15 @@ const reLayoutGraph = () => {
     }).run();
 };
 
+const clearGraph = () => {
+    if (workspaceGraph.value) {
+        workspaceGraph.value.destroy();
+        workspaceGraph.value = null;
+    }
+    localStorage.removeItem('graphData');
+    initGraph();
+};
+
 const shareGraph = () => {
     if (!workspaceGraph.value) return;
     const graphData = workspaceGraph.value.json();
@@ -903,7 +914,7 @@ const analyzeGraph = async () => {
 
         if (!response.ok) throw new Error("Analysis request failed");
         const data = await response.json();
-        analysisResult.value = data.reply;
+        analysisResultOfGraph.value = data.reply;
         // save the analysis result to localStorage
         const personNodes = workspaceGraph.value.nodes('[type="person"]');
         if (personNodes.length === 1) {
@@ -1828,6 +1839,9 @@ watch(activeTab, (newTab) => {
   if (newTab === 'search' || newTab === 'auto-finding' || newTab === 'workspace' || newTab === 'profile') {
     loadSavedProfiles();
   }
+  if (newTab === 'workspace') {
+    loadSavedGraphRemotely();
+  }
   if (newTab === 'profile') {
     fetchRemoteProfiles();
   }
@@ -1862,6 +1876,7 @@ const forwardsChannels = ref<string[]>([]);
 const userProfile = ref<any>(null);
 const loadingUserProfile = ref(false);
 const savedProfiles = ref<{channel: string[], user: string[], person: string[]}>({ channel: [], user: [], person: [] });
+const savedGraphRemotely = ref<string[]>([]);
 const savedFinalTableHtml = ref("")
 const savedProfileName = ref("")
 const savedPersonProfileHtml = ref("")
@@ -2661,11 +2676,21 @@ const viewRemoteProfile = async (profileName: string) => {
         const data = JSON.parse(await response.json());
         // Assuming data structure: { reply: "markdown content" }
         selectedRemoteProfileName.value = profileName;
-        selectedRemoteProfileContent.value = md.render(data.reply);
+        let jsonData = data.text.split('Here is the context input: ')[1] || '';
+        try {
+            const parsed = JSON.parse(jsonData);
+            if (Array.isArray(parsed)) {
+              jsonData = parsed.map(item => `\n---\n# **ID ${item.id}**\n${item.analysis}`).join('\n')
+            }
+        } catch (e) {
+            // Keep original if parsing fails
+        }
+        selectedRemoteProfileContent.value = md.render(data.reply + '\n---\n# **Inputs >>>>>>>**\n---\n' + jsonData + '');
     } catch(e) {
         console.error(e);
         toastMessage.value = "Failed to load profile.";
         toastType.value = "error";
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
     } finally {
         loadingRemoteProfiles.value = false;
     }
@@ -2701,6 +2726,62 @@ const viewSavedProfile = (type: string, name: string) => {
         }
         
     }
+}
+
+const loadSavedGraphRemotely = async () => {
+  if (!loginToken.value) return;
+
+  try {
+    const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=graph-`, {
+      method: 'GET',
+      headers: {
+        'x-gos-token': loginToken.value,
+      },
+    });
+    
+    if (!response.ok) {
+        isLoginTokenValid.value = false;
+        throw new Error(`Failed to fetch graphs remotely: ${response.status} ${response.statusText}`);
+    }
+    const res = await response.json()
+    if (res.state == 0) {
+      savedGraphRemotely.value = res.keys.map(item => decodeURIComponent(item));
+    }
+    isLoginTokenValid.value = true;
+  } catch (err) {
+    toastMessage.value = "Failed to load graph from remote: " + err.message;
+    toastType.value = "error";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  } finally {
+  }
+}
+
+const viewSavedGraphRemotely = async (name: string) => {
+  try {
+    const response = await fetch(`https://i.gogingko.net/api/v1/v/profiles/${name}`, {
+      method: 'GET',
+      headers: {
+        'x-gos-token': loginToken.value,
+      },
+    });
+
+    if (!response.ok) {
+      isLoginTokenValid.value = false;
+      throw new Error(`Failed to fetch graphs remotely: ${response.status} ${response.statusText}`);
+    }
+    const data = await response.json();
+    if (workspaceGraph.value) {
+      workspaceGraph.value.json(JSON.parse(data));
+      toastMessage.value = 'Graph loaded remotely.';
+      toastType.value = 'success';
+      setTimeout(() => { toastMessage.value = ""; }, 3000);
+    }
+  } catch (err) {
+    toastMessage.value = "Failed to load graph to canvas: " + err.message;
+    toastType.value = "error";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  } finally {
+  } 
 }
 
 const searchChannel = async () => {
@@ -5892,6 +5973,13 @@ const timelineTicks = computed(() => {
             </div>
           </div>
           
+          <div v-if="savedGraphRemotely.length > 0" class="space-y-2 px-4 mt-4">
+            <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Graphs at Remote</h4>
+            <div class="flex flex-wrap gap-2">
+                <button v-for="name in savedGraphRemotely" :key="name" @click="viewSavedGraphRemotely(name)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900">{{ name }}</button>
+            </div>
+          </div>
+          
           <div
             v-if="savedPersonProfileHtml"
             class="w-full max-w-6xl mx-auto my-8 bg-gradient-to-br from-white to-blue-50/50 dark:bg-gray-900 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
@@ -5931,6 +6019,7 @@ const timelineTicks = computed(() => {
               <button @click="saveGraph" class="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700">Save</button>
               <button @click="loadGraph" class="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-sm hover:bg-gray-300 dark:hover:bg-gray-600">Load</button>
               <button @click="reLayoutGraph" class="px-3 py-1.5 bg-purple-600 text-white rounded text-sm hover:bg-purple-700">Re-layout</button>
+              <button @click="clearGraph" class="px-3 py-1.5 bg-red-600 text-white rounded text-sm hover:bg-red-700">Clear</button>
               <button @click="shareGraph" class="px-3 py-1.5 bg-green-600 text-white rounded text-sm hover:bg-green-700">Share</button>
               <button @click="analyzeGraph" :disabled="isAnalyzingGraph" class="px-3 py-1.5 bg-yellow-600 text-white rounded text-sm hover:bg-yellow-700 disabled:opacity-50">
                 {{ isAnalyzingGraph ? 'Analyzing...' : 'Analysis' }}
@@ -6076,9 +6165,9 @@ const timelineTicks = computed(() => {
         </div>
         
         <!-- Analysis Result Section -->
-        <div v-if="analysisResult" class="mt-4 p-4 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700">
-           <h3 class="text-xs font-black uppercase tracking-widest text-gray-500 dark:text-gray-400 mb-2">Analysis Result</h3>
-           <div class="prose dark:prose-invert text-sm text-gray-800 dark:text-gray-200" v-html="renderedMarkdown"></div>
+        <div v-if="analysisResultOfGraph" class="mt-4 p-4 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700">
+           <h3 class="text-xs font-black uppercase tracking-widest text-gray-500 dark:text-gray-400 mb-2">Graph Analysis Result</h3>
+           <div class="prose dark:prose-invert text-sm text-gray-800 dark:text-gray-200" v-html="renderedMarkdownOfGraph"></div>
         </div>
       </div>
 
@@ -6518,7 +6607,7 @@ const timelineTicks = computed(() => {
 
         <div v-if="selectedRemoteProfileContent" class="bg-white dark:bg-gray-800 rounded-2xl p-6 border border-gray-200 dark:border-gray-700 shadow-xl prose dark:prose-invert max-w-none">
           <h3 class="text-lg font-bold mb-4 text-gray-900 dark:text-gray-100">{{ selectedRemoteProfileName }}</h3>
-          <div v-html="selectedRemoteProfileContent" class="prose-sm"></div>
+          <div v-html="selectedRemoteProfileContent" class="prose-sm prose-pre:whitespace-pre-wrap"></div>
         </div>
 
         <div
