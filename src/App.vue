@@ -92,6 +92,9 @@ const addAllToWorkspace = async () => {
 
 const analysisResult = ref("");
 const isAnalyzing = ref(false);
+const isSummarizing = ref(false);
+const longPressTimerInSummarize = ref<number | null>(null);
+const isLongPressInSummarize = ref(false);
 const isAnalyzingGraph = ref(false);
 const isAnalysisModalVisible = ref(false);
 const analyzedCount = ref(0);
@@ -287,6 +290,81 @@ const analyzePosts = async () => {
   } finally {
     isAnalyzing.value = false;
   }
+};
+
+const summarizePosts = async () => {
+    const targetPosts = activeTab.value === "search" ? searchResults.value : posts.value;
+    if (!targetPosts || targetPosts.length === 0) return;
+
+    isSummarizing.value = true;
+    try {
+        const strippedPosts = targetPosts
+      .map((p) => {
+        const { data, key } = p;
+        // Keep essential data only
+        return {
+          key,
+          content: data?.content,
+          date: data?.date,
+          author: data?.author || data?.user,
+          reply: data?.reply,
+          linkPreview: data?.linkPreview
+            ? {
+                title: data.linkPreview.title,
+                description: data.linkPreview.description,
+              }
+            : undefined,
+        };
+      })
+      .filter((p) => p.content || p.reply || p.linkPreview);
+
+        const response = await fetch("https://ask.gingkogo.uk/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                sender: "mc",
+                chat_id: "mc",
+                text: "Please summarize the following posts, make sure to group them into different topics, for each group, generate briefing title and summarized content, return in Chinese with channel name and post id range:\n\n" + JSON.stringify(strippedPosts),
+            }),
+        });
+
+        if (!response.ok) throw new Error("Summarization failed");
+        const data = await response.json();
+        analysisResult.value = data.reply || "No summary data received.";
+        isAnalysisModalVisible.value = true;
+    } catch (err) {
+        console.error(err);
+        alert("Failed to summarize posts.");
+    } finally {
+        isSummarizing.value = false;
+    }
+};
+
+const startLongPressInSummarize = () => {
+    isLongPressInSummarize.value = false;
+    longPressTimerInSummarize.value = window.setTimeout(() => {
+        isLongPressInSummarize.value = true;
+        summarizePosts();
+    }, 800);
+};
+
+const endLongPressInSummarize = () => {
+    if (longPressTimerInSummarize.value) {
+        clearTimeout(longPressTimerInSummarize.value);
+        longPressTimerInSummarize.value = null;
+    }
+    if (!isLongPressInSummarize.value) {
+        analyzePosts();
+    }
+    isLongPressInSummarize.value = false;
+};
+
+const cancelLongPressInSummarize = () => {
+    if (longPressTimerInSummarize.value) {
+        clearTimeout(longPressTimerInSummarize.value);
+        longPressTimerInSummarize.value = null;
+    }
+    isLongPressInSummarize.value = false;
 };
 
 const runAutoFinding = async () => {
@@ -616,6 +694,22 @@ const findNode = () => {
     selectedNode.value = node;
     toastMessage.value = `Node ${nodeSearchQuery.value} found.`;
     toastType.value = 'success';
+    
+    // Highlight logic
+    node.style({
+        'border-width': '4px',
+        'border-color': '#2563eb', // Tailwind blue-600
+        'border-style': 'solid'
+    });
+    
+    // After 5 seconds, remove the style overrides
+    setTimeout(() => {
+        if (!node || node.removed()) return; // node might be deleted in the meantime
+        node.removeStyle('border-width');
+        node.removeStyle('border-color');
+        node.removeStyle('border-style');
+    }, 5000);
+
     setTimeout(() => { toastMessage.value = ""; }, 3000);
   } else {
     toastMessage.value = `Node ${nodeSearchQuery.value} not found.`;
@@ -1827,7 +1921,7 @@ const fetchChannelProfile = async (channel: string) => {
   }
 };
 
-watch(channelName, (newChannel) => {
+watch(currentChannelName, (newChannel) => {
     if (newChannel) fetchChannelProfile(newChannel);
 });
 
@@ -3196,7 +3290,7 @@ const focusNode = (nodeId: string) => {
         // Highlight logic
         node.style({
             'border-width': '4px',
-            'border-color': '#EAB308', // Tailwind yellow-500
+            'border-color': '#2563eb', // Tailwind blue-600
             'border-style': 'solid'
         });
         
@@ -3280,19 +3374,24 @@ const timelineTicks = computed(() => {
     class="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200"
   >
     <div class="max-w-[98%] mx-auto p-4 sm:p-6 lg:p-8 xl:p-10">
+
       <!-- Analysis Button -->
       <button
         v-if="
           (activeTab === 'explorer' && posts.length > 0) ||
           (activeTab === 'search' && searchResults.length > 0)
         "
-        @click="analyzePosts"
-        :disabled="isAnalyzing"
+        @mousedown="startLongPressInSummarize"
+        @mouseup="endLongPressInSummarize"
+        @mouseleave="cancelLongPressInSummarize"
+        @touchstart="startLongPressInSummarize"
+        @touchend="endLongPressInSummarize"
+        :disabled="isAnalyzing || isSummarizing"
         class="fixed bottom-24 right-8 z-50 p-4 rounded-full bg-blue-600/90 dark:bg-blue-500/90 backdrop-blur-lg border border-blue-400 dark:border-blue-600 shadow-xl text-white hover:scale-110 transition-all duration-300 hover:shadow-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed"
         aria-label="Analyze posts"
-        :title="isAnalyzing ? 'Analyzing...' : 'Analyze posts'"
+        :title="isAnalyzing ? 'Analyzing...' : (isSummarizing ? 'Summarizing...' : 'Click to Analyze, Long Press to Summarize')"
       >
-        <Loader2 v-if="isAnalyzing" class="h-6 w-6 animate-spin" />
+        <Loader2 v-if="isAnalyzing || isSummarizing" class="h-6 w-6 animate-spin" />
         <BotMessageSquare v-else class="h-6 w-6" />
       </button>
 
@@ -3792,7 +3891,7 @@ const timelineTicks = computed(() => {
               </div>
               <div v-if="loadingChannelProfile" class="text-sm text-gray-500">Loading profile...</div>
               <div v-else class="overflow-x-auto">
-                <div v-html="channelProfile" class="prose prose-sm dark:prose-invert"></div>
+                <div v-html="channelProfile" class="prose prose-xs text-xs dark:prose-invert"></div>
               </div>
             </div>
 
@@ -5818,17 +5917,17 @@ const timelineTicks = computed(() => {
           </div>
 
         <div class="mt-8 h-[960px] w-full flex-none bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 flex flex-col relative overflow-hidden shadow-sm">
-          <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm z-10">
+          <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex flex-col md:flex-row justify-between items-center gap-4 bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm z-10">
             <h2 class="text-lg font-bold text-gray-900 dark:text-white flex items-center">
               <Layers class="w-4 h-4 mr-2 text-purple-500" />
               {{ isLoginTokenValid ? 'Graph Remote' : 'Graph Local' }}
             </h2>
-            <div class="flex gap-2">
+            <div class="flex flex-wrap gap-2 justify-center">
               <div class="relative">
                 <Search class="w-4 h-4 absolute left-2 top-2.5 text-gray-400" />
-                <input type="text" v-model="nodeSearchQuery" @keyup.enter="findNode" placeholder="Find node (id)..." class="pl-8 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-800 text-sm text-gray-900 dark:text-white" />
+                <input type="text" v-model="nodeSearchQuery" @keyup.enter="findNode" placeholder="Find node by id" class="pl-8 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-800 text-sm text-gray-900 dark:text-white w-full sm:w-auto" />
               </div>
-              <input type="text" v-model="graphNameInput" placeholder="Graph name..." class="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-800 text-sm text-gray-900 dark:text-white w-32" />
+              <input type="text" v-model="graphNameInput" placeholder="Graph name..." class="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-800 text-sm text-gray-900 dark:text-white w-24 sm:w-32" />
               <button @click="saveGraph" class="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700">Save</button>
               <button @click="loadGraph" class="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-sm hover:bg-gray-300 dark:hover:bg-gray-600">Load</button>
               <button @click="reLayoutGraph" class="px-3 py-1.5 bg-purple-600 text-white rounded text-sm hover:bg-purple-700">Re-layout</button>
@@ -5854,7 +5953,7 @@ const timelineTicks = computed(() => {
              </div>
           </div>
           <!-- Property Viewer -->
-          <div class="absolute top-20 right-6 w-72 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xl p-4 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 z-10 pointer-events-auto transition-transform">
+          <div v-if="selectedNode || selectedEdge" class="absolute top-20 right-6 w-72 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xl p-4 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 z-10 pointer-events-auto transition-transform">
             <h3 class="text-[10px] font-black mb-1 uppercase tracking-widest text-gray-500 dark:text-gray-400">Property</h3>
             
             <!-- Node Viewer -->
