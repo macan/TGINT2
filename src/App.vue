@@ -42,6 +42,7 @@ import {
   LoaderCircle,
   Forward,
   Share2,
+  Languages,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -1511,6 +1512,37 @@ const channelProfile = ref("");
 const channelProfileDate = ref("");
 const loadingChannelProfile = ref(false);
 
+const translatedPosts = ref<Record<string, string>>({});
+const isTranslating = ref<Record<string, boolean>>({});
+
+const translatePost = async (post: any) => {
+  if (translatedPosts.value[post.key]) {
+    delete translatedPosts.value[post.key];
+    return;
+  }
+  
+  isTranslating.value[post.key] = true;
+  try {
+     const res = await fetch(`https://i.gogingko.net/api/v1/gtr?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(post.data.content)}`, {
+        method: 'GET'
+    });
+    if (!res.ok) throw new Error("Translation failed");
+    const data = await res.json();
+    // Assuming the API returns a structure where [0][0][0] is the translated text as per common google translate API behavior
+    if (data[0]) {
+      const translatedTextArray = data[0].map(item => item[0])
+      translatedPosts.value[post.key] = translatedTextArray.join(''); 
+    } else {
+      translatedPosts.value[post.key] = "Please retry later.";
+    }
+  } catch(e) {
+    console.error("Translation error", e);
+    translatedPosts.value[post.key] = "Translation failed.";
+  } finally {
+    isTranslating.value[post.key] = false;
+  }
+};
+
 const searchOnGoogle = (text: string) => {
   if (text) {
     window.open(`https://www.google.com/search?q=${encodeURIComponent(text)}`, '_blank');
@@ -1789,7 +1821,6 @@ const fetchChannelProfile = async (channel: string) => {
     const data = JSON.parse(await response.json());
     channelProfile.value = md.render(data.reply);
   } catch(e) {
-    console.error("Failed to load profile", e);
     channelProfile.value = "Channel profile un-generated or not found.";
   } finally {
     loadingChannelProfile.value = false;
@@ -2590,7 +2621,7 @@ const searchChannel = async () => {
   hasMorePosts.value = true;
   suggestedChannels.value = [];
   
-  const name = channelName.value.trim().replace(/^@/, "");
+  let name = channelName.value.trim().replace(/^@/, "");
   currentChannelName.value = name;
   addToLastVisited(name);
 
@@ -2609,6 +2640,20 @@ const searchChannel = async () => {
       metaRes = await fetch(
         `https://i.gogingko.net/api/v1/v/telegram-channel/${name.slice(4)}`
       );
+    }
+    // try to lookup the resolve cache
+    if (metaRes.status === 404) {
+      const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${name}`)
+      if (resolveRes.ok) {
+        const data = await resolveRes.json()
+        if (data.state == 0 && data.gso?.result) {
+          name = data.gso.result
+          currentChannelName.value = name
+          metaRes = await fetch(
+            `https://i.gogingko.net/api/v1/v/telegram-channel/${name}`
+          );
+        }
+      }
     }
     if (metaRes.status === 404) {
       const fallbackRes = await fetch(
@@ -2643,12 +2688,29 @@ const searchChannel = async () => {
       console.error("Failed to fetch forwards", e);
     }
 
-    const postsRes = await fetch(
+    let postsRes = await fetch(
       `https://i.gogingko.net/api/v1/last/${name}?n=25`
     );
 
     if (postsRes.ok) {
-      const postsData = await postsRes.json();
+      let postsData = await postsRes.json();
+      if (postsData.length === 0) {
+        // check resolve cache
+        const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${name}`)
+        if (resolveRes.ok) {
+          const data = await resolveRes.json()
+          if (data.state == 0 && data.gso?.result) {
+            name = data.gso.result
+            currentChannelName.value = name
+            postsRes = await fetch(
+              `https://i.gogingko.net/api/v1/last/${name}?n=25`
+            );
+            if (postsRes.ok) {
+              postsData = await postsRes.json();
+            }
+          }
+        }
+      }
       // need to reset the selectedUsernamesExplorer
       selectedUsernamesExplorer.value = []
       posts.value = Array.isArray(postsData)
@@ -4232,8 +4294,16 @@ const timelineTicks = computed(() => {
                       <div
                         class="text-gray-800 dark:text-gray-200 text-[15px] leading-relaxed whitespace-pre-wrap break-words flex-1"
                       >
-                        {{ post.data.content }}
+                        {{ post.key in translatedPosts ? post.data.content + '\n--------\n' + translatedPosts[post.key] : post.data.content}}
                       </div>
+                      <button
+                        @click="translatePost(post)"
+                        class="p-1 -mt-1 text-gray-400 hover:text-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-md transition-colors flex-shrink-0"
+                        title="Translate to Chinese"
+                      >
+                        <Languages v-if="!isTranslating[post.key]" class="h-4 w-4" />
+                        <Loader2 v-else class="h-4 w-4 animate-spin" />
+                      </button>
                       <button
                         @click="searchOnGoogle(post.data.content)"
                         class="p-1 -mt-1 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors flex-shrink-0"
@@ -5279,8 +5349,16 @@ const timelineTicks = computed(() => {
                 >
                   <div
                     class="text-gray-800 dark:text-gray-200 text-sm whitespace-pre-wrap break-words flex-1"
-                    v-html="highlightText(post.data.content)"
+                    v-html="highlightText(post.key in translatedPosts ? post.data.content + '\n--------\n' + translatedPosts[post.key] : post.data.content)"
                   ></div>
+                  <button
+                    @click="translatePost(post)"
+                    class="p-1 -mt-1 text-gray-400 hover:text-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-md transition-colors flex-shrink-0"
+                    title="Translate to Chinese"
+                  >
+                    <Languages v-if="!isTranslating[post.key]" class="h-4 w-4" />
+                    <Loader2 v-else class="h-4 w-4 animate-spin" />
+                  </button>
                   <button
                     @click="searchOnGoogle(post.data.content)"
                     class="p-1 -mt-1 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors flex-shrink-0"
