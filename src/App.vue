@@ -96,11 +96,23 @@ const isAnalyzing = ref(false);
 const isSummarizing = ref(false);
 const longPressTimerInSummarize = ref<number | null>(null);
 const isLongPressInSummarize = ref(false);
+const telegramUsername = ref("");
+const telegramUser = ref<any>(null);
+const loadingTelegramUser = ref(false);
+const telegramError = ref("");
+const isHistoryVisible = ref(false);
 const isAnalyzingGraph = ref(false);
 const isAnalysisModalVisible = ref(false);
 const analyzedCount = ref(0);
+const lookupUserHistory = ref<string[]>(JSON.parse(localStorage.getItem('telegramUserLookupHistory') || '[]'));
 const renderedMarkdown = computed(() => md.render(analysisResult.value));
 const renderedMarkdownOfGraph = computed(() => md.render(analysisResultOfGraph.value));
+
+const selectHistory = (user: string) => {
+    telegramUsername.value = user;
+    isHistoryVisible.value = false;
+    fetchTelegramUser();
+};
 
 const counters = ref<Record<string, number>>({});
 const frequencies = ref<Record<string, number>>({});
@@ -367,6 +379,35 @@ const cancelLongPressInSummarize = () => {
         longPressTimerInSummarize.value = null;
     }
     isLongPressInSummarize.value = false;
+};
+
+const fetchTelegramUser = async () => {
+    isHistoryVisible.value = false;
+    if (!telegramUsername.value.trim()) return;
+    loadingTelegramUser.value = true;
+    telegramError.value = "";
+    telegramUser.value = null;
+    try {
+        const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-user/${telegramUsername.value}`);
+        if (!response.ok) throw new Error("User not found");
+        telegramUser.value = await response.json();
+        const username = telegramUsername.value.trim();
+        if (!lookupUserHistory.value.includes(username)) {
+            lookupUserHistory.value.unshift(username);
+            if (lookupUserHistory.value.length > 10) lookupUserHistory.value.pop();
+            localStorage.setItem('telegramUserLookupHistory', JSON.stringify(lookupUserHistory.value));
+        }
+        // there are two differnt user result, we should regular it
+        if ('about' in telegramUser.value) {
+          telegramUser.value.description = telegramUser.value.about
+          telegramUser.value.title = `${telegramUser.value.first_name || ''} ${telegramUser.value.last_name || ''}`
+          telegramUser.value.status = telegramUser.value.status?.status
+        }
+    } catch(err) {
+        telegramError.value = err.message;
+    } finally {
+        loadingTelegramUser.value = false;
+    }
 };
 
 const runAutoFinding = async () => {
@@ -862,7 +903,9 @@ const analyzeGraph = async () => {
             ids.push(...oldIdsStr.split(', '))
           }
         });
-        console.log(ids)
+        if (ids.length === 0) {
+          return
+        }
         // Transform keys into { ns, key } objects by splitting at the first dot
         const mgetPayload = ids.map((fullKey: string) => {
           return {
@@ -2617,6 +2660,7 @@ const selectedRemoteProfileName = ref("");
 const loadingRemoteProfiles = ref(false);
 
 const fetchRemoteProfiles = async () => {
+  // use this function to auto check the loginToken
   if (!loginToken.value) return;
   
   profileError.value = "";
@@ -2729,7 +2773,7 @@ const viewSavedProfile = (type: string, name: string) => {
 }
 
 const loadSavedGraphRemotely = async () => {
-  if (!loginToken.value) return;
+  if (!isLoginTokenValid.value) return;
 
   try {
     const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=graph-`, {
@@ -3783,7 +3827,7 @@ const timelineTicks = computed(() => {
               class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 overflow-hidden relative"
             >
               <div
-                class="h-40 bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-600 relative overflow-hidden"
+                class="h-24 bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-600 relative overflow-hidden"
               >
                 <div
                   class="absolute inset-0 bg-white/10 dark:bg-black/10 backdrop-blur-sm"
@@ -6591,7 +6635,7 @@ const timelineTicks = computed(() => {
       </div>
 
       <!-- Profile Tab -->
-      <div v-show="activeTab === 'profile'" class="w-full relative pt-2 pb-6 flex flex-col h-full overflow-y-auto px-6">
+      <div v-show="activeTab === 'profile'" class="w-full relative pt-2 pb-[200px] flex flex-col h-full overflow-y-auto px-6">
         <h2 class="text-xl font-bold mb-6 text-gray-900 dark:text-white">Remote Profiles</h2>
   
         <div v-if="loadingRemoteProfiles" class="text-center py-10">
@@ -6624,6 +6668,67 @@ const timelineTicks = computed(() => {
             <p>{{ profileError }}</p>
           </div>
         </div>
+
+        <h2 class="text-xl font-bold mb-6 text-gray-900 dark:text-white">Telegram Users</h2>
+
+        <div class="mt-4 relative">
+          <div class="flex gap-2">
+            <input 
+              v-model="telegramUsername" 
+              @keyup.enter="fetchTelegramUser" 
+              @focus="isHistoryVisible = true" 
+              @blur="handleBlur"
+              placeholder="Enter Telegram username" 
+              class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-800 text-sm" 
+            />
+            <button @click="fetchTelegramUser" class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">Search</button>
+          </div>
+          
+          <!-- Dropdown -->
+          <div v-if="isHistoryVisible && lookupUserHistory.length > 0" class="absolute z-50 w-full mt-1 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg shadow-lg max-h-40 overflow-y-auto">
+            <button 
+              v-for="user in lookupUserHistory" 
+              :key="user" 
+              @click="selectHistory(user)" 
+              class="w-full text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-white"
+            >
+              {{ user }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="loadingTelegramUser" class="text-center py-4 text-sm text-gray-500">Loading...</div>
+        <div v-if="telegramError" class="text-red-500 text-sm py-4">{{ telegramError }}</div>
+        
+        <div v-if="telegramUser" class="mt-4 p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm flex items-start gap-4">
+            <img :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" @error="handleImageError" class="w-16 h-16 rounded-full object-cover" alt="Profile photo" />
+            <div>
+                <h3 class="font-bold text-gray-900 dark:text-white">{{ telegramUser.title }}</h3>
+                <p class="text-xs text-gray-500">@{{ telegramUser.username }}</p>
+                <p v-if="telegramUser.description" class="text-sm text-gray-700 dark:text-gray-300 mt-2">{{ telegramUser.description }}</p>
+                <div class="mt-2 text-xs text-gray-500 space-y-1">
+                    <p v-if="telegramUser.id" >ID: {{ telegramUser.id }}</p>
+                    <p v-if="telegramUser.phone">Phone: {{ telegramUser.phone }}</p>
+                    <p v-if="telegramUser.lang">Lang: {{ telegramUser.lang }}</p>
+                    <p v-if="telegramUser.status">Status: {{ telegramUser.status }}</p>
+                </div>
+            </div>
+        </div>
+        <!-- Raw Userdata Debug -->
+        <details
+            v-if="telegramUser"
+            class="bg-gray-50 dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 text-xs"
+        >
+            <summary
+                class="font-medium text-gray-700 dark:text-gray-300 cursor-pointer outline-none"
+            >
+                View Raw Userdata
+            </summary>
+            <pre
+                class="mt-2 overflow-x-auto text-gray-600 dark:text-gray-400"
+                >{{ JSON.stringify(telegramUser, null, 2) }}</pre
+            >
+        </details>
       </div>
 
     </div>
