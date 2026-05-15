@@ -43,6 +43,9 @@ import {
   Forward,
   Share2,
   Languages,
+  PanelRightOpen,
+  PanelRightClose,
+  Copy,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -94,6 +97,14 @@ const analysisResult = ref("");
 const analysisResultOfGraph = ref("");
 const isAnalyzing = ref(false);
 const isSummarizing = ref(false);
+const isPostFetcherVisible = ref(false);
+const copyUsernamesToClipboard = (allNames) => {
+    const text = allNames.join(',');
+    navigator.clipboard.writeText(text);
+    toastMessage.value = "Usernames copied to clipboard!";
+    toastType.value = "success";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+};
 const longPressTimerInSummarize = ref<number | null>(null);
 const isLongPressInSummarize = ref(false);
 const telegramUsername = ref("");
@@ -381,6 +392,14 @@ const cancelLongPressInSummarize = () => {
     isLongPressInSummarize.value = false;
 };
 
+const TelegramCDNRegions = {
+  1: ['Miami, FL, USA', 'North and South America'],
+  2: ['Amsterdam, NL', 'Europe, Africa, parts of Middle East'],
+  3: ['Miami, FL, USA', 'Secondary for Americas (often used for storage)'],
+  4: ['Amsterdam, NL', 'Secondary for Europe/Africa'],
+  5: ['Singapore, SG', 'Asia, Australia, and Oceania'],
+}
+
 const fetchTelegramUser = async () => {
     isHistoryVisible.value = false;
     if (!telegramUsername.value.trim()) return;
@@ -397,11 +416,19 @@ const fetchTelegramUser = async () => {
             if (lookupUserHistory.value.length > 10) lookupUserHistory.value.pop();
             localStorage.setItem('telegramUserLookupHistory', JSON.stringify(lookupUserHistory.value));
         }
-        // there are two differnt user result, we should regular it
+        // there are two differnt user results, we should regular it
         if ('about' in telegramUser.value) {
           telegramUser.value.description = telegramUser.value.about
           telegramUser.value.title = `${telegramUser.value.first_name || ''} ${telegramUser.value.last_name || ''}`
           telegramUser.value.status = telegramUser.value.status?.status
+        }
+        // set DC Flag
+        if (telegramUser.value.photo) {
+          const match = String(telegramUser.value.photo).match(/cdn(\d+)/);
+          if (match) {
+            telegramUser.value.cdnNumber = match[1];
+            telegramUser.value.cdnRegion = TelegramCDNRegions[telegramUser.value.cdnNumber as keyof typeof TelegramCDNRegions];
+          }
         }
     } catch(err) {
         telegramError.value = err.message;
@@ -3520,6 +3547,17 @@ const timelineTicks = computed(() => {
         <BotMessageSquare v-else class="h-6 w-6" />
       </button>
 
+      <button
+        v-if="
+          (activeTab === 'auto-finding')
+        "
+        @click="isPostFetcherVisible = !isPostFetcherVisible"
+        class="fixed bottom-24 right-8 z-50 p-4 rounded-full bg-purple-600/90 dark:bg-purple-500/90 backdrop-blur-lg border border-purple-400 dark:border-purple-600 shadow-xl text-white hover:scale-110 transition-all duration-300 hover:shadow-purple-500/40 disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <PanelRightOpen v-if="!isPostFetcherVisible" class="w-6 h-6" />
+        <PanelRightClose v-else class="w-6 h-6" />
+      </button>
+
       <!-- Back to Top Button -->
       <Transition
         enter-active-class="transition duration-300 ease-out"
@@ -3947,11 +3985,14 @@ const timelineTicks = computed(() => {
               <div
                 class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm"
               >
-                <h3
-                  class="text-xs font-black text-gray-400 uppercase tracking-wider mb-4"
-                >
-                  Usernames
-                </h3>
+                <div class="flex justify-between items-center mb-4">
+                  <h3 class="text-xs font-black text-gray-400 uppercase tracking-wider">
+                    Usernames
+                  </h3>
+                  <button @click="copyUsernamesToClipboard(allUsernamesExplorer)" class="text-gray-400 hover:text-blue-500 transition">
+                    <Copy class="w-4 h-4" />
+                  </button>
+                </div>
                 <div
                   class="max-h-[calc(100vh-15rem)] overflow-y-auto space-y-1 pr-2 custom-scrollbar"
                 >
@@ -5300,11 +5341,16 @@ const timelineTicks = computed(() => {
             <div
               class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm"
             >
-              <h3
-                class="text-xs font-black text-gray-400 uppercase tracking-wider mb-4"
-              >
-                Usernames
-              </h3>
+              <div class="flex justify-between items-center mb-4">
+                <h3                
+                  class="text-xs font-black text-gray-400 uppercase tracking-wider"
+                >
+                  Usernames
+                </h3>
+                <button @click="copyUsernamesToClipboard(allUsernames)" class="text-gray-400 hover:text-blue-500 transition">
+                  <Copy class="w-4 h-4" />
+                </button>
+              </div>
               <div
                 class="max-h-[calc(100vh-15rem)] overflow-y-auto space-y-1 pr-2 custom-scrollbar"
               >
@@ -6331,7 +6377,7 @@ const timelineTicks = computed(() => {
 
         <!-- Floating Post Tool Widget -->
         <div
-          v-show="activeTab === 'auto-finding'"
+          v-show="activeTab === 'auto-finding' && isPostFetcherVisible"
           :style="{
             position: 'fixed',
             left: postWidgetX + 'px',
@@ -6636,42 +6682,9 @@ const timelineTicks = computed(() => {
 
       <!-- Profile Tab -->
       <div v-show="activeTab === 'profile'" class="w-full relative pt-2 pb-[200px] flex flex-col h-full overflow-y-auto px-6">
-        <h2 class="text-xl font-bold mb-6 text-gray-900 dark:text-white">Remote Profiles</h2>
-  
-        <div v-if="loadingRemoteProfiles" class="text-center py-10">
-          <Loader2 class="w-8 h-8 animate-spin mx-auto text-blue-500" />
-        </div>
-
-        <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <button v-for="profile in remoteProfiles" :key="profile" @click="viewRemoteProfile(profile)" 
-            class="p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition-all text-sm font-medium shadow-sm">
-            {{ profile }}
-          </button>
-        </div>
-
-        <div v-if="selectedRemoteProfileContent" class="bg-white dark:bg-gray-800 rounded-2xl p-6 border border-gray-200 dark:border-gray-700 shadow-xl prose dark:prose-invert max-w-none">
-          <h3 class="text-lg font-bold mb-4 text-gray-900 dark:text-gray-100">{{ selectedRemoteProfileName }}</h3>
-          <div v-html="selectedRemoteProfileContent" class="prose-sm prose-pre:whitespace-pre-wrap"></div>
-        </div>
-
-        <div
-          v-if="profileError"
-          class="rounded-xl bg-red-50 dark:bg-red-900/20 p-4 mb-8 border border-red-100 dark:border-red-900/50 flex items-start"
-        >
-          <AlertCircle
-            class="h-5 w-5 text-red-400 dark:text-red-500 mt-0.5 mr-3 flex-shrink-0"
-          />
-          <div class="text-sm text-red-700 dark:text-red-400">
-            <h3 class="font-medium text-red-800 dark:text-red-300 mb-1">
-              Error fetching channel
-            </h3>
-            <p>{{ profileError }}</p>
-          </div>
-        </div>
-
         <h2 class="text-xl font-bold mb-6 text-gray-900 dark:text-white">Telegram Users</h2>
 
-        <div class="mt-4 relative">
+        <div class="mt-2 relative mb-8">
           <div class="flex gap-2">
             <input 
               v-model="telegramUsername" 
@@ -6700,24 +6713,32 @@ const timelineTicks = computed(() => {
         <div v-if="loadingTelegramUser" class="text-center py-4 text-sm text-gray-500">Loading...</div>
         <div v-if="telegramError" class="text-red-500 text-sm py-4">{{ telegramError }}</div>
         
-        <div v-if="telegramUser" class="mt-4 p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm flex items-start gap-4">
-            <img :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" @error="handleImageError" class="w-16 h-16 rounded-full object-cover" alt="Profile photo" />
-            <div>
-                <h3 class="font-bold text-gray-900 dark:text-white">{{ telegramUser.title }}</h3>
-                <p class="text-xs text-gray-500">@{{ telegramUser.username }}</p>
-                <p v-if="telegramUser.description" class="text-sm text-gray-700 dark:text-gray-300 mt-2">{{ telegramUser.description }}</p>
-                <div class="mt-2 text-xs text-gray-500 space-y-1">
-                    <p v-if="telegramUser.id" >ID: {{ telegramUser.id }}</p>
-                    <p v-if="telegramUser.phone">Phone: {{ telegramUser.phone }}</p>
-                    <p v-if="telegramUser.lang">Lang: {{ telegramUser.lang }}</p>
-                    <p v-if="telegramUser.status">Status: {{ telegramUser.status }}</p>
+        <div v-if="telegramUser" class="mt-4 p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm relative">
+            <div class="flex items-start gap-4">
+                <img :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" @error="handleImageError" class="w-16 h-16 rounded-full object-cover" alt="Profile photo" />
+                <div>
+                    <h3 class="font-bold text-gray-900 dark:text-white">{{ telegramUser.title }}</h3>
+                    <p class="text-xs text-gray-500">@{{ telegramUser.username }}</p>
+                    <p v-if="telegramUser.description" class="text-sm text-gray-700 dark:text-gray-300 mt-2">{{ telegramUser.description }}</p>
+                    <div class="mt-2 text-xs text-gray-500 space-y-1">
+                        <p v-if="telegramUser.id" >ID: {{ telegramUser.id }}</p>
+                        <p v-if="telegramUser.phone">Phone: {{ telegramUser.phone }}</p>
+                        <p v-if="telegramUser.lang">Lang: {{ telegramUser.lang }}</p>
+                        <p v-if="telegramUser.status">Status: {{ telegramUser.status }}</p>
+                    </div>
                 </div>
+            </div>
+            <!-- top right -->
+            <div v-if="telegramUser.cdnNumber || telegramUser.cdnRegion" class="absolute top-4 right-4 text-xs text-gray-500 text-right">
+                <p v-if="telegramUser.cdnNumber">DC: {{ telegramUser.cdnNumber }}</p>
+                <p v-if="telegramUser.cdnRegion">{{ telegramUser.cdnRegion[0] }}</p>
+                <p v-if="telegramUser.cdnRegion">{{ telegramUser.cdnRegion[1] }}</p>
             </div>
         </div>
         <!-- Raw Userdata Debug -->
         <details
             v-if="telegramUser"
-            class="bg-gray-50 dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 text-xs"
+            class="bg-gray-50 dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 text-xs mb-8"
         >
             <summary
                 class="font-medium text-gray-700 dark:text-gray-300 cursor-pointer outline-none"
@@ -6729,8 +6750,44 @@ const timelineTicks = computed(() => {
                 >{{ JSON.stringify(telegramUser, null, 2) }}</pre
             >
         </details>
+
+        <h2 class="text-xl font-bold mb-6 text-gray-900 dark:text-white">Remote Profiles</h2>
+  
+        <div v-if="loadingRemoteProfiles" class="text-center py-10">
+          <Loader2 class="w-8 h-8 animate-spin mx-auto text-blue-500" />
+        </div>
+
+        <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+          <button v-for="profile in remoteProfiles" :key="profile" @click="viewRemoteProfile(profile)" 
+            class="p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition-all text-sm font-medium shadow-sm">
+            {{ profile }}
+          </button>
+        </div>
+
+        <div v-if="selectedRemoteProfileContent" class="bg-white dark:bg-gray-800 rounded-2xl p-6 border border-gray-200 dark:border-gray-700 shadow-xl prose dark:prose-invert max-w-none mb-8">
+          <h3 class="text-lg font-bold mb-4 text-gray-900 dark:text-gray-100">{{ selectedRemoteProfileName }}</h3>
+          <div v-html="selectedRemoteProfileContent" class="prose-sm prose-pre:whitespace-pre-wrap"></div>
+        </div>
+
+        <div
+          v-if="profileError"
+          class="rounded-xl bg-red-50 dark:bg-red-900/20 p-4 mb-8 border border-red-100 dark:border-red-900/50 flex items-start"
+        >
+          <AlertCircle
+            class="h-5 w-5 text-red-400 dark:text-red-500 mt-0.5 mr-3 flex-shrink-0"
+          />
+          <div class="text-sm text-red-700 dark:text-red-400">
+            <h3 class="font-medium text-red-800 dark:text-red-300 mb-1">
+              Error fetching channel
+            </h3>
+            <p>{{ profileError }}</p>
+          </div>
+        </div>
+
+        
       </div>
 
     </div>
+
   </div>
 </template>
