@@ -737,7 +737,9 @@ import {
   endOfDay,
 } from "date-fns";
 
-const isDark = ref(false);
+const isDark = ref(localStorage.theme === 'dark');
+const explorerTab = ref<HTMLElement | null>(null);
+const explorerMinHeight = ref("0px");
 const suggestedChannels = ref<string[]>([]);
 let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -1597,7 +1599,14 @@ const addEdge = (source: string, target: string, data: any = {}) => {
   }
 };
 
+const tabScrollPositions = ref<Record<string, number>>({});
+
 watch(activeTab, (newTab, oldTab) => {
+  // Save current scroll position
+  if (oldTab) {
+    tabScrollPositions.value[oldTab] = window.scrollY;
+  }
+
   // If we are leaving workspace, save state
   if (oldTab === 'workspace' && workspaceGraph.value) {
     graphState.value = workspaceGraph.value.json();
@@ -1612,6 +1621,12 @@ watch(activeTab, (newTab, oldTab) => {
       }
     });
   }
+
+  // Restore scroll position
+  nextTick(() => {
+    const savedScroll = tabScrollPositions.value[newTab] || 0;
+    window.scrollTo(0, savedScroll);
+  });
 });
 
 // Auto Finding State
@@ -2621,9 +2636,8 @@ const fetchUserProfile = async (name: string) => {
   loadingUserProfile.value = true;
   userProfile.value = null;
   try {
-    const [userRes, avatarRes] = await Promise.all([
-      fetch(`https://i.gogingko.net/api/v1/v/telegram-user/${name}`),
-      fetch(`https://i.gogingko.net/api/v1/v/telegram-profile/${name}`)
+    const [userRes] = await Promise.all([
+      fetch(`https://i.gogingko.net/api/v1/v/telegram-user/${name}`)
     ]);
 
     if (userRes.ok) {
@@ -2631,6 +2645,7 @@ const fetchUserProfile = async (name: string) => {
       if (userData._tool) {
         userProfile.value = {
             username: userData.username,
+            avatarUrl: `https://i.gogingko.net/api/v1/v/telegram-profile/${name}`,
             id: userData.id,
             about: userData.about,
             firstName: userData.first_name,
@@ -2641,14 +2656,22 @@ const fetchUserProfile = async (name: string) => {
             verified: userData.verified
         };
       } else {
+        const match = String(userData.photo).match(/cdn(\d+)/);
+        let cdnNumber = null
+        let cdnRegion = null
+        if (match) {
+            cdnNumber = match[1];
+            cdnRegion = TelegramCDNRegions[cdnNumber as keyof typeof TelegramCDNRegions];
+        }
         userProfile.value = {
             username: userData.username,
-            title: userData.title
+            avatarUrl: `https://i.gogingko.net/api/v1/v/telegram-profile/${name}`,
+            title: userData.title,
+            description: userData.description,
+            cdnNumber: cdnNumber,
+            cdnRegion: cdnRegion
         };
       }
-    }
-    if (avatarRes.ok) {
-        userProfile.value = { ...userProfile.value, avatarUrl: avatarRes.url };
     }
   } catch (e) {
     console.error("Failed to fetch user profile", e);
@@ -2858,6 +2881,10 @@ const viewSavedGraphRemotely = async (name: string) => {
 const searchChannel = async () => {
   if (!channelName.value.trim()) return;
 
+  if (explorerTab.value) {
+    explorerMinHeight.value = `${explorerTab.value.clientHeight}px`;
+  }
+
   isInputFocused.value = false;
   loading.value = true;
   error.value = "";
@@ -2870,12 +2897,6 @@ const searchChannel = async () => {
   let name = channelName.value.trim().replace(/^@/, "");
   currentChannelName.value = name;
   addToLastVisited(name);
-
-  if (searchMode.value === 'user') {
-      await fetchUserProfile(name);
-      loading.value = false;
-      return;
-  }
 
   try {
     let metaRes = await fetch(
@@ -2967,6 +2988,9 @@ const searchChannel = async () => {
     error.value = err.message || "An error occurred while fetching data";
   } finally {
     loading.value = false;
+    nextTick(() => {
+      explorerMinHeight.value = "0px";
+    });
   }
 };
 
@@ -2994,6 +3018,7 @@ const performGlobalSearch = async () => {
   }
 
   // Build query: (field:"word1" AND field:"word2") OR (field2:"word1" AND field2:"word2")
+  let isUserSelected = false;
   const fieldQueries = selectedFields.map((field) => {
     const wordQueries = words
       .map((word) => {
@@ -3002,6 +3027,7 @@ const performGlobalSearch = async () => {
 
         // Use wildcard format for 'user' field, otherwise use double quotes
         if (field === "user") {
+          isUserSelected = true
           return `${field}:*${escapedWord}*`;
         }
         if (field === "url") {
@@ -3100,6 +3126,11 @@ const performGlobalSearch = async () => {
 
     searchResults.value = results;
     hasSearched.value = true;
+
+    // check if we should load user profile
+    if (isUserSelected) {
+      await fetchUserProfile(globalSearchQuery.value.trim())
+    }
   } catch (err: any) {
     console.error("Search error details:", err);
     searchError.value = `Search failed: ${
@@ -3751,7 +3782,7 @@ const timelineTicks = computed(() => {
       </header>
 
       <!-- Explorer Tab -->
-      <div v-show="activeTab === 'explorer'">
+      <div ref="explorerTab" v-show="activeTab === 'explorer'" :style="{ minHeight: explorerMinHeight }">
         <div class="max-w-[95%] mx-auto mb-16 px-4 sm:px-0">
               <form @submit.prevent="searchChannel" class="relative group">
                 <div
@@ -3768,7 +3799,8 @@ const timelineTicks = computed(() => {
                   placeholder="Enter channel name (e.g. durov)"
                 />
                 <button
-                  type="submit"
+                  type="button"
+                  @click.prevent="searchChannel"
                   :disabled="loading || !channelName.trim()"
                   @mousedown.prevent
                   class="absolute right-2 top-2 bottom-2 px-5 bg-blue-600 text-white rounded-[0.65rem] text-xs font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
@@ -5325,15 +5357,43 @@ const timelineTicks = computed(() => {
             <!-- User Profile Widget -->
             <div
               v-if="userProfile || loadingUserProfile"
-              class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm"
+              class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm hover:border-blue-200 dark:hover:border-blue-800 transition-colors"
             >
-                <h3 class="text-xs font-black text-gray-400 uppercase tracking-wider mb-4">User Profile</h3>
-                <div v-if="loadingUserProfile" class="text-sm text-gray-500">Loading...</div>
-                <div v-else-if="userProfile" class="text-sm text-gray-700 dark:text-gray-200">
-                    <img v-if="userProfile.avatarUrl" :src="userProfile.avatarUrl" alt="Avatar" class="w-16 h-16 rounded-full mb-3" />
-                    <p class="font-bold">{{ userProfile.username }}</p>
-                    <p>{{ userProfile.firstName }} {{ userProfile.lastName }}</p>
-                    <p v-if="userProfile.about" class="text-xs mt-1 text-gray-500">{{ userProfile.about }}</p>
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-xs font-black text-gray-400 uppercase tracking-wider">User Profile</h3>
+                </div>
+                
+                <div v-if="loadingUserProfile" class="text-sm text-gray-500 py-4 flex items-center gap-2">
+                    <Loader2 class="w-4 h-4 animate-spin" /> Loading profile...
+                </div>
+
+                <div v-else-if="userProfile" class="flex flex-col gap-3">
+                    <div class="flex items-center gap-4">
+                        <img 
+                          v-if="userProfile.avatarUrl" 
+                          :src="userProfile.avatarUrl" 
+                          @error="handleImageError" 
+                          alt="Avatar" 
+                          class="w-16 h-16 rounded-full border-2 border-white dark:border-gray-700 shadow-md object-cover" 
+                        />
+                        <div class="flex-1 min-w-0">
+                            <p class="font-bold text-lg text-gray-900 dark:text-white truncate">@{{ userProfile.username }}</p>
+                            <p v-if="userProfile.title" class="text-sm font-medium text-blue-600 dark:text-blue-400 truncate">{{ userProfile.title }}</p>
+                        </div>
+                    </div>
+
+                    <div class="text-sm text-gray-700 dark:text-gray-300">
+                        <p class="font-semibold">{{ userProfile.firstName }} {{ userProfile.lastName }}</p>
+                        <div v-if="userProfile.cdnNumber || userProfile.cdnRegion" class="text-[10px] text-gray-400 dark:text-gray-500 mt-1">
+                            <span v-if="userProfile.cdnNumber">DC: {{ userProfile.cdnNumber }}</span>
+                            <span v-if="userProfile.cdnRegion" class="ml-2">{{ userProfile.cdnRegion[0] }}</span>
+                            <span v-if="userProfile.cdnRegion" class="ml-2">{{ userProfile.cdnRegion[1] }}</span>
+                        </div>
+                    </div>
+
+                    <div v-if="userProfile.about || userProfile.description" class="text-xs pt-2 border-t border-gray-100 dark:border-gray-700 text-gray-500 dark:text-gray-400 leading-relaxed">
+                        {{ userProfile.about || userProfile.description }}
+                    </div>
                 </div>
             </div>
 
