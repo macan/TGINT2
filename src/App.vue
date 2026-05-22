@@ -124,12 +124,40 @@ const handleClickOutside = (event: MouseEvent) => {
     }
 };
 
+const startChatDrag = (e: MouseEvent) => {
+    isChatDragging.value = true;
+    chatDragOffset.value = { x: e.clientX - widgetPosition.value.left, y: e.clientY - widgetPosition.value.top };
+};
+
+const startChatResize = (e: MouseEvent) => {
+    isChatResizing.value = true;
+    e.stopPropagation();
+    e.preventDefault();
+};
+
+const onMouseMove = (e: MouseEvent) => {
+    if (isChatDragging.value) {
+        widgetPosition.value = { top: e.clientY - chatDragOffset.value.y, left: e.clientX - chatDragOffset.value.x };
+    } else if (isChatResizing.value) {
+        widgetSize.value = { width: Math.max(200, e.clientX - widgetPosition.value.left), height: Math.max(150, e.clientY - widgetPosition.value.top) };
+    }
+};
+
+const onMouseUp = () => {
+    isChatDragging.value = false;
+    isChatResizing.value = false;
+};
+
 onMounted(() => {
     document.addEventListener('click', handleClickOutside);
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
 });
 
 onUnmounted(() => {
     document.removeEventListener('click', handleClickOutside);
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', onMouseUp);
 });
 
 const renderedMarkdown = computed(() => md.render(analysisResult.value));
@@ -284,6 +312,51 @@ const endDrag = () => {
   window.removeEventListener("mouseup", endDrag);
 };
 
+const generalAsk = async (userInputText) => {
+  try {
+    const targetPosts =
+      activeTab.value === "search" ? searchResults.value : posts.value;
+    // Strip unnecessary fields
+    const strippedPosts = targetPosts
+      .map((p) => {
+        const { data, key } = p;
+        // Keep essential data only
+        return {
+          key,
+          content: data?.content,
+          date: data?.date,
+          author: data?.author || data?.user,
+          reply: data?.reply,
+          linkPreview: data?.linkPreview
+            ? {
+                title: data.linkPreview.title,
+                description: data.linkPreview.description,
+              }
+            : undefined,
+          outlinks: data?.outlinks,
+        };
+      })
+      .filter((p) => p.content || p.reply || p.linkPreview);
+
+    const response = await fetch("https://ask.gingkogo.uk/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sender: "mc",
+        chat_id: "mc",
+        text:
+          userInputText.replace('$POSTS$', JSON.stringify(strippedPosts)),
+      }),
+    });
+    if (!response.ok) throw new Error("Ask request failed: " + response.status);
+    const data = await response.json();
+    return data.reply || "No ask data received."
+  } catch (err) {
+    console.error(err);
+  } finally {
+  }
+}
+
 const analyzePosts = async () => {
   const targetPosts =
     activeTab.value === "search" ? searchResults.value : posts.value;
@@ -389,8 +462,18 @@ const startLongPressInSummarize = () => {
     isLongPressInSummarize.value = false;
     longPressTimerInSummarize.value = window.setTimeout(() => {
         isLongPressInSummarize.value = true;
-        summarizePosts();
+        isSummarizeMenuVisible.value = true;
     }, 800);
+};
+
+const summarizeAndClose = () => {
+    isSummarizeMenuVisible.value = false;
+    summarizePosts();
+};
+
+const openFreeAskAndClose = () => {
+    isSummarizeMenuVisible.value = false;
+    isChatWidgetVisible.value = true;
 };
 
 const endLongPressInSummarize = () => {
@@ -651,7 +734,7 @@ const runAutoFinding = async () => {
               sender: "mc",
               chat_id: "mc",
               text:
-                "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state, social relations, or any rules you found. Output the findings in Chinese with post id range hint in proper place.\n " +
+                "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some posts might be submissions from other users which can be identified by the content signatures and some posts might contain non empty reply field or quoted content which means the content is a reply to that (you shoud distinguish which dialog is truely the target expressed). For each grouped account, keep record their username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state, social relations, or any pattern or regularity you found. Output the findings in Chinese with post id range hint in proper place.\n " +
                 JSON.stringify(strippedPosts),
             }),
           });
@@ -758,6 +841,41 @@ import {
 } from "date-fns";
 
 const isDark = ref(localStorage.theme === 'dark');
+const isSummarizeMenuVisible = ref(false);
+const isChatWidgetVisible = ref(false);
+const chatMessages = ref<{role: 'user' | 'bot', content: string}[]>([]);
+const chatInput = ref('');
+const isChatLoading = ref(false);
+const widgetPosition = ref({ top: 100, left: 100 });
+const widgetSize = ref({ width: 320, height: 384 });
+const isChatDragging = ref(false);
+const chatDragOffset = ref({ x: 0, y: 0 });
+const isChatResizing = ref(false);
+
+const handleChatSubmit = async () => {
+    if (!chatInput.value.trim()) return;
+    const userMessage = chatInput.value;
+    chatMessages.value.push({ role: 'user', content: userMessage });
+    chatInput.value = '';
+    isChatLoading.value = true;
+    
+    // Construct the prompt with instructions
+    const precheck = `Is user's ask intent related with the posts of channel/group or search context? Please only answer 'yes' or 'no'. The user's input is: ${userMessage}`;
+    const precheckResult = await generalAsk(precheck);
+    
+    let prompt = null;
+
+    if (precheckResult.includes('yes')) {
+      prompt = `Based on the provided posts below, answer the following question: ${userMessage}\n\nPosts: $POSTS$`;
+    } else {
+      prompt = `${userMessage}`;
+    }
+    
+    const reply = await generalAsk(prompt);
+    
+    chatMessages.value.push({ role: 'bot', content: reply || "No response." });
+    isChatLoading.value = false;
+};
 const explorerTab = ref<HTMLElement | null>(null);
 const explorerMinHeight = ref("0px");
 const suggestedChannels = ref<string[]>([]);
@@ -1016,7 +1134,7 @@ const analyzeGraph = async () => {
             sender: "mc",
             chat_id: "mc",
             text:
-              "Please analyze the following posts that MIGHT from one user. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state. Output the findings for each grouped account or user in Chinese, for any confirmed evidence please attach with the post id.\n\n" +
+              "Please analyze the following posts that MIGHT from one user. You should consider grouping by the sent user or account. Note that some posts might be submission from other users which can be identified by the content signatures and some posts might contain non empty reply field or quoted content which means the content is a reply to that content (you should distinguish which dialog is truely the target expressed). For each grouped account, keep record the username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state. Output the findings for each grouped account or user in Chinese, for any confirmed evidence please attach with the post id.\n\n" +
               JSON.stringify(strippedPosts),
           }),
         });
@@ -2014,7 +2132,7 @@ const fetchChannelProfile = async (channel: string) => {
         headers: { 'x-gos-token': loginToken.value }
     });
     if (response.status === 404) {
-      const clistResponse = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=${profileName}-`, {
+      const clistResponse = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=${profileName}-&k=24`, {
           method: 'GET',
           headers: { 'x-gos-token': loginToken.value }
       });
@@ -2510,7 +2628,7 @@ watch(channelName, (newVal) => {
 
     searchTimeout = setTimeout(async () => {
          try {
-            const response = await fetch(`https://i.gogingko.net/api/v1/zr/telegram-channel?prefix=${encodeURIComponent(newVal)}`, {
+            const response = await fetch(`https://i.gogingko.net/api/v1/zr/telegram-channel?prefix=${encodeURIComponent(newVal)}&k=24`, {
                 headers: { 'x-gos-token': loginToken.value }
             });
             if (response.ok) {
@@ -2707,17 +2825,40 @@ const fetchUserProfile = async (name: string) => {
   }
 };
 
+const getSha1HexDigest = async (fdata) => {
+    // 1. Encode string into an array of bytes (Uint8Array)
+    const encoder = new TextEncoder();
+    const data = encoder.encode(fdata);
+    
+    // 2. Calculate the SHA-1 hash array buffer
+    const hashBuffer = await crypto.subtle.digest('SHA-1', data);
+    
+    // 3. Convert the binary buffer into a hex string
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hexdigest = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    
+    return hexdigest;
+}
+
 const saveProfileRemotely = async (profileName: string, gosToken: string, dataContent: any) => {
   try {
+    const finalData = JSON.stringify(dataContent)
+    const digest = await getSha1HexDigest(finalData)
+
     const response = await fetch(`https://i.gogingko.net/api/v1/p/profiles/${profileName}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-gos-token': gosToken,
+        'x-gos-digest': digest,
       },
-      body: JSON.stringify(dataContent),
+      body: finalData,
     });
     
+    if (response.status == 412) {
+      isLoginTokenValid.value = true;
+      return 'Profile not changed.'
+    }
     if (!response.ok) {
         isLoginTokenValid.value = false;
         throw new Error(`Failed to save profile remotely: ${response.status} ${response.statusText}`);
@@ -2743,7 +2884,7 @@ const fetchRemoteProfiles = async () => {
   profileError.value = "";
   loadingRemoteProfiles.value = true;
   try {
-    const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=profile-`, {
+    const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=profile-&k=24`, {
       method: 'GET',
       headers: {
         'x-gos-token': loginToken.value,
@@ -2853,7 +2994,7 @@ const loadSavedGraphRemotely = async () => {
   if (!isLoginTokenValid.value) return;
 
   try {
-    const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=graph-`, {
+    const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=graph-&k=24`, {
       method: 'GET',
       headers: {
         'x-gos-token': loginToken.value,
@@ -2958,7 +3099,7 @@ const searchChannel = async () => {
       const fallbackRes = await fetch(
         `https://i.gogingko.net/api/v1/zr/telegram-channel?prefix=${encodeURIComponent(
           name
-        )}&k=20`
+        )}&k=24`
       );
       if (fallbackRes.ok) {
         const data = await fallbackRes.json();
@@ -3604,11 +3745,45 @@ const timelineTicks = computed(() => {
         :disabled="isAnalyzing || isSummarizing"
         class="fixed bottom-24 right-8 z-50 p-4 rounded-full bg-blue-600/90 dark:bg-blue-500/90 backdrop-blur-lg border border-blue-400 dark:border-blue-600 shadow-xl text-white hover:scale-110 transition-all duration-300 hover:shadow-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed"
         aria-label="Analyze posts"
-        :title="isAnalyzing ? 'Analyzing...' : (isSummarizing ? 'Summarizing...' : 'Click to Analyze, Long Press to Summarize')"
+        :title="isAnalyzing ? 'Analyzing...' : (isSummarizing ? 'Summarizing...' : 'Click to Analyze, Long Press for Options')"
       >
         <Loader2 v-if="isAnalyzing || isSummarizing" class="h-6 w-6 animate-spin" />
         <BotMessageSquare v-else class="h-6 w-6" />
       </button>
+
+      <!-- Popup Menu -->
+      <div v-if="isSummarizeMenuVisible" class="fixed bottom-40 right-8 z-[60] bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 w-40 overflow-hidden">
+          <button @click="summarizeAndClose" class="w-full text-left px-4 py-3 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-white border-b border-gray-200 dark:border-gray-700">Summarize</button>
+          <button @click="openFreeAskAndClose" class="w-full text-left px-4 py-3 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-white">Free Ask</button>
+      </div>
+
+      <!-- Chat Widget -->
+      <div v-if="isChatWidgetVisible" 
+           :style="{ top: `${widgetPosition.top}px`, left: `${widgetPosition.left}px`, width: `${widgetSize.width}px`, height: `${widgetSize.height}px` }"
+           class="fixed z-[70] bg-white dark:bg-gray-800 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden">
+          <!-- Chat Header -->
+          <div @mousedown="startChatDrag" class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-900 cursor-move">
+              <h3 class="font-bold text-gray-900 dark:text-gray-100">Free Ask</h3>
+              <button @click="isChatWidgetVisible = false" class="text-gray-500 hover:text-red-500"><X class="h-4 w-4" /></button>
+          </div>
+          <!-- Chat Content -->
+          <div class="flex-grow p-4 overflow-y-auto text-gray-900 dark:text-white text-sm space-y-3">
+             <div v-for="(msg, index) in chatMessages" :key="index" :class="msg.role === 'user' ? 'text-right' : 'text-left'">
+                 <div :class="msg.role === 'user' ? 'bg-blue-100 dark:bg-blue-900 p-2 rounded-lg inline-block' : 'prose prose-sm dark:prose-invert'">
+                     <div v-html="md.render(msg.content)"></div>
+                 </div>
+             </div>
+             <div v-if="isChatLoading" class="text-gray-500 text-xs italic flex items-center gap-2">
+                 <Loader2 class="h-4 w-4 animate-spin" /> AI is thinking...
+             </div>
+          </div>
+          <!-- Input -->
+          <div class="p-4 border-t border-gray-200 dark:border-gray-700">
+              <input type="text" v-model="chatInput" @keyup.enter="handleChatSubmit" placeholder="Ask anything..." class="w-full p-2 border rounded-lg dark:bg-gray-900 dark:border-gray-700 dark:text-white" :disabled="isChatLoading" />
+          </div>
+          <!-- Resize Handle -->
+          <div @mousedown="startChatResize" class="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize bg-gray-300 dark:bg-gray-600 rounded-tl-lg"></div>
+      </div>
 
       <button
         v-if="
@@ -6429,13 +6604,13 @@ const timelineTicks = computed(() => {
           <!-- Saved Profiles -->
           <div v-if="savedProfiles.channel.length > 0 || savedProfiles.user.length > 0" class="mt-8 space-y-4">
               <div v-if="savedProfiles.channel.length > 0">
-                <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Channels</h4>
+                <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Channels at Local</h4>
                 <div class="flex flex-wrap gap-2">
                     <button v-for="name in savedProfiles.channel" :key="name" @click="viewSavedProfile('channel', name)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900">{{ name }}</button>
                 </div>
               </div>
               <div v-if="savedProfiles.user.length > 0">
-                <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Users</h4>
+                <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Users at Local</h4>
                 <div class="flex flex-wrap gap-2">
                     <button v-for="name in savedProfiles.user" :key="name" @click="viewSavedProfile('user', name)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900">{{ name }}</button>
                 </div>
