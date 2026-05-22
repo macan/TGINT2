@@ -116,9 +116,29 @@ const isAnalyzingGraph = ref(false);
 const isAnalysisModalVisible = ref(false);
 const analyzedCount = ref(0);
 const lookupUserHistory = ref<string[]>(JSON.parse(localStorage.getItem('telegramUserLookupHistory') || '[]'));
+const dropdownContainer = ref<HTMLElement | null>(null);
+
+const handleClickOutside = (event: MouseEvent) => {
+    if (dropdownContainer.value && !dropdownContainer.value.contains(event.target as Node)) {
+        isHistoryVisible.value = false;
+    }
+};
+
+onMounted(() => {
+    document.addEventListener('click', handleClickOutside);
+});
+
+onUnmounted(() => {
+    document.removeEventListener('click', handleClickOutside);
+});
+
 const renderedMarkdown = computed(() => md.render(analysisResult.value));
 const renderedMarkdownOfGraph = computed(() => md.render(analysisResultOfGraph.value));
 
+const deleteHistory = (username: string) => {
+    lookupUserHistory.value = lookupUserHistory.value.filter(u => u !== username);
+    localStorage.setItem('telegramUserLookupHistory', JSON.stringify(lookupUserHistory.value));
+};
 const selectHistory = (user: string) => {
     telegramUsername.value = user;
     isHistoryVisible.value = false;
@@ -822,6 +842,20 @@ const saveGraph = async () => {
     }
 };
 
+
+function applyGraphStyle() {
+    if (workspaceGraph.value) {
+      workspaceGraph.value.style()
+        .selector('node')
+          .style('color', isDark.value ? '#f8fafc' : '#1e293b')
+        .selector('edge')
+          .style('color', isDark.value ? '#f8fafc' : '#1e293b')
+          .style('text-background-color', isDark.value ? '#1e293b' : '#ffffff')
+          .style('text-border-color', isDark.value ? '#334155' : '#e2e8f0')
+        .update();
+    }
+}
+
 const loadGraph = async () => {
     if (!graphNameInput.value && isLoginTokenValid.value) {
         toastMessage.value = "Please enter a graph name.";
@@ -840,7 +874,10 @@ const loadGraph = async () => {
             if (!response.ok) throw new Error("Failed to load graph");
             const data = await response.json();
             if (workspaceGraph.value) {
-                workspaceGraph.value.json(JSON.parse(data));
+                const parsedData = JSON.parse(data);
+                delete parsedData.style;
+                workspaceGraph.value.json(parsedData);
+                applyGraphStyle(); // Apply styles to newly loaded graph
                 toastMessage.value = 'Graph loaded remotely.';
                 toastType.value = 'success';
                 setTimeout(() => { toastMessage.value = ""; }, 3000);
@@ -1368,39 +1405,38 @@ const initGraph = () => {
       pixelRatio: 1,
       style: [
         {
+          selector: 'node',
+          style: {
+            'label': 'data(label)',
+            'color': isDark.value ? '#f8fafc' : '#1e293b',
+            'font-size': '10px'
+          }
+        },
+        {
           selector: 'node[type="person"]',
           style: {
             'background-color': '#ec4899', // Pink-500
-            'label': 'data(label)',
-            'color': isDark.value ? '#f8fafc' : '#1e293b',
             'shape': 'ellipse',
             'width': 30,
             'height': 30,
-            'font-size': '10px'
           }
         },
         {
           selector: 'node[type="user"]',
           style: {
             'background-color': '#10b981', // Emerald-500
-            'label': 'data(label)',
-            'color': isDark.value ? '#f8fafc' : '#1e293b',
             'shape': 'round-rectangle',
             'width': 30,
             'height': 30,
-            'font-size': '10px'
           }
         },
         {
           selector: 'node[type="channel"]',
           style: {
             'background-color': '#f59e0b', // Amber-500
-            'label': 'data(label)',
-            'color': isDark.value ? '#f8fafc' : '#1e293b',
             'shape': 'diamond',
             'width': 30,
             'height': 30,
-            'font-size': '10px'
           }
         },
         {
@@ -1440,18 +1476,9 @@ const initGraph = () => {
       }
     });
 
-    watch(isDark, (newDark) => {
-      if (workspaceGraph.value) {
-        workspaceGraph.value.style()
-          .selector('node')
-            .style('color', newDark ? '#f8fafc' : '#1e293b')
-          .selector('edge')
-            .style('color', newDark ? '#f8fafc' : '#1e293b')
-            .style('text-background-color', newDark ? '#1e293b' : '#ffffff')
-            .style('text-border-color', newDark ? '#334155' : '#e2e8f0')
-          .update();
-      }
-    });
+watch(isDark, () => {
+  applyGraphStyle();
+});
 
     lastContainerSize.value = { width: container.clientWidth, height: container.clientHeight };
 
@@ -2861,11 +2888,16 @@ const viewSavedGraphRemotely = async (name: string) => {
 
     if (!response.ok) {
       isLoginTokenValid.value = false;
+
       throw new Error(`Failed to fetch graphs remotely: ${response.status} ${response.statusText}`);
     }
     const data = await response.json();
     if (workspaceGraph.value) {
-      workspaceGraph.value.json(JSON.parse(data));
+      const parsedData = JSON.parse(data);
+      delete parsedData.style;
+      workspaceGraph.value.json(parsedData);
+      applyGraphStyle(); // Apply styles to newly loaded graph
+      //workspaceGraph.value.json(JSON.parse(data));
       toastMessage.value = 'Graph loaded remotely.';
       toastType.value = 'success';
       setTimeout(() => { toastMessage.value = ""; }, 3000);
@@ -6132,7 +6164,7 @@ const timelineTicks = computed(() => {
           
           <div
             v-if="savedPersonProfileHtml"
-            class="w-full max-w-6xl mx-auto my-8 bg-gradient-to-br from-white to-blue-50/50 dark:bg-gray-900 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
+            class="w-full max-w-6xl mx-auto my-8 bg-gradient-to-br from-white to-blue-50/50 dark:from-gray-900 dark:to-gray-800 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
           >
             <div class="flex items-center gap-2 mb-4">
               <div
@@ -6412,7 +6444,7 @@ const timelineTicks = computed(() => {
           
           <div
             v-if="savedFinalTableHtml"
-            class="w-full max-w-6xl mx-auto mt-8 bg-gradient-to-br from-white to-blue-50/50 dark:bg-gray-900 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
+            class="w-full max-w-6xl mx-auto mt-8 bg-gradient-to-br from-white to-blue-50/50 dark:from-gray-900 dark:to-gray-800 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
           >
             <div class="flex items-center gap-2 mb-4">
               <div
@@ -6744,7 +6776,7 @@ const timelineTicks = computed(() => {
       <div v-show="activeTab === 'profile'" class="w-full relative pt-2 pb-[200px] flex flex-col h-full overflow-y-auto px-6">
         <h2 class="text-xl font-bold mb-6 text-gray-900 dark:text-white">Telegram Users</h2>
 
-        <div class="mt-2 relative mb-8">
+        <div ref="dropdownContainer" class="mt-2 relative mb-8">
           <div class="flex gap-2">
             <input 
               v-model="telegramUsername" 
@@ -6759,14 +6791,18 @@ const timelineTicks = computed(() => {
           
           <!-- Dropdown -->
           <div v-if="isHistoryVisible && lookupUserHistory.length > 0" class="absolute z-50 w-full mt-1 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg shadow-lg max-h-40 overflow-y-auto">
-            <button 
+            <div 
               v-for="user in lookupUserHistory" 
               :key="user" 
-              @click="selectHistory(user)" 
-              class="w-full text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-white"
+              class="w-full text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-white flex justify-between items-center group"
             >
-              {{ user }}
-            </button>
+              <button @click="selectHistory(user)" class="flex-grow text-left">
+                {{ user }}
+              </button>
+              <button @click.stop="deleteHistory(user)" class="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500">
+                <X class="w-3 h-3"/>
+              </button>
+            </div>
           </div>
         </div>
 
