@@ -3752,6 +3752,7 @@ const timelineTicks = computed(() => {
       </button>
 
       <!-- Popup Menu -->
+      <div v-if="isSummarizeMenuVisible" @click="isSummarizeMenuVisible = false" class="fixed inset-0 z-[55]"></div>
       <div v-if="isSummarizeMenuVisible" class="fixed bottom-40 right-8 z-[60] bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 w-40 overflow-hidden">
           <button @click="summarizeAndClose" class="w-full text-left px-4 py-3 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-white border-b border-gray-200 dark:border-gray-700">Summarize</button>
           <button @click="openFreeAskAndClose" class="w-full text-left px-4 py-3 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-white">Free Ask</button>
@@ -6869,7 +6870,7 @@ const timelineTicks = computed(() => {
 
               <div
                 v-if="finalTableHtml"
-                class="mt-8 bg-gradient-to-br from-white to-blue-50/50 dark:bg-gray-900 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
+                class="mt-8 bg-gradient-to-br from-white to-blue-50/50 dark:from-gray-900 dark:to-gray-950 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
               >
                 <div class="flex items-center gap-2 mb-4">
                   <div
