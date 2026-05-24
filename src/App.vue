@@ -46,6 +46,8 @@ import {
   PanelRightOpen,
   PanelRightClose,
   Copy,
+  Library,
+  Hash,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -194,6 +196,20 @@ const fetchCounters = async () => {
     }
   } catch (err) {
     console.error("Failed to fetch counters:", err);
+  }
+};
+
+const fetchChannelNamesByLang = async (langCode: string) => {
+  try {
+    const response = await fetch(`https://i.gogingko.net/api/v1/lang/${langCode}`, {
+      method: "GET",
+    });
+    if (!response.ok) throw new Error("Failed to fetch channel names: " + response.status);
+    const text = await response.text();
+    return text.split(',').map(name => name.trim()).filter(name => name.length > 0);
+  } catch (err) {
+    console.error("Failed to fetch channel names:", err);
+    return [];
   }
 };
 
@@ -882,7 +898,124 @@ const suggestedChannels = ref<string[]>([]);
 let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 
 const showBackToTop = ref(false);
-const activeTab = ref<"explorer" | "search" | "auto-finding" | "workspace" | "profile">("explorer");
+const activeTab = ref<"explorer" | "search" | "auto-finding" | "workspace" | "profile" | "channel">("explorer");
+const channels = ref<any[]>([]);
+const isLoadingChannels = ref(false);
+const langCode = ref("");
+
+const fetchChannels = async (forceFetch: boolean = false) => {
+    if (!forceFetch) {
+        const cached = localStorage.getItem('telegramChannels');
+        if (cached) {
+            channels.value = JSON.parse(cached);
+            return;
+        }
+    }
+
+    isLoadingChannels.value = true;
+    try {
+        const response = await fetch('https://i.gogingko.net/api/v1/zr/telegram-channel', {
+        });
+        if (response.ok) {
+            const data = await response.json();
+            const keys: string[] = data.keys || [];
+            
+            // Fetch profiles for each channel concurrently
+            const channelPromises = keys.map(async (channelName) => {
+                try {
+                    const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${channelName}`, {
+                    });
+                    if (profileRes.ok) {
+                        let userData = await profileRes.json()
+                        const match = String(userData.photo).match(/cdn(\d+)/);
+                        let cdnNumber = null
+                        let cdnRegion = null
+                        if (match) {
+                            cdnNumber = match[1];
+                            cdnRegion = TelegramCDNRegions[cdnNumber as keyof typeof TelegramCDNRegions];
+                        }
+                        userProfile.value = {
+                            username: userData.username,
+                            avatarUrl: `https://i.gogingko.net/api/v1/v/telegram-profile/${name}`,
+                            title: userData.title,
+                            description: userData.description,
+                            cdnNumber: cdnNumber,
+                            cdnRegion: cdnRegion
+                        };
+                        userData.cdnNumber = cdnNumber
+                        userData.cdnRegion = cdnRegion
+                        return userData;
+                    }
+                } catch (e) {
+                    console.error(`Failed to fetch profile for ${channelName}`, e);
+                }
+                return { name: channelName }; 
+            });
+            const results = await Promise.all(channelPromises);
+            channels.value = results;
+            localStorage.setItem('telegramChannels', JSON.stringify(results));
+        }
+    } catch (e) {
+        console.error(e);
+    } finally {
+        isLoadingChannels.value = false;
+    }
+};
+
+const handleLangFetch = async () => {
+    if (!langCode.value) return;
+    isLoadingChannels.value = true;
+    try {
+        const names = await fetchChannelNamesByLang(langCode.value);
+        if (names.length > 0) {
+            const channelPromises = names.map(async (channelName) => {
+                try {
+                    const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${channelName}`);
+                    if (profileRes.ok) {
+                        let userData = await profileRes.json()
+                        const match = String(userData.photo).match(/cdn(\d+)/);
+                        let cdnNumber = null
+                        let cdnRegion = null
+                        if (match) {
+                            cdnNumber = match[1];
+                            cdnRegion = TelegramCDNRegions[cdnNumber as keyof typeof TelegramCDNRegions];
+                        }
+                        userProfile.value = {
+                            username: userData.username,
+                            avatarUrl: `https://i.gogingko.net/api/v1/v/telegram-profile/${name}`,
+                            title: userData.title,
+                            description: userData.description,
+                            cdnNumber: cdnNumber,
+                            cdnRegion: cdnRegion
+                        };
+                        userData.cdnNumber = cdnNumber
+                        userData.cdnRegion = cdnRegion
+                        return userData;
+                    }
+                } catch (e) {
+                    console.error(`Failed to fetch profile for ${channelName}`, e);
+                }
+                return { name: channelName }; 
+            });
+            channels.value = await Promise.all(channelPromises);
+        } else {
+            channels.value = [];
+        }
+    } catch (e) {
+        console.error(e);
+    } finally {
+        isLoadingChannels.value = false;
+    }
+};
+
+const isChannelLoaded = ref(false);
+
+watch(activeTab, (newTab) => {
+    if (newTab === 'channel' && !isChannelLoaded.value) {
+        fetchChannels();
+        isChannelLoaded.value = true;
+    }
+});
 
 // Workspace State & Logic
 const workspaceGraph = ref<any>(null);
@@ -3901,6 +4034,23 @@ const timelineTicks = computed(() => {
           class="inline-flex bg-gray-200/50 dark:bg-gray-800/50 p-1.5 rounded-2xl backdrop-blur-xl border border-gray-200/50 dark:border-gray-700/50 shadow-inner"
         >
           <button
+            @click="activeTab = 'channel'"
+            :class="[
+              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              activeTab === 'channel'
+                ? 'bg-white dark:bg-gray-700 text-yellow-600 dark:text-yellow-400 shadow-md shadow-yellow-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+            ]"
+          >
+            <Library
+              :class="[
+                'h-4 w-4 mr-2 transition-transform duration-300',
+                activeTab === 'channel' ? 'scale-110' : '',
+              ]"
+            />
+            Channels
+          </button>
+          <button
             @click="activeTab = 'explorer'"
             :class="[
               'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
@@ -3915,7 +4065,7 @@ const timelineTicks = computed(() => {
                 activeTab === 'explorer' ? 'scale-110' : '',
               ]"
             />
-            Channel Explorer
+            Explorer
           </button>
           <button
             @click="activeTab = 'search'"
@@ -3988,6 +4138,66 @@ const timelineTicks = computed(() => {
           </button>
         </div>
       </header>
+
+      <!-- Channel Tab -->
+      <div v-show="activeTab === 'channel'" class="max-w-[95%] mx-auto px-4 py-8">
+        <div class="flex items-center justify-between mb-6">
+          <h2 class="text-2xl font-bold text-gray-900 dark:text-white">Channels</h2>
+          <div class="flex items-center gap-2">
+            <div class="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
+              <input v-model="langCode" placeholder="zh-CN" class="w-20 bg-transparent px-2 py-1 text-sm outline-none text-gray-900 dark:text-white" @keyup.enter="handleLangFetch" />
+            </div>
+            <button 
+              @click="langCode ? handleLangFetch() : fetchChannels(true)"
+              class="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 dark:hover:bg-yellow-700 text-sm font-semibold"
+            >
+              {{ langCode ? 'Filter by Language' : 'Next Batch' }}
+            </button>
+          </div>
+        </div>
+        
+        <div v-if="isLoadingChannels" class="flex flex-col items-center justify-center py-20 text-gray-500">
+           <div class="h-8 w-8 animate-spin rounded-full border-4 border-t-blue-500 border-gray-200 mb-4"></div>
+           Loading channels...
+        </div>
+
+        <div v-else class="columns-1 md:columns-2 lg:columns-3 xl:columns-4 gap-6">
+          <div v-for="channel in channels" :key="channel.name"
+               class="break-inside-avoid bg-white dark:bg-gray-800 p-6 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-sm hover:shadow-lg transition-shadow mb-6">
+            <div class="flex items-center gap-4 mb-4 relative">
+              <img 
+                :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + channel.username" 
+                @error="handleImageError"
+                class="w-12 h-12 rounded-full border border-gray-200 dark:border-gray-700" 
+                alt="Avatar"
+              />
+              <div class="flex-grow pr-8">
+                <h3 class="text-lg font-bold text-gray-900 break-words dark:text-white">
+                  {{ channel.title || channel.name }}
+                </h3>
+                <p v-if="channel.username" class="text-sm text-gray-400">@{{ channel.username || channel.name }}</p>
+              </div>
+              <div class="absolute top-0 right-0">
+                <component :is="channel._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : channel._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User" class="h-5 w-5 text-gray-400" />
+              </div>
+            </div>
+            <p v-if="channel.description || channel.about" class="text-sm text-gray-500 dark:text-gray-400 mb-4 leading-relaxed whitespace-pre-wrap break-words overflow-hidden">{{ channel.description || channel.about }}</p>
+            
+            <div class="flex flex-wrap gap-2 text-xs text-gray-500 dark:text-gray-400 mb-4">
+              <span v-if="channel.members" class="flex items-center gap-1"><Users class="h-3 w-3" /> {{ channel.members }}</span>
+              <span v-if="channel.files" class="flex items-center gap-1"><FileText class="h-3 w-3" /> {{ channel.files }}</span>
+              <span v-if="channel.photos" class="flex items-center gap-1"><ImageIcon class="h-3 w-3" /> {{ channel.photos }}</span>
+              <span v-if="channel.videos" class="flex items-center gap-1"><Video class="h-3 w-3" /> {{ channel.videos }}</span>
+            </div>
+
+            <div v-if="channel.cdnNumber" class="text-xs text-blue-500 font-mono mb-4">
+              DC: {{ channel.cdnNumber }} <span v-if="channel.cdnRegion">({{ channel.cdnRegion[1] }})</span>
+            </div>
+
+            <button @click="activeTab = 'explorer'; channelName = channel.username || channel.name; searchChannel()" class="w-full text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 text-sm font-semibold">View Channel</button>
+          </div>
+        </div>
+      </div>
 
       <!-- Explorer Tab -->
       <div ref="explorerTab" v-show="activeTab === 'explorer'" :style="{ minHeight: explorerMinHeight }">
