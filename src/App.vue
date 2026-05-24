@@ -5170,6 +5170,28 @@ const timelineTicks = computed(() => {
                       </div>
                     </div>
 
+                    <!-- PDF Document Preview -->
+                    <div
+                      v-if="post.data?.documents && post.data.documents.length > 0 && post.data.documents[0].mime_type == 'application/pdf'"
+                      class="mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/50 flex items-center p-4 shadow-sm hover:shadow-md transition-shadow relative z-10"
+                    >
+                      <div class="mr-4">
+                        <FileText class="h-10 w-10 text-red-500" />
+                      </div>
+                      <div class="flex-1 min-w-0">
+                        <h4 class="text-sm font-bold text-gray-900 dark:text-white mb-1">
+                          {{ post.data.documents[0].attributes[0].file_name || 'Document.pdf' }}
+                        </h4>
+                        <a
+                          :href="`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`"
+                          target="_blank"
+                          class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-semibold"
+                        >
+                          View Document
+                        </a>
+                      </div>
+                    </div>
+
                     <div
                       class="mt-5 pt-4 border-t border-gray-100 dark:border-gray-700/50 flex flex-col space-y-4 relative z-10"
                     >
