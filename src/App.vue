@@ -1209,6 +1209,7 @@ const analyzeGraph = async () => {
         setTimeout(() => { toastMessage.value = ""; }, 5000);
 
         let ids: string[] = [];
+        // for each post-in edge, get all the post ids
         postInEdges.forEach((edge: any) => {
           const lines = (edge.data('facts') || '').split('\n');
           let oldIdsStr = '';
@@ -1246,7 +1247,17 @@ const analyzeGraph = async () => {
           );
         }
 
-        const postsData = await mgetResponse.json();
+        let postsData = await mgetResponse.json();
+        console.log(`mget ${postsData.length} posts`)
+
+        // for each channel edge, get all the post ids from the channel
+        const directChannels = workspaceGraph.value.edges('[label="channel"]');
+        for (const edge of directChannels) {
+          const channelPosts = await fetchChannelPosts(edge.target().id());
+          postsData.push(...channelPosts);
+        };
+        console.log(`total get ${postsData.length} posts`)
+
         const results = Array.isArray(postsData) ? postsData : postsData.data || [];
 
         const strippedPosts = results
@@ -1373,6 +1384,60 @@ const fetchChannelDates = async (nodeId: string) => {
         toastType.value = 'error';
         setTimeout(() => { toastMessage.value = ""; }, 3000);
     }
+};
+
+const fetchChannelPosts = async (nodeId: string) => {
+    try {
+        let response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=100`);
+        if (!response.ok) throw new Error('Failed to fetch');
+        let data = await response.json();
+        
+        // Assuming posts are returned in data.posts
+        let allPosts = [];
+        let posts = data || [];
+        let min = 1;
+
+        if (posts.length === 0) {
+           toastMessage.value = 'No posts found in channel.';
+           toastType.value = 'error';
+           setTimeout(() => { toastMessage.value = ""; }, 3000);
+           return [];
+        } else {
+          min = parseInt(posts[posts.length - 1].key.split('.')[1]);
+        }
+        allPosts.push(...posts);
+        toastMessage.value = `Fetched ${allPosts.length} posts from ${nodeId}! Continue...`;
+        toastType.value = 'success';
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+
+        // iterate to the first post
+        while (min > 1) {
+          response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=100&b=${min}`);
+          if (!response.ok) throw new Error('Failed to fetch');
+          data = await response.json();
+          posts = data || [];
+          if (posts.length != 0) {
+            min = parseInt(posts[posts.length - 1].key.split('.')[1]);
+          } else {
+            // fail fast to ignore lower post ids.
+            break;
+          }
+          allPosts.push(...posts);
+          if (min - 100 <= 0) {
+            break;
+          }
+        }
+        toastMessage.value = `Fetched ${allPosts.length} posts from ${nodeId}!`;
+        toastType.value = 'success';
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+
+        return allPosts;
+    } catch (e) {
+        toastMessage.value = 'Fetch failed.';
+        toastType.value = 'error';
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+    }
+  return [];
 };
 
 const generateHash5 = (seed) => {
@@ -2501,6 +2566,25 @@ const allUsernamesExplorer = computed(() => {
   return Array.from(users).sort();
 });
 
+const usernamePostCounts = computed(() => {
+  const counts: Record<string, number> = {};
+  posts.value.forEach((p) => {
+    const rawUser = p.data?.user;
+    let username: string | undefined;
+    if (rawUser) {
+      const parts = rawUser.split("/");
+      username = parts[parts.length - 1];
+    } else if (p.data?.uid !== undefined) {
+      username = String(p.data?.uid);
+    }
+    
+    if (username) {
+      counts[username] = (counts[username] || 0) + 1;
+    }
+  });
+  return counts;
+});
+
 const allUsernames = computed(() => {
   const users = new Set<string>();
   searchResults.value.forEach((p) => {
@@ -2754,7 +2838,7 @@ onMounted(() => {
 
 watch(channelName, (newVal) => {
     if (searchTimeout) clearTimeout(searchTimeout);
-    if (newVal.trim().length === 0 || !isLoginTokenValid) {
+    if (newVal.trim().length === 0 || !isLoginTokenValid.value) {
         suggestedChannels.value = [];
         return;
     }
@@ -3248,7 +3332,12 @@ const searchChannel = async () => {
       throw new Error(`Failed to fetch metadata: ${metaRes.statusText}`);
     }
 
-    const metaData = await metaRes.json();
+    let metaData = await metaRes.json();
+    const match = String(metaData.photo).match(/cdn(\d+)/);
+    if (match) {
+        metaData.cdnNumber = match[1];
+        metaData.cdnRegion = TelegramCDNRegions[metaData.cdnNumber as keyof typeof TelegramCDNRegions];
+    }
     metadata.value = metaData;
 
     try {
@@ -4370,7 +4459,7 @@ const timelineTicks = computed(() => {
                   <div class="grid grid-cols-2 gap-4">
                     <div
                       v-if="metadata.subscribers || metadata.members || metadata.participants_count"
-                      class="bg-blue-50/80 dark:bg-blue-900/20 p-5 rounded-[2rem] border border-blue-100/50 dark:border-blue-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
+                      class="bg-blue-50/80 dark:bg-blue-900/20 p-3 rounded-2xl border border-blue-100/50 dark:border-blue-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
                     >
                       <Users
                         class="h-6 w-6 mb-2 text-blue-500 dark:text-blue-400"
@@ -4391,7 +4480,7 @@ const timelineTicks = computed(() => {
 
                     <div
                       v-if="metadata.date || metadata.createdAt"
-                      class="bg-purple-50/80 dark:bg-purple-900/20 p-5 rounded-[2rem] border border-purple-100/50 dark:border-purple-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
+                      class="bg-purple-50/80 dark:bg-purple-900/20 p-3 rounded-2xl border border-purple-100/50 dark:border-purple-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
                     >
                       <Calendar
                         class="h-6 w-6 mb-2 text-purple-500 dark:text-purple-400"
@@ -4407,6 +4496,66 @@ const timelineTicks = computed(() => {
                         >Created</span
                       >
                     </div>
+
+                    <div
+                      v-if="metadata.files"
+                      class="bg-orange-50/80 dark:bg-orange-900/20 p-3 rounded-2xl border border-orange-100/50 dark:border-orange-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
+                    >
+                      <FileText
+                        class="h-6 w-6 mb-2 text-orange-500 dark:text-orange-400"
+                      />
+                      <span
+                        class="text-xl font-black text-gray-900 dark:text-white"
+                        >{{ metadata.files }}</span
+                      >
+                      <span
+                        class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mt-1"
+                        >Files</span
+                      >
+                    </div>
+
+                    <div
+                      v-if="metadata.photos"
+                      class="bg-green-50/80 dark:bg-green-900/20 p-3 rounded-2xl border border-green-100/50 dark:border-green-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
+                    >
+                      <ImageIcon
+                        class="h-6 w-6 mb-2 text-green-500 dark:text-green-400"
+                      />
+                      <span
+                        class="text-xl font-black text-gray-900 dark:text-white"
+                        >{{ metadata.photos }}</span
+                      >
+                      <span
+                        class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mt-1"
+                        >Photos</span
+                      >
+                    </div>
+
+                    <div
+                      v-if="metadata.videos"
+                      class="bg-red-50/80 dark:bg-red-900/20 p-3 rounded-2xl border border-red-100/50 dark:border-red-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
+                    >
+                      <Video
+                        class="h-6 w-6 mb-2 text-red-500 dark:text-red-400"
+                      />
+                      <span
+                        class="text-xl font-black text-gray-900 dark:text-white"
+                        >{{ metadata.videos }}</span
+                      >
+                      <span
+                        class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mt-1"
+                        >Videos</span
+                      >
+                    </div>
+                  </div>
+
+                  <div
+                    v-if="metadata.cdnNumber"
+                    class="mt-4 bg-gray-50/80 dark:bg-gray-700/30 p-5 rounded-[2rem] border border-gray-100/50 dark:border-gray-600/50 flex flex-col items-center justify-center text-center transition-transform duration-300"
+                  >
+                    <span class="text-lg font-black text-gray-900 dark:text-white">
+                      {{ 'DC: ' + metadata.cdnNumber }} <span v-if="metadata.cdnRegion">({{ Array.isArray(metadata.cdnRegion) ? metadata.cdnRegion[1] : metadata.cdnRegion }})</span>
+                    </span>
                   </div>
                 </div>
               </div>
@@ -4451,13 +4600,14 @@ const timelineTicks = computed(() => {
                     :key="username"
                     @click="toggleUsernameExplorer(username)"
                     :class="[
-                      'w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all',
+                      'w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all flex justify-between items-center',
                       selectedUsernamesExplorer.includes(username)
                         ? 'bg-blue-600 text-white shadow-sm'
                         : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
                     ]"
                   >
-                    {{ username }}
+                    <span>{{ username }}</span>
+                    <span class="text-[10px] opacity-70">{{ usernamePostCounts[username] || 0 }}</span>
                   </button>
                 </div>
               </div>
@@ -4863,6 +5013,13 @@ const timelineTicks = computed(() => {
                     <!-- Badges -->
                     <div class="absolute top-4 right-4 flex space-x-1 z-20">
                       <button
+                        @click.stop="addToWorkspaceFromPost(post)"
+                        class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full"
+                        title="Add to Workspace"
+                      >
+                        <Layout class="h-3 w-3 mr-1" /> Add
+                      </button>
+                      <button
                         @click.stop="sharePost(post)"
                         class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full"
                         title="Share"
@@ -5151,14 +5308,15 @@ const timelineTicks = computed(() => {
                           >{{ post.data.linkPreview.siteName }}</span
                         >
                         <a
-                          v-if="post.data.linkPreview.href"
-                          :href="post.data.linkPreview.href"
+                          v-if="post.data.linkPreview.href || post.data.linkPreview.url"
+                          :href="post.data.linkPreview.href || post.data.linkPreview.url"
                           target="_blank"
                           class="text-sm font-bold text-gray-900 dark:text-white hover:text-blue-600 dark:hover:text-blue-400 mb-1.5 line-clamp-1 transition-colors"
                         >
                           {{
                             post.data.linkPreview.title ||
-                            post.data.linkPreview.href
+                            post.data.linkPreview.href ||
+                            post.data.linkPreview.url
                           }}
                         </a>
                         <p
