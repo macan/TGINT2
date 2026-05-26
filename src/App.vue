@@ -1252,10 +1252,10 @@ const analyzeGraph = async () => {
 
         // for each channel edge, get all the post ids from the channel
         const directChannels = workspaceGraph.value.edges('[label="channel"]');
-        for (const edge of directChannels) {
-          const channelPosts = await fetchChannelPosts(edge.target().id());
-          postsData.push(...channelPosts);
-        };
+        //for (const edge of directChannels) {
+        //  const channelPosts = await fetchChannelPosts(edge.target().id());
+        //  postsData.push(...channelPosts);
+        //};
         console.log(`total get ${postsData.length} posts`)
 
         const results = Array.isArray(postsData) ? postsData : postsData.data || [];
@@ -1278,14 +1278,19 @@ const analyzeGraph = async () => {
             sender: "mc",
             chat_id: "mc",
             text:
-              "Please analyze the following posts that MIGHT from one user. You should consider grouping by the sent user or account. Note that some posts might be submission from other users which can be identified by the content signatures and some posts might contain non empty reply field or quoted content which means the content is a reply to that content (you should distinguish which dialog is truely the target expressed). For each grouped account, keep record the username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state. Output the findings for each grouped account or user in Chinese, for any confirmed evidence please attach with the post id.\n\n" +
+              "Please analyze the following posts that MIGHT from one user. You should consider grouping by the sent user or account. Note that some posts might be submission from other users which can be identified by the content signatures and some posts might contain non empty reply field or quoted content which means the content is a reply to that content (you should distinguish which dialog is truely the target expressed). For each grouped account, keep record the username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state. Output the findings for each grouped account or user in Chinese including a table to clearly view, for any confirmed evidence please attach with the post id.\n\n" +
               JSON.stringify(strippedPosts),
           }),
         });
 
-        if (!response.ok) throw new Error("Analysis request failed");
+        if (!response.ok) throw new Error("Analysis request to ASK service failed " + response.status);
         const data = await response.json();
-        analysisResultOfGraph.value = data.reply;
+        // if it is a long response, we need to wait for the final result
+        if (data.token) {
+          analysisResultOfGraph.value = data.text;
+        } else {
+          analysisResultOfGraph.value = data.reply;
+        }
         // save the analysis result to localStorage
         const personNodes = workspaceGraph.value.nodes('[type="person"]');
         if (personNodes.length === 1) {
@@ -1295,8 +1300,9 @@ const analyzeGraph = async () => {
           }
         }
     } catch (error) {
-        toastMessage.value = "Analysis failed.";
+        toastMessage.value = "Analysis failed: " + error;
         toastType.value = "error";
+        setTimeout(() => { toastMessage.value = ""; }, 5000);
         console.error(error);
     } finally {
         isAnalyzingGraph.value = false;
@@ -1386,7 +1392,7 @@ const fetchChannelDates = async (nodeId: string) => {
     }
 };
 
-const fetchChannelPosts = async (nodeId: string) => {
+const fetchChannelPosts = async (nodeId: string, atMost = 100) => {
     try {
         let response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=100`);
         if (!response.ok) throw new Error('Failed to fetch');
@@ -1413,17 +1419,16 @@ const fetchChannelPosts = async (nodeId: string) => {
         // iterate to the first post
         while (min > 1) {
           response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=100&b=${min}`);
-          if (!response.ok) throw new Error('Failed to fetch');
+          if (!response.ok) throw new Error('Failed to fetch ' + nodeId + ' b=' + min);
           data = await response.json();
           posts = data || [];
           if (posts.length != 0) {
             min = parseInt(posts[posts.length - 1].key.split('.')[1]);
+            allPosts.push(...posts);
           } else {
-            // fail fast to ignore lower post ids.
-            break;
+            min = min - 100;
           }
-          allPosts.push(...posts);
-          if (min - 100 <= 0) {
+          if (atMost > 0 && allPosts.length >= atMost) {
             break;
           }
         }
@@ -2568,6 +2573,36 @@ const allUsernamesExplorer = computed(() => {
 
 const usernamePostCounts = computed(() => {
   const counts: Record<string, number> = {};
+  searchResults.value.forEach((p) => {
+    const rawUser = p.data?.user;
+    let username: string | undefined;
+    if (rawUser) {
+      const parts = rawUser.split("/");
+      username = parts[parts.length - 1];
+    } else if (p.data?.uid !== undefined) {
+      username = String(p.data?.uid);
+    }
+    
+    if (username) {
+      counts[username] = (counts[username] || 0) + 1;
+    }
+  });
+  return counts;
+});
+
+const channelPostCounts = computed(() => {
+  const counts: Record<string, number> = {};
+  searchResults.value.forEach((p) => {
+    const channel = p.key.split('.')[0];
+    if (channel) {
+      counts[channel] = (counts[channel] || 0) + 1;
+    }
+  });
+  return counts;
+});
+
+const usernamePostCountsExplorer = computed(() => {
+  const counts: Record<string, number> = {};
   posts.value.forEach((p) => {
     const rawUser = p.data?.user;
     let username: string | undefined;
@@ -3152,7 +3187,24 @@ const viewRemoteProfile = async (profileName: string) => {
             method: 'GET',
         });
         if (!response.ok) throw new Error("Failed to load profile");
-        const data = JSON.parse(await response.json());
+        let data = JSON.parse(await response.json());
+        if (data.token) {
+          // this is a marker of in-completed result, need to fetch the true result.
+            try {
+              const response = await fetch(`https://i.gogingko.net/api/v1/v/test/${data.token}`, {
+                method: 'GET',
+              });
+              if (!response.ok) {
+                throw new Error(`Failed to fetch profiles remotely: token=${data.token} ${response.status}`); 
+              } else {
+                data = await response.json();
+              }
+            } catch (err) {
+              toastMessage.value = "Failed to load token from remote: " + err.message;
+              toastType.value = "error";
+              setTimeout(() => { toastMessage.value = ""; }, 3000);
+            }
+        }
         // Assuming data structure: { reply: "markdown content" }
         selectedRemoteProfileName.value = profileName;
         let jsonData = data.text.split('Here is the context input: ')[1] || '';
@@ -3191,19 +3243,37 @@ const loadSavedProfiles = () => {
     savedProfiles.value = profiles;
 }
 
-const viewSavedProfile = (type: string, name: string) => {
+const viewSavedProfile = async (type: string, name: string) => {
     const data = localStorage.getItem(`profile-${type}-${name}`);
     if (data) {
         const parsed = JSON.parse(data);
         savedProfileName.value = `profile-${type}-${name}`
         if (type == 'person') {
-          savedPersonProfileHtml.value = md.render(parsed.reply);
+          if (parsed.token) {
+            // try to fetch the final result from GOS
+            try {
+              const response = await fetch(`https://i.gogingko.net/api/v1/v/test/${parsed.token}`, {
+                method: 'GET',
+              });
+              if (!response.ok) {
+                savedPersonProfileHtml.value = md.render(`Token ${parsed.token} result not found, please reload later!`);
+              } else {
+                const fetched = await response.json();
+                savedPersonProfileHtml.value = md.render(fetched.reply);
+              }
+            } catch (err) {
+              toastMessage.value = "Failed to load token from remote: " + err.message;
+              toastType.value = "error";
+              setTimeout(() => { toastMessage.value = ""; }, 3000);
+            }
+          } else {
+            savedPersonProfileHtml.value = md.render(parsed.reply);
+          }
           activeTab.value = 'workspace'; // Make sure we are in the right tab or just display it
         } else {
           savedFinalTableHtml.value = md.render(parsed.reply);
           activeTab.value = 'auto-finding'; // Make sure we are in the right tab or just display it
         }
-        
     }
 }
 
@@ -3582,36 +3652,43 @@ const loadMorePosts = async () => {
     return;
   }
 
-  try {
-    const numericId = lastPostId.includes(".")
-      ? lastPostId.split(".")[1]
-      : lastPostId;
-    const response = await fetch(
-      `https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=50&b=${numericId}`
-    );
-    if (response.ok) {
-      const morePostsData = await response.json();
-      const newPosts = Array.isArray(morePostsData)
-        ? morePostsData
-        : morePostsData.data ||
-          morePostsData.posts ||
-          morePostsData.items ||
-          [];
+  let numericId = parseInt(lastPostId.includes(".")
+    ? lastPostId.split(".")[1]
+    : lastPostId);
 
-      if (newPosts.length === 0) {
-        hasMorePosts.value = false;
+  while (numericId > 1) {
+    try {
+      const response = await fetch(
+        `https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=50&b=${numericId}`
+      );
+      if (response.ok) {
+        const morePostsData = await response.json();
+        const newPosts = Array.isArray(morePostsData)
+          ? morePostsData
+          : morePostsData.data ||
+            morePostsData.posts ||
+            morePostsData.items ||
+            [];
+
+        if (newPosts.length === 0) {
+          if (numericId - 50 > 0) {
+            numericId -= 50;
+            continue;
+          }
+          hasMorePosts.value = false;
+        } else {
+          posts.value = [...posts.value, ...newPosts];
+        }
+        break;
       } else {
-        posts.value = [...posts.value, ...newPosts];
+        hasMorePosts.value = false;
       }
-    } else {
+    } catch (err) {
+      console.error("Error loading more posts:", err);
       hasMorePosts.value = false;
     }
-  } catch (err) {
-    console.error("Error loading more posts:", err);
-    hasMorePosts.value = false;
-  } finally {
-    isLoadingMore.value = false;
   }
+  isLoadingMore.value = false;
 };
 
 const closeLightbox = () => {
@@ -4607,7 +4684,7 @@ const timelineTicks = computed(() => {
                     ]"
                   >
                     <span>{{ username }}</span>
-                    <span class="text-[10px] opacity-70">{{ usernamePostCounts[username] || 0 }}</span>
+                    <span class="text-[10px] opacity-70">{{ usernamePostCountsExplorer[username] || 0 }}</span>
                   </button>
                 </div>
               </div>
@@ -6017,16 +6094,19 @@ const timelineTicks = computed(() => {
                   :key="username"
                   @click="toggleUsername(username)"
                   :class="[
-                    'w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all',
+                    'w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all flex justify-between items-center',
                     selectedUsernames.includes(username)
                       ? 'bg-blue-600 text-white shadow-sm'
                       : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
                   ]"
                 >
-                  {{ username }}
+                  <span>{{ username }}</span>
+                  <span class="text-[10px] opacity-70">{{ usernamePostCounts[username] || 0 }}</span>
                 </button>
               </div>
             </div>
+
+            <!-- Channels Widget -->
             <div
               class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm"
             >
@@ -6043,13 +6123,14 @@ const timelineTicks = computed(() => {
                   :key="channel"
                   @click="toggleChannel(channel)"
                   :class="[
-                    'w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all',
+                    'w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all flex justify-between items-center',
                     selectedChannels.includes(channel)
                       ? 'bg-blue-600 text-white shadow-sm'
                       : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
                   ]"
                 >
-                  {{ channel }}
+                  <span>{{ channel }}</span>
+                  <span class="text-[10px] opacity-70">{{ channelPostCounts[channel] || 0 }}</span>
                 </button>
               </div>
             </div>
