@@ -409,7 +409,7 @@ const analyzePosts = async () => {
         sender: "mc",
         chat_id: "mc",
         text:
-          "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state. Output the findings in Chinese, , for any confirmed evidence please attach with the post id.\n\n" +
+          "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours(reference to China), job postion, career, gender, age, location, tour, language, education, interests, hobby, favorite things, politic opinions, special opinions, technology skills, troubles, cognitive state. Output the findings in Chinese, , for any confirmed evidence please attach with the post id.\n\n" +
           JSON.stringify(strippedPosts),
       }),
     });
@@ -750,7 +750,7 @@ const runAutoFinding = async () => {
               sender: "mc",
               chat_id: "mc",
               text:
-                "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some posts might be submissions from other users which can be identified by the content signatures and some posts might contain non empty reply field or quoted content which means the content is a reply to that (you shoud distinguish which dialog is truely the target expressed). For each grouped account, keep record their username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state, social relations, or any pattern or regularity you found. Output the findings in Chinese with post id range hint in proper place.\n " +
+                "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some posts might be submissions from other users which can be identified by the content signatures and some posts might contain non empty reply field or quoted content which means the content is a reply to that (you shoud distinguish which dialog is truely the target expressed). For each grouped account, keep record their username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in life, for example living city or country, post date that reflect the active hours(reference to China), job postion, career, gender, age, location, tour, language, education, interests, hobby, favorite things, politic opinions, special opinions, technology skills, troubles, cognitive state, social relations, or any pattern or regularity you found. Output the findings in Chinese with post id range hint in proper place.\n " +
                 JSON.stringify(strippedPosts),
             }),
           });
@@ -1278,7 +1278,7 @@ const analyzeGraph = async () => {
             sender: "mc",
             chat_id: "mc",
             text:
-              "Please analyze the following posts that MIGHT from one user. You should consider grouping by the sent user or account. Note that some posts might be submission from other users which can be identified by the content signatures and some posts might contain non empty reply field or quoted content which means the content is a reply to that content (you should distinguish which dialog is truely the target expressed). For each grouped account, keep record the username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours, job postion, career, gender, age, location, tour, language, education, interests, favorite things, politic, special opinions, troubles, cognitive state. Output the findings for each grouped account or user in Chinese including a table to clearly view, for any confirmed evidence please attach with the post id.\n\n" +
+              "Please analyze the following posts that MIGHT from one user. You should consider grouping by the sent user or account. Note that some posts might be submission from other users which can be identified by the content signatures and some posts might contain non empty reply field or quoted content which means the content is a reply to that content (you should distinguish which dialog is truely the target expressed). For each grouped account, keep record the username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours(reference to China), job postion, career, gender, age, location, tour, language, education, interests, hobby, favorite things, politic opinions, special opinions, technology skills, troubles, cognitive state. Output the findings for each grouped account or user in Chinese including a table to clearly view, for any confirmed evidence please attach with the post id.\n\n" +
               JSON.stringify(strippedPosts),
           }),
         });
@@ -3136,7 +3136,7 @@ const fetchRemoteProfiles = async () => {
   profileError.value = "";
   loadingRemoteProfiles.value = true;
   try {
-    const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=profile-&k=24`, {
+    const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=profile-&k=32`, {
       method: 'GET',
       headers: {
         'x-gos-token': loginToken.value,
@@ -3355,6 +3355,12 @@ const searchChannel = async () => {
   suggestedChannels.value = [];
   
   let name = channelName.value.trim().replace(/^@/, "");
+  let binit = null;
+  if (name.includes('?b=')) {
+    binit = name.split('?b=')[1]
+    name = name.split('?b=')[0]
+  }
+  
   currentChannelName.value = name;
   addToLastVisited(name);
 
@@ -3421,7 +3427,7 @@ const searchChannel = async () => {
     }
 
     let postsRes = await fetch(
-      `https://i.gogingko.net/api/v1/last/${name}?n=25`
+      binit ? `https://i.gogingko.net/api/v1/last/${name}?n=25&b=${binit}` : `https://i.gogingko.net/api/v1/last/${name}?n=25`
     );
 
     if (postsRes.ok) {
@@ -4424,7 +4430,7 @@ const timelineTicks = computed(() => {
                      Last Visited
                    </div>
                    <div class="max-h-60 overflow-y-auto">
-                     <button
+                     <div
                        v-for="channel in lastVisitedChannels"
                        :key="channel.name"
                        class="flex items-center justify-between w-full text-left px-4 py-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 text-sm text-gray-700 dark:text-gray-200 transition-colors"
@@ -4435,7 +4441,7 @@ const timelineTicks = computed(() => {
                            isInputFocused = false;
                            searchChannel();
                          "
-                         class="flex-1"
+                         class="flex-1 cursor-pointer"
                        >
                          {{ channel.name }}
                        </span>
@@ -4446,7 +4452,7 @@ const timelineTicks = computed(() => {
                        >
                          <X class="h-3 w-3" />
                        </button>
-                     </button>
+                     </div>
                    </div>
                 </div>
               </form>
