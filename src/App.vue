@@ -39,6 +39,7 @@ import {
   GripHorizontal,
   Sparkles,
   Pin,
+  Bot,
   LoaderCircle,
   Forward,
   Share2,
@@ -52,6 +53,8 @@ import {
 
 import MarkdownIt from "markdown-it";
 import markdownItMark from "markdown-it-mark";
+// @ts-ignore
+import clm from "country-locale-map";
 const md = new MarkdownIt({ html: true }).use(markdownItMark);
 
 // Login State Logic
@@ -900,12 +903,100 @@ let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 const showBackToTop = ref(false);
 const activeTab = ref<"explorer" | "search" | "auto-finding" | "workspace" | "profile" | "channel">("explorer");
 const channels = ref<any[]>([]);
+const activeChannelOrUser = ref<"channel" | "user">("channel");
 const isLoadingChannels = ref(false);
 const langCode = ref("");
 
+const toggleChannelOrUser = () => {
+    activeChannelOrUser.value = activeChannelOrUser.value === 'channel' ? 'user' : 'channel';
+    fetchChannels(false);
+};
+
+const getCountryCodeFromLanguage = (lang: string): string | null => {
+    if (!lang) return null;
+    const cleaned = lang.trim();
+    if (cleaned.includes('-')) {
+        const parts = cleaned.split('-');
+        const potentialCountry = parts[parts.length - 1].toUpperCase();
+        if (potentialCountry.length === 2) {
+            return potentialCountry;
+        }
+    }
+    try {
+        if (clm) {
+            const countryByLocale = clm.getCountryByLocale(cleaned);
+            if (countryByLocale?.alpha2) {
+                return countryByLocale.alpha2;
+            }
+            const countries = clm.getLanguageCountries(cleaned);
+            if (countries && countries.length > 0) {
+                return countries[0];
+            }
+        }
+    } catch (err) {
+        console.error("Error mapping language with clm:", err);
+    }
+    const mapping: Record<string, string> = {
+        zh: "CN",
+        en: "US",
+        es: "ES",
+        ru: "RU",
+        ja: "JP",
+        ko: "KR",
+        fr: "FR",
+        de: "DE",
+        it: "IT",
+        pt: "PT",
+        ar: "SA",
+        vi: "VN",
+        fa: "IR",
+        tr: "TR",
+        id: "ID",
+        hi: "IN",
+        uk: "UA",
+        th: "TH",
+        pl: "PL",
+        nl: "NL",
+        sv: "SE",
+        no: "NO",
+        fi: "FI",
+        da: "DK",
+        he: "IL",
+        el: "GR",
+        cs: "CZ",
+        hu: "HU",
+        ro: "RO",
+        bg: "BG",
+        sk: "SK",
+        ms: "MY",
+        tl: "PH"
+    };
+    const base = cleaned.toLowerCase().split(/[_-]/)[0];
+    return mapping[base] || null;
+};
+
+const getFlagEmoji = (countryCode: string | null): string => {
+    if (!countryCode) return "";
+    try {
+        const codePoints = countryCode
+            .toUpperCase()
+            .split('')
+            .map(char => 127397 + char.charCodeAt(0));
+        return String.fromCodePoint(...codePoints);
+    } catch (e) {
+        return "";
+    }
+};
+
+const computedFlag = computed(() => {
+    if (!langCode.value) return "";
+    const countryCode = getCountryCodeFromLanguage(langCode.value);
+    return getFlagEmoji(countryCode);
+});
+
 const fetchChannels = async (forceFetch: boolean = false) => {
     if (!forceFetch) {
-        const cached = localStorage.getItem('telegramChannels');
+        const cached = localStorage.getItem('telegram' + activeChannelOrUser.value);
         if (cached) {
             channels.value = JSON.parse(cached);
             return;
@@ -914,16 +1005,23 @@ const fetchChannels = async (forceFetch: boolean = false) => {
 
     isLoadingChannels.value = true;
     try {
-        const response = await fetch('https://i.gogingko.net/api/v1/zr/telegram-channel', {
+        let headers = {}
+        const endpoint = activeChannelOrUser.value === 'channel' ? 'telegram-channel' : 'telegram-user';
+        if (activeChannelOrUser.value === 'user') {
+          headers = { 'x-gos-token': loginToken.value }
+        }
+        const response = await fetch(`https://i.gogingko.net/api/v1/zr/${endpoint}`, {
+          method: 'GET',
+          headers: headers,
         });
         if (response.ok) {
             const data = await response.json();
             const keys: string[] = data.keys || [];
             
             // Fetch profiles for each channel concurrently
-            const channelPromises = keys.map(async (channelName) => {
+            const channelPromises = keys.map(async (name) => {
                 try {
-                    const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${channelName}`, {
+                    const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/${endpoint}/${name}`, {
                     });
                     if (profileRes.ok) {
                         let userData = await profileRes.json()
@@ -934,26 +1032,18 @@ const fetchChannels = async (forceFetch: boolean = false) => {
                             cdnNumber = match[1];
                             cdnRegion = TelegramCDNRegions[cdnNumber as keyof typeof TelegramCDNRegions];
                         }
-                        userProfile.value = {
-                            username: userData.username,
-                            avatarUrl: `https://i.gogingko.net/api/v1/v/telegram-profile/${name}`,
-                            title: userData.title,
-                            description: userData.description,
-                            cdnNumber: cdnNumber,
-                            cdnRegion: cdnRegion
-                        };
                         userData.cdnNumber = cdnNumber
                         userData.cdnRegion = cdnRegion
                         return userData;
                     }
                 } catch (e) {
-                    console.error(`Failed to fetch profile for ${channelName}`, e);
+                    console.error(`Failed to fetch profile for ${name}`, e);
                 }
-                return { name: channelName }; 
+                return { name: name }; 
             });
             const results = await Promise.all(channelPromises);
             channels.value = results;
-            localStorage.setItem('telegramChannels', JSON.stringify(results));
+            localStorage.setItem('telegram' + activeChannelOrUser.value, JSON.stringify(results));
         }
     } catch (e) {
         console.error(e);
@@ -4312,25 +4402,28 @@ const timelineTicks = computed(() => {
       </header>
 
       <!-- Channel Tab -->
-      <div v-show="activeTab === 'channel'" class="max-w-[95%] mx-auto px-4 py-8">
+      <div v-show="activeTab === 'channel'" class="max-w-[95%] mx-auto px-4 pt-1 pb-8">
         <div class="flex items-center justify-between mb-6">
-          <h2 class="text-2xl font-bold text-gray-900 dark:text-white">Channels</h2>
+          <h2 class="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2 cursor-pointer" @click="toggleChannelOrUser">
+            <span>{{ activeChannelOrUser === 'channel' ? 'Channels' : 'Users' }}</span>
+            <span v-if="computedFlag" class="inline-block transition-transform duration-300 hover:scale-125 select-none" :title="'Language Flag for: ' + langCode">{{ computedFlag }}</span>
+          </h2>
           <div class="flex items-center gap-2">
-            <div class="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
+            <div v-if="activeChannelOrUser === 'channel'" class="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
               <input v-model="langCode" placeholder="zh-CN" class="w-20 bg-transparent px-2 py-1 text-sm outline-none text-gray-900 dark:text-white" @keyup.enter="handleLangFetch" />
             </div>
             <button 
-              @click="langCode ? handleLangFetch() : fetchChannels(true)"
+              @click="(activeChannelOrUser === 'channel' && langCode) ? handleLangFetch() : fetchChannels(true)"
               class="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 dark:hover:bg-yellow-700 text-sm font-semibold"
             >
-              {{ langCode ? 'Filter by Language' : 'Next Batch' }}
+              {{ (activeChannelOrUser === 'channel' && langCode) ? 'Filter by Language' : 'Next Batch' }}
             </button>
           </div>
         </div>
         
         <div v-if="isLoadingChannels" class="flex flex-col items-center justify-center py-20 text-gray-500">
            <div class="h-8 w-8 animate-spin rounded-full border-4 border-t-blue-500 border-gray-200 mb-4"></div>
-           Loading channels...
+           Loading {{ activeChannelOrUser === 'channel' ? 'channels' : 'users' }}...
         </div>
 
         <div v-else class="columns-1 md:columns-2 lg:columns-3 xl:columns-4 gap-6">
@@ -4338,22 +4431,29 @@ const timelineTicks = computed(() => {
                class="break-inside-avoid bg-white dark:bg-gray-800 p-6 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-sm hover:shadow-lg transition-shadow mb-6">
             <div class="flex items-center gap-4 mb-4 relative">
               <img 
-                :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + channel.username" 
+                :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name)" 
                 @error="handleImageError"
                 class="w-12 h-12 rounded-full border border-gray-200 dark:border-gray-700" 
                 alt="Avatar"
               />
-              <div class="flex-grow pr-8">
-                <h3 class="text-lg font-bold text-gray-900 break-words dark:text-white">
-                  {{ channel.title || channel.name }}
+              <div class="flex-grow pr-8 min-w-0">
+                <h3 class="text-lg font-bold text-gray-900 truncate dark:text-white" :title="channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : '')">
+                  {{ channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : '')}}
                 </h3>
-                <p v-if="channel.username" class="text-sm text-gray-400">@{{ channel.username || channel.name }}</p>
+                <p v-if="channel.username || channel.id" class="text-sm text-gray-400">
+                  <span v-if="channel.username">@{{ channel.username }}</span>
+                  <span v-if="channel.username && channel.id">, </span>
+                  <span v-if="channel.id">ID:{{ channel.id }}</span>
+                </p>
               </div>
-              <div class="absolute top-0 right-0">
-                <component :is="channel._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : channel._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User" class="h-5 w-5 text-gray-400" />
+              <div class="absolute top-0 right-0 flex items-center gap-1">
+                <Bot v-if="channel.bot !== undefined" :class="['h-5 w-5', channel.bot ? 'text-green-500' : 'text-red-500']" />
+                <component :is="activeChannelOrUser === 'channel' ? (channel._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : channel._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User) : User" class="h-5 w-5 text-gray-400" />
               </div>
             </div>
             <p v-if="channel.description || channel.about" class="text-sm text-gray-500 dark:text-gray-400 mb-4 leading-relaxed whitespace-pre-wrap break-words overflow-hidden">{{ channel.description || channel.about }}</p>
+            <p v-if="channel.status && channel.status.status" class="text-xs font-semibold text-blue-600 dark:text-blue-400 mb-4">{{ channel.status.status }}</p>
+            <p v-if="channel.phone && channel.phone" class="text-xs font-semibold text-red-600 dark:text-red-400 mb-4">{{ channel.phone }}</p>
             
             <div class="flex flex-wrap gap-2 text-xs text-gray-500 dark:text-gray-400 mb-4">
               <span v-if="channel.members" class="flex items-center gap-1"><Users class="h-3 w-3" /> {{ channel.members }}</span>
@@ -4366,7 +4466,7 @@ const timelineTicks = computed(() => {
               DC: {{ channel.cdnNumber }} <span v-if="channel.cdnRegion">({{ channel.cdnRegion[1] }})</span>
             </div>
 
-            <button @click="activeTab = 'explorer'; channelName = channel.username || channel.name; searchChannel()" class="w-full text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 text-sm font-semibold">View Channel</button>
+            <button v-if="activeChannelOrUser === 'channel'" @click="activeTab = 'explorer'; channelName = channel.username || channel.name; searchChannel()" class="w-full text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 text-sm font-semibold">View Channel</button>
           </div>
         </div>
       </div>
