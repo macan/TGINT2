@@ -4489,7 +4489,7 @@ const timelineTicks = computed(() => {
                   placeholder="Enter channel name (e.g. durov)"
                 />
                 <button
-                  type="button"
+                  type="submit"
                   @click.prevent="searchChannel"
                   :disabled="loading || !channelName.trim()"
                   @mousedown.prevent
@@ -4613,9 +4613,10 @@ const timelineTicks = computed(() => {
 
                 <div class="mt-2">
                   <h2
-                    class="text-xl font-bold text-gray-900 dark:text-white tracking-tight leading-none mb-1"
+                    class="text-xl font-bold text-gray-900 dark:text-white tracking-tight leading-none mb-1 flex items-center justify-between"
                   >
-                    {{ metadata.title || metadata.name }}
+                    <span>{{ metadata.title || metadata.name }}</span>
+                    <component :is="metadata._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : metadata._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User" class="h-5 w-5 text-gray-400" />
                   </h2>
                   
                   <p
