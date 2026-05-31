@@ -1871,6 +1871,10 @@ const loadGraph = async () => {
         return;
     }
 
+    // Reset currently selected node or edge in inspector to avoid stale views
+    selectedNode.value = null;
+    selectedEdge.value = null;
+
     if (isLoginTokenValid.value && graphNameInput.value) {
         try {
             // Reusing profile loading logic as it seems to return content directly
@@ -1883,6 +1887,8 @@ const loadGraph = async () => {
             if (workspaceGraph.value) {
                 const parsedData = JSON.parse(data);
                 delete parsedData.style;
+                // Clear existing elements in cytoscape before loading the new graph structure
+                workspaceGraph.value.elements().remove();
                 workspaceGraph.value.json(parsedData);
                 applyGraphStyle(); // Apply styles to newly loaded graph
                 toastMessage.value = 'Graph loaded remotely.';
@@ -1898,6 +1904,8 @@ const loadGraph = async () => {
     } else {
         const data = localStorage.getItem('graphData');
         if (data && workspaceGraph.value) {
+            // Clear existing elements in cytoscape before loading the new graph structure
+            workspaceGraph.value.elements().remove();
             workspaceGraph.value.json(JSON.parse(data));
             toastMessage.value = 'Graph loaded.';
             toastType.value = 'success';
@@ -4102,6 +4110,7 @@ const viewSavedGraphRemotely = async (name: string) => {
     if (workspaceGraph.value) {
       const parsedData = JSON.parse(data);
       delete parsedData.style;
+      workspaceGraph.value.elements().remove();
       workspaceGraph.value.json(parsedData);
       applyGraphStyle(); // Apply styles to newly loaded graph
       //workspaceGraph.value.json(JSON.parse(data));
