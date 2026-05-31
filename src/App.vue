@@ -60,6 +60,7 @@ import {
   Trash2,
   Database,
   Edit,
+  SlidersHorizontal,
   ChevronDown,
   ChevronRight,
 } from "lucide-vue-next";
@@ -981,6 +982,8 @@ const expandedFolders = ref<Record<string, boolean>>({
 });
 
 const listenPosts = ref<any[]>([]);
+const selectedChannelMetadata = ref<any | null>(null);
+const isFetchingChannelMetadata = ref(false);
 const newlyFetchedListenKeys = ref<Set<string>>(new Set());
 const isFetchingListenPosts = ref(false);
 const listenAutoRefreshActive = ref(false);
@@ -1326,6 +1329,7 @@ function formatDateForSearch(date) {
 
 const fetchListenPosts = async (node: ListenItem) => {
   if (!node || node.isFolder) return;
+  if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
   
   // 1. Immediately load cached posts from localStorage for instant display
   const cachedStorageKey = `listen_cached_posts_${node.id}`;
@@ -1340,6 +1344,7 @@ const fetchListenPosts = async (node: ListenItem) => {
   }
 
   // Bind cached items directly
+  if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
   listenPosts.value = cached;
   isFetchingListenPosts.value = true;
   
@@ -1349,16 +1354,24 @@ const fetchListenPosts = async (node: ListenItem) => {
     if (node.type === "channel") {
       const username = node.argument?.trim();
       if (!username) {
+        if (selectedListenNode.value?.id === node.id) {
+          isFetchingListenPosts.value = false;
+        }
         return;
       }
       const response = await fetch(`https://i.gogingko.net/api/v1/last/${username}?n=50`);
+      if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
       if (response.ok) {
         const data = await response.json();
+        if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
         fetchedPosts = Array.isArray(data) ? data : (data.data || data.posts || data.items || []);
       }
     } else if (node.type === "keyword") {
       const keywords = node.argument?.trim().split(',');
       if (!keywords) {
+        if (selectedListenNode.value?.id === node.id) {
+          isFetchingListenPosts.value = false;
+        }
         return;
       }
       const start = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -1376,8 +1389,10 @@ const fetchListenPosts = async (node: ListenItem) => {
           "x-gos-ft-topk": "50",
         }
       });
+      if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
       if (response.ok) {
         const data = await response.json();
+        if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
         const keys = data.keys || [];
 
         if (keys.length > 0) {
@@ -1398,14 +1413,18 @@ const fetchListenPosts = async (node: ListenItem) => {
             },
             body: JSON.stringify(mgetPayload),
           });
+          if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
 
           if (mgetResponse.ok) {
             const postsData = await mgetResponse.json();
+            if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
             fetchedPosts = Array.isArray(postsData) ? postsData : postsData.data || [];
           }
         }
       }
     }
+
+    if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
 
     const getPostId = (post: any): string => {
       return post.key || post.id || (post.data && post.data.id) || '';
@@ -1448,6 +1467,8 @@ const fetchListenPosts = async (node: ListenItem) => {
         console.error("Failed to save cached posts:", err);
       }
 
+      if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
+
       // Check for strictly new posts to highlight
       const freshlyAdded: string[] = [];
       for (const p of fetchedPosts) {
@@ -1465,7 +1486,9 @@ const fetchListenPosts = async (node: ListenItem) => {
   } catch (e) {
     console.error("Error in fetchListenPosts:", e);
   } finally {
-    isFetchingListenPosts.value = false;
+    if (selectedListenNode.value?.id === node.id) {
+      isFetchingListenPosts.value = false;
+    }
   }
 };
 
@@ -1496,9 +1519,46 @@ const toggleListenAutoRefresh = () => {
   }
 };
 
-watch(selectedListenNode, () => {
+const fetchSelectedChannelMetadata = async (node: ListenItem) => {
+  if (node.type !== 'channel') {
+    selectedChannelMetadata.value = null;
+    return;
+  }
+  
+  const username = node.argument?.trim();
+  if (!username) {
+    selectedChannelMetadata.value = null;
+    return;
+  }
+  
+  isFetchingChannelMetadata.value = true;
+  try {
+    const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${username}`);
+    if (!response.ok) throw new Error('Failed to fetch channel metadata');
+    const data = await response.json();
+    if (selectedListenNode.value?.id === node.id) {
+      selectedChannelMetadata.value = data;
+    }
+  } catch (error) {
+    console.error("Error fetching channel metadata:", error);
+    if (selectedListenNode.value?.id === node.id) {
+      selectedChannelMetadata.value = null;
+    }
+  } finally {
+    if (selectedListenNode.value?.id === node.id) {
+      isFetchingChannelMetadata.value = false;
+    }
+  }
+};
+
+watch(selectedListenNode, (newNode) => {
   if (listenAutoRefreshActive.value) {
     startListenPolling();
+  }
+  if (newNode && newNode.type === 'channel') {
+    fetchSelectedChannelMetadata(newNode);
+  } else {
+    selectedChannelMetadata.value = null;
   }
 });
 
@@ -1521,14 +1581,22 @@ const getCountryCodeFromLanguage = (lang: string): string | null => {
         }
     }
     try {
-        if (clm) {
-            const countryByLocale = clm.getCountryByLocale(cleaned);
-            if (countryByLocale?.alpha2) {
-                return countryByLocale.alpha2;
-            }
-            const countries = clm.getLanguageCountries(cleaned);
-            if (countries && countries.length > 0) {
-                return countries[0];
+        if (clm && typeof clm.getAllCountries === 'function') {
+            const allCountries = clm.getAllCountries();
+            if (Array.isArray(allCountries)) {
+                const cleanLower = cleaned.toLowerCase();
+                let found = allCountries.find(c => 
+                    c.default_locale?.toLowerCase() === cleanLower ||
+                    (c.locales && c.locales.some(loc => loc.toLowerCase() === cleanLower))
+                );
+                if (!found) {
+                    found = allCountries.find(c => 
+                        c.languages && c.languages.some(lang => lang.toLowerCase() === cleanLower || cleanLower.startsWith(lang.toLowerCase()))
+                    );
+                }
+                if (found && found.alpha2) {
+                    return found.alpha2.toUpperCase();
+                }
             }
         }
     } catch (err) {
@@ -1997,9 +2065,12 @@ const analyzeGraph = async () => {
     }
 };
 
-const fetchNodeMetadata = async (nodeId: string) => {
+const fetchNodeMetadata = async (nodeType: string, nodeId: string) => {
     try {
-        const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${nodeId}`);
+        if (nodeType === 'user' && nodeId.includes('Telegram User')) {
+          return;
+        }
+        const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-${nodeType}/${nodeId}`);
         if (!response.ok) throw new Error('Failed to fetch');
         const data = await response.json();
         
@@ -4345,7 +4416,7 @@ const formatViews = (views: any) => {
 };
 
 const telegramLogoUrl =
-  "data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%232AABEE' d='M12 24c6.627 0 12-5.373 12-12S18.627 0 12 0 0 5.373 0 12s5.373 12 12 12z'/%3E%3Cpath fill='%23fff' d='M5.265 11.735l11.953-4.606c.553-.206 1.034.13.844.975l-2.02 9.516c-.15.676-.554.843-1.116.528l-3.085-2.274-1.488 1.433c-.165.165-.303.303-.62.303l.22-3.15 5.734-5.18c.25-.223-.054-.346-.387-.123l-7.09 4.466-3.054-.954c-.664-.208-.678-.664.14-.984z'/%3E%3C/svg%3E";
+  "data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' fill='%232AABEE'/%3E%3Cpath fill='%23fff' d='M5.265 11.735l11.953-4.606c.553-.206 1.034.13.844.975l-2.02 9.516c-.15.676-.554.843-1.116.528l-3.085-2.274-1.488 1.433c-.165.165-.303.303-.62.303l.22-3.15 5.734-5.18c.25-.223-.054-.346-.387-.123l-7.09 4.466-3.054-.954c-.664-.208-.678-.664.14-.984z'/%3E%3C/svg%3E";
 
 const loadMorePosts = async () => {
   if (
@@ -4850,27 +4921,34 @@ const timelineTicks = computed(() => {
         </p>
         <div
           v-if="Object.keys(counters).length > 0"
-          class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 mb-8 max-w-7xl 2xl:max-w-[90%] mx-auto px-4"
+          class="flex flex-wrap items-center justify-center gap-1.5 mb-8 max-w-4xl mx-auto px-4"
         >
           <div
             v-for="(count, type) in counters"
             :key="type"
-            class="px-4 py-3 bg-white/50 dark:bg-gray-800/50 backdrop-blur rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 flex flex-col items-center justify-center gap-1 transition-transform hover:scale-105"
+            class="inline-flex items-center gap-1.5 px-3 py-1 bg-white/40 dark:bg-gray-800/40 backdrop-blur-sm rounded-full border border-gray-150/40 dark:border-gray-700/40 text-[11px]"
           >
-            <span
-              class="text-[10px] font-black text-gray-500 dark:text-gray-400 uppercase tracking-widest"
-              >{{ type }}</span
-            >
-            <span
-              class="text-lg font-black text-blue-600 dark:text-blue-400 tabular-nums"
-              >{{ count.toLocaleString() }}</span
-            >
+            <span class="font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider text-[9px]">
+              {{ type }}
+            </span>
+            <span class="font-extrabold text-teal-600 dark:text-teal-400 font-mono tracking-tight tabular-nums">
+              {{ count.toLocaleString() }}
+            </span>
             <span
               v-if="frequencies[type] !== undefined"
-              class="text-[10px] text-gray-400 dark:text-gray-500"
-              >{{ frequencies[type].toFixed(1) }} obj/s</span
+              class="text-[9px] text-gray-400 dark:text-gray-500 font-mono opacity-80"
             >
+              ({{ frequencies[type].toFixed(1) }}/s)
+            </span>
           </div>
+          
+          <button
+            @click="activeTab = 'monitor'"
+            class="inline-flex items-center gap-1 px-3 py-1 bg-pink-50/50 dark:bg-pink-950/20 text-pink-600 dark:text-pink-400 hover:bg-pink-50 dark:hover:bg-pink-950/40 rounded-full border border-pink-100/50 dark:border-pink-900/20 transition-all font-bold hover:scale-105 text-[10px] uppercase tracking-wider cursor-pointer"
+          >
+            <Activity class="h-3 w-3 animate-pulse text-pink-500" />
+            <span>Monitor Engine</span>
+          </button>
         </div>
       </div>
 
@@ -5054,71 +5132,179 @@ const timelineTicks = computed(() => {
       </header>
 
       <!-- Channel Tab -->
-      <div v-show="activeTab === 'channel'" class="max-w-[95%] mx-auto px-4 pt-1 pb-8">
-        <div class="flex items-center justify-between mb-6">
-          <h2 class="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2 cursor-pointer" @click="toggleChannelOrUser">
-            <span>{{ activeChannelOrUser === 'channel' ? 'Channels' : 'Users' }}</span>
-            <span v-if="computedFlag" class="inline-block transition-transform duration-300 hover:scale-125 select-none" :title="'Language Flag for: ' + langCode">{{ computedFlag }}</span>
-          </h2>
-          <div class="flex items-center gap-2">
-            <div v-if="activeChannelOrUser === 'channel'" class="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
-              <input v-model="langCode" placeholder="zh-CN" class="w-20 bg-transparent px-2 py-1 text-sm outline-none text-gray-900 dark:text-white" @keyup.enter="handleLangFetch" />
+      <div v-show="activeTab === 'channel'" class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 pt-1 pb-16 space-y-8">
+        <!-- Control Bar Card -->
+        <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 shadow-sm relative overflow-hidden">
+          <!-- Ambient highlights -->
+          <div class="absolute -top-16 -right-16 w-32 h-32 bg-teal-500/5 dark:bg-teal-500/10 rounded-full blur-2xl pointer-events-none"></div>
+          <div class="absolute -bottom-16 -left-16 w-32 h-32 bg-indigo-500/5 dark:bg-indigo-500/10 rounded-full blur-2xl pointer-events-none"></div>
+
+          <div class="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-6">
+            <!-- Left: Beautiful Tab Switches -->
+            <div class="space-y-2.5">
+              <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Metadata Directory</label>
+              <div class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900 border border-gray-150/80 dark:border-gray-850 p-1 rounded-2xl w-full sm:w-80">
+                <button 
+                  @click="activeChannelOrUser = 'channel'; fetchChannels(false)"
+                  :class="[
+                    'flex-1 py-2 text-xs font-black rounded-xl transition-all duration-300 flex items-center justify-center gap-2 cursor-pointer',
+                    activeChannelOrUser === 'channel'
+                      ? 'bg-teal-600 text-white shadow-md shadow-teal-500/10'
+                      : 'text-gray-450 hover:text-gray-650 dark:text-gray-400 dark:hover:text-gray-250'
+                  ]"
+                >
+                  <Hash class="h-3.5 w-3.5" />
+                  Channels
+                </button>
+                <button 
+                  @click="activeChannelOrUser = 'user'; fetchChannels(false)"
+                  :class="[
+                    'flex-1 py-2 text-xs font-black rounded-xl transition-all duration-300 flex items-center justify-center gap-2 cursor-pointer',
+                    activeChannelOrUser === 'user'
+                      ? 'bg-teal-600 text-white shadow-md shadow-teal-500/10'
+                      : 'text-gray-450 hover:text-gray-650 dark:text-gray-400 dark:hover:text-gray-250'
+                  ]"
+                >
+                  <User class="h-3.5 w-3.5" />
+                  Users
+                </button>
+              </div>
             </div>
-            <button 
-              @click="(activeChannelOrUser === 'channel' && langCode) ? handleLangFetch() : fetchChannels(true)"
-              class="px-4 py-2 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 dark:hover:bg-yellow-700 text-sm font-semibold"
-            >
-              {{ (activeChannelOrUser === 'channel' && langCode) ? 'Filter by Language' : 'Next Batch' }}
-            </button>
+
+            <!-- Right: Interactive Filters & Batches -->
+            <div class="flex flex-wrap items-end gap-4">
+              <!-- Language Filter input -->
+              <div v-if="activeChannelOrUser === 'channel'" class="space-y-2.5">
+                <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Language Target</label>
+                <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-850 rounded-2xl px-4 py-2 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all w-full sm:w-56">
+                  <Globe class="h-4 w-4 text-teal-600 dark:text-teal-400 mr-2 shrink-0" />
+                  <input 
+                    v-model="langCode" 
+                    placeholder="e.g. zh-CN, en, ru" 
+                    class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
+                    @keyup.enter="handleLangFetch" 
+                  />
+                  <!-- Animated flag -->
+                  <span v-if="computedFlag" class="absolute right-3 inline-block text-sm transition-transform duration-300 hover:scale-125 select-none" :title="'Language Flag for: ' + langCode">
+                    {{ computedFlag }}
+                  </span>
+                </div>
+              </div>
+
+              <!-- Refetch / Next Batch Button -->
+              <div class="space-y-2.5 w-full sm:w-auto">
+                <label class="hidden sm:block text-[10px] font-black text-transparent select-none uppercase tracking-widest">Action</label>
+                <button 
+                  @click="(activeChannelOrUser === 'channel' && langCode) ? handleLangFetch() : fetchChannels(true)"
+                  class="w-full sm:w-auto px-5 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl text-xs font-black tracking-wide flex items-center justify-center gap-2 shadow-md shadow-teal-500/25 hover:shadow-teal-500/40 cursor-pointer transition-all duration-300 hover:-translate-y-0.5 active:translate-y-0"
+                >
+                  <RefreshCw class="h-3.5 w-3.5 shrink-0" :class="[isLoadingChannels ? 'animate-spin' : '']" />
+                  <span>{{ (activeChannelOrUser === 'channel' && langCode) ? 'Apply Lang Filter' : 'Fetch Next Batch' }}</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
         
-        <div v-if="isLoadingChannels" class="flex flex-col items-center justify-center py-20 text-gray-500">
-           <div class="h-8 w-8 animate-spin rounded-full border-4 border-t-blue-500 border-gray-200 mb-4"></div>
-           Loading {{ activeChannelOrUser === 'channel' ? 'channels' : 'users' }}...
+        <!-- Loading Registry State -->
+        <div v-if="isLoadingChannels" class="flex flex-col items-center justify-center py-32 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-750/60 shadow-sm relative overflow-hidden">
+          <div class="relative flex items-center justify-center mb-6">
+            <div class="absolute w-16 h-16 rounded-full bg-teal-500/10 animate-ping"></div>
+            <div class="relative h-12 w-12 animate-spin rounded-full border-[3px] border-teal-500 border-t-transparent flex items-center justify-center shadow-md">
+              <Bot class="h-5 w-5 text-teal-650 dark:text-teal-400 animate-pulse" />
+            </div>
+          </div>
+          <p class="text-xs font-black uppercase tracking-widest text-teal-600 dark:text-teal-400">Synthesizing Archive Registry...</p>
+          <p class="text-[11px] text-gray-400 dark:text-gray-500 mt-2 font-semibold">Downloading profiles and parsing CDN routing metadata...</p>
         </div>
 
+        <!-- Empty Directory State -->
+        <div v-else-if="channels.length === 0" class="text-center py-20 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-750/60 p-8 shadow-sm max-w-md mx-auto my-12">
+          <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-teal-50 dark:bg-teal-950/40 mb-4 shadow-inner border border-teal-100/20">
+            <Bot class="h-8 w-8 text-teal-500" />
+          </div>
+          <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider mb-2">No Profiles Available</h3>
+          <p class="text-xs text-gray-400 dark:text-gray-500 font-semibold leading-relaxed">
+            We couldn't retrieve any profiles for this selection. Try updating your language code or fetch a new random batch.
+          </p>
+        </div>
+
+        <!-- Directory Cards Grid -->
         <div v-else class="columns-1 md:columns-2 lg:columns-3 xl:columns-4 gap-6">
           <div v-for="channel in channels" :key="channel.name"
-               class="break-inside-avoid bg-white dark:bg-gray-800 p-6 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-sm hover:shadow-lg transition-shadow mb-6">
-            <div class="flex items-center gap-4 mb-4 relative">
-              <img 
-                :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name)" 
-                @error="handleImageError"
-                class="w-12 h-12 rounded-full border border-gray-200 dark:border-gray-700" 
-                alt="Avatar"
-              />
-              <div class="flex-grow pr-8 min-w-0">
-                <h3 class="text-lg font-bold text-gray-900 truncate dark:text-white" :title="channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : '')">
+               class="break-inside-avoid bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/75 dark:border-gray-750 shadow-sm hover:shadow-xl hover:border-teal-500/20 dark:hover:border-teal-500/15 transition-all duration-300 mb-6 relative overflow-hidden group">
+            <!-- Subtle Hover Gradient Accent -->
+            <div class="absolute -right-12 -top-12 w-24 h-24 bg-teal-500/[0.03] dark:bg-teal-500/[0.04] rounded-full blur-xl group-hover:scale-150 transition-transform duration-500 pointer-events-none"></div>
+
+            <div class="flex items-center gap-4 mb-4 relative z-10">
+              <!-- Avatar Circle Container -->
+              <div class="relative shrink-0 select-none">
+                <img 
+                  :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name)" 
+                  @error="handleImageError"
+                  class="w-12 h-12 rounded-2xl border-2 border-teal-500/10 dark:border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900 group-hover:border-teal-500/40 transition-colors duration-300" 
+                  alt="Avatar"
+                />
+                <!-- Type-specific badge indicator bottom right of avatar -->
+                <span class="absolute -bottom-1 -right-1 p-1 rounded-lg text-white bg-teal-600 border border-white dark:border-gray-800 shadow-sm flex items-center justify-center">
+                  <component :is="activeChannelOrUser === 'channel' ? (channel._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : channel._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User) : User" class="h-2.5 w-2.5 text-white" />
+                </span>
+              </div>
+
+              <!-- Metadata content -->
+              <div class="flex-grow min-w-0 pr-4">
+                <h3 class="text-xs font-black text-gray-900 truncate dark:text-white group-hover:text-teal-600 dark:group-hover:text-teal-400 transition-colors duration-300" :title="channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : '')">
                   {{ channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : '')}}
                 </h3>
-                <p v-if="channel.username || channel.id" class="text-sm text-gray-400">
+                <p v-if="channel.username || channel.id" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 truncate mt-0.5 flex items-center gap-1.5">
                   <span v-if="channel.username">@{{ channel.username }}</span>
-                  <span v-if="channel.username && channel.id">, </span>
-                  <span v-if="channel.id">ID:{{ channel.id }}</span>
+                  <span v-if="channel.username && channel.id" class="opacity-60">•</span>
+                  <span v-if="channel.id" class="font-mono">ID: {{ channel.id }}</span>
                 </p>
               </div>
-              <div class="absolute top-0 right-0 flex items-center gap-1">
-                <Bot v-if="channel.bot !== undefined" :class="['h-5 w-5', channel.bot ? 'text-green-500' : 'text-red-500']" />
-                <component :is="activeChannelOrUser === 'channel' ? (channel._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : channel._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User) : User" class="h-5 w-5 text-gray-400" />
+
+              <!-- Right badges aligned -->
+              <div class="absolute top-0 right-0 z-15">
+                <span v-if="channel.bot !== undefined" :class="['text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-lg border shadow-sm shrink-0', channel.bot ? 'bg-emerald-500/[0.06] text-emerald-600 dark:text-emerald-400 border-emerald-500/10' : 'bg-rose-500/[0.06] text-rose-600 dark:text-rose-400 border-rose-500/10']">
+                  {{ channel.bot ? 'Bot' : 'User' }}
+                </span>
               </div>
             </div>
-            <p v-if="channel.description || channel.about" class="text-sm text-gray-500 dark:text-gray-400 mb-4 leading-relaxed whitespace-pre-wrap break-words overflow-hidden">{{ channel.description || channel.about }}</p>
-            <p v-if="channel.status && channel.status.status" class="text-xs font-semibold text-blue-600 dark:text-blue-400 mb-4">{{ channel.status.status }}</p>
-            <p v-if="channel.phone && channel.phone" class="text-xs font-semibold text-red-600 dark:text-red-400 mb-4">{{ channel.phone }}</p>
+
+            <!-- Description with clamping -->
+            <p v-if="channel.description || channel.about" class="text-[11px] text-gray-500 dark:text-gray-400 mb-4 leading-relaxed whitespace-pre-wrap break-words overflow-hidden line-clamp-3 group-hover:text-gray-600 dark:group-hover:text-gray-300 transition-colors">
+              {{ channel.description || channel.about }}
+            </p>
+
+            <!-- Status badges -->
+            <div class="flex flex-wrap gap-2 mb-3 z-10 relative">
+              <span v-if="channel.status && channel.status.status" class="text-[9px] font-bold text-teal-600 dark:text-teal-400 bg-teal-500/[0.05] border border-teal-500/10 px-2 py-0.5 rounded-lg max-w-full truncate">{{ channel.status.status }}</span>
+              <span v-if="channel.phone" class="text-[9px] font-bold text-rose-600 dark:text-rose-400 bg-rose-500/[0.05] border border-rose-500/10 px-2 py-0.5 rounded-lg max-w-full truncate">{{ channel.phone }}</span>
+            </div>
             
-            <div class="flex flex-wrap gap-2 text-xs text-gray-500 dark:text-gray-400 mb-4">
-              <span v-if="channel.members" class="flex items-center gap-1"><Users class="h-3 w-3" /> {{ channel.members }}</span>
-              <span v-if="channel.files" class="flex items-center gap-1"><FileText class="h-3 w-3" /> {{ channel.files }}</span>
-              <span v-if="channel.photos" class="flex items-center gap-1"><ImageIcon class="h-3 w-3" /> {{ channel.photos }}</span>
-              <span v-if="channel.videos" class="flex items-center gap-1"><Video class="h-3 w-3" /> {{ channel.videos }}</span>
+            <!-- Metric tags board -->
+            <div v-if="channel.members || channel.files || channel.photos || channel.videos" class="grid grid-cols-2 gap-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 mb-4 pt-3 border-t border-gray-100/50 dark:border-gray-800/30">
+              <span v-if="channel.members" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Users class="h-3 w-3 text-teal-650" /> {{ channel.members }}</span>
+              <span v-if="channel.files" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><FileText class="h-3 w-3 text-teal-650" /> {{ channel.files }}</span>
+              <span v-if="channel.photos" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><ImageIcon class="h-3 w-3 text-teal-650" /> {{ channel.photos }}</span>
+              <span v-if="channel.videos" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Video class="h-3 w-3 text-teal-650" /> {{ channel.videos }}</span>
             </div>
 
-            <div v-if="channel.cdnNumber" class="text-xs text-blue-500 font-mono mb-4">
-              DC: {{ channel.cdnNumber }} <span v-if="channel.cdnRegion">({{ channel.cdnRegion[1] }})</span>
+            <!-- DC Chip Badge -->
+            <div v-if="channel.cdnNumber" class="text-[9px] font-mono font-black uppercase tracking-wider text-teal-650 dark:text-teal-400 bg-teal-500/[0.04] dark:bg-teal-950/40 px-2 py-0.5 rounded-lg border border-teal-500/10 mb-4 inline-flex items-center gap-1">
+              <span>DC: {{ channel.cdnNumber }}</span>
+              <span v-if="channel.cdnRegion" class="opacity-70">({{ channel.cdnRegion[1] }})</span>
             </div>
 
-            <button v-if="activeChannelOrUser === 'channel'" @click="activeTab = 'explorer'; channelName = channel.username || channel.name; searchChannel()" class="w-full text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 text-sm font-semibold">View Channel</button>
+            <!-- View Action button -->
+            <button 
+              v-if="activeChannelOrUser === 'channel'" 
+              @click="activeTab = 'explorer'; channelName = channel.username || channel.name; searchChannel()" 
+              class="w-full mt-2 py-2 bg-gray-50 hover:bg-teal-650 text-teal-600 hover:text-white dark:bg-gray-900/80 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black tracking-wide rounded-xl border border-gray-150 dark:border-gray-800/80 hover:border-transparent cursor-pointer transition-all duration-300 hover:shadow-md hover:shadow-teal-500/10 text-center flex items-center justify-center gap-1.5"
+            >
+              <span>View Channel Archive</span>
+              <ExternalLink class="h-3 w-3" />
+            </button>
           </div>
         </div>
       </div>
@@ -5128,7 +5314,7 @@ const timelineTicks = computed(() => {
         <div class="max-w-[95%] mx-auto mb-16 px-4 sm:px-0">
               <form @submit.prevent="searchChannel" class="relative group">
                 <div
-                  class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-blue-500 z-10"
+                  class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-teal-650 z-10"
                 >
                   <Layout class="h-5 w-5 text-gray-400" />
                 </div>
@@ -5137,7 +5323,7 @@ const timelineTicks = computed(() => {
                   @focus="isInputFocused = true"
                   @blur="handleBlur"
                   type="text"
-                  class="block w-full pl-14 pr-[120px] py-3.5 border border-gray-200 dark:border-gray-700 rounded-xl leading-5 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-sm font-medium shadow-sm hover:shadow-md focus:shadow-xl transition-all duration-300"
+                  class="block w-full pl-14 pr-[120px] py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
                   placeholder="Enter channel name (e.g. durov)"
                 />
                 <button
@@ -5145,7 +5331,7 @@ const timelineTicks = computed(() => {
                   @click.prevent="searchChannel"
                   :disabled="loading || !channelName.trim()"
                   @mousedown.prevent
-                  class="absolute right-2 top-2 bottom-2 px-5 bg-blue-600 text-white rounded-[0.65rem] text-xs font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
+                  class="absolute right-2 top-2 bottom-2 px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer"
                 >
                   <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
                   {{ loading ? "Exploring..." : "Explore" }}
@@ -5154,16 +5340,16 @@ const timelineTicks = computed(() => {
                 <!-- Autocomplete Dropdown -->
                 <div
                   v-if="isInputFocused && (lastVisitedChannels.length > 0 || suggestedChannels.length > 0)"
-                  class="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden"
+                  class="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-250/60 dark:border-gray-700/60 overflow-hidden"
                 >
-                   <div v-show="isLoginTokenValid && suggestedChannels.length > 0" class="px-4 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
+                   <div v-show="isLoginTokenValid && suggestedChannels.length > 0" class="px-4 py-2 text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
                      Auto completed
                    </div>
                    <div v-if="isLoginTokenValid && suggestedChannels.length > 0" class="max-h-60 overflow-y-auto">
                      <button
                        v-for="channel in suggestedChannels"
                        :key="channel"
-                       class="flex items-center justify-between w-full text-left px-4 py-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 text-sm text-gray-700 dark:text-gray-200 transition-colors"
+                       class="flex items-center justify-between w-full text-left px-5 py-2.5 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 text-xs font-bold text-gray-700 dark:text-gray-200 transition-colors cursor-pointer"
                      >
                        <span
                          @click.prevent="
@@ -5173,19 +5359,19 @@ const timelineTicks = computed(() => {
                          "
                          class="flex-1"
                        >
-                         {{ channel }}
+                         @{{ channel }}
                        </span>
                      </button>
                    </div>
 
-                   <div class="px-4 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
+                   <div class="px-5 py-2.5 text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
                      Last Visited
                    </div>
                    <div class="max-h-60 overflow-y-auto">
                      <div
                        v-for="channel in lastVisitedChannels"
                        :key="channel.name"
-                       class="flex items-center justify-between w-full text-left px-4 py-2 hover:bg-blue-50 dark:hover:bg-blue-900/20 text-sm text-gray-700 dark:text-gray-200 transition-colors"
+                       class="flex items-center justify-between w-full text-left px-5 py-2.5 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 text-xs font-bold text-gray-700 dark:text-gray-200 transition-colors"
                      >
                        <span
                          @click.prevent="
@@ -5195,14 +5381,14 @@ const timelineTicks = computed(() => {
                          "
                          class="flex-1 cursor-pointer"
                        >
-                         {{ channel.name }}
+                         @{{ channel.name }}
                        </span>
                        <button
                          @click.stop.prevent="removeVisitedChannel(channel.name)"
-                         class="ml-2 text-gray-400 hover:text-red-500"
+                         class="ml-2 text-gray-400 hover:text-red-550 cursor-pointer"
                          title="Remove"
                        >
-                         <X class="h-3 w-3" />
+                         <X class="h-3.5 w-3.5" />
                        </button>
                      </div>
                    </div>
@@ -5236,24 +5422,24 @@ const timelineTicks = computed(() => {
             class="lg:col-span-4 xl:col-span-3 space-y-6 transition-all duration-500 origin-left"
           >
             <div
-              class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 overflow-hidden relative"
+              class="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-200/60 dark:border-gray-700/60 overflow-hidden relative"
             >
               <div
-                class="h-24 bg-gradient-to-br from-blue-500 via-indigo-500 to-purple-600 relative overflow-hidden"
+                class="h-28 bg-gradient-to-br from-teal-500 via-emerald-600 to-indigo-700 relative overflow-hidden"
               >
                 <div
-                  class="absolute inset-0 bg-white/10 dark:bg-black/10 backdrop-blur-sm"
+                  class="absolute inset-0 bg-white/5 dark:bg-black/10 backdrop-blur-[2px]"
                 ></div>
                 <div
-                  class="absolute -top-10 -right-10 w-40 h-40 bg-white/20 dark:bg-white/10 rounded-full blur-3xl"
+                  class="absolute -top-10 -right-10 w-36 h-36 bg-white/20 dark:bg-white/10 rounded-full blur-2xl"
                 ></div>
                 <div
-                  class="absolute -bottom-10 -left-10 w-40 h-40 bg-black/10 dark:bg-black/20 rounded-full blur-3xl"
+                  class="absolute -bottom-10 -left-10 w-36 h-36 bg-black/10 dark:bg-black/20 rounded-full blur-2xl"
                 ></div>
               </div>
-              <div class="px-8 pb-10 pt-12 relative">
+              <div class="px-6 pb-8 pt-10 relative">
                 <div
-                  class="w-20 h-20 rounded-full bg-white dark:bg-gray-800 border-4 border-white dark:border-gray-800 shadow-2xl absolute -top-10 left-8 flex items-center justify-center text-4xl font-bold text-blue-600 dark:text-blue-400 overflow-hidden ring-4 ring-blue-50 dark:ring-blue-900/30"
+                  class="w-20 h-20 rounded-2xl bg-white dark:bg-gray-800 border-2 border-white dark:border-gray-800 shadow-md absolute -top-10 left-6 flex items-center justify-center overflow-hidden ring-4 ring-teal-500/10"
                 >
                   <img
                     :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${currentChannelName}`"
@@ -5265,43 +5451,43 @@ const timelineTicks = computed(() => {
 
                 <div class="mt-2">
                   <h2
-                    class="text-xl font-bold text-gray-900 dark:text-white tracking-tight leading-none mb-1 flex items-center justify-between"
+                    class="text-lg font-black text-gray-900 dark:text-white tracking-tight leading-tight mb-1 flex items-center justify-between"
                   >
                     <span>{{ metadata.title || metadata.name }}</span>
-                    <component :is="metadata._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : metadata._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User" class="h-5 w-5 text-gray-400" />
+                    <component :is="metadata._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : metadata._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User" class="h-4 w-4 text-gray-400" />
                   </h2>
                   
                   <p
-                    class="text-blue-600 dark:text-blue-400 font-bold text-sm mb-6 flex items-center tracking-wide"
+                    class="text-teal-600 dark:text-teal-400 font-bold text-xs mb-5 flex items-center tracking-wide"
                   >
                     @{{ metadata.username || metadata.name || channelName }}
-                    <button @click="addToWorkspace" class="ml-2 flex items-center gap-1.5 px-2 py-1 bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 rounded-lg border border-blue-200 dark:border-blue-700 text-[10px] font-bold hover:bg-blue-50 dark:hover:bg-gray-700 transition-all shadow-sm">
-                      <Layout class="h-3 w-3" />
+                    <button @click="addToWorkspace" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-teal-600 dark:text-teal-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all">
+                      <Layout class="h-2.5 w-2.5" />
                       Add
                     </button>
                   </p>
 
                   <div
                     v-if="metadata.description || metadata.about"
-                    class="mb-8"
+                    class="mb-6"
                   >
                     <p
-                      class="text-gray-600 dark:text-gray-300 text-sm leading-relaxed whitespace-pre-wrap break-words bg-gray-50/80 dark:bg-gray-700/30 p-5 rounded-3xl border border-gray-100/50 dark:border-gray-600/50"
+                      class="text-gray-600 dark:text-gray-300 text-xs leading-relaxed whitespace-pre-wrap break-words bg-gray-50/50 dark:bg-gray-900/30 p-4 rounded-2xl border border-gray-150 dark:border-gray-700/60"
                     >
                       {{ metadata.description || metadata.about }}
                     </p>
                   </div>
 
-                  <div class="grid grid-cols-2 gap-4">
+                  <div class="grid grid-cols-2 gap-3">
                     <div
                       v-if="metadata.subscribers || metadata.members || metadata.participants_count"
-                      class="bg-blue-50/80 dark:bg-blue-900/20 p-3 rounded-2xl border border-blue-100/50 dark:border-blue-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
+                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
                     >
                       <Users
-                        class="h-6 w-6 mb-2 text-blue-500 dark:text-blue-400"
+                        class="h-5 w-5 mb-1.5 text-teal-500"
                       />
                       <span
-                        class="text-xl font-black text-gray-900 dark:text-white"
+                        class="text-base font-black text-gray-900 dark:text-white font-mono tracking-tight"
                         >{{
                           (
                             metadata.subscribers || metadata.members || metadata.participants_count
@@ -5309,77 +5495,77 @@ const timelineTicks = computed(() => {
                         }}</span
                       >
                       <span
-                        class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mt-1"
+                        class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
                         >Subscribers</span
                       >
                     </div>
 
                     <div
                       v-if="metadata.date || metadata.createdAt"
-                      class="bg-purple-50/80 dark:bg-purple-900/20 p-3 rounded-2xl border border-purple-100/50 dark:border-purple-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
+                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
                     >
                       <Calendar
-                        class="h-6 w-6 mb-2 text-purple-500 dark:text-purple-400"
+                        class="h-5 w-5 mb-1.5 text-indigo-500"
                       />
                       <span
-                        class="text-sm font-black text-gray-900 dark:text-white"
+                        class="text-xs font-black text-gray-900 dark:text-white"
                         >{{
                           formatDate(metadata.date || metadata.createdAt)
                         }}</span
                       >
                       <span
-                        class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mt-1"
+                        class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
                         >Created</span
                       >
                     </div>
 
                     <div
                       v-if="metadata.files"
-                      class="bg-orange-50/80 dark:bg-orange-900/20 p-3 rounded-2xl border border-orange-100/50 dark:border-orange-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
+                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
                     >
                       <FileText
-                        class="h-6 w-6 mb-2 text-orange-500 dark:text-orange-400"
+                        class="h-5 w-5 mb-1.5 text-amber-500"
                       />
                       <span
-                        class="text-xl font-black text-gray-900 dark:text-white"
+                        class="text-base font-black text-gray-900 dark:text-white font-mono tracking-tight"
                         >{{ metadata.files }}</span
                       >
                       <span
-                        class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mt-1"
+                        class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
                         >Files</span
                       >
                     </div>
 
                     <div
                       v-if="metadata.photos"
-                      class="bg-green-50/80 dark:bg-green-900/20 p-3 rounded-2xl border border-green-100/50 dark:border-green-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
+                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
                     >
                       <ImageIcon
-                        class="h-6 w-6 mb-2 text-green-500 dark:text-green-400"
+                        class="h-5 w-5 mb-1.5 text-emerald-500"
                       />
                       <span
-                        class="text-xl font-black text-gray-900 dark:text-white"
+                        class="text-base font-black text-gray-900 dark:text-white font-mono tracking-tight"
                         >{{ metadata.photos }}</span
                       >
                       <span
-                        class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mt-1"
+                        class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
                         >Photos</span
                       >
                     </div>
 
                     <div
                       v-if="metadata.videos"
-                      class="bg-red-50/80 dark:bg-red-900/20 p-3 rounded-2xl border border-red-100/50 dark:border-red-800/30 flex flex-col items-center justify-center text-center transition-transform hover:scale-105 duration-300"
+                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
                     >
                       <Video
-                        class="h-6 w-6 mb-2 text-red-500 dark:text-red-400"
+                        class="h-5 w-5 mb-1.5 text-rose-500"
                       />
                       <span
-                        class="text-xl font-black text-gray-900 dark:text-white"
+                        class="text-base font-black text-gray-900 dark:text-white font-mono tracking-tight"
                         >{{ metadata.videos }}</span
                       >
                       <span
-                        class="text-[10px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest mt-1"
+                        class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
                         >Videos</span
                       >
                     </div>
@@ -5387,10 +5573,10 @@ const timelineTicks = computed(() => {
 
                   <div
                     v-if="metadata.cdnNumber"
-                    class="mt-4 bg-gray-50/80 dark:bg-gray-700/30 p-5 rounded-[2rem] border border-gray-100/50 dark:border-gray-600/50 flex flex-col items-center justify-center text-center transition-transform duration-300"
+                    class="mt-3 bg-gray-50/50 dark:bg-gray-900/10 p-4 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center"
                   >
-                    <span class="text-lg font-black text-gray-900 dark:text-white">
-                      {{ 'DC: ' + metadata.cdnNumber }} <span v-if="metadata.cdnRegion">({{ Array.isArray(metadata.cdnRegion) ? metadata.cdnRegion[1] : metadata.cdnRegion }})</span>
+                    <span class="text-xs font-black text-gray-700 dark:text-gray-200">
+                      {{ 'IDC Center DC: ' + metadata.cdnNumber }} <span v-if="metadata.cdnRegion" class="text-teal-600 dark:text-teal-400">({{ Array.isArray(metadata.cdnRegion) ? metadata.cdnRegion[1] : metadata.cdnRegion }})</span>
                     </span>
                   </div>
                 </div>
@@ -5418,32 +5604,32 @@ const timelineTicks = computed(() => {
               class="space-y-4 h-fit flex-shrink-0"
             >
               <div
-                class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm"
+                class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm"
               >
                 <div class="flex justify-between items-center mb-4">
-                  <h3 class="text-xs font-black text-gray-400 uppercase tracking-wider">
+                  <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
                     Usernames
                   </h3>
-                  <button @click="copyUsernamesToClipboard(allUsernamesExplorer)" class="text-gray-400 hover:text-blue-500 transition">
+                  <button @click="copyUsernamesToClipboard(allUsernamesExplorer)" class="text-gray-400 hover:text-teal-500 transition-colors">
                     <Copy class="w-4 h-4" />
                   </button>
                 </div>
                 <div
-                  class="max-h-[calc(100vh-15rem)] overflow-y-auto space-y-1 pr-2 custom-scrollbar"
+                  class="max-h-[calc(100vh-15rem)] overflow-y-auto space-y-1.5 pr-2 custom-scrollbar"
                 >
                   <button
                     v-for="username in allUsernamesExplorer"
                     :key="username"
                     @click="toggleUsernameExplorer(username)"
                     :class="[
-                      'w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all flex justify-between items-center',
+                      'w-full text-left px-3 py-2.5 rounded-xl text-xs font-semibold transition-all flex justify-between items-center cursor-pointer',
                       selectedUsernamesExplorer.includes(username)
-                        ? 'bg-blue-600 text-white shadow-sm'
-                        : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
+                        ? 'bg-teal-600 text-white shadow-sm shadow-teal-500/10'
+                        : 'bg-gray-50 dark:bg-gray-900 border border-gray-150/40 dark:border-gray-800/40 text-gray-700 dark:text-gray-300 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400',
                     ]"
                   >
                     <span>{{ username }}</span>
-                    <span class="text-[10px] opacity-70">{{ usernamePostCountsExplorer[username] || 0 }}</span>
+                    <span class="text-[10px] font-mono opacity-80 font-bold bg-white/20 px-1.5 py-0.5 rounded-md">{{ usernamePostCountsExplorer[username] || 0 }}</span>
                   </button>
                 </div>
               </div>
@@ -5452,16 +5638,16 @@ const timelineTicks = computed(() => {
             <!-- Forwards From Widget -->
             <div
               v-show="isProfileVisible && forwardsChannels.length > 0"
-              class="mt-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-8"
+              class="mt-6 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm"
             >
-              <div class="flex items-center justify-between mb-6 relative">
+              <div class="flex items-center justify-between mb-4 relative">
                 <h3
-                  class="text-xs font-black text-gray-400 uppercase tracking-widest"
+                  class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
                 >
                   Forwards From
                 </h3>
               </div>
-              <div class="space-y-2 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+              <div class="space-y-1.5 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
                 <button
                   v-for="channelNameForward in forwardsChannels"
                   :key="channelNameForward"
@@ -5469,9 +5655,9 @@ const timelineTicks = computed(() => {
                     channelName = channelNameForward;
                     searchChannel();
                   "
-                  class="w-full text-left p-2.5 rounded-lg text-xs font-medium bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-200 hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors"
+                  class="w-full text-left px-3 py-2 rounded-xl text-xs font-semibold bg-gray-50 dark:bg-gray-900 text-gray-850 dark:text-gray-200 border border-gray-150/40 dark:border-gray-800/40 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400 hover:border-teal-100 dark:hover:border-teal-900/40 transition-colors"
                 >
-                  {{ channelNameForward }}
+                  @{{ channelNameForward }}
                 </button>
               </div>
             </div>
@@ -5479,19 +5665,19 @@ const timelineTicks = computed(() => {
             <!-- Profile Widget -->
             <div
               v-show="isProfileVisible && channelProfile"
-              class="mt-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-8"
+              class="mt-6 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm"
             >
-              <div class="flex items-center justify-between mb-6 relative">
+              <div class="flex items-center justify-between mb-4 relative">
                 <h3
-                  class="text-xs font-black text-gray-400 uppercase tracking-widest"
+                  class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
                 >
                   Channel Profile
                 </h3>
-                <span v-if="channelProfileDate" class="text-xs font-bold text-gray-500 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded-lg">
+                <span v-if="channelProfileDate" class="text-[9px] font-mono font-bold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/50 border border-teal-100/50 dark:border-teal-900/20 px-2 py-0.5 rounded-full">
                     {{ channelProfileDate }}
                 </span>
               </div>
-              <div v-if="loadingChannelProfile" class="text-sm text-gray-500">Loading profile...</div>
+              <div v-if="loadingChannelProfile" class="text-xs text-gray-450 animate-pulse">Loading profile...</div>
               <div v-else class="overflow-x-auto">
                 <div v-html="channelProfile" class="prose prose-xs text-xs dark:prose-invert"></div>
               </div>
@@ -5500,93 +5686,90 @@ const timelineTicks = computed(() => {
             <!-- X Similar Users Widget -->
             <div
               v-show="isProfileVisible"
-              class="mt-8 bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] shadow-xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-8 sticky top-20"
+              class="mt-6 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 sticky top-20 shadow-sm"
             >
-              <div class="flex items-center justify-between mb-6 relative">
+              <div class="flex items-center justify-between mb-4 relative">
                 <div class="flex items-center gap-2">
                   <h3
-                    class="text-xs font-black text-gray-400 uppercase tracking-widest"
+                    class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
                   >
                     X Similar Users
                   </h3>
                   <div class="group relative inline-block">
                     <Info class="h-4 w-4 text-gray-400 cursor-help" />
-                    <div class="absolute -left-2 top-full mt-2 w-48 p-2 bg-gray-900 border border-gray-700 text-white text-xs rounded-lg shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10">
+                    <div class="absolute -left-2 top-full mt-2 w-48 p-2 bg-gray-900 border border-gray-700 text-white text-[10px] rounded-lg shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10 leading-normal">
                       Search for similar users on X to find matching profiles.
                     </div>
                   </div>
                 </div>
                 <LoaderCircle
                   v-if="isSearchingX"
-                  class="h-5 w-5 animate-spin text-blue-500 absolute top-0 -right-2"
+                  class="h-4 w-4 animate-spin text-teal-500 absolute top-0 -right-1"
                 />
               </div>
 
-              <div class="mb-4 flex gap-2">
+              <div class="mb-4 flex gap-1.5">
                 <input
                   v-model="xSearchInput"
                   @keyup.enter="searchXUser(xSearchInput)"
                   placeholder="Search X users..."
-                  class="w-full px-4 py-2 text-sm bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all dark:text-gray-100 placeholder:text-gray-400"
+                  class="w-full px-3.5 py-2 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all dark:text-gray-100 placeholder:text-gray-400"
                 />
                 <button
                   @click="searchXUser(xSearchInput)"
                   :disabled="isSearchingX || !xSearchInput.trim()"
-                  class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0 flex items-center justify-center min-w-[44px]"
+                  class="px-3.5 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0 flex items-center justify-center min-w-[36px] cursor-pointer"
                 >
-                  <Search class="h-4 w-4" />
+                  <Search class="h-3.5 w-3.5" />
                 </button>
               </div>
 
               <div
                 v-if="xSearchResults.length > 0"
-                class="space-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar"
+                class="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar"
               >
                 <div
                   v-for="user in xSearchResults"
                   :key="user.id"
-                  class="p-3 bg-gray-50 dark:bg-gray-900 rounded-xl border border-gray-100 dark:border-gray-800 space-y-2"
+                  class="p-3 bg-gray-50 dark:bg-gray-900/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/40 space-y-2"
                 >
-                  <div class="flex items-center gap-3">
+                  <div class="flex items-center gap-2.5">
                     <img
                       v-if="user.profile_image_url"
                       :src="user.profile_image_url"
-                      class="w-10 h-10 rounded-full"
+                      class="w-8 h-8 rounded-lg object-cover border border-gray-150 dark:border-gray-800 shrink-0"
                       alt="Profile"
                     />
-                    <div>
+                    <div class="min-w-0">
                       <p
-                        class="text-sm font-bold text-gray-900 dark:text-gray-100"
+                        class="text-xs font-bold text-gray-900 dark:text-gray-100 truncate"
                       >
                         {{ user.name }}
                       </p>
-                      <p class="text-xs text-gray-500 dark:text-gray-400">
+                      <p class="text-[10px] text-gray-400 dark:text-gray-500 truncate">
                         @{{ user.screen_name }}
                       </p>
                     </div>
                   </div>
-                  <p class="text-xs text-gray-600 dark:text-gray-300">
+                  <p class="text-[11px] text-gray-600 dark:text-gray-300 leading-normal line-clamp-3">
                     {{ user.description }}
                   </p>
-                  <div class="flex text-[10px] text-gray-400 gap-3 pt-1">
-                    <span v-if="user.location">📍 {{ user.location }}</span>
-                    <span v-if="user.followers_count != null"
-                      >👥 {{ user.followers_count }}</span
-                    >
-                    <span v-if="user.friends_count != null"
-                      >👤 {{ user.friends_count }}</span
+                  <div class="flex text-[9px] text-gray-400 gap-2.5 pt-1 border-t border-gray-100 dark:border-gray-800/60">
+                    <span v-if="user.location" class="truncate max-w-[80px]">📍 {{ user.location }}</span>
+                    <span v-if="user.followers_count != null" class="font-mono"
+                      >👥 {{ user.followers_count.toLocaleString() }}</span
                     >
                   </div>
                   <a
                     v-if="user.screen_name"
                     :href="`https://x.com/${user.screen_name}`"
                     target="_blank"
-                    class="block text-[10px] text-blue-500 font-bold underline"
-                    >View X Profile</a
+                    class="inline-flex items-center gap-1 text-[10px] text-teal-600 dark:text-teal-400 font-extrabold hover:underline"
+                    >View X Profile <ExternalLink class="h-2.5 w-2.5" /></a
                   >
                 </div>
               </div>
-              <p v-else-if="!isSearchingX" class="text-sm text-gray-400">
+              <p v-else-if="!isSearchingX" class="text-[11px] text-gray-400 dark:text-gray-500 italic text-center py-2">
                 No results. Click an author name to search on X.
               </p>
             </div>
@@ -5832,59 +6015,25 @@ const timelineTicks = computed(() => {
                     :id="`post-${post.key}`"
                     :key="post.key || index"
                     :class="[
-                      'rounded-3xl shadow-sm border p-4 sm:p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden',
+                      'rounded-2xl border p-5 hover:shadow-md transition-all duration-300 relative overflow-hidden',
                       post.data?.grouped?.nr > 0
                         ? `${getGroupStyles(post.data.grouped.root).bg} ${
                             getGroupStyles(post.data.grouped.root).border
                           }`
-                        : 'bg-white dark:bg-gray-800 border-gray-100 dark:border-gray-700',
-                      post.isNewEmphasized ? 'ring-2 ring-blue-500' : '',
+                        : 'bg-white dark:bg-gray-800 border-gray-200/60 dark:border-gray-700/60',
+                      post.isNewEmphasized ? 'ring-2 ring-teal-500' : '',
                     ]"
                   >
                     <!-- Decorative Corner Glow -->
                     <div
-                      class="absolute -top-10 -right-10 w-24 h-24 bg-blue-50/50 dark:bg-blue-900/10 rounded-full blur-2xl pointer-events-none"
+                      class="absolute -top-10 -right-10 w-24 h-24 bg-teal-500/5 dark:bg-teal-500/5 rounded-full blur-2xl pointer-events-none"
                     ></div>
 
-                    <!-- Badges -->
-                    <div class="absolute top-4 right-4 flex space-x-1 z-20">
-                      <button
-                        @click.stop="addToWorkspaceFromPost(post)"
-                        class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full"
-                        title="Add to Workspace"
-                      >
-                        <Layout class="h-3 w-3 mr-1" /> Add
-                      </button>
-                      <button
-                        @click.stop="sharePost(post)"
-                        class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full"
-                        title="Share"
-                      >
-                        <Share2 class="h-3 w-3 mr-1" /> Share
-                      </button>
-                      <span
-                        class="text-[10px] font-bold px-2 py-0.5 rounded-full"
-                        :class="
-                          getToolName(post) === 'TGB'
-                            ? 'bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400'
-                            : 'bg-gray-50 dark:bg-gray-700/50 text-gray-400'
-                        "
-                      >
-                        {{ getToolName(post) }}
-                      </span>
-                      <span
-                        class="text-[10px] font-bold text-gray-400 bg-gray-50 dark:bg-gray-700/50 px-2 py-0.5 rounded-full"
-                      >
-                        {{ getUsername(post) }}
-                      </span>
-                    </div>
-
-                    <div
-                      class="flex justify-between items-start mb-3 relative z-10"
-                    >
-                      <div class="flex items-center space-x-3">
+                    <!-- Post Card Header -->
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4 pb-3 border-b border-gray-100 dark:border-gray-700/50">
+                      <div class="flex items-center gap-3">
                         <div
-                          class="w-9 h-9 rounded-full bg-blue-50 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden ring-1 ring-white dark:ring-gray-800 shadow-sm"
+                          class="w-10 h-10 rounded-xl bg-gray-50 dark:bg-gray-900 flex items-center justify-center font-bold text-xs overflow-hidden ring-1 ring-gray-150 dark:ring-gray-850 shadow-sm shrink-0"
                         >
                           <img
                             :src="getPostAvatarUrl(post)"
@@ -5893,64 +6042,88 @@ const timelineTicks = computed(() => {
                             class="w-full h-full object-cover"
                           />
                         </div>
-                        <div>
-                          <button
-                            class="text-sm font-bold text-gray-900 dark:text-white hover:text-blue-500 transition-colors"
-                            @click="
-                              searchXUser(
-                                post.data?.author ||
-                                  post.data?.user ||
-                                  metadata.name
-                              )
-                            "
-                          >
-                            {{
-                              post.data?.author ||
-                              post.data?.user ||
-                              metadata.title ||
-                              metadata.name
-                            }}
-                          </button>
-                          <div
-                            v-if="post.data?.grouped?.nr > 0"
-                            :class="[
-                              'flex items-center px-1.5 py-0.5 rounded-sm text-[8px] font-black uppercase tracking-wider',
-                              getGroupStyles(post.data.grouped.root).badge,
-                            ]"
-                          >
-                            <Layers class="h-2 w-2 mr-0.5" />
-                            Group: {{ post.data.grouped.root }}
+                        <div class="min-w-0">
+                          <div class="flex items-center gap-1.5 flex-wrap">
+                            <button
+                              class="text-xs font-extrabold text-gray-900 dark:text-white hover:text-teal-600 dark:hover:text-teal-400 transition-colors text-left"
+                              @click="searchXUser(post.data?.author || post.data?.user || metadata.name)"
+                            >
+                              {{ post.data?.author || post.data?.user || metadata.title || metadata.name }}
+                            </button>
+                            <span
+                              class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full"
+                              :class="
+                                getToolName(post) === 'TGB'
+                                  ? 'bg-purple-50 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400 border border-purple-100/50 dark:border-purple-900/10'
+                                  : 'bg-gray-50 dark:bg-gray-900 text-gray-450 border border-gray-150/40 dark:border-gray-800'
+                              "
+                            >
+                              {{ getToolName(post) }}
+                            </span>
                           </div>
                           <p
-                            class="flex justify-between items-center text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest mt-0"
+                            class="flex items-center gap-2 text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
                           >
                             <span>{{ formatDate(post.data?.date) }}</span>
-                            <span v-if="post.mtime" class="text-[9px] text-blue-500 dark:text-blue-400 ml-2">
-                              Scraped: {{ formatScrapedDate(post.mtime) }}
+                            <span v-if="post.mtime" class="text-[9px] text-teal-600 dark:text-teal-400">
+                              (Scraped {{ formatScrapedDate(post.mtime) }})
                             </span>
                           </p>
                         </div>
                       </div>
-                      <a
-                        v-if="post.url || post.link"
-                        :href="post.url || post.link"
-                        target="_blank"
-                        class="text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors flex items-center bg-blue-50 dark:bg-blue-900/20 px-2 py-0.5 rounded-full"
-                      >
-                        View <ExternalLink class="h-2.5 w-2.5 ml-0.5" />
-                      </a>
+
+                      <!-- Header Action Controls -->
+                      <div class="flex items-center gap-1.5 sm:self-center">
+                        <button
+                          @click.stop="addToWorkspaceFromPost(post)"
+                          class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
+                          title="Add to Workspace"
+                        >
+                          <Layout class="h-3 w-3 text-teal-500" />
+                          <span>Add</span>
+                        </button>
+                        <button
+                          @click.stop="sharePost(post)"
+                          class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
+                          title="Share"
+                        >
+                          <Share2 class="h-3 w-3 text-teal-500" />
+                          <span>Share</span>
+                        </button>
+                        <a
+                          v-if="post.url || post.link"
+                          :href="post.url || post.link"
+                          target="_blank"
+                          class="inline-flex items-center gap-1 px-2.5 py-1 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/50 dark:hover:bg-teal-900/40 text-teal-600 dark:text-teal-450 rounded-lg border border-teal-100 dark:border-teal-900/30 text-[10px] font-extrabold transition-all cursor-pointer"
+                        >
+                          <span>View</span>
+                          <ExternalLink class="h-3 w-3" />
+                        </a>
+                      </div>
+                    </div>
+
+                    <!-- Sub Group Status Badge -->
+                    <div
+                      v-if="post.data?.grouped?.nr > 0"
+                      :class="[
+                        'inline-flex items-center px-2 py-0.5 rounded-md text-[9px] font-mono font-bold uppercase tracking-wider mb-3.5',
+                        getGroupStyles(post.data.grouped.root).badge,
+                      ]"
+                    >
+                      <Layers class="h-3 w-3 mr-1" />
+                      Group: {{ post.data.grouped.root }}
                     </div>
 
                     <!-- Quoted Reply -->
                     <div
                       v-if="post.data?.reply && post.data.reply.length >= 2"
-                      class="mb-4 border-l-4 border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/10 p-4 rounded-r-2xl relative z-10"
+                      class="mb-4 border-l-4 border-teal-500 bg-teal-500/[0.03] dark:bg-teal-950/[0.15] p-3.5 rounded-r-2xl relative z-10 border border-teal-100/50 dark:border-teal-900/20"
                     >
                       <div
-                        class="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-blue-600 dark:text-blue-400 mb-1.5"
+                        class="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 mb-1.5"
                       >
                         <div class="flex items-center">
-                          <Reply class="h-3 w-3 mr-1" />
+                          <Reply class="h-3.5 w-3.5 mr-1" />
                           Reply to message
                         </div>
                         <span
@@ -5958,7 +6131,7 @@ const timelineTicks = computed(() => {
                             Array.isArray(post.data?.reply) &&
                             post.data.reply[0] != null
                           "
-                          class="font-mono bg-blue-100/50 dark:bg-blue-800/30 px-2 py-0.5 rounded border border-blue-200/50 dark:border-blue-700/50 tracking-normal text-[10px] normal-case"
+                          class="font-mono bg-teal-50 dark:bg-teal-950/40 px-2 py-0.5 rounded border border-teal-100/50 dark:border-teal-900/10 tracking-normal text-[9px] normal-case"
                           >ID:
                           {{
                             post.data._tool
@@ -5968,7 +6141,7 @@ const timelineTicks = computed(() => {
                         >
                       </div>
                       <div
-                        class="text-gray-700 dark:text-gray-300 text-sm whitespace-pre-wrap break-words italic line-clamp-3"
+                        class="text-gray-600 dark:text-gray-300 text-xs whitespace-pre-wrap break-words italic line-clamp-3"
                       >
                         {{ post.data.reply[1] }}
                       </div>
@@ -5977,20 +6150,20 @@ const timelineTicks = computed(() => {
                     <!-- Forward Area -->
                     <div
                       v-if="post.data?.forward_url"
-                      class="mb-4 border-l-4 border-purple-400 dark:border-purple-500 bg-purple-50/50 dark:bg-purple-900/10 p-4 rounded-r-2xl relative z-10"
+                      class="mb-4 border-l-4 border-indigo-500 bg-indigo-500/[0.03] dark:bg-indigo-950/[0.15] p-3.5 rounded-r-2xl relative z-10 border border-indigo-100/50 dark:border-indigo-900/20"
                     >
                       <div
-                        class="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-purple-600 dark:text-purple-400 mb-1.5"
+                        class="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-indigo-600 dark:text-indigo-400 mb-1.5"
                       >
                         <div class="flex items-center">
-                          <Forward class="h-3 w-3 mr-1" />
-                          Forward
+                          <Forward class="h-3.5 w-3.5 mr-1" />
+                          Forwarded Message
                         </div>
-                        <span v-if="getForwardInfo(post)?.date" class="font-mono bg-purple-100/50 dark:bg-purple-800/30 px-2 py-0.5 rounded border border-purple-200/50 dark:border-purple-700/50 tracking-normal text-[10px] normal-case">
+                        <span v-if="getForwardInfo(post)?.date" class="font-mono bg-indigo-50 dark:bg-indigo-950/40 px-2 py-0.5 rounded border border-indigo-100/50 dark:border-indigo-900/10 tracking-normal text-[9px] normal-case">
                           {{ getForwardInfo(post)?.date }}
                         </span>
                       </div>
-                      <div class="text-gray-800 dark:text-gray-200 text-sm font-medium whitespace-pre-wrap break-words italic line-clamp-3">
+                      <div class="text-gray-600 dark:text-gray-300 text-xs font-medium whitespace-pre-wrap break-words italic line-clamp-3">
                         {{ getForwardInfo(post)?.text }}
                       </div>
                     </div>
@@ -6623,35 +6796,35 @@ const timelineTicks = computed(() => {
         class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10"
       >
         <div
-          class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2rem] shadow-2xl shadow-blue-900/5 dark:shadow-none border border-gray-100 dark:border-gray-700 p-5 sm:p-8 mb-10 relative overflow-hidden"
+          class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 sm:p-8 mb-8 shadow-sm relative overflow-hidden"
         >
           <!-- Background Decoration -->
           <div
-            class="absolute -top-20 -right-20 w-40 h-40 bg-blue-500/10 dark:bg-blue-500/20 rounded-full blur-3xl pointer-events-none"
+            class="absolute -top-20 -right-20 w-40 h-40 bg-teal-500/5 dark:bg-teal-505/10 rounded-full blur-3xl pointer-events-none"
           ></div>
           <div
-            class="absolute -bottom-20 -left-20 w-40 h-40 bg-purple-500/10 dark:bg-purple-500/20 rounded-full blur-3xl pointer-events-none"
+            class="absolute -bottom-20 -left-20 w-40 h-40 bg-indigo-500/5 dark:bg-indigo-500/10 rounded-full blur-3xl pointer-events-none"
           ></div>
 
           <form @submit.prevent="performGlobalSearch" class="relative z-10">
             <div class="relative flex items-center mb-6 group">
               <div
-                class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-blue-500 z-10"
+                class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-teal-600 z-10"
               >
                 <Globe class="h-5 w-5 text-gray-400" />
               </div>
               <input
                 v-model="globalSearchQuery"
                 type="text"
-                class="block w-full pl-12 pr-[120px] py-3.5 border border-gray-200 dark:border-gray-700 rounded-xl leading-5 bg-white/90 dark:bg-gray-800/90 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-sm font-medium shadow-sm hover:shadow-md focus:shadow-xl transition-all duration-300"
+                class="block w-full pl-14 pr-[120px] py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
                 placeholder="Search across all telegram data..."
               />
               <button
                 type="submit"
                 :disabled="isSearching || !globalSearchQuery.trim()"
-                class="absolute right-2 top-2 bottom-2 px-5 bg-blue-600 text-white rounded-[0.65rem] text-xs font-bold tracking-wide hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-lg shadow-blue-500/30 hover:shadow-blue-500/50 hover:-translate-y-0.5 active:translate-y-0"
+                class="absolute right-2 top-2 bottom-2 px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer"
               >
-                <Loader2 v-if="isSearching" class="h-5 w-5 animate-spin mr-2" />
+                <Loader2 v-if="isSearching" class="h-4 w-4 animate-spin mr-2" />
                 {{ isSearching ? "Searching..." : "Search" }}
               </button>
             </div>
@@ -6668,15 +6841,15 @@ const timelineTicks = computed(() => {
                   type="button"
                   @click="toggleField(field)"
                   :class="[
-                    'flex items-center px-2.5 py-1 rounded-lg border transition-all duration-300',
+                    'flex items-center px-3 py-1.5 rounded-xl border text-[11px] font-bold tracking-tight transition-all duration-350 cursor-pointer',
                     searchFields[field]
-                      ? 'bg-blue-600 border-blue-600 text-white'
-                      : 'bg-white/50 dark:bg-gray-800/50 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400',
+                      ? 'bg-teal-600 border-teal-600 text-white shadow-sm shadow-teal-500/10'
+                      : 'bg-white/50 dark:bg-gray-800/50 border-gray-150 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400',
                   ]"
                 >
-                  <component :is="getFieldIcon(field)" class="h-3 w-3 mr-1.5" />
+                  <component :is="getFieldIcon(field)" class="h-3.5 w-3.5 mr-1.5" />
                   <span
-                    class="text-[10px] font-bold capitalize tracking-tight"
+                    class="capitalize"
                     >{{ field === "content" ? "Post" : field }}</span
                   >
                 </button>
@@ -6684,26 +6857,26 @@ const timelineTicks = computed(() => {
 
               <div class="flex flex-wrap items-center gap-2">
                 <div
-                  class="flex flex-wrap items-center bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-xl border border-gray-200 dark:border-gray-700 backdrop-blur-sm gap-1"
+                  class="flex flex-wrap items-center bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-xl border border-gray-150 dark:border-gray-700 backdrop-blur-sm gap-1"
                 >
                   <input
                     type="datetime-local"
                     v-model="searchStartDate"
-                    class="bg-transparent text-[10px] p-0.5 text-gray-600 dark:text-gray-300 focus:outline-none w-[130px]"
+                    class="bg-transparent text-[10px] p-0.5 text-gray-605 dark:text-gray-300 focus:outline-none w-[130px] font-mono font-semibold"
                   />
-                  <span class="text-[10px] text-gray-400 px-1">to</span>
+                  <span class="text-[10px] text-gray-400 px-1 font-mono">to</span>
                   <input
                     type="datetime-local"
                     v-model="searchEndDate"
-                    class="bg-transparent text-[10px] p-0.5 text-gray-600 dark:text-gray-300 focus:outline-none w-[130px]"
+                    class="bg-transparent text-[10px] p-0.5 text-gray-650 dark:text-gray-300 focus:outline-none w-[130px] font-mono font-semibold"
                   />
                 </div>
 
                 <div
-                  class="flex items-center bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-xl border border-gray-200 dark:border-gray-700 backdrop-blur-sm"
+                  class="flex items-center bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-xl border border-gray-150 dark:border-gray-700 backdrop-blur-sm"
                 >
-                  <div class="px-2 text-gray-400 dark:text-gray-500">
-                    <ListFilter class="h-3 w-3" />
+                  <div class="px-2 text-gray-450 dark:text-gray-550">
+                    <ListFilter class="h-3.5 w-3.5" />
                   </div>
                   <div class="flex space-x-0.5">
                     <button
@@ -6712,10 +6885,10 @@ const timelineTicks = computed(() => {
                       type="button"
                       @click="searchLimit = limit"
                       :class="[
-                        'px-2 py-0.5 rounded-lg text-[10px] font-bold transition-all',
+                        'px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer',
                         searchLimit === limit
-                          ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-sm'
-                          : 'text-gray-400',
+                          ? 'bg-white dark:bg-gray-700 text-teal-650 dark:text-teal-400 shadow-sm'
+                          : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
                       ]"
                     >
                       {{ limit }}
@@ -6744,22 +6917,22 @@ const timelineTicks = computed(() => {
 
         <div
           v-if="isSearching"
-          class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-[2.5rem] border border-gray-100 dark:border-gray-700 p-16 text-center shadow-lg"
+          class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-16 text-center shadow-sm"
         >
           <div
-            class="inline-flex items-center justify-center w-20 h-20 rounded-full bg-blue-50 dark:bg-blue-900/20 mb-6 shadow-inner ring-1 ring-blue-100 dark:ring-blue-800 border-8 border-white dark:border-gray-900"
+            class="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-teal-50 dark:bg-teal-950/40 mb-6 shadow-inner ring-1 ring-teal-100 dark:ring-teal-900/20 border-4 border-white dark:border-gray-900"
           >
             <Loader2
-              class="h-8 w-8 text-blue-500 dark:text-blue-400 animate-spin"
+              class="h-8 w-8 text-teal-600 dark:text-teal-400 animate-spin"
             />
           </div>
           <h3
-            class="text-2xl font-black tracking-tight text-gray-900 dark:text-white mb-3"
+            class="text-xl font-black tracking-tight text-gray-900 dark:text-white mb-2"
           >
             Searching Telegram...
           </h3>
           <p
-            class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium"
+            class="text-xs text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium"
           >
             Querying internal dataset, this may take a few seconds.
           </p>
@@ -6772,10 +6945,10 @@ const timelineTicks = computed(() => {
               <button
                 @click="addAllToWorkspace"
                 :disabled="isAddingAll"
-                class="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center shadow-lg shadow-purple-500/30 hover:shadow-purple-500/50 hover:-translate-y-0.5 active:translate-y-0"
+                class="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center shadow-md shadow-teal-500/25 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer"
               >
-                <Loader2 v-if="isAddingAll" class="h-3 w-3 animate-spin mr-2" />
-                <Layers v-else class="h-3 w-3 mr-2" />
+                <Loader2 v-if="isAddingAll" class="h-3.5 w-3.5 animate-spin mr-2" />
+                <Layers v-else class="h-3.5 w-3.5 mr-2" />
                 {{ isAddingAll ? 'Adding...' : 'Add All to Workspace' }}
               </button>
             </div>
@@ -6791,14 +6964,14 @@ const timelineTicks = computed(() => {
             <!-- User Profile Widget -->
             <div
               v-if="userProfile || loadingUserProfile"
-              class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm hover:border-blue-200 dark:hover:border-blue-800 transition-colors"
+              class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm"
             >
                 <div class="flex justify-between items-center mb-4">
-                    <h3 class="text-xs font-black text-gray-400 uppercase tracking-wider">User Profile</h3>
+                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">User Profile</h3>
                 </div>
                 
-                <div v-if="loadingUserProfile" class="text-sm text-gray-500 py-4 flex items-center gap-2">
-                    <Loader2 class="w-4 h-4 animate-spin" /> Loading profile...
+                <div v-if="loadingUserProfile" class="text-xs text-gray-400 py-4 flex items-center gap-2 animate-pulse">
+                    <Loader2 class="w-3.5 h-3.5 animate-spin text-teal-500" /> Loading profile...
                 </div>
 
                 <div v-else-if="userProfile" class="flex flex-col gap-3">
@@ -6808,24 +6981,23 @@ const timelineTicks = computed(() => {
                           :src="userProfile.avatarUrl" 
                           @error="handleImageError" 
                           alt="Avatar" 
-                          class="w-16 h-16 rounded-full border-2 border-white dark:border-gray-700 shadow-md object-cover" 
+                          class="w-16 h-16 rounded-2xl border border-gray-100 dark:border-gray-700 shadow-md object-cover ring-4 ring-teal-500/10 shrink-0" 
                         />
                         <div class="flex-1 min-w-0">
-                            <p class="font-bold text-lg text-gray-900 dark:text-white truncate">@{{ userProfile.username }}</p>
-                            <p v-if="userProfile.title" class="text-sm font-medium text-blue-600 dark:text-blue-400 truncate">{{ userProfile.title }}</p>
+                            <p class="font-extrabold text-base text-gray-900 dark:text-white truncate">@{{ userProfile.username }}</p>
+                            <p v-if="userProfile.title" class="text-xs font-bold text-teal-600 dark:text-teal-400 truncate mt-0.5">{{ userProfile.title }}</p>
                         </div>
                     </div>
 
-                    <div class="text-sm text-gray-700 dark:text-gray-300">
-                        <p class="font-semibold">{{ userProfile.firstName }} {{ userProfile.lastName }}</p>
-                        <div v-if="userProfile.cdnNumber || userProfile.cdnRegion" class="text-[10px] text-gray-400 dark:text-gray-500 mt-1">
-                            <span v-if="userProfile.cdnNumber">DC: {{ userProfile.cdnNumber }}</span>
-                            <span v-if="userProfile.cdnRegion" class="ml-2">{{ userProfile.cdnRegion[0] }}</span>
-                            <span v-if="userProfile.cdnRegion" class="ml-2">{{ userProfile.cdnRegion[1] }}</span>
+                    <div class="text-xs text-gray-700 dark:text-gray-300">
+                        <p class="font-black">{{ userProfile.firstName }} {{ userProfile.lastName }}</p>
+                        <div v-if="userProfile.cdnNumber || userProfile.cdnRegion" class="text-[10px] text-gray-400 dark:text-gray-500 mt-1 font-mono">
+                            <span v-if="userProfile.cdnNumber" class="font-medium">IDC Center DC: {{ userProfile.cdnNumber }}</span>
+                            <span v-if="userProfile.cdnRegion" class="ml-2 text-teal-600 dark:text-teal-400">({{ userProfile.cdnRegion[1] }})</span>
                         </div>
                     </div>
 
-                    <div v-if="userProfile.about || userProfile.description" class="text-xs pt-2 border-t border-gray-100 dark:border-gray-700 text-gray-500 dark:text-gray-400 leading-relaxed">
+                    <div v-if="userProfile.about || userProfile.description" class="text-xs pt-2.5 border-t border-gray-100 dark:border-gray-800 text-gray-500 dark:text-gray-400 leading-relaxed">
                         {{ userProfile.about || userProfile.description }}
                     </div>
                 </div>
@@ -6833,63 +7005,77 @@ const timelineTicks = computed(() => {
 
             <!-- Usernames Widget -->
             <div
-              class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm"
+              class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm"
             >
               <div class="flex justify-between items-center mb-4">
                 <h3                
-                  class="text-xs font-black text-gray-400 uppercase tracking-wider"
+                  class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
                 >
                   Usernames
                 </h3>
-                <button @click="copyUsernamesToClipboard(allUsernames)" class="text-gray-400 hover:text-blue-500 transition">
+                <button @click="copyUsernamesToClipboard(allUsernames)" class="text-gray-400 hover:text-teal-500 transition-colors cursor-pointer">
                   <Copy class="w-4 h-4" />
                 </button>
               </div>
               <div
-                class="max-h-[calc(100vh-15rem)] overflow-y-auto space-y-1 pr-2 custom-scrollbar"
+                class="max-h-[300px] overflow-y-auto space-y-1.5 pr-2 custom-scrollbar"
               >
                 <button
                   v-for="username in allUsernames"
                   :key="username"
                   @click="toggleUsername(username)"
                   :class="[
-                    'w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all flex justify-between items-center',
+                    'w-full text-left px-3 py-2.5 rounded-xl text-xs font-semibold transition-all flex justify-between items-center cursor-pointer',
                     selectedUsernames.includes(username)
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
+                      ? 'bg-teal-600 text-white shadow-sm shadow-teal-500/10'
+                      : 'bg-gray-50 dark:bg-gray-900 border border-gray-150/40 dark:border-gray-800/40 text-gray-700 dark:text-gray-300 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400',
                   ]"
                 >
                   <span>{{ username }}</span>
-                  <span class="text-[10px] opacity-70">{{ usernamePostCounts[username] || 0 }}</span>
+                  <span
+                    :class="[
+                      'text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-md',
+                      selectedUsernames.includes(username)
+                        ? 'opacity-80 bg-white/20 text-white'
+                        : 'opacity-70 bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
+                    ]"
+                  >{{ usernamePostCounts[username] || 0 }}</span>
                 </button>
               </div>
             </div>
 
             <!-- Channels Widget -->
             <div
-              class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm"
+              class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm"
             >
               <h3
-                class="text-xs font-black text-gray-400 uppercase tracking-wider mb-4"
+                class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-4"
               >
                 Channels
               </h3>
               <div
-                class="max-h-[calc(100vh-15rem)] overflow-y-auto space-y-1 pr-2 custom-scrollbar"
+                class="max-h-[300px] overflow-y-auto space-y-1.5 pr-2 custom-scrollbar"
               >
                 <button
                   v-for="channel in allChannels"
                   :key="channel"
                   @click="toggleChannel(channel)"
                   :class="[
-                    'w-full text-left p-2.5 rounded-lg text-xs font-medium transition-all flex justify-between items-center',
+                    'w-full text-left px-3 py-2.5 rounded-xl text-xs font-semibold transition-all flex justify-between items-center cursor-pointer',
                     selectedChannels.includes(channel)
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700',
+                      ? 'bg-teal-600 text-white shadow-sm shadow-teal-500/10'
+                      : 'bg-gray-50 dark:bg-gray-900 border border-gray-150/40 dark:border-gray-800/40 text-gray-700 dark:text-gray-300 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400',
                   ]"
                 >
                   <span>{{ channel }}</span>
-                  <span class="text-[10px] opacity-70">{{ channelPostCounts[channel] || 0 }}</span>
+                  <span
+                    :class="[
+                      'text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-md',
+                      selectedChannels.includes(channel)
+                        ? 'opacity-80 bg-white/20 text-white'
+                        : 'opacity-70 bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
+                    ]"
+                  >{{ channelPostCounts[channel] || 0 }}</span>
                 </button>
               </div>
             </div>
@@ -6898,17 +7084,17 @@ const timelineTicks = computed(() => {
           <div class="lg:col-span-8 xl:col-span-9 space-y-6">
             <div
               v-if="searchTimelineStats"
-              class="bg-white/80 dark:bg-gray-800/80 backdrop-blur-xl rounded-2xl border border-gray-100 dark:border-gray-700 p-6 shadow-sm mb-8"
+              class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm mb-8"
             >
               <div class="flex items-center justify-between mb-4">
                 <h4
                   class="text-sm font-bold text-gray-900 dark:text-white flex items-center"
                 >
-                  <Calendar class="h-4 w-4 mr-2 text-blue-500" />
+                  <Calendar class="h-4 w-4 mr-2 text-teal-600 dark:text-teal-450" />
                   Activity Timeline
                 </h4>
                 <span
-                  class="text-xs font-medium text-gray-500 dark:text-gray-400"
+                  class="text-xs font-semibold text-gray-400 dark:text-gray-500 font-mono"
                 >
                   {{ searchTimelineStats.count }} dates mapped
                 </span>
@@ -6924,7 +7110,7 @@ const timelineTicks = computed(() => {
                 <div
                   v-for="(item, idx) in searchTimelineStats.items"
                   :key="idx"
-                  class="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-blue-500 border-2 border-white dark:border-gray-800 shadow-[0_0_8px_rgba(59,130,246,0.5)] transition-all duration-300 hover:scale-150 cursor-pointer group"
+                  class="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-teal-500 border-2 border-white dark:border-gray-800 shadow-[0_0_8px_rgba(20,184,166,0.5)] transition-all duration-355 hover:scale-150 cursor-pointer group"
                   :style="{ left: `${item.position}%` }"
                   @click="scrollToPost(item.post.key)"
                 >
@@ -6941,7 +7127,7 @@ const timelineTicks = computed(() => {
                 class="flex justify-between items-center mt-3 text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider"
               >
                 <span>{{ searchTimelineStats.start }}</span>
-                <span class="px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded-md"
+                <span class="px-2.5 py-1 bg-gray-50 dark:bg-gray-900 rounded-md text-[9px] font-mono normal-case"
                   >Span: Starts {{ searchTimelineStats.spanText }}</span
                 >
                 <span>{{ searchTimelineStats.end }}</span>
@@ -6953,7 +7139,7 @@ const timelineTicks = computed(() => {
                 class="text-lg font-bold text-gray-900 dark:text-white flex items-center"
               >
                 <MessageSquare
-                  class="h-5 w-5 mr-2 text-blue-500 dark:text-blue-400"
+                  class="h-5 w-5 mr-2 text-teal-600 dark:text-teal-400"
                 />
                 Search Results
               </h3>
@@ -6968,49 +7154,24 @@ const timelineTicks = computed(() => {
                 :id="`post-${post.key}`"
                 :key="post.key || index"
                 :class="[
-                  'relative rounded-2xl shadow-sm border p-5 hover:shadow-md transition-all duration-300',
+                  'relative rounded-3xl shadow-sm border p-6 hover:shadow-md transition-all duration-350',
                   post.data?.grouped?.nr > 0
                     ? `${getGroupStyles(post.data.grouped.root).bg} ${
                         getGroupStyles(post.data.grouped.root).border
                       }`
-                    : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700',
+                    : 'bg-white dark:bg-gray-800 border-gray-200/60 dark:border-gray-700/60',
                 ]"
               >
-                <div class="absolute top-4 right-4 flex space-x-1">
-                  <button
-                    @click.stop="addToWorkspaceFromPost(post)"
-                    class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full"
-                    title="Add to Workspace"
-                  >
-                    <Layout class="h-3 w-3 mr-1" /> Add
-                  </button>
-                  <button
-                    @click.stop="sharePost(post)"
-                    class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded-full"
-                    title="Share"
-                  >
-                    <Share2 class="h-3 w-3 mr-1" /> Share
-                  </button>
-                  <span
-                    class="text-[10px] font-bold px-2 py-0.5 rounded-full"
-                    :class="
-                      getToolName(post) === 'TGB'
-                        ? 'bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400'
-                        : 'bg-gray-50 dark:bg-gray-700/50 text-gray-400'
-                    "
-                  >
-                    {{ getToolName(post) }}
-                  </span>
-                  <span
-                    class="text-[10px] font-bold text-gray-400 bg-gray-50 dark:bg-gray-700/50 px-2 py-0.5 rounded-full"
-                  >
-                    {{ getUsername(post) }}
-                  </span>
-                </div>
-                <div class="flex justify-between items-start mb-3">
-                  <div class="flex items-center space-x-2">
+                <!-- Decorative Corner Glow -->
+                <div
+                  class="absolute -top-10 -right-10 w-24 h-24 bg-teal-500/5 dark:bg-teal-500/5 rounded-full blur-2xl pointer-events-none"
+                ></div>
+
+                <!-- Post Card Header -->
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4 pb-3 border-b border-gray-100 dark:border-gray-700/50">
+                  <div class="flex items-center gap-3">
                     <div
-                      class="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-bold text-xs overflow-hidden"
+                      class="w-10 h-10 rounded-xl bg-gray-50 dark:bg-gray-900 flex items-center justify-center font-bold text-xs overflow-hidden ring-1 ring-gray-150 dark:ring-gray-850 shadow-sm shrink-0"
                     >
                       <img
                         :src="getPostAvatarUrl(post)"
@@ -7019,53 +7180,91 @@ const timelineTicks = computed(() => {
                         class="w-full h-full object-cover"
                       />
                     </div>
-                    <div>
-                      <div class="flex items-center space-x-2">
-                        <p
-                          class="text-sm font-semibold text-gray-900 dark:text-white"
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-1.5 flex-wrap">
+                        <button
+                          class="text-xs font-extrabold text-gray-900 dark:text-white hover:text-teal-600 dark:hover:text-teal-400 transition-colors text-left"
+                          @click="searchXUser(post.data?.author || post.data?.user || 'Telegram User')"
                         >
-                          {{
-                            post.data?.author ||
-                            post.data?.user ||
-                            "Telegram User"
-                          }}
-                        </p>
-                        <div
-                          v-if="post.data?.grouped?.nr > 0"
-                          :class="[
-                            'flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider',
-                            getGroupStyles(post.data.grouped.root).badge,
-                          ]"
+                          {{ post.data?.author || post.data?.user || "Telegram User" }}
+                        </button>
+                        <span
+                          class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full"
+                          :class="
+                            getToolName(post) === 'TGB'
+                              ? 'bg-purple-50 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400 border border-purple-100/50 dark:border-purple-900/10'
+                              : 'bg-gray-50 dark:bg-gray-900 text-gray-450 border border-gray-150/40 dark:border-gray-800'
+                          "
                         >
-                          <Layers class="h-2.5 w-2.5 mr-1" />
-                          Group: {{ post.data.grouped.root }}
-                        </div>
+                          {{ getToolName(post) }}
+                        </span>
+                        <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full bg-teal-50 dark:bg-teal-950/30 text-teal-650 dark:text-teal-400 border border-teal-100/40 dark:border-teal-900/20">
+                          {{ getUsername(post) }}
+                        </span>
                       </div>
-                      <p class="text-xs text-gray-500 dark:text-gray-400">
-                        {{ formatDate(post.data?.date) }}
+                      <p
+                        class="flex items-center gap-2 text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
+                      >
+                        <span>{{ formatDate(post.data?.date) }}</span>
+                        <span v-if="post.mtime" class="text-[9px] text-teal-600 dark:text-teal-400">
+                          (Scraped {{ formatScrapedDate(post.mtime) }})
+                        </span>
                       </p>
                     </div>
                   </div>
-                  <a
-                    v-if="post.url || post.link"
-                    :href="post.url || post.link"
-                    target="_blank"
-                    class="text-xs text-blue-600 dark:text-blue-400 hover:underline flex items-center"
-                  >
-                    View <ExternalLink class="h-3 w-3 ml-1" />
-                  </a>
+
+                  <!-- Header Action Controls -->
+                  <div class="flex items-center gap-1.5 sm:self-center">
+                    <button
+                      @click.stop="addToWorkspaceFromPost(post)"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
+                      title="Add to Workspace"
+                    >
+                      <Layout class="h-3 w-3 text-teal-500" />
+                      <span>Add</span>
+                    </button>
+                    <button
+                      @click.stop="sharePost(post)"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
+                      title="Share"
+                    >
+                      <Share2 class="h-3 w-3 text-teal-500" />
+                      <span>Share</span>
+                    </button>
+                    <a
+                      v-if="post.url || post.link"
+                      :href="post.url || post.link"
+                      target="_blank"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/50 dark:hover:bg-teal-900/40 text-teal-600 dark:text-teal-450 rounded-lg border border-teal-100 dark:border-teal-900/30 text-[10px] font-extrabold transition-all cursor-pointer"
+                    >
+                      <span>View</span>
+                      <ExternalLink class="h-3 w-3" />
+                    </a>
+                  </div>
+                </div>
+
+                <!-- Sub Group Status Badge -->
+                <div
+                  v-if="post.data?.grouped?.nr > 0"
+                  :class="[
+                    'inline-flex items-center px-2 py-0.5 rounded-md text-[9px] font-mono font-bold uppercase tracking-wider mb-3.5',
+                    getGroupStyles(post.data.grouped.root).badge,
+                  ]"
+                >
+                  <Layers class="h-3 w-3 mr-1" />
+                  Group: {{ post.data.grouped.root }}
                 </div>
 
                 <!-- Quoted Reply -->
                 <div
                   v-if="post.data?.reply && post.data.reply.length >= 2"
-                  class="mb-3 border-l-4 border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 p-3 rounded-r-xl"
+                  class="mb-4 border-l-4 border-teal-500 bg-teal-500/[0.03] dark:bg-teal-950/[0.15] p-3.5 rounded-r-2xl relative z-10 border border-teal-100/50 dark:border-teal-900/20"
                 >
                   <div
-                    class="flex items-center justify-between text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1"
+                    class="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 mb-1.5"
                   >
                     <div class="flex items-center">
-                      <Reply class="h-3 w-3 mr-1" />
+                      <Reply class="h-3.5 w-3.5 mr-1" />
                       Reply to message
                     </div>
                     <span
@@ -7073,7 +7272,7 @@ const timelineTicks = computed(() => {
                         Array.isArray(post.data?.reply) &&
                         post.data.reply[0] != null
                       "
-                      class="font-mono bg-blue-100/50 dark:bg-blue-800/30 px-2 py-0.5 rounded border border-blue-200/50 dark:border-blue-700/50 text-[10px]"
+                      class="font-mono bg-teal-50 dark:bg-teal-950/40 px-2 py-0.5 rounded border border-teal-100/50 dark:border-teal-900/10 tracking-normal text-[9px] normal-case"
                       >ID:
                       {{
                         post.data._tool
@@ -7083,7 +7282,7 @@ const timelineTicks = computed(() => {
                     >
                   </div>
                   <div
-                    class="text-gray-700 dark:text-gray-300 text-sm whitespace-pre-wrap break-words line-clamp-3"
+                    class="text-gray-600 dark:text-gray-300 text-xs whitespace-pre-wrap break-words italic line-clamp-3"
                     v-html="highlightText(post.data.reply[1])"
                   ></div>
                 </div>
@@ -7091,21 +7290,21 @@ const timelineTicks = computed(() => {
                 <!-- Forward Area -->
                 <div
                   v-if="post.data?.forward_url"
-                  class="mb-3 border-l-4 border-purple-400 dark:border-purple-500 bg-purple-50/50 dark:bg-purple-900/20 p-3 rounded-r-xl"
+                  class="mb-4 border-l-4 border-indigo-500 bg-indigo-500/[0.03] dark:bg-indigo-950/[0.15] p-3.5 rounded-r-2xl relative z-10 border border-indigo-100/50 dark:border-indigo-900/20"
                 >
                   <div
-                    class="flex items-center justify-between text-xs font-semibold text-purple-600 dark:text-purple-400 mb-1"
+                    class="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-indigo-600 dark:text-indigo-400 mb-1.5"
                   >
                     <div class="flex items-center">
-                      <Forward class="h-3 w-3 mr-1" />
-                      Forward
+                      <Forward class="h-3.5 w-3.5 mr-1" />
+                      Forwarded Message
                     </div>
-                    <span v-if="getForwardInfo(post)?.date" class="font-mono bg-purple-100/50 dark:bg-purple-800/30 px-2 py-0.5 rounded border border-purple-200/50 dark:border-purple-700/50 text-[10px]">
+                    <span v-if="getForwardInfo(post)?.date" class="font-mono bg-indigo-55 dark:bg-indigo-950/45 px-2 py-0.5 rounded border border-indigo-100/50 dark:border-indigo-900/10 tracking-normal text-[9px] normal-case">
                       {{ getForwardInfo(post)?.date }}
                     </span>
                   </div>
                   <div
-                    class="text-gray-800 dark:text-gray-200 text-sm font-medium whitespace-pre-wrap break-words line-clamp-3"
+                    class="text-gray-650 dark:text-gray-300 text-xs font-semibold whitespace-pre-wrap break-words italic line-clamp-3"
                   >
                     {{ getForwardInfo(post)?.text }}
                   </div>
@@ -7113,23 +7312,23 @@ const timelineTicks = computed(() => {
 
                 <div
                   v-if="post.data?.content"
-                  class="flex items-start gap-2 mb-3"
+                  class="flex items-start gap-2 mb-4"
                 >
                   <div
-                    class="text-gray-800 dark:text-gray-200 text-sm whitespace-pre-wrap break-words flex-1"
+                    class="text-gray-800 dark:text-gray-200 text-sm whitespace-pre-wrap break-words flex-1 leading-relaxed"
                     v-html="highlightText(post.key in translatedPosts ? post.data.content + '\n--------\n' + translatedPosts[post.key] : post.data.content)"
                   ></div>
                   <button
                     @click="translatePost(post)"
-                    class="p-1 -mt-1 text-gray-400 hover:text-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-md transition-colors flex-shrink-0"
+                    class="p-1.5 -mt-1 text-gray-450 hover:text-teal-600 hover:bg-teal-50 dark:hover:bg-teal-900/25 rounded-md transition-colors flex-shrink-0 cursor-pointer"
                     title="Translate to Chinese"
                   >
                     <Languages v-if="!isTranslating[post.key]" class="h-4 w-4" />
-                    <Loader2 v-else class="h-4 w-4 animate-spin" />
+                    <Loader2 v-else class="h-4 w-4 animate-spin text-teal-650" />
                   </button>
                   <button
                     @click="searchOnGoogle(post.data.content)"
-                    class="p-1 -mt-1 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors flex-shrink-0"
+                    class="p-1.5 -mt-1 text-gray-450 hover:text-teal-600 hover:bg-teal-50 dark:hover:bg-teal-900/25 rounded-md transition-colors flex-shrink-0 cursor-pointer"
                     title="Search on Google"
                   >
                     <Search class="h-4 w-4" />
@@ -7142,16 +7341,16 @@ const timelineTicks = computed(() => {
                     post.data?.contact &&
                     Object.keys(post.data.contact).length > 0
                   "
-                  class="mb-3 rounded-lg border border-blue-200/50 dark:border-blue-800/50 bg-blue-50/50 dark:bg-blue-900/20 p-3 relative z-10 shadow-sm"
+                  class="mb-3 rounded-2xl border border-teal-150/40 bg-teal-500/[0.02] dark:bg-teal-950/[0.10] p-4 relative z-10 border border-teal-100/30 dark:border-teal-900/10"
                 >
-                  <div class="flex items-center mb-2">
+                  <div class="flex items-center mb-2.5">
                     <div
-                      class="h-7 w-7 rounded-full bg-blue-100 dark:bg-blue-800/50 flex flex-shrink-0 items-center justify-center text-blue-600 dark:text-blue-400 mr-2"
+                      class="h-7 w-7 rounded-lg bg-teal-50 dark:bg-teal-900/30 flex flex-shrink-0 items-center justify-center text-teal-600 dark:text-teal-400 mr-2 border border-teal-100 dark:border-teal-900/40 shadow-sm"
                     >
                       <User class="h-3.5 w-3.5" />
                     </div>
                     <div
-                      class="text-[9px] font-black tracking-widest text-blue-500 uppercase"
+                      class="text-[9px] font-black tracking-wider text-teal-600 dark:text-teal-400 uppercase"
                     >
                       Contact Shared
                     </div>
@@ -7172,9 +7371,9 @@ const timelineTicks = computed(() => {
                     </div>
                     <div
                       v-if="post.data.contact.phone_number"
-                      class="flex items-center text-xs text-gray-700 dark:text-gray-300"
+                      class="flex items-center text-xs text-gray-700 dark:text-gray-300 font-mono"
                     >
-                      <Phone class="h-3 w-3 mr-1.5 text-blue-500/70" />
+                      <Phone class="h-3 w-3 mr-1.5 text-teal-600/70" />
                       {{ post.data.contact.phone_number }}
                     </div>
                     <div
@@ -7550,162 +7749,414 @@ const timelineTicks = computed(() => {
           <p><strong>Response:</strong> {{ debugInfo.response }}</p>
         </div>
       </div>
-
       <!-- Workspace Tab -->
       <div v-show="activeTab === 'workspace'" class="w-full relative pt-2 pb-6 flex flex-col h-full overflow-y-auto">
-        <!-- Saved Profiles -->
-          <div v-if="savedProfiles.person.length > 0" class="space-y-2 px-4">
-            <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Persons at Local</h4>
-            <div class="flex flex-wrap gap-2">
-                <button v-for="name in savedProfiles.person" :key="name" @click="viewSavedProfile('person', name)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900">{{ name }}</button>
-            </div>
-          </div>
-          
-          <div v-if="savedGraphRemotely.length > 0" class="space-y-2 px-4 mt-4">
-            <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Graphs at Remote</h4>
-            <div class="flex flex-wrap gap-2">
-                <button v-for="name in savedGraphRemotely" :key="name" @click="viewSavedGraphRemotely(name)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900">{{ name }}</button>
-            </div>
-          </div>
-          
-          <div
-            v-if="savedPersonProfileHtml"
-            class="w-full max-w-6xl mx-auto my-8 bg-gradient-to-br from-white to-blue-50/50 dark:from-gray-900 dark:to-gray-800 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
-          >
-            <div class="flex items-center gap-2 mb-4">
-              <div
-                class="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center"
-              >
-                <Sparkles class="w-4 h-4 text-white" />
-              </div>
-              <h5
-                class="text-sm font-black text-blue-900 dark:text-blue-100 uppercase tracking-wider"
-              >
-                Saved Person Profile
-              </h5>
-            </div>
-          
-            <div class="flex items-center justify-between mb-4">
-                <h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">{{ savedProfileName }}</h3>
-                <button @click="handleSaveRemote(savedProfileName)" class="text-xs bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700">Save Remotely</button>
-            </div>
-            <div v-html="savedPersonProfileHtml" class="prose-sm"></div>
-          </div>
+        
+        <!-- Header Banner Section -->
+        <div class="relative bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm overflow-hidden mb-6 mx-4 md:mx-6 shrink-0">
+          <div class="absolute -right-20 -top-20 w-44 h-44 bg-purple-500/[0.04] dark:bg-purple-500/[0.08] rounded-full blur-3xl pointer-events-none"></div>
+          <div class="absolute -left-20 -bottom-20 w-44 h-44 bg-indigo-500/[0.04] dark:bg-indigo-500/[0.08] rounded-full blur-3xl pointer-events-none"></div>
 
-        <div class="mt-8 h-[960px] w-full flex-none bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 flex flex-col relative overflow-hidden shadow-sm">
-          <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex flex-col md:flex-row justify-between items-center gap-4 bg-white/50 dark:bg-gray-800/50 backdrop-blur-sm z-10">
-            <h2 class="text-lg font-bold text-gray-900 dark:text-white flex items-center">
-              <Layers class="w-4 h-4 mr-2 text-purple-500" />
-              {{ isLoginTokenValid ? 'Graph Remote' : 'Graph Local' }}
-            </h2>
-            <div class="flex flex-wrap gap-2 justify-center">
-              <div class="relative">
-                <Search class="w-4 h-4 absolute left-2 top-2.5 text-gray-400" />
-                <input type="text" v-model="nodeSearchQuery" @keyup.enter="findNode" placeholder="Find node by id" class="pl-8 pr-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-800 text-sm text-gray-900 dark:text-white w-full sm:w-auto" />
+          <div class="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+            <div class="space-y-2">
+              <div class="flex items-center gap-2">
+                <span class="p-1.5 rounded-xl bg-purple-500/10 text-purple-600 dark:text-purple-450">
+                  <Layers class="h-5 w-5" />
+                </span>
+                <span class="text-[10px] font-black text-purple-600 dark:text-purple-400 uppercase tracking-widest leading-none">Network Studio</span>
               </div>
-              <input type="text" v-model="graphNameInput" placeholder="Graph name..." class="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-800 text-sm text-gray-900 dark:text-white w-24 sm:w-32" />
-              <button @click="saveGraph" class="px-3 py-1.5 bg-indigo-600 text-white rounded text-sm hover:bg-indigo-700">Save</button>
-              <button @click="loadGraph" class="px-3 py-1.5 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded text-sm hover:bg-gray-300 dark:hover:bg-gray-600">Load</button>
-              <button @click="reLayoutGraph" class="px-3 py-1.5 bg-purple-600 text-white rounded text-sm hover:bg-purple-700">Re-layout</button>
-              <button @click="clearGraph" class="px-3 py-1.5 bg-red-600 text-white rounded text-sm hover:bg-red-700">Clear</button>
-              <button @click="shareGraph" class="px-3 py-1.5 bg-green-600 text-white rounded text-sm hover:bg-green-700">Share</button>
-              <button @click="analyzeGraph" :disabled="isAnalyzingGraph" class="px-3 py-1.5 bg-yellow-600 text-white rounded text-sm hover:bg-yellow-700 disabled:opacity-50">
-                {{ isAnalyzingGraph ? 'Analyzing...' : 'Analysis' }}
+              <h2 class="text-xl md:text-2xl font-black text-gray-900 dark:text-white tracking-tight">Interactive Graph Workspace</h2>
+              <p class="text-xs text-gray-400 dark:text-gray-500 font-semibold max-w-xl">
+                Map channels and entities, establish forward flows, analyze relationship linkages, and view dynamic chronologies.
+              </p>
+            </div>
+
+            <!-- Dashboard micro-indicator -->
+            <div class="flex items-center gap-6 text-[11px] font-semibold text-gray-400 dark:text-gray-500 shrink-0 self-start md:self-center border-t md:border-t-0 md:border-l border-gray-200/60 dark:border-gray-750 pt-4 md:pt-0 md:pl-6">
+              <div v-if="savedProfiles.person.length > 0" class="space-y-1">
+                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500 leading-none">Local Persons</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ savedProfiles.person.length }} entities</p>
+              </div>
+              <div v-if="savedGraphRemotely.length > 0" class="space-y-1">
+                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500 leading-none">Remote Graphs</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ savedGraphRemotely.length }} charts</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Saved Libraries Sub-grid -->
+        <div v-if="savedProfiles.person.length > 0 || savedGraphRemotely.length > 0" class="grid grid-cols-1 md:grid-cols-2 gap-6 mx-4 md:mx-6 mb-6 shrink-0">
+          <!-- Saved Persons Local Cabinet -->
+          <div v-if="savedProfiles.person.length > 0" class="bg-gradient-to-br from-white to-gray-50/50 dark:from-gray-800 dark:to-gray-900/40 p-5 rounded-3xl border border-gray-200/75 dark:border-gray-750 space-y-4 shadow-sm">
+            <div class="flex items-center gap-2">
+              <User class="h-4.5 w-4.5 text-purple-600 dark:text-purple-400" />
+              <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Saved Local Persons</h4>
+            </div>
+            <p class="text-[11px] text-gray-450 dark:text-gray-500 font-semibold leading-relaxed">
+              Dossier saved in your offline storage pool:
+            </p>
+            <div class="flex flex-wrap gap-2 pt-1">
+              <button 
+                v-for="name in savedProfiles.person" 
+                :key="name" 
+                @click="viewSavedProfile('person', name)" 
+                class="px-3 py-1.5 text-xs font-semibold bg-white hover:bg-purple-500/[0.04] dark:bg-gray-800/85 hover:text-purple-600 dark:hover:text-purple-400 border border-gray-200/60 dark:border-gray-750 rounded-xl transition-all cursor-pointer shadow-sm hover:border-purple-500/30"
+              >
+                {{ name }}
               </button>
             </div>
           </div>
-          <div class="flex-1 relative flex flex-col h-full z-0 overflow-hidden">
-             <!-- Hint Message (moved here) -->
-             <div v-if="addingEdge" class="absolute top-2 left-2 z-[100] px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 text-white bg-blue-600 pointer-events-none">
-                <span class="font-bold">Hint:</span> Select target node to add edge.
-             </div>
-             <div v-if="contextMenu.visible" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop @contextmenu.stop.prevent :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }" class="absolute z-50 bg-white dark:bg-gray-800 rounded-lg shadow-lg border border-gray-200 dark:border-gray-700 p-1 w-32 shadow-xl">
-                 <button @click="startAddEdge" class="block w-full text-left px-3 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-sm text-gray-900 dark:text-white">Add Edge</button>
-                 <button v-if="contextMenu.node.data('type') === 'channel'" @click="addForwardFrom" class="block w-full text-left px-3 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-sm text-gray-900 dark:text-white">Add Forward</button>
-                 <button @click="deleteNode" class="block w-full text-left px-3 py-1 hover:bg-red-100 dark:hover:bg-red-900 rounded text-sm text-red-600 dark:text-red-400">Delete Node</button>
-                 <hr class="my-1 border-gray-200 dark:border-gray-700" />
-                 <button @click="contextMenu.visible = false" class="block w-full text-left px-3 py-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-sm text-gray-500">Close</button>
-             </div>
-             <div id="workspace-canvas" class="w-full h-[900px] flex-none bg-[#f8fafc] dark:bg-[#0f172a] relative z-0">
-             </div>
+
+          <!-- Saved Remote Graphs Cabinet -->
+          <div v-if="savedGraphRemotely.length > 0" class="bg-gradient-to-br from-white to-gray-50/50 dark:from-gray-800 dark:to-gray-900/40 p-5 rounded-3xl border border-gray-200/75 dark:border-gray-750 space-y-4 shadow-sm">
+            <div class="flex items-center gap-2">
+              <Layers class="h-4.5 w-4.5 text-indigo-600 dark:text-indigo-400" />
+              <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Remote Saved Graphs</h4>
+            </div>
+            <p class="text-[11px] text-gray-450 dark:text-gray-500 font-semibold leading-relaxed">
+              Interactive structural topologies synchronized with cloud catalogs:
+            </p>
+            <div class="flex flex-wrap gap-2 pt-1">
+              <button 
+                v-for="name in savedGraphRemotely" 
+                :key="name" 
+                @click="viewSavedGraphRemotely(name)" 
+                class="px-3 py-1.5 text-xs font-semibold bg-white hover:bg-indigo-500/[0.04] dark:bg-gray-800/85 hover:text-indigo-600 dark:hover:text-indigo-400 border border-gray-200/60 dark:border-gray-750 rounded-xl transition-all cursor-pointer shadow-sm hover:border-indigo-500/30"
+              >
+                {{ name }}
+              </button>
+            </div>
           </div>
-          <!-- Property Viewer -->
-          <div v-if="selectedNode || selectedEdge" class="absolute top-20 right-6 w-72 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xl p-4 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 z-10 pointer-events-auto transition-transform">
-            <h3 class="text-[10px] font-black mb-1 uppercase tracking-widest text-gray-500 dark:text-gray-400">Property</h3>
-            
-            <!-- Node Viewer -->
-            <div v-if="selectedNode" class="bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-100 dark:border-gray-800 space-y-2">
-              <div class="flex justify-between items-center">
-                  <div class="max-w-[70%]">
-                      <p class="text-xs font-bold text-gray-900 dark:text-white break-words">{{ editingNodeData.label }}</p>
-                      <p class="text-[9px] text-gray-400 font-mono">{{ editingNodeData.id }}</p>
-                  </div>
-                  <div class="flex flex-col items-end gap-0.5">
-                      <span class="text-[9px] bg-blue-100 text-blue-700 px-1.5 rounded-full font-bold uppercase">{{ editingNodeData.type }}</span>
-                      <button v-if="editingNodeData.type === 'channel'" @click="fetchNodeMetadata(editingNodeData.id)" class="text-[9px] bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 px-1.5 rounded-full font-bold hover:bg-green-200">
-                          Fetch
-                      </button>
-                  </div>
+        </div>
+
+        <!-- Saved Person Profile Viewer Sheet -->
+        <transition enter-active-class="transition duration-300 ease-out" enter-from-class="transform scale-98 opacity-0" enter-to-class="transform scale-100 opacity-100">
+          <div
+            v-if="savedPersonProfileHtml"
+            class="mx-4 md:mx-6 mb-6 bg-white dark:bg-gray-800 p-6 md:p-8 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm relative overflow-hidden space-y-6 shrink-0"
+          >
+            <div class="flex items-center justify-between pb-4 border-b border-gray-150 dark:border-gray-750">
+              <div class="flex items-center gap-2.5">
+                <span class="p-1.5 rounded-xl bg-purple-50 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400 border border-purple-500/10">
+                  <Sparkles class="h-4.5 w-4.5" />
+                </span>
+                <div>
+                  <h3 class="text-xs font-black text-gray-400 dark:text-gray-550 uppercase tracking-widest leading-none">Inspecting Local Target</h3>
+                  <h4 class="text-base font-black text-gray-900 dark:text-white mt-1">{{ savedProfileName }}</h4>
+                </div>
               </div>
               
-              <div class="space-y-1">
-                  <input v-model="editingNodeData.label" @input="saveChanges" placeholder="Label" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
+              <div class="flex items-center gap-2">
+                <button 
+                  @click="handleSaveRemote(savedProfileName)" 
+                  class="px-3.5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-purple-500/15 cursor-pointer transition-all duration-300 hover:-translate-y-0.5 active:translate-y-0"
+                >
+                  <Database class="h-3.5 w-3.5" />
+                  <span>Save Remotely</span>
+                </button>
+                <button 
+                  @click="savedPersonProfileHtml = null; savedProfileName = ''" 
+                  class="p-1.5 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-750 text-gray-400 hover:text-gray-900 dark:hover:text-white transition-all cursor-pointer border border-gray-200/60 dark:border-gray-750 bg-white dark:bg-gray-800"
+                >
+                  <X class="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          
+            <div class="prose dark:prose-invert prose-sm leading-relaxed max-w-none text-xs text-gray-750 dark:text-gray-300 p-5 bg-gray-50/50 dark:bg-gray-900/35 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl overflow-y-auto max-h-[500px]">
+              <div v-html="savedPersonProfileHtml" class="prose-sm prose-pre:whitespace-pre-wrap font-semibold"></div>
+            </div>
+          </div>
+        </transition>
+
+        <!-- Main Graph Studio Card -->
+        <div class="mx-4 md:mx-6 h-[960px] flex-none bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 flex flex-col relative overflow-hidden shadow-sm">
+          
+          <!-- Modern Control Hub Header -->
+          <div class="px-6 py-5 border-b border-gray-150 dark:border-gray-750 flex flex-col lg:flex-row justify-between items-stretch lg:items-center gap-4 bg-white/50 dark:bg-gray-800/50 backdrop-blur-md z-10">
+            <div class="flex items-center gap-3">
+              <span class="p-2 bg-gradient-to-tr from-purple-500/10 to-indigo-500/10 text-purple-600 dark:text-purple-400 rounded-xl border border-purple-500/10">
+                <Layers class="w-4 h-4" />
+              </span>
+              <div>
+                <h2 class="text-sm font-black text-gray-900 dark:text-white tracking-widest uppercase mb-0.5">
+                  {{ isLoginTokenValid ? 'Graph Remote Studio' : 'Graph Local Studio' }}
+                </h2>
+                <span class="text-[10px] font-bold text-gray-400 dark:text-gray-500">Workspace Graph Sandbox</span>
+              </div>
+            </div>
+
+            <!-- Sleek Control Toolbar -->
+            <div class="flex flex-wrap items-center gap-3">
+              <!-- Search query field -->
+              <div class="relative min-w-[140px] sm:min-w-[180px] flex-grow lg:flex-grow-0">
+                <Search class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-550" />
+                <input 
+                  type="text" 
+                  v-model="nodeSearchQuery" 
+                  @keyup.enter="findNode" 
+                  placeholder="Find node ID..." 
+                  class="pl-9 pr-3.5 py-2 hover:bg-gray-50/50 dark:hover:bg-gray-900/35 border border-gray-200/80 dark:border-gray-700 rounded-xl bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/15 transition-all w-full" 
+                />
+              </div>
+
+              <!-- Graph name field -->
+              <div class="relative min-w-[110px] sm:min-w-[140px] flex-grow lg:flex-grow-0">
+                <FileText class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-teal-600 dark:text-teal-400" />
+                <input 
+                  type="text" 
+                  v-model="graphNameInput" 
+                  placeholder="Graph title..." 
+                  class="pl-9 pr-3.5 py-2 hover:bg-gray-50/50 dark:hover:bg-gray-900/35 border border-gray-200/80 dark:border-gray-700 rounded-xl bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/15 transition-all w-full" 
+                />
+              </div>
+
+              <!-- Button Actions -->
+              <div class="flex flex-wrap items-center gap-2">
+                <button 
+                  @click="saveGraph" 
+                  class="px-3.5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-purple-500/10 cursor-pointer transition-all hover:-translate-y-0.5 active:translate-y-0"
+                >
+                  <Plus class="h-3.5 w-3.5" />
+                  <span>Save</span>
+                </button>
+
+                <button 
+                  @click="loadGraph" 
+                  class="px-3.5 py-2 border border-gray-200/80 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-200 rounded-xl text-xs font-bold tracking-wide flex items-center justify-center gap-1.5 bg-white dark:bg-gray-800 transition-all cursor-pointer"
+                >
+                  <FolderOpen class="h-3.5 w-3.5" />
+                  <span>Load</span>
+                </button>
+
+                <button 
+                  @click="reLayoutGraph" 
+                  class="px-3.5 py-2 border border-gray-200/80 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-200 rounded-xl text-xs font-bold tracking-wide flex items-center justify-center gap-1.5 bg-white dark:bg-gray-800 transition-all cursor-pointer"
+                >
+                  <RefreshCw class="h-3.5 w-3.5" />
+                  <span>Re-layout</span>
+                </button>
+
+                <button 
+                  @click="clearGraph" 
+                  class="px-3.5 py-2 border border-rose-500/20 text-rose-500 dark:text-rose-455 hover:bg-rose-500/10 rounded-xl text-xs font-bold tracking-wide flex items-center justify-center gap-1.5 bg-rose-500/[0.02] transition-all cursor-pointer"
+                >
+                  <Trash2 class="h-3.5 w-3.5" />
+                  <span>Clear</span>
+                </button>
+
+                <button 
+                  @click="shareGraph" 
+                  class="px-3.5 py-2 border border-emerald-500/20 text-emerald-600 dark:text-emerald-450 hover:bg-emerald-500/10 rounded-xl text-xs font-bold tracking-wide flex items-center justify-center gap-1.5 bg-emerald-500/[0.02] transition-all cursor-pointer"
+                >
+                  <Share2 class="h-3.5 w-3.5" />
+                  <span>Share</span>
+                </button>
+
+                <button 
+                  @click="analyzeGraph" 
+                  :disabled="isAnalyzingGraph"
+                  class="px-3.5 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-orange-500/15 cursor-pointer disabled:opacity-50 transition-all hover:-translate-y-0.5 active:translate-y-0"
+                >
+                  <Sparkles class="h-3.5 w-3.5 animate-pulse" />
+                  <span>{{ isAnalyzingGraph ? 'Analyzing...' : 'Deep Analysis' }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex-1 relative flex flex-col h-full z-0 overflow-hidden bg-[#fafafa] dark:bg-[#121c2d]">
+             <!-- Hint Message -->
+             <transition enter-active-class="transition duration-150 ease-out" enter-from-class="transform -translate-y-2 opacity-0" enter-to-class="transform translate-y-0 opacity-100">
+               <div v-if="addingEdge" class="absolute top-4 left-4 z-[100] px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 text-white bg-purple-600 font-semibold text-xs border border-purple-500/20 select-none">
+                  <span class="font-black bg-white/20 px-1.5 py-0.5 rounded-lg uppercase tracking-wider text-[10px]">Add Link</span> 
+                  <span>Select any target node on the canvas to add an edge.</span>
+               </div>
+             </transition>
+
+             <!-- Context Menu (Highly Premium) -->
+             <div v-if="contextMenu.visible" @mousedown.stop @touchstart.stop @pointerdown.stop @click.stop @contextmenu.stop.prevent :style="{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }" class="absolute z-50 bg-white/95 dark:bg-gray-800/95 backdrop-blur-md rounded-2xl shadow-2xl border border-gray-200/80 dark:border-gray-750 p-1.5 w-40 divide-y divide-gray-100 dark:divide-gray-850">
+                 <div class="py-1">
+                   <button @click="startAddEdge" class="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-750 rounded-xl text-xs font-semibold text-gray-900 dark:text-white flex items-center gap-2 cursor-pointer">
+                     <Plus class="w-3.5 h-3.5 text-purple-500" />
+                     <span>Add Edge</span>
+                   </button>
+                   <button v-if="contextMenu.node.data('type') === 'channel'" @click="addForwardFrom" class="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-750 rounded-xl text-xs font-semibold text-gray-900 dark:text-white flex items-center gap-2 cursor-pointer">
+                     <Forward class="w-3.5 h-3.5 text-teal-500" />
+                     <span>Add Forward</span>
+                   </button>
+                 </div>
+                 <div class="py-1">
+                   <button @click="deleteNode" class="w-full text-left px-3 py-2 hover:bg-rose-500/[0.05] rounded-xl text-xs font-semibold text-rose-600 dark:text-rose-455 flex items-center gap-2 cursor-pointer">
+                     <Trash2 class="w-3.5 h-3.5 text-rose-500" />
+                     <span>Delete Node</span>
+                   </button>
+                 </div>
+                 <div class="py-1">
+                   <button @click="contextMenu.visible = false" class="w-full text-left px-3 py-1.5 hover:bg-gray-50 dark:hover:bg-gray-750 rounded-lg text-[11px] font-bold text-gray-400 dark:text-gray-550 text-center cursor-pointer">
+                     Close
+                   </button>
+                 </div>
+             </div>
+             
+             <!-- Canvas Area -->
+             <div id="workspace-canvas" class="w-full h-full min-h-[500px] flex-1 bg-[#f9fafb] dark:bg-[#0b121f] relative z-0">
+             </div>
+
+          <!-- Property Viewer (Floating Inspector Card) -->
+          <div v-if="selectedNode || selectedEdge" class="absolute top-6 right-6 w-80 bg-white/95 dark:bg-gray-800/95 backdrop-blur-md p-5 rounded-3xl shadow-xl border border-gray-200/80 dark:border-gray-750 z-20 pointer-events-auto transition-all space-y-4">
+            <div class="flex items-center justify-between pb-2 border-b border-gray-150 dark:border-gray-750">
+              <h3 class="text-[10px] font-black uppercase tracking-widest text-purple-600 dark:text-purple-400 flex items-center gap-1.5 leading-none">
+                <Database class="w-3.5 h-3.5" />
+                <span>Sandbox Inspector</span>
+              </h3>
+              <button @click="selectedNode = null; selectedEdge = null" class="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg text-gray-400 hover:text-gray-655 transition-colors cursor-pointer">
+                <X class="w-3.5 h-3.5" />
+              </button>
+            </div>
+            
+            <!-- Node Viewer -->
+            <div v-if="selectedNode" class="space-y-4">
+              <div class="flex justify-between items-start gap-2">
+                <div class="max-w-[70%]">
+                  <p class="text-xs font-black text-gray-900 dark:text-white break-words">{{ editingNodeData.label }}</p>
+                  <p class="text-[10px] text-gray-400 dark:text-gray-550 font-mono tracking-tight font-bold select-all mt-0.5 truncate">{{ editingNodeData.id }}</p>
+                </div>
+                <div class="flex flex-col items-end gap-1.5 shrink-0">
+                  <span class="text-[9px] bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/10 px-2 py-0.5 rounded-lg font-black uppercase tracking-wider leading-none">{{ editingNodeData.type }}</span>
+                  <button v-if="editingNodeData.type === 'channel' || editingNodeData.type === 'user'" @click="fetchNodeMetadata(editingNodeData.type, editingNodeData.id)" class="text-[9px] bg-teal-500/10 hover:bg-teal-500/20 text-teal-600 dark:text-teal-400 border border-teal-500/10 px-2 py-0.5 rounded-lg font-black uppercase cursor-pointer transition-colors">
+                    Fetch Metadata
+                  </button>
+                </div>
+              </div>
               
-                  <div v-if="editingNodeData.type !== 'person'" class="grid grid-cols-2 gap-1">
-                      <input v-model="editingNodeData.username" @input="saveChanges" placeholder="User" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
-                      <input v-model="editingNodeData.link" @input="saveChanges" placeholder="Link" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
+              <div class="space-y-2.5">
+                  <div>
+                    <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Custom Display Name</label>
+                    <input v-model="editingNodeData.label" @input="saveChanges" placeholder="Enter Label" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-2 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
+                  </div>
+              
+                  <div v-if="editingNodeData.type !== 'person'" class="grid grid-cols-2 gap-2">
+                    <div>
+                      <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Handle</label>
+                      <input v-model="editingNodeData.username" @input="saveChanges" placeholder="@User" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
+                    </div>
+                    <div>
+                      <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Link</label>
+                      <input v-model="editingNodeData.link" @input="saveChanges" placeholder="URL Link" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
+                    </div>
                   </div>
 
-                  <textarea v-model="editingNodeData.facts" @input="saveChanges" placeholder="Facts" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px] h-12" />
+                  <div>
+                    <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Facts & Bio Notes</label>
+                    <textarea v-model="editingNodeData.facts" @input="saveChanges" placeholder="Dossier analytical bio notes..." class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl p-3 text-xs font-semibold outline-none text-gray-900 dark:text-white h-20 focus:border-purple-500 transition-colors resize-none" />
+                  </div>
               </div>
 
               <!-- In/Out Edges List -->
-              <div class="pt-1 border-t border-gray-200 dark:border-gray-700 space-y-0.5 mt-1">
-                  <p class="text-[9px] font-bold text-gray-500 uppercase">Incoming</p>
-                  <button v-for="edge in getEdges.incoming" :key="edge.id()" @click="selectEdge(edge)" class="w-full bg-white dark:bg-gray-800 p-0.5 rounded text-[9px] border truncate text-left hover:border-blue-300 flex justify-between items-center">
-                       <span class="truncate">{{edge.source().id()}} → {{edge.target().id()}}</span>
-                       <span @click.stop="deleteEdge(edge)" class="text-red-500 hover:text-red-700 font-bold px-1">×</span>
-                   </button>
+              <div class="pt-3 border-t border-gray-150 dark:border-gray-750 space-y-2 mt-2">
+                  <div>
+                    <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-1.5 flex items-center gap-1">
+                      <ChevronRight class="w-3 h-3 text-gray-400" />
+                      <span>Incoming Links ({{ getEdges.incoming.length }})</span>
+                    </p>
+                    <div class="max-h-24 overflow-y-auto space-y-1">
+                      <div v-for="edge in getEdges.incoming" :key="edge.id()" class="w-full bg-gray-50 dark:bg-gray-900/35 p-2 rounded-xl text-[10px] border border-gray-200/50 dark:border-gray-750 truncate text-left flex justify-between items-center pr-2">
+                         <button @click="selectEdge(edge)" class="truncate hover:text-purple-600 dark:hover:text-purple-400 font-bold cursor-pointer max-w-[85%] text-[10px]">
+                           {{ edge.source().id() }} → ID Box
+                         </button>
+                         <button @click.stop="deleteEdge(edge)" class="text-rose-500 hover:text-rose-700 font-bold p-1 hover:bg-rose-500/10 rounded-md cursor-pointer transition-colors text-xs leading-none">×</button>
+                      </div>
+                    </div>
+                  </div>
                   
-                  <p class="text-[9px] font-bold text-gray-500 uppercase mt-0.5">Outgoing</p>
-                  <button v-for="edge in getEdges.outgoing" :key="edge.id()" @click="selectEdge(edge)" class="w-full bg-white dark:bg-gray-800 p-0.5 rounded text-[9px] border truncate text-left hover:border-purple-300 flex justify-between items-center">
-                       <span class="truncate">{{edge.source().id()}} → {{edge.target().id()}}</span>
-                       <span @click.stop="deleteEdge(edge)" class="text-red-500 hover:text-red-700 font-bold px-1">×</span>
-                   </button>
+                  <div>
+                    <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-1.5 flex items-center gap-1">
+                      <ChevronRight class="w-3 h-3 text-gray-400" />
+                      <span>Outgoing Links ({{ getEdges.outgoing.length }})</span>
+                    </p>
+                    <div class="max-h-24 overflow-y-auto space-y-1">
+                      <div v-for="edge in getEdges.outgoing" :key="edge.id()" class="w-full bg-gray-50 dark:bg-gray-900/35 p-2 rounded-xl text-[10px] border border-gray-200/50 dark:border-gray-750 truncate text-left flex justify-between items-center pr-2">
+                         <button @click="selectEdge(edge)" class="truncate hover:text-purple-600 dark:hover:text-purple-400 font-bold cursor-pointer max-w-[85%] text-[10px]">
+                           ID Box → {{ edge.target().id() }}
+                         </button>
+                         <button @click.stop="deleteEdge(edge)" class="text-rose-500 hover:text-rose-700 font-bold p-1 hover:bg-rose-500/10 rounded-md cursor-pointer transition-colors text-xs leading-none">×</button>
+                      </div>
+                    </div>
+                  </div>
               </div>
             </div>
 
             <!-- Edge Viewer -->
-            <div v-else-if="selectedEdge" class="bg-gray-50 dark:bg-gray-900 rounded-lg p-2 border border-gray-100 dark:border-gray-800 space-y-1">
-                <div class="flex justify-between items-center">
-                    <p class="text-[10px] font-bold text-gray-900 dark:text-white">Edge {{editingEdgeData.id}}</p>
-                    <button v-if="editingEdgeData.label === 'channel'" @click="fetchChannelDates(editingEdgeData.target)" class="text-[9px] bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 px-1.5 rounded-full font-bold hover:bg-green-200">Fetch</button>
+            <div v-else-if="selectedEdge" class="space-y-4">
+              <div class="flex justify-between items-center pb-2 border-b border-gray-150 dark:border-gray-750">
+                <div>
+                  <p class="text-xs font-black text-gray-900 dark:text-white">Edge Relationship</p>
+                  <p class="text-[9px] text-gray-400 dark:text-gray-550 font-mono mt-0.5">ID: {{ editingEdgeData.id }}</p>
                 </div>
-                <div class="grid grid-cols-2 gap-1">
-                    <input v-model="editingEdgeData.source" @input="saveChanges" placeholder="Source" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
-                    <input v-model="editingEdgeData.target" @input="saveChanges" placeholder="Target" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
+                <button v-if="editingEdgeData.label === 'channel'" @click="fetchChannelDates(editingEdgeData.target)" class="text-[9px] bg-teal-500/10 hover:bg-teal-500/20 text-teal-650 dark:text-teal-400 border border-teal-500/10 px-2.5 py-0.5 rounded-lg font-black uppercase cursor-pointer transition-colors">
+                  Sync Target
+                </button>
+              </div>
+              
+              <div class="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Source Node ID</label>
+                  <input v-model="editingEdgeData.source" @input="saveChanges" placeholder="Source" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
                 </div>
-                <input v-model="editingEdgeData.label" @input="saveChanges" placeholder="Label" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px]" />
-                <textarea v-model="editingEdgeData.facts" @input="saveChanges" placeholder="Facts" class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded p-1 text-[10px] h-12" />
-                <p class="text-[9px] text-gray-400">Created: {{editingEdgeData.createdAt}}</p>
+                <div>
+                  <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Target Node ID</label>
+                  <input v-model="editingEdgeData.target" @input="saveChanges" placeholder="Target" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
+                </div>
+              </div>
+
+              <div>
+                <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Relationship Type</label>
+                <input v-model="editingEdgeData.label" @input="saveChanges" placeholder="e.g. forward, mentions" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-2 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
+              </div>
+
+              <div>
+                <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Facts Context</label>
+                <textarea v-model="editingEdgeData.facts" @input="saveChanges" placeholder="Enter association facts..." class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl p-3 text-xs font-semibold outline-none text-gray-900 dark:text-white h-20 focus:border-purple-500 transition-colors resize-none" />
+              </div>
+
+              <div class="text-[9px] font-bold text-gray-400 dark:text-gray-500 flex items-center gap-1 bg-gray-50 dark:bg-gray-900/55 p-2 rounded-xl">
+                <span>Created context:</span>
+                <span class="font-mono text-gray-600 dark:text-gray-400">{{ editingEdgeData.createdAt || 'N/A' }}</span>
+              </div>
+            </div>
             </div>
             
-            <div v-else class="bg-gray-50 dark:bg-gray-900 rounded-xl p-3 border border-gray-100 dark:border-gray-800">
-              <p class="text-xs text-gray-400 dark:text-gray-500 text-center font-medium py-4">Select a node or edge</p>
+            <div v-else class="text-center py-6 text-gray-400">
+              <p class="text-xs font-medium">Select a node or relationship link on the graph</p>
             </div>
           </div>
         </div>
         
-        <!-- Timeline Viewer -->
-        <div class="min-h-[300px] border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 rounded-3xl mt-4 p-4 overflow-hidden relative" :style="{ height: `${Math.max(300, timelineRows.length * 56 + 150)}px` }">
-           <div class="flex items-center justify-between mb-2 sticky left-0 right-0">
-               <h3 class="text-xs font-black uppercase tracking-widest text-gray-500 dark:text-gray-400">Timeline Viewer</h3>
-                <div class="flex items-center gap-2">
-                    <span class="text-[9px] text-gray-500">Zoom: {{ zoomLevel.toFixed(1) }}x</span>
-                    <button @click="resetZoom" class="text-[9px] px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300">Reset</button>
+        <!-- Timeline Viewer Card -->
+        <div class="mx-4 md:mx-6 min-h-[300px] border border-gray-200/80 dark:border-gray-750 bg-white dark:bg-gray-800 rounded-3xl mt-6 p-6 md:p-8 overflow-hidden relative shadow-sm" :style="{ height: `${Math.max(300, timelineRows.length * 56 + 180)}px` }">
+           
+           <!-- Timeline Header -->
+           <div class="flex items-center justify-between mb-6 sticky left-0 right-0 z-10 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm pb-3 border-b border-gray-150 dark:border-gray-750">
+                <div class="flex items-center gap-2.5">
+                  <span class="p-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 border border-indigo-500/10">
+                    <Clock class="w-4 h-4" />
+                  </span>
+                  <div>
+                    <h3 class="text-xs font-black uppercase tracking-wider text-gray-900 dark:text-white">Dossier Event Timeline</h3>
+                    <p class="text-[10px] font-bold text-gray-400 dark:text-gray-500">Chronological analysis of registered interactions</p>
+                  </div>
+                </div>
+
+                <!-- Zoom controls -->
+                <div class="flex items-center gap-3">
+                    <span class="text-[10px] font-mono font-black uppercase tracking-wide text-gray-500 bg-gray-50 dark:bg-gray-900 px-2.5 py-1 rounded-lg border border-gray-200/50 dark:border-gray-750 rounded-xl">Zoom: {{ zoomLevel.toFixed(1) }}x</span>
+                    <button @click="resetZoom" class="text-[10px] font-black uppercase tracking-wide px-3 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-650 rounded-xl text-gray-750 dark:text-gray-300 transition-colors border border-gray-205 dark:border-gray-750 cursor-pointer">Reset</button>
                 </div>
            </div>
            
+           <!-- Timeline Board -->
            <div 
              ref="timelineContainer"
              class="relative h-full cursor-grab active:cursor-grabbing overflow-hidden"
@@ -7715,14 +8166,15 @@ const timelineTicks = computed(() => {
              @mouseup="onTimelineMouseUp"
              @mouseleave="onTimelineMouseLeave"
            >
-              <div id="timeline-canvas" class="relative min-w-[max-content] p-2 pb-20" :style="{ 
+              <div id="timeline-canvas" class="relative min-w-[max-content] p-2 pb-24" :style="{ 
                 width: `${100 * zoomLevel}%`,
                 left: `${-panOffset}px`
-              }">                
+              }"> 
                 <div class="hidden bg-green-700 bg-blue-700 bg-red-700 bg-purple-700 bg-indigo-700 bg-emerald-700 bg-rose-700 bg-cyan-700"></div>
-                <div v-for="(row, rowIdx) in timelineRows" :key="rowIdx" class="relative h-8 mt-2">
+                
+                <div v-for="(row, rowIdx) in timelineRows" :key="rowIdx" class="relative h-8 mt-3 first:mt-0">
                     <div v-for="item in row" :key="item.id" 
-                          class="absolute h-5 rounded-md flex items-center px-2 text-[10px] text-white font-medium whitespace-nowrap cursor-pointer shadow-sm hover:shadow-md transition-all duration-200 hover:scale-[1.02] hover:z-10" 
+                          class="absolute h-6 rounded-xl flex items-center px-3.5 text-[10px] text-white font-black uppercase tracking-wider whitespace-nowrap cursor-pointer shadow-md hover:shadow-lg transition-all duration-300 hover:-translate-y-0.5 hover:z-10 border border-white/10" 
                           :style="{ 
                              left: `${((item.start - timelineRange.min) / (timelineRange.max - timelineRange.min)) * 100}%`,
                              width: `${Math.max(0.2, (((item.start === item.end ? item.start + 3600000 : item.end) - item.start) / Math.max(1, (timelineRange.max - timelineRange.min))) * 100)}%`
@@ -7731,32 +8183,55 @@ const timelineTicks = computed(() => {
                           @mouseenter="hoveredItem = item"
                           @mouseleave="hoveredItem = null"
                           @click.stop="focusNode(item.source)"
-                          ">
+                    >
                           {{ item.source }}
                     </div>
                 </div>
 
                 <!-- Axis -->
-                <div class="absolute bottom-0 left-0 w-full h-8 flex text-[9px] text-gray-400 dark:text-gray-500 font-mono pointer-events-none">
-                    <div v-for="tick in timelineTicks" :key="tick.time" class="absolute border-l border-gray-400/30 h-3" :style="{ left: `${tick.position}%` }">
-                        <span class="absolute top-4 -translate-x-1/2 text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 px-1 rounded whitespace-nowrap">{{ tick.label }}</span>
+                <div class="absolute bottom-6 left-0 w-full h-8 flex text-[9px] text-gray-400 dark:text-gray-550 pointer-events-none border-t border-gray-150 dark:border-gray-750 pt-2 font-mono">
+                    <div v-for="tick in timelineTicks" :key="tick.time" class="absolute h-3 border-l border-gray-200 dark:border-gray-750" :style="{ left: `${tick.position}%` }">
+                        <span class="absolute top-3 -translate-x-1/2 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 px-1.5 rounded whitespace-nowrap font-bold tracking-tight">{{ tick.label }}</span>
                     </div>
                 </div>
               </div>
            </div>
 
            <!-- Hover Label -->
-           <div v-if="hoveredItem" class="absolute left-1/2 -translate-x-1/2 top-2 bg-black/80 text-white text-[10px] px-3 py-1.5 rounded-full shadow-lg z-50 pointer-events-none whitespace-nowrap">
-               <span class="font-bold border-r border-gray-500 pr-2 mr-2">{{ hoveredItem.source }}</span>
-               <span>{{ new Date(hoveredItem.start).toLocaleString() }} - {{ new Date(hoveredItem.end).toLocaleString() }}</span>
-           </div>
+           <transition enter-active-class="transition duration-150 ease-out" enter-from-class="transform scale-95 opacity-0" enter-to-class="transform scale-100 opacity-100">
+             <div v-if="hoveredItem" class="absolute left-1/2 -translate-x-1/2 bottom-12 bg-gray-900/95 dark:bg-gray-950/95 backdrop-blur-md text-white text-[10px] px-4 py-2.5 rounded-2xl shadow-xl z-50 pointer-events-none whitespace-nowrap border border-white/10 flex items-center gap-3">
+                 <span class="font-black uppercase tracking-wider text-teal-400 pr-3 border-r border-gray-700 flex items-center gap-1">
+                   <Clock class="w-3 h-3" />
+                   <span>{{ hoveredItem.source }}</span>
+                 </span>
+                 <span class="font-semibold text-gray-300">{{ new Date(hoveredItem.start).toLocaleString() }} <span class="text-teal-550 mx-1">→</span> {{ new Date(hoveredItem.end).toLocaleString() }}</span>
+             </div>
+           </transition>
         </div>
         
         <!-- Analysis Result Section -->
-        <div v-if="analysisResultOfGraph" class="mt-4 p-4 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700">
-           <h3 class="text-xs font-black uppercase tracking-widest text-gray-500 dark:text-gray-400 mb-2">Graph Analysis Result</h3>
-           <div class="prose dark:prose-invert text-sm text-gray-800 dark:text-gray-200" v-html="renderedMarkdownOfGraph"></div>
-        </div>
+        <transition enter-active-class="transition duration-300 ease-out" enter-from-class="transform scale-98 opacity-0" enter-to-class="transform scale-100 opacity-100">
+          <div v-if="analysisResultOfGraph" class="mx-4 md:mx-6 mt-6 p-6 md:p-8 bg-gradient-to-br from-white to-amber-50/[0.12] dark:from-gray-800 dark:to-orange-950/20 rounded-3xl border border-amber-500/15 shadow-sm relative overflow-hidden space-y-4">
+             <div class="absolute -right-24 -bottom-24 w-48 h-48 bg-amber-500/[0.03] rounded-full blur-3xl pointer-events-none"></div>
+             
+             <div class="flex items-center gap-2.5 pb-3 border-b border-gray-150 dark:border-gray-750">
+               <span class="p-1.5 rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/10">
+                 <Sparkles class="h-4.5 w-4.5" />
+               </span>
+               <div>
+                 <h2 class="text-xs font-black uppercase tracking-wider text-gray-900 dark:text-white">AI Studio Network Diagnosis</h2>
+                 <p class="text-[10px] font-bold text-gray-400 dark:text-gray-500">Heuristic structural relationship findings</p>
+               </div>
+             </div>
+
+             <div class="prose dark:prose-invert max-w-none text-xs text-gray-750 dark:text-gray-300 p-5 bg-white dark:bg-gray-900/40 border border-gray-150 dark:border-gray-750 rounded-2xl select-text font-semibold">
+               <div class="prose-sm prose-pre:whitespace-pre-wrap leading-relaxed" v-html="renderedMarkdownOfGraph"></div>
+             </div>
+          </div>
+        </transition>
+
+        <!-- Extra bottom anchor spacer -->
+        <div class="h-10"></div>
       </div>
 
       <!-- Monitor Tab -->
@@ -8130,6 +8605,9 @@ const timelineTicks = computed(() => {
                   <div class="text-xs font-mono text-gray-400 flex flex-wrap gap-x-4 gap-y-1">
                     <span>Target: <strong class="text-gray-700 dark:text-gray-200">{{ selectedListenNode.argument }}</strong></span>
                     <span>Created: <strong>{{ new Date(selectedListenNode.create_time).toLocaleDateString() }}</strong></span>
+                    <span v-if="listenPosts && listenPosts.length > 0">
+                      Newest: <strong class="text-teal-600 dark:text-teal-400">{{ formatDate(listenPosts[0]?.data?.date) }}</strong>
+                    </span>
                   </div>
                   <p v-if="selectedListenNode.description" class="text-xs text-gray-550 dark:text-gray-400 italic max-w-xl">
                     {{ selectedListenNode.description }}
@@ -8176,6 +8654,70 @@ const timelineTicks = computed(() => {
                   >
                     <RefreshCw class="h-4 w-4" :class="[isFetchingListenPosts ? 'animate-spin' : '']" />
                   </button>
+                </div>
+              </div>
+
+              <!-- Channel Metadata Widget -->
+              <div v-if="selectedListenNode.type === 'channel'" class="transition-all duration-300">
+                <!-- Loading Metadata state -->
+                <div v-if="isFetchingChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm p-6 flex items-center justify-center gap-3 text-gray-500 text-xs">
+                  <LoaderCircle class="h-4 w-4 animate-spin text-teal-500" />
+                  <span>Fetching channel profile...</span>
+                </div>
+                
+                <!-- Display Metadata state -->
+                <div v-else-if="selectedChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col md:flex-row items-stretch">
+                  <!-- Left accent gradient and avatar bar -->
+                  <div class="bg-gradient-to-br from-teal-500/20 to-teal-600/5 dark:from-teal-950/40 dark:to-teal-900/10 p-6 flex flex-row md:flex-col items-center justify-center gap-4 border-b md:border-b-0 md:border-r border-gray-150 dark:border-gray-700 md:w-48 shrink-0 select-none">
+                    <div class="w-16 h-16 rounded-full bg-white dark:bg-gray-800 border-2 border-teal-100 dark:border-teal-900/40 shadow-md overflow-hidden shrink-0 flex items-center justify-center">
+                      <img
+                        :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument}`"
+                        @error="handleImageError"
+                        alt="Channel Avatar"
+                        class="w-full h-full object-cover"
+                      />
+                    </div>
+                    <div class="text-center md:text-center flex-1">
+                      <h4 class="text-xs font-bold text-gray-400 uppercase tracking-widest leading-none mb-1">
+                        @{{ selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument }}
+                      </h4>
+                      <span v-if="selectedChannelMetadata.subscribers || selectedChannelMetadata.members || selectedChannelMetadata.participants_count" class="inline-flex items-center gap-1 text-[10px] bg-teal-50 dark:bg-teal-950/50 text-teal-600 dark:text-teal-400 font-black px-2 py-0.5 rounded-full uppercase tracking-wider scale-95 border border-teal-100/50 dark:border-teal-900/20">
+                        <Users class="h-3 w-3" />
+                        {{ (selectedChannelMetadata.subscribers || selectedChannelMetadata.members || selectedChannelMetadata.participants_count).toLocaleString() }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <!-- Right description & actions info -->
+                  <div class="p-6 flex-1 flex flex-col justify-between gap-4">
+                    <div class="space-y-2">
+                      <div class="flex items-center justify-between gap-2 flex-wrap">
+                        <div class="flex items-center gap-2">
+                          <h3 class="text-base font-black text-gray-900 dark:text-white leading-tight">
+                            {{ selectedChannelMetadata.title || selectedChannelMetadata.name }}
+                          </h3>
+                        </div>
+                        <a
+                          :href="`https://t.me/${selectedChannelMetadata.username || selectedListenNode.argument}`"
+                          target="_blank"
+                          class="inline-flex items-center gap-1.5 px-3 py-1 bg-teal-500 hover:bg-teal-600 text-white dark:bg-teal-600 dark:hover:bg-teal-700 text-[11px] font-bold rounded-xl shadow-sm transition-all shadow-teal-500/10 hover:-translate-y-0.5 shrink-0"
+                        >
+                          <ExternalLink class="h-3 w-3" />
+                          <span>Join Channel</span>
+                        </a>
+                      </div>
+                      <p v-if="selectedChannelMetadata.description || selectedChannelMetadata.about" class="text-xs text-gray-650 dark:text-gray-300 leading-relaxed whitespace-pre-wrap break-words bg-gray-50/50 dark:bg-gray-800/50 p-3 rounded-2xl border border-gray-100/50 dark:border-gray-700/50">
+                        {{ selectedChannelMetadata.description || selectedChannelMetadata.about }}
+                      </p>
+                      <p v-else class="text-xs text-gray-400 italic">No description provided for this channel.</p>
+                    </div>
+
+                    <!-- Additional mini details tags grid -->
+                    <div class="flex flex-wrap gap-2 text-[10px] font-mono text-gray-400 border-t border-gray-100 dark:border-gray-700/60 pt-3">
+                      <span v-if="selectedChannelMetadata.date || selectedChannelMetadata.createdAt">First Seen: <strong class="text-gray-600 dark:text-gray-300">{{ formatDate(selectedChannelMetadata.date || selectedChannelMetadata.createdAt) }}</strong></span>
+                      <span v-if="selectedChannelMetadata._type">Type: <strong class="text-gray-600 dark:text-gray-300">{{ selectedChannelMetadata._type.split('.').pop() }}</strong></span>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -8557,115 +9099,205 @@ const timelineTicks = computed(() => {
 
        <!-- Auto Finding Tab -->
       <div v-show="activeTab === 'auto-finding'" class="space-y-6">
-        <div class="max-w-6xl mx-auto mb-8 px-4 sm:px-0 space-y-4">
+        <div class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10">
           <div
-            class="flex items-center gap-4 bg-gray-100 dark:bg-gray-800 p-1 rounded-xl"
+            class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 sm:p-8 mb-8 shadow-sm relative overflow-hidden"
           >
-            <button
-              @click="searchMode = 'channel'"
-              :disabled="isAutoFinding"
-              :class="[
-                'flex-1 py-2 text-xs font-bold rounded-lg transition',
-                isAutoFinding ? 'opacity-50 cursor-not-allowed' : '',
-                searchMode === 'channel'
-                  ? 'bg-white dark:bg-gray-700 shadow-sm'
-                  : 'text-gray-500',
-              ]"
-            >
-              Channel
-            </button>
-            <button
-              @click="searchMode = 'user'"
-              :disabled="isAutoFinding"
-              :class="[
-                'flex-1 py-2 text-xs font-bold rounded-lg transition',
-                isAutoFinding ? 'opacity-50 cursor-not-allowed' : '',
-                searchMode === 'user'
-                  ? 'bg-white dark:bg-gray-700 shadow-sm'
-                  : 'text-gray-500',
-              ]"
-            >
-              User
-            </button>
-          </div>
-          <div class="mb-4 px-1">
-            <div class="flex justify-between items-center mb-1">
-              <label
-                class="block text-[10px] font-black text-gray-500 uppercase tracking-widest"
-                >Iterations</label
-              >
-              <span
-                class="text-[10px] font-bold text-blue-600 dark:text-blue-400"
-                >{{ numIterations }}</span
-              >
-            </div>
-            <input
-              type="range"
-              min="1"
-              max="25"
-              v-model="numIterations"
-              class="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full appearance-none cursor-pointer accent-blue-600"
-            />
-          </div>
-          <form @submit.prevent="runAutoFinding" class="relative group">
-            <input
-              v-model="autoChannelName"
-              type="text"
-              class="block w-full pl-6 pr-[120px] py-3.5 border border-gray-200 dark:border-gray-700 rounded-xl bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-blue-500/20 focus:border-blue-500 text-sm font-medium shadow-sm transition-all duration-300"
-              :placeholder="
-                searchMode === 'channel'
-                  ? 'Enter channel name...'
-                  : 'Enter user name...'
-              "
-            />
-            <button
-              type="submit"
-              :disabled="isAutoFinding || !autoChannelName.trim()"
-              class="absolute right-2 top-2 bottom-2 px-5 bg-blue-600 text-white rounded-[0.65rem] text-xs font-bold tracking-wide hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-blue-500/30 flex items-center"
-            >
-              <Loader2 v-if="isAutoFinding" class="h-4 w-4 animate-spin mr-2" />
-              {{ isAutoFinding ? "Finding..." : "Start Finding" }}
-            </button>
-          </form>
+            <!-- Background Decoration -->
+            <div
+              class="absolute -top-20 -right-20 w-40 h-40 bg-teal-500/5 dark:bg-teal-500/10 rounded-full blur-3xl pointer-events-none"
+            ></div>
+            <div
+              class="absolute -bottom-20 -left-20 w-40 h-40 bg-indigo-500/5 dark:bg-indigo-500/10 rounded-full blur-3xl pointer-events-none"
+            ></div>
 
-          <!-- Saved Profiles -->
-          <div v-if="savedProfiles.channel.length > 0 || savedProfiles.user.length > 0" class="mt-8 space-y-4">
-              <div v-if="savedProfiles.channel.length > 0">
-                <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Channels at Local</h4>
-                <div class="flex flex-wrap gap-2">
-                    <button v-for="name in savedProfiles.channel" :key="name" @click="viewSavedProfile('channel', name)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900">{{ name }}</button>
+            <div class="relative z-10 space-y-8">
+              <!-- Top parameters grid -->
+              <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                
+                <!-- Left panel: Configuration (5 cols) -->
+                <div class="lg:col-span-5 bg-gray-50/50 dark:bg-gray-900/40 border border-gray-150/45 dark:border-gray-850/40 p-5 rounded-2xl space-y-5">
+                  <div class="flex items-center gap-2 pb-2 border-b border-gray-100 dark:border-gray-800">
+                    <SlidersHorizontal class="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">Params Setup</h3>
+                  </div>
+
+                  <!-- Select Mode -->
+                  <div class="space-y-2">
+                    <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">Search Target Mode</label>
+                    <div
+                      class="flex items-center gap-2 bg-white dark:bg-gray-800 border border-gray-150 dark:border-gray-850 p-1 rounded-xl"
+                    >
+                      <button
+                        @click="searchMode = 'channel'"
+                        :disabled="isAutoFinding"
+                        :class="[
+                          'flex-1 py-1.5 text-xs font-bold rounded-lg transition-all duration-300 cursor-pointer',
+                          isAutoFinding ? 'opacity-50 cursor-not-allowed' : '',
+                          searchMode === 'channel'
+                            ? 'bg-teal-600 text-white shadow-sm shadow-teal-500/10'
+                            : 'text-gray-450 hover:text-gray-600 dark:hover:text-gray-300',
+                        ]"
+                      >
+                        Channel
+                      </button>
+                      <button
+                        @click="searchMode = 'user'"
+                        :disabled="isAutoFinding"
+                        :class="[
+                          'flex-1 py-1.5 text-xs font-bold rounded-lg transition-all duration-300 cursor-pointer',
+                          isAutoFinding ? 'opacity-50 cursor-not-allowed' : '',
+                          searchMode === 'user'
+                            ? 'bg-teal-600 text-white shadow-sm shadow-teal-500/10'
+                            : 'text-gray-450 hover:text-gray-600 dark:hover:text-gray-300',
+                        ]"
+                      >
+                        User
+                      </button>
+                    </div>
+                  </div>
+
+                  <!-- Slider control -->
+                  <div class="space-y-2">
+                    <div class="flex justify-between items-center">
+                      <label
+                        class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
+                        >Iterations Limit</label
+                      >
+                      <span
+                        class="text-[10px] font-mono font-bold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-2 py-0.5 rounded border border-teal-100/50 dark:border-teal-900/10"
+                        >Run Count: {{ numIterations }}</span
+                      >
+                    </div>
+                    <input
+                      type="range"
+                      min="1"
+                      max="25"
+                      v-model="numIterations"
+                      class="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full appearance-none cursor-pointer accent-teal-600"
+                    />
+                  </div>
+                </div>
+
+                <!-- Right panel: Input Form & Guidance (7 cols) -->
+                <div class="lg:col-span-7 space-y-5">
+                  <div class="flex items-center gap-2">
+                    <BotMessageSquare class="h-4 w-4 text-teal-650 dark:text-teal-400" />
+                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">Execute Search</h3>
+                  </div>
+
+                  <!-- Input Form -->
+                  <form @submit.prevent="runAutoFinding" class="relative group">
+                    <div
+                      class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-teal-600 z-10"
+                    >
+                      <Search class="h-5 w-5 text-gray-400" />
+                    </div>
+                    <input
+                      v-model="autoChannelName"
+                      type="text"
+                      class="block w-full pl-14 pr-[150px] py-4 border border-gray-200/90 dark:border-gray-700/90 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
+                      :placeholder="
+                        searchMode === 'channel'
+                          ? 'Enter channel name (e.g. durov)'
+                          : 'Enter user name (e.g. user_id)'
+                      "
+                    />
+                    <button
+                      type="submit"
+                      :disabled="isAutoFinding || !autoChannelName.trim()"
+                      class="absolute right-2 top-2 bottom-2 px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer"
+                    >
+                      <Loader2 v-if="isAutoFinding" class="h-4 w-4 animate-spin mr-2" />
+                      {{ isAutoFinding ? "Finding..." : "Start Finding" }}
+                    </button>
+                  </form>
+
+                  <!-- Quick Guidance Info Tip -->
+                  <div class="bg-teal-50/[0.18] dark:bg-teal-950/[0.08] p-4 rounded-2xl border border-teal-100/30 dark:border-teal-900/20 text-xs text-gray-500 dark:text-gray-450 flex items-start gap-3">
+                    <Info class="h-4 w-4 text-teal-600 shrink-0 mt-0.5" />
+                    <p class="leading-relaxed">
+                      Auto Sequence Finding automatically traces consecutive indices back-to-back to extract, translate, and synthesize an intelligence grid from available channels or individual users.
+                    </p>
+                  </div>
+                </div>
+
+              </div>
+
+              <!-- Saved Profiles Row (Always beautifully visible when profiles list exists) -->
+              <div v-if="savedProfiles.channel.length > 0 || savedProfiles.user.length > 0" class="pt-6 border-t border-gray-100 dark:border-gray-700/50 space-y-4">
+                <div class="flex items-center gap-2">
+                  <Database class="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                  <h4 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">Local Archives Directory</h4>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <!-- Channels Column -->
+                  <div v-if="savedProfiles.channel.length > 0" class="bg-gray-50/50 dark:bg-gray-900/30 p-4 rounded-2xl border border-gray-150/40 dark:border-gray-850/40 space-y-2.5">
+                    <h5 class="text-[10px] font-black text-teal-650 dark:text-teal-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <span class="w-1.5 h-1.5 rounded-full bg-teal-500"></span>
+                      <span>Saved Channel Scrapes</span>
+                    </h5>
+                    <div class="flex flex-wrap gap-2">
+                      <button 
+                        v-for="name in savedProfiles.channel" 
+                        :key="name" 
+                        @click="viewSavedProfile('channel', name)" 
+                        class="px-3 py-1.5 text-xs font-semibold bg-white dark:bg-gray-800 border border-gray-150/50 dark:border-gray-750 rounded-xl hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400 text-gray-700 dark:text-gray-300 cursor-pointer shadow-sm transition-colors"
+                      >
+                        @{{ name }}
+                      </button>
+                    </div>
+                  </div>
+
+                  <!-- Users Column -->
+                  <div v-if="savedProfiles.user.length > 0" class="bg-gray-50/50 dark:bg-gray-900/30 p-4 rounded-2xl border border-gray-150/40 dark:border-gray-850/40 space-y-2.5">
+                    <h5 class="text-[10px] font-black text-indigo-650 dark:text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                      <span>Saved User Scrapes</span>
+                    </h5>
+                    <div class="flex flex-wrap gap-2">
+                      <button 
+                        v-for="name in savedProfiles.user" 
+                        :key="name" 
+                        @click="viewSavedProfile('user', name)" 
+                        class="px-3 py-1.5 text-xs font-semibold bg-white dark:bg-gray-800 border border-gray-150/50 dark:border-gray-750 rounded-xl hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400 text-gray-700 dark:text-gray-300 cursor-pointer shadow-sm transition-colors"
+                      >
+                        @{{ name }}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
-              <div v-if="savedProfiles.user.length > 0">
-                <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-2">Saved Users at Local</h4>
-                <div class="flex flex-wrap gap-2">
-                    <button v-for="name in savedProfiles.user" :key="name" @click="viewSavedProfile('user', name)" class="px-3 py-1.5 text-xs bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900">{{ name }}</button>
-                </div>
-              </div>
-          </div>
-          
-          <div
-            v-if="savedFinalTableHtml"
-            class="w-full max-w-6xl mx-auto mt-8 bg-gradient-to-br from-white to-blue-50/50 dark:from-gray-900 dark:to-gray-800 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
-          >
-            <div class="flex items-center gap-2 mb-4">
+              
+              <!-- Saved Final Table Insight display -->
               <div
-                class="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center"
+                v-if="savedFinalTableHtml"
+                class="w-full mt-6 bg-gradient-to-br from-white to-teal-50/[0.12] dark:from-gray-900 dark:to-gray-950 p-6 rounded-3xl border border-teal-150/40 dark:border-teal-900/10 shadow-sm prose dark:prose-invert max-w-none text-sm relative overflow-hidden"
               >
-                <Sparkles class="w-4 h-4 text-white" />
+                <!-- subtle gradient highlight -->
+                <div class="absolute -top-12 -right-12 w-24 h-24 bg-teal-500/5 dark:bg-teal-500/5 rounded-full blur-xl pointer-events-none"></div>
+
+                <div class="flex items-center gap-2 mb-4">
+                  <div
+                    class="w-8 h-8 rounded-xl bg-teal-50 dark:bg-teal-950/50 border border-teal-105 dark:border-teal-900/30 flex items-center justify-center shadow-sm"
+                  >
+                    <Sparkles class="w-4 h-4 text-teal-650 dark:text-teal-400" />
+                  </div>
+                  <h5
+                    class="text-xs font-black text-teal-800 dark:text-teal-100 uppercase tracking-wider"
+                  >
+                    Saved Final Analysis Insights
+                  </h5>
+                </div>
+              
+                <div class="flex items-center justify-between gap-4 mb-4 pb-2 border-b border-gray-100 dark:border-gray-800">
+                    <h3 class="text-base font-extrabold text-gray-900 dark:text-gray-100">@{{ savedProfileName }}</h3>
+                    <button @click="handleSaveRemote(savedProfileName)" class="text-[10px] font-black bg-teal-600 text-white px-3.5 py-1.5 rounded-lg hover:bg-teal-700 shadow-sm cursor-pointer transition-colors">Save Remotely</button>
+                </div>
+                <div v-html="savedFinalTableHtml" class="prose-sm overflow-x-auto"></div>
               </div>
-              <h5
-                class="text-sm font-black text-blue-900 dark:text-blue-100 uppercase tracking-wider"
-              >
-                Saved Final Analysis Insights
-              </h5>
             </div>
-          
-            <div class="flex items-center justify-between mb-4">
-                <h3 class="text-lg font-bold text-gray-900 dark:text-gray-100">{{ savedProfileName }}</h3>
-                <button @click="handleSaveRemote(savedProfileName)" class="text-xs bg-blue-600 text-white px-3 py-1 rounded-lg hover:bg-blue-700">Save Remotely</button>
-            </div>
-            <div v-html="savedFinalTableHtml" class="prose-sm"></div>
           </div>
         </div>
 
@@ -8678,49 +9310,49 @@ const timelineTicks = computed(() => {
             top: postWidgetY + 'px',
             zIndex: 100,
           }"
-          class="w-80 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xl rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 flex flex-col p-4 cursor-default"
+          class="w-80 bg-white/95 dark:bg-gray-800/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-gray-200/80 dark:border-gray-700/80 flex flex-col p-4 cursor-default border-t-2 border-t-teal-500"
         >
           <div
-            class="cursor-grab p-2 mb-2 bg-purple-500/10 border-b border-purple-500/20 flex justify-between items-center rounded-lg"
+            class="cursor-grab p-2.5 mb-3 bg-teal-500/[0.08] border-b border-teal-500/10 flex justify-between items-center rounded-xl"
             @mousedown.prevent="startDrag($event, 'post')"
           >
-            <h2 class="text-xs font-black text-purple-700 dark:text-purple-300">
+            <h2 class="text-xs font-black uppercase tracking-wider text-teal-600 dark:text-teal-400">
               Post Fetcher
             </h2>
-            <GripHorizontal class="h-3 w-3 text-purple-400" />
+            <GripHorizontal class="h-3.5 w-3.5 text-teal-500 animate-pulse" />
           </div>
 
           <form @submit.prevent="fetchSinglePost" class="relative group">
             <input
               v-model="singlePostId"
               type="text"
-              class="block w-full pl-3 pr-20 py-2 border border-gray-200 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-900"
-              placeholder="Post ID..."
+              class="block w-full pl-3 pr-20 py-2 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold bg-white dark:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+              placeholder="Enter unique Post ID..."
             />
             <button
               type="submit"
               :disabled="isFetchingPost"
-              class="absolute right-1 top-1 bottom-1 px-3 bg-purple-600 text-white rounded-md text-[10px] font-bold"
+              class="absolute right-1 top-1 bottom-1 px-3.5 bg-teal-600 text-white rounded-lg text-[10px] font-extrabold hover:bg-teal-700 cursor-pointer disabled:opacity-50 transition-colors"
             >
               {{ isFetchingPost ? "..." : "Fetch" }}
             </button>
           </form>
           <div
             v-if="singlePost"
-            class="mt-3 flex-1 overflow-y-auto max-h-[300px] border border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-900/50 backdrop-blur-sm rounded-xl"
+            class="mt-3 flex-1 overflow-y-auto max-h-[300px] border border-gray-150 dark:border-gray-800 bg-gray-50/40 dark:bg-gray-900/40 backdrop-blur-sm rounded-xl custom-scrollbar"
           >
             <div class="p-3">
               <!-- Header -->
               <div class="flex justify-between items-start mb-2.5">
                 <div class="flex items-center space-x-2 min-w-0 pr-2">
                   <div
-                    class="h-7 w-7 rounded-full bg-blue-100 dark:bg-blue-900/40 flex-shrink-0 flex items-center justify-center text-blue-600 dark:text-blue-400"
+                    class="h-7 w-7 rounded-lg bg-teal-50 dark:bg-teal-950/40 border border-teal-100/30 flex-shrink-0 flex items-center justify-center text-teal-600 dark:text-teal-400"
                   >
                     <User class="h-3.5 w-3.5" />
                   </div>
                   <div class="min-w-0">
                     <h4
-                      class="text-xs font-bold text-gray-900 dark:text-gray-100 truncate"
+                      class="text-xs font-extrabold text-gray-900 dark:text-gray-100 truncate"
                     >
                       {{
                         singlePost.data?.author ||
@@ -8729,7 +9361,7 @@ const timelineTicks = computed(() => {
                       }}
                     </h4>
                     <p
-                      class="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5"
+                      class="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5"
                     >
                       {{ formatDate(singlePost.data?.date) }}
                     </p>
@@ -8737,7 +9369,7 @@ const timelineTicks = computed(() => {
                 </div>
                 <span
                   v-if="singlePost.key"
-                  class="font-mono bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-1.5 py-0.5 rounded shadow-sm text-[9px] text-gray-500 flex-shrink-0"
+                  class="font-mono bg-white dark:bg-gray-800 border border-gray-205 dark:border-gray-700 px-1.5 py-0.5 rounded shadow-sm text-[9px] text-gray-500 flex-shrink-0"
                 >
                   #{{ singlePost.key }}
                 </span>
@@ -8748,10 +9380,10 @@ const timelineTicks = computed(() => {
                 v-if="
                   singlePost.data?.reply && singlePost.data.reply.length >= 2
                 "
-                class="mb-3 border-l-4 border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 p-3 rounded-r-xl"
+                class="mb-3 border-l-4 border-teal-500 bg-teal-500/[0.03] dark:bg-teal-950/[0.15] p-2.5 rounded-r-xl border border-teal-100/30 dark:border-teal-900/10"
               >
                 <div
-                  class="flex items-center justify-between text-xs font-semibold text-blue-600 dark:text-blue-400 mb-1"
+                  class="flex items-center justify-between text-[9px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 mb-1"
                 >
                   <div class="flex items-center">
                     <Reply class="h-3 w-3 mr-1" />
@@ -8762,7 +9394,7 @@ const timelineTicks = computed(() => {
                       Array.isArray(singlePost.data?.reply) &&
                       singlePost.data.reply[0] != null
                     "
-                    class="font-mono bg-blue-100/50 dark:bg-blue-800/30 px-2 py-0.5 rounded border border-blue-200/50 dark:border-blue-700/50 text-[10px]"
+                    class="font-mono bg-teal-50 dark:bg-teal-950/40 px-1.5 py-0.2 rounded border border-teal-100/50 dark:border-teal-900/10 text-[9px] normal-case"
                     >ID:
                     {{
                       singlePost.data._tool
@@ -8772,7 +9404,7 @@ const timelineTicks = computed(() => {
                   >
                 </div>
                 <div
-                  class="text-gray-700 dark:text-gray-300 text-xs leading-relaxed whitespace-pre-wrap break-words"
+                  class="text-gray-600 dark:text-gray-300 text-[11px] leading-relaxed whitespace-pre-wrap break-words italic line-clamp-3"
                   v-html="highlightText(singlePost.data.reply[1])"
                 ></div>
               </div>
@@ -8782,7 +9414,7 @@ const timelineTicks = computed(() => {
                 v-if="
                   singlePost.data?.photos && singlePost.data.photos.length > 0
                 "
-                class="mb-2.5 rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700 bg-black cursor-zoom-in group"
+                class="mb-2.5 rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-black cursor-zoom-in group"
                 @click="
                   openLightbox(
                     `https://i.gogingko.net/api/v1/v/telegram-photo/${singlePost.key}_0`
@@ -8798,7 +9430,7 @@ const timelineTicks = computed(() => {
                 v-else-if="
                   singlePost.data?.videos && singlePost.data.videos.length > 0
                 "
-                class="mb-2.5 rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700 bg-black"
+                class="mb-2.5 rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-black"
               >
                 <video controls class="w-full h-32 object-cover">
                   <source :src="getVideoUrl(singlePost)" type="video/mp4" />
@@ -8807,21 +9439,21 @@ const timelineTicks = computed(() => {
 
               <!-- Content Body -->
               <div
-                class="text-xs leading-relaxed text-gray-800 dark:text-gray-200 whitespace-pre-wrap break-words"
+                class="text-xs leading-relaxed text-gray-700 dark:text-gray-200 whitespace-pre-wrap break-words mt-1"
                 v-html="highlightText(singlePost.data?.content || '')"
               ></div>
 
               <!-- Contact & Extras if needed -->
               <div
                 v-if="singlePost.data?.contact"
-                class="mt-2 text-[10px] p-2 bg-white dark:bg-gray-800 border border-blue-100 dark:border-blue-900 rounded flex items-center text-blue-600 dark:text-blue-400"
+                class="mt-2 text-[10px] font-semibold p-2.5 bg-teal-500/[0.02] dark:bg-teal-950/[0.10] border border-teal-150/40 dark:border-teal-900/10 rounded-xl flex items-center text-teal-600 dark:text-teal-400"
               >
-                <Phone class="h-3 w-3 mr-1.5" /> Contact Card Attached
+                <Phone class="h-3.5 w-3.5 mr-1.5 text-teal-500" /> Contact Card Attached
               </div>
 
               <!-- Footer Stats / Links -->
               <div
-                class="mt-3 pt-2 border-t border-gray-200 dark:border-gray-700 text-[10px] text-gray-500 dark:text-gray-400 flex items-center justify-between"
+                class="mt-3 pt-2 border-t border-gray-150 dark:border-gray-800 text-[10px] text-gray-400 dark:text-gray-500 flex items-center justify-between font-mono"
               >
                 <span>{{
                   singlePost.data?.views != null
@@ -8832,7 +9464,7 @@ const timelineTicks = computed(() => {
                   v-if="singlePost.url || singlePost.link"
                   :href="singlePost.url || singlePost.link"
                   target="_blank"
-                  class="text-blue-500 dark:text-blue-400 hover:underline flex items-center"
+                  class="text-teal-6s0 dark:text-teal-400 hover:underline flex items-center hover:text-teal-600 transition-colors"
                 >
                   View original <ExternalLink class="h-2.5 w-2.5 ml-1" />
                 </a>
@@ -8843,129 +9475,157 @@ const timelineTicks = computed(() => {
 
         <div
           v-if="autoCells.length === 0 && !isAutoFinding"
-          class="text-center py-24 sm:py-32"
+          class="text-center py-20 sm:py-24 max-w-lg mx-auto bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-8 shadow-sm my-8"
         >
           <div
-            class="inline-flex items-center justify-center w-20 h-20 rounded-full bg-purple-50 dark:bg-purple-900/20 mb-6 shadow-inner ring-1 ring-purple-100 dark:ring-purple-800 border-8 border-white dark:border-gray-900"
+            class="inline-flex items-center justify-center w-20 h-20 rounded-3xl bg-teal-50 dark:bg-teal-950/40 mb-6 shadow-inner ring-4 ring-teal-500/10 border-2 border-teal-100 dark:border-teal-850"
           >
             <BotMessageSquare
-              class="h-8 w-8 text-purple-500 dark:text-purple-400"
+              class="h-8 w-8 text-teal-600 dark:text-teal-400 animate-pulse"
             />
           </div>
           <h2
-            class="text-2xl font-black tracking-tight text-gray-900 dark:text-white mb-3"
+            class="text-xl font-extrabold tracking-tight text-gray-900 dark:text-white mb-2"
           >
             Auto Sequence Finding
           </h2>
           <p
-            class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium"
+            class="text-gray-400 dark:text-gray-500 text-xs font-semibold leading-relaxed"
           >
-            Enter a channel name to automatically fetch, analyze, and verify
-            consecutive posts for evidence.
+            Enter a channel or user handle above to automatically trace, analyze, and verify continuous posts consecutively.
           </p>
         </div>
 
         <div
           v-else
-          class="w-full max-w-full lg:max-w-7xl xl:max-w-[90rem] mx-auto space-y-4"
+          class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 space-y-6 pb-20"
         >
           <!-- Final Result Area -->
           <div
             v-if="autoCells.length > 0"
-            class="w-full max-w-full lg:max-w-7xl xl:max-w-[90rem] mx-auto bg-white dark:bg-gray-800 rounded-2xl p-6 shadow-sm border border-gray-200 dark:border-gray-700 mb-8"
+            class="w-full bg-white dark:bg-gray-800 rounded-3xl p-6 sm:p-8 border border-gray-200/60 dark:border-gray-700/60 shadow-sm relative overflow-hidden backdrop-blur-sm"
           >
+            <!-- Background highlight -->
+            <div
+              class="absolute -top-12 -right-12 w-28 h-28 bg-emerald-500/5 dark:bg-emerald-500/5 rounded-full blur-2xl pointer-events-none"
+            ></div>
+
             <h3
-              class="text-lg font-bold text-gray-900 dark:text-white mb-4 flex items-center"
+              class="text-sm font-black text-gray-900 dark:text-white uppercase tracking-wider mb-4 flex items-center"
             >
-              <CheckCircle2 class="h-5 w-5 mr-2 text-green-500" />
+              <CheckCircle2 class="h-4.5 w-4.5 mr-2 text-teal-600 dark:text-teal-400" />
               Final Analysis Summary
             </h3>
-            <div class="text-sm text-gray-600 dark:text-gray-300">
-              <p>
-                {{ autoCells.filter((c) => c.status === "completed").length }}
-                / {{ autoCells.length }} iterations completed.
+            <div class="text-xs text-gray-500 dark:text-gray-400">
+              <p class="font-semibold flex items-center gap-2">
+                <span>Iterations processed:</span>
+                <span class="font-mono text-xs font-black px-2 py-0.5 rounded-full bg-teal-50 dark:bg-teal-950/50 text-teal-600 dark:text-teal-400 border border-teal-100/30 dark:border-teal-900/30">
+                  {{ autoCells.filter((c) => c.status === "completed").length }} / {{ autoCells.length }} completed
+                </span>
               </p>
 
               <div
                 v-if="isGeneratingFinalTable"
-                class="mt-4 flex items-center text-blue-500"
+                class="mt-4 flex items-center text-teal-600 font-bold animate-pulse text-xs"
               >
-                <Loader2 class="h-4 w-4 mr-2 animate-spin" />
-                Generating table...
+                <Loader2 class="h-3.5 w-3.5 mr-2 animate-spin text-teal-500" />
+                Synthesizing global timeline matrix...
               </div>
 
               <div
                 v-if="finalTableHtml"
-                class="mt-8 bg-gradient-to-br from-white to-blue-50/50 dark:from-gray-900 dark:to-gray-950 p-6 rounded-3xl border border-blue-100 dark:border-gray-700 shadow-xl shadow-blue-500/5 prose dark:prose-invert max-w-none text-sm"
+                class="mt-6 bg-gradient-to-br from-white to-teal-50/[0.08] dark:from-gray-900 dark:to-gray-950 p-6 sm:p-8 rounded-3xl border border-teal-150/40 dark:border-teal-900/10 shadow-xl shadow-teal-500/[0.02] prose dark:prose-invert max-w-none text-xs leading-relaxed"
               >
                 <div class="flex items-center gap-2 mb-4">
                   <div
-                    class="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center"
+                    class="w-8 h-8 rounded-xl bg-teal-50 dark:bg-teal-950/40 border border-teal-100/30 flex items-center justify-center shadow-sm"
                   >
-                    <Sparkles class="w-4 h-4 text-white" />
+                    <Sparkles class="w-4 h-4 text-teal-650 dark:text-teal-400" />
                   </div>
                   <h5
-                    class="text-sm font-black text-blue-900 dark:text-blue-100 uppercase tracking-wider"
+                    class="text-[10px] font-black text-teal-800 dark:text-teal-100 uppercase tracking-widest"
                   >
                     Final Analysis Insights
                   </h5>
                 </div>
-                <div v-html="finalTableHtml" class="prose-sm"></div>
+                <div v-html="finalTableHtml" class="prose-sm overflow-x-auto"></div>
               </div>
             </div>
           </div>
 
-          <h3 class="text-sm font-bold text-gray-900 dark:text-white mb-4">
-            Finding Logs & Results
+          <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider pt-2">
+            Sequence Finding Cells & Logs
           </h3>
           <div
             v-for="cell in autoCells"
             :key="cell.id"
-            class="border border-gray-200 dark:border-gray-700 rounded-xl p-4 bg-gray-50 dark:bg-gray-900"
+            class="bg-white dark:bg-gray-800 border border-gray-200/60 dark:border-gray-750 p-5 sm:p-6 rounded-3xl shadow-sm hover:shadow-md transition-all duration-300 relative overflow-hidden"
           >
-            <h4 class="font-bold text-xs text-gray-500 mb-2 flex items-center">
-              Cell {{ cell.id }}
-              <Loader2
-                v-if="cell.status === 'running'"
-                class="h-3 w-3 ml-2 animate-spin text-blue-500"
-              />
+            <!-- Cell Header -->
+            <div class="flex items-center justify-between gap-4 mb-4 pb-3 border-b border-gray-100 dark:border-gray-800">
               <span
-                v-if="cell.status === 'error'"
-                class="ml-2 text-red-500 text-[10px]"
-                >Error</span
+                class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-gray-50 dark:bg-gray-900/60 text-gray-550 dark:text-gray-400 border border-gray-150/40 dark:border-gray-800"
               >
-            </h4>
-            <div class="space-y-2">
+                Cell ID: {{ cell.id }}
+                <Loader2
+                  v-if="cell.status === 'running'"
+                  class="h-3 w-3 ml-1 animate-spin text-teal-500"
+                />
+                <span
+                  v-if="cell.status === 'error'"
+                  class="ml-1 text-red-500 font-mono font-bold"
+                  >● Offline Error</span
+                >
+                <span
+                  v-else-if="cell.status === 'completed'"
+                  class="ml-1 text-emerald-500 font-mono font-bold"
+                  >● Verified</span
+                >
+              </span>
+            </div>
+
+            <!-- Content list -->
+            <div class="space-y-4">
+              <!-- Log Board -->
               <div
-                class="bg-gray-100 dark:bg-gray-950 p-3 rounded font-mono text-xs text-gray-600 dark:text-gray-400"
+                class="bg-gray-950 text-emerald-400 border border-gray-900 p-4 rounded-2xl font-mono text-xs leading-relaxed max-h-40 overflow-y-auto custom-scrollbar shadow-inner"
               >
-                <div v-for="(log, i) in cell.logs" :key="i">{{ log }}</div>
+                <div v-for="(log, i) in cell.logs" :key="i" class="flex gap-2">
+                  <span class="text-gray-600 shrink-0">[{{ i + 1 }}]</span>
+                  <span>{{ log }}</span>
+                </div>
               </div>
+
+              <!-- Analysis Block -->
               <div
                 v-if="cell.analysisResult"
-                class="bg-blue-50 dark:bg-blue-900/10 p-3 rounded border border-blue-100 dark:border-blue-900"
+                class="bg-gradient-to-br from-teal-500/[0.02] to-teal-500/[0.04] dark:from-teal-950/[0.12] dark:to-teal-950/[0.15] border border-teal-150/30 dark:border-teal-900/10 p-5 rounded-2xl"
               >
                 <h5
-                  class="text-[10px] font-black text-blue-800 dark:text-blue-400 uppercase mb-1"
+                  class="text-[10px] font-black text-teal-700 dark:text-teal-400 uppercase tracking-widest mb-2 flex items-center gap-1"
                 >
-                  Analysis
+                  <Bot class="h-3.5 w-3.5" />
+                  <span>Cognitive Intelligence Analysis</span>
                 </h5>
                 <div
-                  class="prose dark:prose-invert prose-xs"
+                  class="prose dark:prose-invert prose-xs text-xs text-gray-700 dark:text-gray-300 leading-relaxed max-w-none"
                   v-html="md.render(cell.analysisResult)"
                 ></div>
               </div>
+
+              <!-- Verification Block -->
               <div
                 v-if="cell.verificationResult"
-                class="bg-green-50 dark:bg-green-900/10 p-3 rounded border border-green-100 dark:border-green-900"
+                class="bg-gradient-to-br from-indigo-500/[0.02] to-indigo-500/[0.04] dark:from-indigo-950/[0.12] dark:to-indigo-950/[0.15] border border-indigo-150/30 dark:border-indigo-900/10 p-5 rounded-2xl"
               >
                 <h5
-                  class="text-[10px] font-black text-green-800 dark:text-green-400 uppercase mb-1"
+                  class="text-[10px] font-black text-indigo-700 dark:text-indigo-400 uppercase tracking-widest mb-2 flex items-center gap-1"
                 >
-                  Verification
+                  <CheckCircle2 class="h-3.5 w-3.5" />
+                  <span>Sequence Verification Result</span>
                 </h5>
                 <div
-                  class="prose dark:prose-invert prose-xs"
+                  class="prose dark:prose-invert prose-xs text-xs text-gray-700 dark:text-gray-300 leading-relaxed max-w-none"
                   v-html="md.render(cell.verificationResult)"
                 ></div>
               </div>
@@ -8974,115 +9634,312 @@ const timelineTicks = computed(() => {
         </div>
       </div>
 
-      <!-- Profile Tab -->
-      <div v-show="activeTab === 'profile'" class="w-full relative pt-2 pb-[200px] flex flex-col h-full overflow-y-auto px-6">
-        <h2 class="text-xl font-bold mb-6 text-gray-900 dark:text-white">Telegram Users</h2>
+       <!-- Profile Tab -->
+      <div v-show="activeTab === 'profile'" class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 pt-1 pb-24 space-y-10">
+        
+        <!-- Header Banner Section -->
+        <div class="relative bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm overflow-hidden mb-2">
+          <!-- Decorative gradients -->
+          <div class="absolute -right-20 -top-20 w-44 h-44 bg-teal-500/[0.04] dark:bg-teal-500/[0.08] rounded-full blur-3xl pointer-events-none"></div>
+          <div class="absolute -left-20 -bottom-20 w-44 h-44 bg-indigo-500/[0.04] dark:bg-indigo-500/[0.08] rounded-full blur-3xl pointer-events-none"></div>
 
-        <div ref="dropdownContainer" class="mt-2 relative mb-8">
-          <div class="flex gap-2">
-            <input 
-              v-model="telegramUsername" 
-              @keyup.enter="fetchTelegramUser" 
-              @focus="isHistoryVisible = true" 
-              @blur="handleBlur"
-              placeholder="Enter Telegram username" 
-              class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-800 text-sm" 
-            />
-            <button @click="fetchTelegramUser" class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">Search</button>
+          <div class="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+            <div class="space-y-2">
+              <div class="flex items-center gap-2">
+                <span class="p-1.5 rounded-xl bg-teal-500/10 text-teal-600 dark:text-teal-400">
+                  <User class="h-5 w-5" />
+                </span>
+                <span class="text-[10px] font-black text-teal-650 dark:text-teal-400 uppercase tracking-widest">Dossier Workspace</span>
+              </div>
+              <h2 class="text-xl md:text-2xl font-black text-gray-900 dark:text-white tracking-tight">Identity & User Profile Explorer</h2>
+              <p class="text-xs text-gray-400 dark:text-gray-500 font-semibold max-w-xl">
+                Scan Telegram user nodes, look up cached database entities, and query deep registry descriptors.
+              </p>
+            </div>
+
+            <!-- Dashboard micro-indicator -->
+            <div class="flex items-center gap-6 text-[11px] font-semibold text-gray-400 dark:text-gray-500 shrink-0 self-start md:self-center border-t md:border-t-0 md:border-l border-gray-200/60 dark:border-gray-750 pt-4 md:pt-0 md:pl-6">
+              <div class="space-y-1">
+                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">History Pool</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ lookupUserHistory.length }} lookups</p>
+              </div>
+              <div class="space-y-1">
+                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">Registry Archives</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ remoteProfiles.length }} catalogs</p>
+              </div>
+            </div>
           </div>
+        </div>
+
+        <!-- Search Dossier Box Block -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           
-          <!-- Dropdown -->
-          <div v-if="isHistoryVisible && lookupUserHistory.length > 0" class="absolute z-50 w-full mt-1 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg shadow-lg max-h-40 overflow-y-auto">
-            <div 
-              v-for="user in lookupUserHistory" 
-              :key="user" 
-              class="w-full text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-900 dark:text-white flex justify-between items-center group"
-            >
-              <button @click="selectHistory(user)" class="flex-grow text-left">
-                {{ user }}
-              </button>
-              <button @click.stop="deleteHistory(user)" class="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500">
-                <X class="w-3 h-3"/>
-              </button>
-            </div>
-          </div>
-        </div>
+          <!-- Outer lookup panel -->
+          <div class="lg:col-span-5 space-y-6">
+            <div class="bg-white dark:bg-gray-800 border border-gray-200/75 dark:border-gray-750 rounded-3xl p-6 shadow-sm space-y-6 relative">
+              <div class="space-y-1">
+                <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Search Identity Node</h3>
+                <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">Provide an exact Telegram handle to extract remote server descriptors.</p>
+              </div>
 
-        <div v-if="loadingTelegramUser" class="text-center py-4 text-sm text-gray-500">Loading...</div>
-        <div v-if="telegramError" class="text-red-500 text-sm py-4">{{ telegramError }}</div>
-        
-        <div v-if="telegramUser" class="mt-4 p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm relative">
-            <div class="flex items-start gap-4">
-                <img :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" @error="handleImageError" class="w-16 h-16 rounded-full object-cover" alt="Profile photo" />
-                <div>
-                    <h3 class="font-bold text-gray-900 dark:text-white">{{ telegramUser.title }}</h3>
-                    <p class="text-xs text-gray-500">@{{ telegramUser.username }}</p>
-                    <p v-if="telegramUser.description" class="text-sm text-gray-700 dark:text-gray-300 mt-2">{{ telegramUser.description }}</p>
-                    <div class="mt-2 text-xs text-gray-500 space-y-1">
-                        <p v-if="telegramUser.id" >ID: {{ telegramUser.id }}</p>
-                        <p v-if="telegramUser.phone">Phone: {{ telegramUser.phone }}</p>
-                        <p v-if="telegramUser.lang">Lang: {{ telegramUser.lang }}</p>
-                        <p v-if="telegramUser.status">Status: {{ telegramUser.status }}</p>
-                    </div>
+              <!-- Input dropdown wrap -->
+              <div ref="dropdownContainer" class="relative">
+                <div class="flex gap-2">
+                  <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-850 rounded-2xl px-4 py-2.5 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all w-full">
+                    <User class="h-4 w-4 text-teal-600 dark:text-teal-400 mr-2 shrink-0" />
+                    <input 
+                      v-model="telegramUsername" 
+                      @keyup.enter="fetchTelegramUser" 
+                      @focus="isHistoryVisible = true" 
+                      @blur="handleBlur"
+                      placeholder="e.g. durov, telegram" 
+                      class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
+                    />
+                  </div>
+                  <button 
+                    @click="fetchTelegramUser" 
+                    class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-teal-500/20 hover:shadow-teal-500/30 cursor-pointer transition-all duration-300 hover:-translate-y-0.5 active:translate-y-0 shrink-0"
+                  >
+                    <Search class="h-3.5 w-3.5" />
+                    <span>Search</span>
+                  </button>
                 </div>
+                
+                <!-- Suggestions Dropdown -->
+                <transition enter-active-class="transition duration-150 ease-out" enter-from-class="transform scale-95 opacity-0" enter-to-class="transform scale-100 opacity-100" leave-active-class="transition duration-100 ease-in" leave-from-class="transform scale-100 opacity-100" leave-to-class="transform scale-95 opacity-0">
+                  <div v-if="isHistoryVisible && lookupUserHistory.length > 0" class="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl shadow-xl max-h-48 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
+                    <div class="px-3.5 py-2 bg-gray-50/50 dark:bg-gray-900/30 text-[10px] font-black uppercase tracking-widest text-gray-400">
+                      Recent Queries
+                    </div>
+                    <div 
+                      v-for="user in lookupUserHistory" 
+                      :key="user" 
+                      class="w-full text-left px-3.5 py-2.5 text-xs hover:bg-gray-50 dark:hover:bg-gray-750 text-gray-900 dark:text-white flex justify-between items-center group/item transition-colors"
+                    >
+                      <button @click="selectHistory(user)" class="flex-grow text-left font-semibold hover:text-teal-600 dark:hover:text-teal-400 cursor-pointer flex items-center gap-2">
+                        <Clock class="h-3 w-3 text-gray-400" />
+                        <span>@{{ user }}</span>
+                      </button>
+                      <button @click.stop="deleteHistory(user)" class="opacity-0 group-hover/item:opacity-100 p-1 text-gray-400 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg cursor-pointer transition-all">
+                        <X class="w-3 h-3"/>
+                      </button>
+                    </div>
+                  </div>
+                </transition>
+              </div>
+
+              <!-- Loader and Error outputs -->
+              <div v-if="loadingTelegramUser" class="flex flex-col items-center justify-center py-10 text-gray-400">
+                <div class="relative h-10 w-10 animate-spin rounded-full border-[3px] border-teal-500 border-t-transparent flex items-center justify-center shadow-md mb-2">
+                  <Bot class="h-4.5 w-4.5 text-teal-600 dark:text-teal-400 animate-pulse" />
+                </div>
+                <p class="text-[10px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 animate-pulse">Syncing User profile...</p>
+              </div>
+
+              <div v-if="telegramError" class="rounded-2xl bg-rose-500/[0.04] p-4 border border-rose-500/10 flex items-start gap-3">
+                <AlertCircle class="h-4 w-4 text-rose-500 shrink-0 mt-0.5" />
+                <div class="space-y-0.5">
+                  <p class="text-xs font-black uppercase tracking-wide text-rose-600 dark:text-rose-450">Query Dispatch Failure</p>
+                  <p class="text-xs text-rose-500/90 dark:text-gray-400 font-semibold leading-relaxed">{{ telegramError }}</p>
+                </div>
+              </div>
             </div>
-            <!-- top right -->
-            <div v-if="telegramUser.cdnNumber || telegramUser.cdnRegion" class="absolute top-4 right-4 text-xs text-gray-500 text-right">
-                <p v-if="telegramUser.cdnNumber">DC: {{ telegramUser.cdnNumber }}</p>
-                <p v-if="telegramUser.cdnRegion">{{ telegramUser.cdnRegion[0] }}</p>
-                <p v-if="telegramUser.cdnRegion">{{ telegramUser.cdnRegion[1] }}</p>
+
+            <!-- Searched User Dossier Sheet Card -->
+            <transition v-if="telegramUser" enter-active-class="transition duration-300 ease-out" enter-from-class="transform scale-98 opacity-0" enter-to-class="transform scale-100 opacity-100">
+              <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm relative overflow-hidden space-y-6">
+                <!-- Top right badge / DC Region context -->
+                <div v-if="telegramUser.cdnNumber || telegramUser.cdnRegion" class="absolute top-6 right-6 text-right space-y-1 select-none">
+                  <span v-if="telegramUser.cdnNumber" class="text-[9px] font-mono font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 bg-teal-500/[0.04] border border-teal-500/10 px-2 py-0.5 rounded-lg">
+                    DC {{ telegramUser.cdnNumber }}
+                  </span>
+                  <p v-if="telegramUser.cdnRegion && telegramUser.cdnRegion[1]" class="text-[10px] font-bold text-gray-400 mt-1 uppercase tracking-wider">
+                    {{ telegramUser.cdnRegion[1] }}
+                  </p>
+                </div>
+
+                <div class="flex flex-col sm:flex-row items-start sm:items-center gap-5 pb-5 border-b border-gray-100 dark:border-gray-800/80">
+                  <div class="relative shrink-0">
+                    <img 
+                      :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" 
+                      @error="handleImageError" 
+                      class="w-16 h-16 rounded-2xl object-cover border-2 border-teal-500/10 shadow-sm" 
+                      alt="Profile photo" 
+                    />
+                    <span class="absolute -bottom-1 -right-1 p-1 bg-teal-600 rounded-lg text-white border border-white dark:border-gray-800 shadow-md">
+                      <User class="h-3 w-3" />
+                    </span>
+                  </div>
+                  <div class="space-y-1">
+                    <h3 class="text-base font-black text-gray-900 dark:text-white leading-tight">{{ telegramUser.title || telegramUser.username }}</h3>
+                    <p class="text-xs font-bold text-teal-655 dark:text-teal-400 flex items-center gap-1">@{{ telegramUser.username }}</p>
+                  </div>
+                </div>
+
+                <!-- Description / Bio -->
+                <div v-if="telegramUser.description" class="space-y-2">
+                  <h4 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Biography Desk</h4>
+                  <p class="text-xs text-gray-600 dark:text-gray-300 leading-relaxed font-semibold bg-gray-50/50 dark:bg-gray-900/35 p-4 rounded-2xl border border-gray-150/40 dark:border-gray-850/50 whitespace-pre-wrap break-words">
+                    {{ telegramUser.description }}
+                  </p>
+                </div>
+
+                <!-- Bento Metrics layout -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <!-- ID -->
+                  <div class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl flex items-center gap-3">
+                    <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-650 dark:text-teal-400 shrink-0">
+                      <Hash class="h-4 w-4" />
+                    </div>
+                    <div class="space-y-0.5">
+                      <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Unique Node ID</p>
+                      <p class="text-xs font-bold font-mono text-gray-955 dark:text-white">{{ telegramUser.id || 'N/A' }}</p>
+                    </div>
+                  </div>
+
+                  <!-- Lang context -->
+                  <div class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl flex items-center gap-3">
+                    <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-650 dark:text-teal-400 shrink-0">
+                      <Globe class="h-4 w-4" />
+                    </div>
+                    <div class="space-y-0.5">
+                      <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Locale Profile</p>
+                      <p class="text-xs font-bold text-gray-955 dark:text-white">{{ telegramUser.lang || 'Global (Default)' }}</p>
+                    </div>
+                  </div>
+
+                  <!-- Phone number -->
+                  <div v-if="telegramUser.phone" class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl flex items-center gap-3">
+                    <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-650 dark:text-teal-400 shrink-0">
+                      <Phone class="h-4 w-4" />
+                    </div>
+                    <div class="space-y-0.5">
+                      <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Linked Phone</p>
+                      <p class="text-xs font-bold text-gray-955 dark:text-white">{{ telegramUser.phone }}</p>
+                    </div>
+                  </div>
+
+                  <!-- Presence Status -->
+                  <div v-if="telegramUser.status" class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl flex items-center gap-3">
+                    <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-650 dark:text-teal-400 shrink-0">
+                      <Activity class="h-4 w-4" />
+                    </div>
+                    <div class="space-y-0.5">
+                      <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Remote Status</p>
+                      <p class="text-xs font-bold text-gray-955 dark:text-white">{{ telegramUser.status }}</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Raw inspector dropdown -->
+                <details class="bg-gray-50 dark:bg-gray-950 rounded-2xl border border-gray-200/60 dark:border-gray-900 group">
+                  <summary class="flex items-center justify-between p-4 cursor-pointer outline-none select-none">
+                    <span class="text-xs font-black text-gray-700 dark:text-gray-300 uppercase tracking-widest flex items-center gap-2">
+                      <Database class="h-3.5 w-3.5 text-teal-650 dark:text-teal-400" />
+                      <span>Schema Inspector</span>
+                    </span>
+                    <ChevronDown class="h-4 w-4 text-gray-400 group-open:rotate-180 duration-200 transition-transform" />
+                  </summary>
+                  <div class="p-4 pt-0 border-t border-gray-150 dark:border-gray-900 col-span-2">
+                    <pre class="mt-4 text-[10px] font-mono text-teal-650 dark:text-teal-400 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-48 custom-scrollbar">{{ JSON.stringify(telegramUser, null, 2) }}</pre>
+                  </div>
+                </details>
+              </div>
+            </transition>
+
+            <!-- Beautiful collateral panel: remote dossier categories -->
+            <div class="bg-gradient-to-br from-white to-gray-50/50 dark:from-gray-800 dark:to-gray-900/40 border border-gray-200/80 dark:border-gray-750/80 rounded-3xl p-6 shadow-sm space-y-4">
+              <div class="flex items-center gap-2 mb-2">
+                <FileText class="h-4.5 w-4.5 text-teal-600 dark:text-teal-400" />
+                <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Remote Profiles Index</h3>
+              </div>
+              <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold leading-relaxed">
+                Unlock high-fidelity profiles maintained in foreign indexers. Select any directory source below to bind details into the inspector pane immediately.
+              </p>
+
+              <div v-if="loadingRemoteProfiles" class="flex flex-col items-center justify-center py-6 text-gray-400">
+                <Loader2 class="w-6 h-6 animate-spin text-teal-500" />
+              </div>
+
+              <div v-else class="grid grid-cols-2 gap-3 pt-2">
+                <button 
+                  v-for="profile in remoteProfiles" 
+                  :key="profile" 
+                  @click="viewRemoteProfile(profile)" 
+                  :title="profile"
+                  :class="[
+                    'p-3.5 text-left rounded-2xl border text-xs font-semibold cursor-pointer transition-all duration-300 flex flex-col justify-between h-20 group relative overflow-hidden',
+                    selectedRemoteProfileName === profile
+                      ? 'bg-teal-650/5 dark:bg-teal-600/[0.08] border-teal-500 text-teal-700 dark:text-teal-400'
+                      : 'bg-white dark:bg-gray-800/80 border-gray-200/60 dark:border-gray-750 text-gray-655 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white hover:border-teal-500/30'
+                  ]"
+                >
+                  <FileText class="h-4 w-4 text-teal-650 dark:text-teal-400 mb-2 transition-transform group-hover:scale-110 duration-300" />
+                  <span class="truncate pr-2 font-black tracking-wide">{{ profile }}</span>
+                  <ChevronRight class="absolute right-2.5 bottom-2.5 h-3.5 w-3.5 opacity-0 group-hover:opacity-100 group-hover:translate-x-0.5 duration-300" />
+                </button>
+              </div>
             </div>
-        </div>
-        <!-- Raw Userdata Debug -->
-        <details
-            v-if="telegramUser"
-            class="bg-gray-50 dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 text-xs mb-8"
-        >
-            <summary
-                class="font-medium text-gray-700 dark:text-gray-300 cursor-pointer outline-none"
-            >
-                View Raw Userdata
-            </summary>
-            <pre
-                class="mt-2 overflow-x-auto text-gray-600 dark:text-gray-400"
-                >{{ JSON.stringify(telegramUser, null, 2) }}</pre
-            >
-        </details>
-
-        <h2 class="text-xl font-bold mb-6 text-gray-900 dark:text-white">Remote Profiles</h2>
-  
-        <div v-if="loadingRemoteProfiles" class="text-center py-10">
-          <Loader2 class="w-8 h-8 animate-spin mx-auto text-blue-500" />
-        </div>
-
-        <div v-else class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <button v-for="profile in remoteProfiles" :key="profile" @click="viewRemoteProfile(profile)" 
-            class="p-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition-all text-sm font-medium shadow-sm">
-            {{ profile }}
-          </button>
-        </div>
-
-        <div v-if="selectedRemoteProfileContent" class="bg-white dark:bg-gray-800 rounded-2xl p-6 border border-gray-200 dark:border-gray-700 shadow-xl prose dark:prose-invert max-w-none mb-8">
-          <h3 class="text-lg font-bold mb-4 text-gray-900 dark:text-gray-100">{{ selectedRemoteProfileName }}</h3>
-          <div v-html="selectedRemoteProfileContent" class="prose-sm prose-pre:whitespace-pre-wrap"></div>
-        </div>
-
-        <div
-          v-if="profileError"
-          class="rounded-xl bg-red-50 dark:bg-red-900/20 p-4 mb-8 border border-red-100 dark:border-red-900/50 flex items-start"
-        >
-          <AlertCircle
-            class="h-5 w-5 text-red-400 dark:text-red-500 mt-0.5 mr-3 flex-shrink-0"
-          />
-          <div class="text-sm text-red-700 dark:text-red-400">
-            <h3 class="font-medium text-red-800 dark:text-red-300 mb-1">
-              Error fetching channel
-            </h3>
-            <p>{{ profileError }}</p>
           </div>
+
+          <!-- Inspector Dossier Visualizer Panel -->
+          <div class="lg:col-span-7 space-y-6">
+            
+            <!-- Fallback empty state -->
+            <div v-if="!selectedRemoteProfileContent" class="flex flex-col items-center justify-center py-24 bg-white dark:bg-gray-800 border border-gray-200/60 dark:border-gray-750 rounded-3xl p-8 text-center shadow-sm relative overflow-hidden">
+              <div class="absolute -right-24 -bottom-24 w-48 h-48 bg-teal-500/[0.02] rounded-full blur-3xl pointer-events-none"></div>
+              <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-teal-50 dark:bg-teal-950/40 mb-4 shadow-inner border border-teal-100/10">
+                <FileText class="h-7 w-7 text-teal-500" />
+              </div>
+              <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider mb-2">No Remote Profile Selected</h4>
+              <p class="text-xs text-gray-400 dark:text-gray-500 font-semibold max-w-sm leading-relaxed">
+                Tap any file entry from the remote profiles index on the left to load its interactive dossier catalog here.
+              </p>
+            </div>
+
+            <!-- Selected Remote Profile Binder Card -->
+            <transition v-if="selectedRemoteProfileContent" enter-active-class="transition duration-300 ease-out" enter-from-class="transform scale-98 opacity-0" enter-to-class="transform scale-100 opacity-100">
+              <div class="bg-white dark:bg-gray-800 rounded-3xl p-6 md:p-8 border border-gray-200/80 dark:border-gray-750 shadow-sm relative overflow-hidden space-y-6">
+                <!-- Abstract header info -->
+                <div class="flex items-center justify-between pb-4 border-b border-gray-100 dark:border-gray-800/80">
+                  <div class="flex items-center gap-2.5">
+                    <span class="p-1.5 rounded-xl bg-teal-50 dark:bg-teal-950/40 text-teal-650 dark:text-teal-400">
+                      <FileText class="h-4.5 w-4.5" />
+                    </span>
+                    <div>
+                      <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">Catalog Target</h3>
+                      <h4 class="text-sm font-black text-gray-900 dark:text-white mt-1">{{ selectedRemoteProfileName }}</h4>
+                    </div>
+                  </div>
+                  <!-- Close binding button -->
+                  <button @click="selectedRemoteProfileContent = null; selectedRemoteProfileName = ''" class="p-1.5 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-750 text-gray-400 hover:text-gray-900 dark:hover:text-white transition-all cursor-pointer">
+                    <X class="h-4 w-4" />
+                  </button>
+                </div>
+
+                <!-- Document reader contents -->
+                <div class="prose dark:prose-invert prose-xs leading-relaxed max-w-none text-xs text-gray-750 dark:text-gray-300 p-5 bg-gray-50/50 dark:bg-gray-900/35 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl overflow-y-auto max-h-[850px]">
+                  <div v-html="selectedRemoteProfileContent" class="prose-sm prose-pre:whitespace-pre-wrap font-semibold"></div>
+                </div>
+              </div>
+            </transition>
+
+            <!-- Global Index Fetch Error alert -->
+            <div v-if="profileError" class="rounded-2xl bg-rose-500/[0.04] p-5 border border-rose-500/15 flex items-start gap-4">
+              <AlertCircle class="h-5 w-5 text-rose-500 shrink-0 mt-0.5" />
+              <div class="space-y-1">
+                <h3 class="text-xs font-black uppercase tracking-wider text-rose-600 dark:text-rose-450">Catalogue Query Failure</h3>
+                <p class="text-xs text-rose-500 dark:text-gray-400 font-semibold leading-relaxed">{{ profileError }}</p>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Extra bottom anchor spacer -->
+          <div class="col-span-12 h-6"></div>
+
         </div>
 
-        
       </div>
 
     </div>
