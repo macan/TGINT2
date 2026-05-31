@@ -37,6 +37,7 @@ import {
   ChevronUp,
   BotMessageSquare,
   GripHorizontal,
+  GripVertical,
   Sparkles,
   Pin,
   Bot,
@@ -49,6 +50,18 @@ import {
   Copy,
   Library,
   Hash,
+  Activity,
+  RefreshCw,
+  Radio,
+  Folder,
+  FolderOpen,
+  FolderPlus,
+  Plus,
+  Trash2,
+  Database,
+  Edit,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -901,7 +914,7 @@ const suggestedChannels = ref<string[]>([]);
 let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 
 const showBackToTop = ref(false);
-const activeTab = ref<"explorer" | "search" | "auto-finding" | "workspace" | "profile" | "channel">("explorer");
+const activeTab = ref<"explorer" | "search" | "listen" | "monitor" | "auto-finding" | "workspace" | "profile" | "channel">("explorer");
 const channels = ref<any[]>([]);
 const activeChannelOrUser = ref<"channel" | "user">("channel");
 const isLoadingChannels = ref(false);
@@ -910,6 +923,591 @@ const langCode = ref("");
 const toggleChannelOrUser = () => {
     activeChannelOrUser.value = activeChannelOrUser.value === 'channel' ? 'user' : 'channel';
     fetchChannels(false);
+};
+
+// --- Listen Tab Setup ---
+export interface ListenItem {
+  id: string;
+  name: string;
+  isFolder: boolean;
+  create_time: string;
+  type?: "channel" | "keyword";
+  argument?: string;
+  description?: string;
+  children?: ListenItem[];
+}
+
+const listenDirectory = ref<ListenItem[]>([
+  {
+    id: "folder-1",
+    name: "Tech Streams",
+    isFolder: true,
+    create_time: new Date().toISOString(),
+    children: [
+      {
+        id: "item-durov",
+        name: "Pavel Durov",
+        isFolder: false,
+        create_time: new Date().toISOString(),
+        type: "channel",
+        argument: "durov",
+        description: "Official channel of Telegram founder Pavel Durov"
+      },
+      {
+        id: "item-ai-keywords",
+        name: "AI & Neural Networks",
+        isFolder: false,
+        create_time: new Date().toISOString(),
+        type: "keyword",
+        argument: "artificial intelligence, deepmind, gemini",
+        description: "Post stream containing key AI phrases"
+      }
+    ]
+  },
+  {
+    id: "item-ton",
+    name: "TON Blockchain",
+    isFolder: false,
+    create_time: new Date().toISOString(),
+    type: "channel",
+    argument: "toncoin",
+    description: "Updates about TON network"
+  }
+]);
+
+const selectedListenNode = ref<ListenItem | null>(null);
+const expandedFolders = ref<Record<string, boolean>>({
+  "folder-1": true
+});
+
+const listenPosts = ref<any[]>([]);
+const newlyFetchedListenKeys = ref<Set<string>>(new Set());
+const isFetchingListenPosts = ref(false);
+const listenAutoRefreshActive = ref(false);
+let listenRefreshInterval: any = null;
+
+const isListenModalOpen = ref(false);
+const isEditingListenItem = ref(false);
+const listenItemForm = ref({
+  id: "",
+  name: "",
+  isFolder: false,
+  type: "channel" as "channel" | "keyword",
+  argument: "",
+  description: "",
+  parentId: ""
+});
+
+const toggleFolderExpanded = (id: string) => {
+  expandedFolders.value[id] = !expandedFolders.value[id];
+};
+
+const findNodeAndPerform = (
+  nodes: ListenItem[],
+  id: string,
+  action: (nodes: ListenItem[], index: number) => void
+): boolean => {
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].id === id) {
+      action(nodes, i);
+      return true;
+    }
+    if (nodes[i].isFolder && nodes[i].children) {
+      const found = findNodeAndPerform(nodes[i].children!, id, action);
+      if (found) return true;
+    }
+  }
+  return false;
+};
+
+const addChildToFolder = (nodes: ListenItem[], folderId: string, child: ListenItem): boolean => {
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].id === folderId) {
+      if (!nodes[i].children) {
+        nodes[i].children = [];
+      }
+      nodes[i].children!.push(child);
+      return true;
+    }
+    if (nodes[i].isFolder && nodes[i].children) {
+      const added = addChildToFolder(nodes[i].children!, folderId, child);
+      if (added) return true;
+    }
+  }
+  return false;
+};
+
+const loadListenDirectory = () => {
+  const cached = localStorage.getItem("listen_directory_tree");
+  if (cached) {
+    try {
+      listenDirectory.value = JSON.parse(cached);
+    } catch (e) {
+      console.error("Failed to load listen_directory_tree", e);
+    }
+  }
+};
+
+const saveListenDirectory = () => {
+  localStorage.setItem("listen_directory_tree", JSON.stringify(listenDirectory.value));
+};
+
+const openAddModal = (parentId: string = "", isFolder: boolean = false) => {
+  isEditingListenItem.value = false;
+  listenItemForm.value = {
+    id: "",
+    name: "",
+    isFolder,
+    type: "channel",
+    argument: "",
+    description: "",
+    parentId
+  };
+  isListenModalOpen.value = true;
+};
+
+const openEditModal = (item: ListenItem) => {
+  isEditingListenItem.value = true;
+  listenItemForm.value = {
+    id: item.id,
+    name: item.name,
+    isFolder: item.isFolder,
+    type: item.type || "channel",
+    argument: item.argument || "",
+    description: item.description || "",
+    parentId: ""
+  };
+  isListenModalOpen.value = true;
+};
+
+const saveListenItemForm = () => {
+  if (!listenItemForm.value.name.trim()) return;
+
+  if (isEditingListenItem.value) {
+    findNodeAndPerform(listenDirectory.value, listenItemForm.value.id, (nodes, idx) => {
+      const original = nodes[idx];
+      nodes[idx] = {
+        ...original,
+        name: listenItemForm.value.name,
+        type: listenItemForm.value.type,
+        argument: listenItemForm.value.argument,
+        description: listenItemForm.value.description
+      };
+      if (selectedListenNode.value && selectedListenNode.value.id === original.id) {
+        selectedListenNode.value = nodes[idx];
+        fetchListenPosts(nodes[idx]);
+      }
+    });
+  } else {
+    const newItem: ListenItem = {
+      id: "node-" + Math.random().toString(36).substr(2, 9),
+      name: listenItemForm.value.name,
+      isFolder: listenItemForm.value.isFolder,
+      create_time: new Date().toISOString(),
+      type: listenItemForm.value.isFolder ? undefined : listenItemForm.value.type,
+      argument: listenItemForm.value.isFolder ? undefined : listenItemForm.value.argument,
+      description: listenItemForm.value.description,
+      children: listenItemForm.value.isFolder ? [] : undefined
+    };
+
+    if (listenItemForm.value.parentId) {
+      addChildToFolder(listenDirectory.value, listenItemForm.value.parentId, newItem);
+      expandedFolders.value[listenItemForm.value.parentId] = true;
+    } else {
+      listenDirectory.value.push(newItem);
+    }
+  }
+
+  saveListenDirectory();
+  isListenModalOpen.value = false;
+};
+
+const isDeleteConfirmOpen = ref(false);
+const itemToDeleteId = ref("");
+const itemToDeleteName = ref("");
+
+const deleteListenItem = (id: string, name: string = "") => {
+  itemToDeleteId.value = id;
+  itemToDeleteName.value = name;
+  isDeleteConfirmOpen.value = true;
+};
+
+const confirmDeleteListenItem = () => {
+  if (itemToDeleteId.value) {
+    const id = itemToDeleteId.value;
+    findNodeAndPerform(listenDirectory.value, id, (nodes, idx) => {
+      nodes.splice(idx, 1);
+    });
+    if (selectedListenNode.value && selectedListenNode.value.id === id) {
+      selectedListenNode.value = null;
+      listenPosts.value = [];
+    }
+    saveListenDirectory();
+  }
+  isDeleteConfirmOpen.value = false;
+  itemToDeleteId.value = "";
+  itemToDeleteName.value = "";
+};
+
+const getVisibleNodes = (nodes: ListenItem[], depth = 0, parentId: string | null = null): any[] => {
+  const list: any[] = [];
+  for (const node of nodes) {
+    const hasChildren = !!(node.isFolder && node.children && node.children.length > 0);
+    const isExpanded = !!expandedFolders.value[node.id];
+    
+    list.push({
+      item: node,
+      depth,
+      parentId,
+      hasChildren,
+      isExpanded
+    });
+    
+    if (node.isFolder && isExpanded && node.children) {
+      list.push(...getVisibleNodes(node.children, depth + 1, node.id));
+    }
+  }
+  return list;
+};
+
+const visibleDirectoryNodes = computed(() => {
+  return getVisibleNodes(listenDirectory.value);
+});
+
+// Drag and drop states for Listen Directory items
+const draggedNode = ref<any | null>(null);
+const dragOverNode = ref<any | null>(null);
+const dragOverPosition = ref<"before" | "after" | "inside" | null>(null);
+
+const isDescendant = (parent: ListenItem, childId: string): boolean => {
+  if (!parent.isFolder || !parent.children) return false;
+  for (const child of parent.children) {
+    if (child.id === childId) return true;
+    if (isDescendant(child, childId)) return true;
+  }
+  return false;
+};
+
+const onDragStart = (event: DragEvent, node: any) => {
+  draggedNode.value = node;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", node.item.id);
+  }
+};
+
+const onDragOver = (event: DragEvent, node: any) => {
+  event.preventDefault();
+  if (!draggedNode.value || draggedNode.value.item.id === node.item.id) {
+    dragOverNode.value = null;
+    dragOverPosition.value = null;
+    return;
+  }
+
+  if (isDescendant(draggedNode.value.item, node.item.id)) {
+    dragOverNode.value = null;
+    dragOverPosition.value = null;
+    return;
+  }
+
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+  const relativeY = event.clientY - rect.top;
+  const height = rect.height;
+
+  if (node.item.isFolder) {
+    if (relativeY < height * 0.25) {
+      dragOverPosition.value = "before";
+    } else if (relativeY > height * 0.75) {
+      dragOverPosition.value = "after";
+    } else {
+      dragOverPosition.value = "inside";
+    }
+  } else {
+    if (relativeY < height * 0.5) {
+      dragOverPosition.value = "before";
+    } else {
+      dragOverPosition.value = "after";
+    }
+  }
+
+  dragOverNode.value = node;
+};
+
+const onDragEnd = () => {
+  draggedNode.value = null;
+  dragOverNode.value = null;
+  dragOverPosition.value = null;
+};
+
+const onDrop = (event: DragEvent, targetNode: any) => {
+  event.preventDefault();
+  if (!draggedNode.value) return;
+
+  const draggedId = draggedNode.value.item.id;
+  const targetId = targetNode.item.id;
+
+  if (draggedId === targetId) {
+    onDragEnd();
+    return;
+  }
+
+  if (isDescendant(draggedNode.value.item, targetId)) {
+    onDragEnd();
+    return;
+  }
+
+  let itemToMove: ListenItem | null = null;
+  findNodeAndPerform(listenDirectory.value, draggedId, (nodes, idx) => {
+    itemToMove = nodes.splice(idx, 1)[0];
+  });
+
+  if (!itemToMove) {
+    onDragEnd();
+    return;
+  }
+
+  const pos = dragOverPosition.value;
+  if (pos === "inside") {
+    findNodeAndPerform(listenDirectory.value, targetId, (nodes, idx) => {
+      const folder = nodes[idx];
+      if (folder.isFolder) {
+        if (!folder.children) {
+          folder.children = [];
+        }
+        folder.children.push(itemToMove!);
+        expandedFolders.value[folder.id] = true;
+      }
+    });
+  } else {
+    findNodeAndPerform(listenDirectory.value, targetId, (nodes, idx) => {
+      if (pos === "before") {
+        nodes.splice(idx, 0, itemToMove!);
+      } else {
+        nodes.splice(idx + 1, 0, itemToMove!);
+      }
+    });
+  }
+
+  saveListenDirectory();
+  onDragEnd();
+};
+
+const selectListenItem = (item: ListenItem) => {
+  if (item.isFolder) {
+    toggleFolderExpanded(item.id);
+  } else {
+    newlyFetchedListenKeys.value.clear();
+    selectedListenNode.value = item;
+    fetchListenPosts(item);
+  }
+};
+
+function formatDateForSearch(date) {
+    const pad = (num) => String(num).padStart(2, '0');
+
+    // Extract local date and time components
+    const YYYY = date.getFullYear();
+    const MM = pad(date.getMonth() + 1); // Months are 0-indexed
+    const DD = pad(date.getDate());
+    const hh = pad(date.getHours());
+    const mm = pad(date.getMinutes());
+    const ss = pad(date.getSeconds());
+
+    // Calculate timezone offset in +/-HHmm format
+    const offsetMinutes = date.getTimezoneOffset();
+    const sign = offsetMinutes <= 0 ? '+' : '-';
+    const absOffset = Math.abs(offsetMinutes);
+    const offsetHours = pad(Math.floor(absOffset / 60));
+    const offsetMins = pad(absOffset % 60);
+    const tz = `${sign}${offsetHours}${offsetMins}`;
+
+    return `${YYYY}-${MM}-${DD}T${hh}:${mm}:${ss}${tz}`;
+}
+
+const fetchListenPosts = async (node: ListenItem) => {
+  if (!node || node.isFolder) return;
+  
+  // 1. Immediately load cached posts from localStorage for instant display
+  const cachedStorageKey = `listen_cached_posts_${node.id}`;
+  let cached: any[] = [];
+  try {
+    const cachedRaw = localStorage.getItem(cachedStorageKey);
+    if (cachedRaw) {
+      cached = JSON.parse(cachedRaw);
+    }
+  } catch (err) {
+    console.error("Failed to parse cached listen posts:", err);
+  }
+
+  // Bind cached items directly
+  listenPosts.value = cached;
+  isFetchingListenPosts.value = true;
+  
+  try {
+    let fetchedPosts: any[] = [];
+
+    if (node.type === "channel") {
+      const username = node.argument?.trim();
+      if (!username) {
+        return;
+      }
+      const response = await fetch(`https://i.gogingko.net/api/v1/last/${username}?n=50`);
+      if (response.ok) {
+        const data = await response.json();
+        fetchedPosts = Array.isArray(data) ? data : (data.data || data.posts || data.items || []);
+      }
+    } else if (node.type === "keyword") {
+      const keywords = node.argument?.trim().split(',');
+      if (!keywords) {
+        return;
+      }
+      const start = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const end = new Date();
+
+      const fieldQueries = keywords.map(keyword => `content:"${keyword}"`);
+      const dateRange = `date:[to_date("${formatDateForSearch(start)}", "%Y-%m-%dT%H:%M:%S%z") TO to_date("${formatDateForSearch(end)}", "%Y-%m-%dT%H:%M:%S%z")]`;
+      const finalQuery = `(${fieldQueries.join(" OR ")}) AND ${dateRange}`;
+
+      const response = await fetch("https://i.gogingko.net/api/v1/ft/telegram", {
+        method: "GET",
+        headers: {
+          "x-gos-ft-query": encodeURIComponent(finalQuery),
+          "x-gos-ft-sort": "date-",
+          "x-gos-ft-topk": "50",
+        }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const keys = data.keys || [];
+
+        if (keys.length > 0) {
+          // Transform keys into { ns, key } objects by splitting at the first dot
+          const mgetPayload = keys[0].map((fullKey: string) => {
+            const idx = fullKey.indexOf(".");
+            return {
+              ns: fullKey.slice(0, idx),
+              key: fullKey.slice(idx + 1),
+            };
+          });
+
+          // Fetch full post data
+          const mgetResponse = await fetch("https://i.gogingko.net/api/v1/mget/_", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(mgetPayload),
+          });
+
+          if (mgetResponse.ok) {
+            const postsData = await mgetResponse.json();
+            fetchedPosts = Array.isArray(postsData) ? postsData : postsData.data || [];
+          }
+        }
+      }
+    }
+
+    const getPostId = (post: any): string => {
+      return post.key || post.id || (post.data && post.data.id) || '';
+    };
+
+    const getPostTimestamp = (dateVal: any) => {
+      if (!dateVal) return 0;
+      if (typeof dateVal === "number" && dateVal < 10000000000)
+        return dateVal * 1000;
+      const parsed = new Date(dateVal).getTime();
+      return isNaN(parsed) ? 0 : parsed;
+    };
+
+    if (fetchedPosts.length > 0) {
+      const cachedKeys = new Set(cached.map(p => getPostId(p)).filter(Boolean));
+      const hasPreviousCache = cached.length > 0;
+
+      // Merge cached and fetched, letting fetched entries overwrite cached ones for fresh metadata
+      const mergedMap = new Map<string, any>();
+      for (const p of cached) {
+        const id = getPostId(p);
+        if (id) mergedMap.set(id, p);
+      }
+      for (const p of fetchedPosts) {
+        const id = getPostId(p);
+        if (id) mergedMap.set(id, p);
+      }
+
+      const merged = Array.from(mergedMap.values());
+      // Sort by date descending
+      merged.sort((a, b) => getPostTimestamp(b.data?.date) - getPostTimestamp(a.data?.date));
+
+      // Slice to keep reasonable history limit (max 1000)
+      const finalPosts = merged.slice(0, 1000);
+
+      // Save to cache
+      try {
+        localStorage.setItem(cachedStorageKey, JSON.stringify(finalPosts));
+      } catch (err) {
+        console.error("Failed to save cached posts:", err);
+      }
+
+      // Check for strictly new posts to highlight
+      const freshlyAdded: string[] = [];
+      for (const p of fetchedPosts) {
+        const id = getPostId(p);
+        if (id && (!hasPreviousCache || !cachedKeys.has(id))) {
+          // If there's previous cache, highlight strictly new items that arrived.
+          // If there was no previous cache, we can highlight the top items of this first load so that user feels they are fresh
+          freshlyAdded.push(id);
+        }
+      }
+
+      freshlyAdded.forEach(id => newlyFetchedListenKeys.value.add(id));
+      listenPosts.value = finalPosts;
+    }
+  } catch (e) {
+    console.error("Error in fetchListenPosts:", e);
+  } finally {
+    isFetchingListenPosts.value = false;
+  }
+};
+
+const startListenPolling = () => {
+  if (listenRefreshInterval) {
+    clearInterval(listenRefreshInterval);
+    listenRefreshInterval = null;
+  }
+  if (!listenAutoRefreshActive.value || !selectedListenNode.value) return;
+
+  const intervalTime = selectedListenNode.value.type === "keyword" ? 30000 : 15000;
+  listenRefreshInterval = setInterval(() => {
+    if (selectedListenNode.value) {
+      fetchListenPosts(selectedListenNode.value);
+    }
+  }, intervalTime);
+};
+
+const toggleListenAutoRefresh = () => {
+  listenAutoRefreshActive.value = !listenAutoRefreshActive.value;
+  if (listenAutoRefreshActive.value) {
+    startListenPolling();
+  } else {
+    if (listenRefreshInterval) {
+      clearInterval(listenRefreshInterval);
+      listenRefreshInterval = null;
+    }
+  }
+};
+
+watch(selectedListenNode, () => {
+  if (listenAutoRefreshActive.value) {
+    startListenPolling();
+  }
+});
+
+const clearCachedListenPosts = () => {
+  if (!selectedListenNode.value) return;
+  const cachedStorageKey = `listen_cached_posts_${selectedListenNode.value.id}`;
+  localStorage.removeItem(cachedStorageKey);
+  listenPosts.value = [];
+  newlyFetchedListenKeys.value.clear();
 };
 
 const getCountryCodeFromLanguage = (lang: string): string | null => {
@@ -2381,6 +2979,7 @@ onMounted(() => {
   }
   loadSavedProfiles();
   loadLogin();
+  loadListenDirectory();
 });
 
 onUnmounted(() => {
@@ -2388,6 +2987,7 @@ onUnmounted(() => {
   if (counterTimer) clearInterval(counterTimer);
   if (pendingJobsTimer) clearInterval(pendingJobsTimer);
   if (pollingTimer) clearInterval(pollingTimer);
+  if (listenRefreshInterval) clearInterval(listenRefreshInterval);
 });
 const isProfileVisible = ref(true);
 
@@ -3106,6 +3706,24 @@ const highlightText = (text: any) => {
 
   let highlighted = String(text);
   searchWords.value.forEach((word) => {
+    if (!word.trim()) return;
+    const regex = new RegExp(
+      `(${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
+      "gi"
+    );
+    highlighted = highlighted.replace(
+      regex,
+      '<mark class="bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-0.5 rounded">$1</mark>'
+    );
+  });
+  return highlighted;
+};
+
+const highlightTextByKeywords = (text: any) => {
+  if (!text || !selectedListenNode.value || !selectedListenNode.value.argument) return text ? String(text) : "";
+
+  let highlighted = String(text);
+  selectedListenNode.value.argument.split(',').forEach((word) => {
     if (!word.trim()) return;
     const regex = new RegExp(
       `(${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
@@ -4232,7 +4850,7 @@ const timelineTicks = computed(() => {
         </p>
         <div
           v-if="Object.keys(counters).length > 0"
-          class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 mb-8 max-w-6xl mx-auto"
+          class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 mb-8 max-w-7xl 2xl:max-w-[90%] mx-auto px-4"
         >
           <div
             v-for="(count, type) in counters"
@@ -4347,6 +4965,23 @@ const timelineTicks = computed(() => {
             Global Search
           </button>
           <button
+            @click="activeTab = 'listen'"
+            :class="[
+              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              activeTab === 'listen'
+                ? 'bg-white dark:bg-gray-700 text-teal-600 dark:text-teal-400 shadow-md shadow-teal-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+            ]"
+          >
+            <Radio
+              :class="[
+                'h-4 w-4 mr-2 transition-transform duration-300',
+                activeTab === 'listen' ? 'scale-110' : '',
+              ]"
+            />
+            Listen
+          </button>
+          <button
             @click="activeTab = 'auto-finding'"
             :class="[
               'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
@@ -4397,6 +5032,23 @@ const timelineTicks = computed(() => {
               ]"
             />
             Profiles
+          </button>
+          <button
+            @click="activeTab = 'monitor'"
+            :class="[
+              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              activeTab === 'monitor'
+                ? 'bg-white dark:bg-gray-700 text-pink-600 dark:text-pink-400 shadow-md shadow-pink-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+            ]"
+          >
+            <Activity
+              :class="[
+                'h-4 w-4 mr-2 transition-transform duration-300',
+                activeTab === 'monitor' ? 'scale-110' : '',
+              ]"
+            />
+            Monitor
           </button>
         </div>
       </header>
@@ -7107,7 +7759,803 @@ const timelineTicks = computed(() => {
         </div>
       </div>
 
-      <!-- Auto Finding Tab -->
+      <!-- Monitor Tab -->
+      <div v-show="activeTab === 'monitor'" class="space-y-6 max-w-[95%] mx-auto px-4 py-6">
+        <!-- Overview Banner -->
+        <div class="bg-white dark:bg-gray-800 p-6 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div>
+            <h2 class="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+              <Activity class="h-5 w-5 text-pink-500 animate-pulse" />
+              <span>Real-Time Engine Monitor</span>
+            </h2>
+            <p class="text-sm text-gray-400 mt-1">
+              Live statistics and object ingestion frequencies for public Telegram channel networks
+            </p>
+          </div>
+          
+          <div class="flex items-center gap-3">
+            <button
+              @click="fetchCounters"
+              class="px-4 py-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-xl text-sm font-semibold text-gray-700 dark:text-gray-300 transition-colors flex items-center gap-2"
+            >
+              <RefreshCw class="h-4 w-4" />
+              <span>Sync Metrics</span>
+            </button>
+            <div class="flex items-center gap-2 px-3 py-1.5 bg-green-50 dark:bg-green-950/30 border border-green-200/50 dark:border-green-900/30 rounded-xl">
+              <span class="h-2.5 w-2.5 rounded-full bg-green-500 animate-ping"></span>
+              <span class="text-xs font-semibold text-green-700 dark:text-green-400">Live Connection</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Metric Details Bento Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <!-- Pending Workload & Activity Status Card -->
+          <div class="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20 p-6 rounded-3xl border border-blue-100 dark:border-blue-900/30 shadow-sm flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-bold font-mono uppercase tracking-wider text-blue-600 dark:text-blue-400">Pending Jobs</span>
+                <span class="p-1.5 bg-blue-100 dark:bg-blue-900/40 rounded-lg text-blue-600 dark:text-blue-400">
+                  <Activity class="h-4 w-4" />
+                </span>
+              </div>
+              <div class="mt-4">
+                <p class="text-3xl font-black text-gray-900 dark:text-white tabular-nums">
+                  {{ pendingJobs !== null ? pendingJobs : '0' }}
+                </p>
+                <p class="text-xs text-gray-400 mt-1">
+                  Jobs queued in GSO executor waiting to be evaluated
+                </p>
+              </div>
+            </div>
+            
+            <div class="mt-6 pt-4 border-t border-blue-100 dark:border-blue-900/20 flex items-center justify-between text-xs">
+              <span class="text-gray-500">Status</span>
+              <span class="font-bold text-blue-600 dark:text-blue-400 flex items-center gap-1">
+                <CheckCircle2 class="h-3.5 w-3.5" />
+                <span>Executor Idle</span>
+              </span>
+            </div>
+          </div>
+
+          <!-- Total Metrics Catalogued Card -->
+          <div class="bg-gradient-to-br from-pink-50 to-rose-50 dark:from-pink-950/20 dark:to-rose-950/20 p-6 rounded-3xl border border-pink-100 dark:border-pink-900/30 shadow-sm flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-bold font-mono uppercase tracking-wider text-pink-600 dark:text-pink-400">Captured Objects Today</span>
+                <span class="p-1.5 bg-pink-100 dark:bg-pink-900/40 rounded-lg text-pink-600 dark:text-pink-400">
+                  <Layers class="h-4 w-4" />
+                </span>
+              </div>
+              <div class="mt-4">
+                <p class="text-3xl font-black text-gray-900 dark:text-white tabular-nums">
+                  {{ Object.values(counters).reduce((a, b) => a + b, 0).toLocaleString() }}
+                </p>
+                <p class="text-xs text-gray-400 mt-1">
+                  Combined telemetric events processed in past 24 hours
+                </p>
+              </div>
+            </div>
+            
+            <div class="mt-6 pt-4 border-t border-pink-100 dark:border-pink-900/20 flex items-center justify-between text-xs">
+              <span class="text-gray-500">Sync Interval</span>
+              <span class="font-bold text-pink-600 dark:text-pink-400">30s Refreshed</span>
+            </div>
+          </div>
+
+          <!-- Network Diagnostics Card -->
+          <div class="bg-white dark:bg-gray-800 p-6 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-bold font-mono uppercase tracking-wider text-gray-500 dark:text-gray-400">System Clock (UTC)</span>
+                <span class="p-1.5 bg-gray-100 dark:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 font-mono">
+                  <Clock class="h-4 w-4" />
+                </span>
+              </div>
+              <div class="mt-4">
+                <h3 class="text-base font-black text-gray-900 dark:text-white font-mono leading-none tracking-tight">
+                  2026-05-30
+                </h3>
+                <p class="text-xl font-bold text-gray-600 dark:text-gray-400 font-mono mt-1">
+                  {{ String(new Date().getUTCHours()).padStart(2, '0') }}:{{ String(new Date().getUTCMinutes()).padStart(2, '0') }}:{{ String(new Date().getUTCSeconds()).padStart(2, '0') }} UTC
+                </p>
+              </div>
+            </div>
+            
+            <div class="mt-6 pt-4 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs">
+              <span class="text-gray-500">Region</span>
+              <span class="font-bold text-gray-700 dark:text-gray-300">Global Cluster</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- In-Depth Object Ingestion Status -->
+        <div class="bg-white dark:bg-gray-800 p-6 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm">
+          <div class="flex items-center justify-between mb-6">
+            <h3 class="text-sm font-black uppercase tracking-widest text-gray-500 dark:text-gray-400">Inbound Event Stream Channels</h3>
+            <span class="text-xs bg-gray-100 dark:bg-gray-700 px-3 py-1 rounded-full text-gray-700 dark:text-gray-300 font-mono">
+              {{ Object.keys(counters).length }} active event types
+            </span>
+          </div>
+          
+          <div v-if="Object.keys(counters).length === 0" class="flex flex-col items-center justify-center py-12 text-gray-400">
+            <LoaderCircle class="h-8 w-8 animate-spin mb-3 text-pink-500" />
+            <p class="text-sm">Retrieving diagnostic data stream...</p>
+          </div>
+
+          <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div
+              v-for="(count, type) in counters"
+              :key="type"
+              class="px-5 py-4 bg-gray-50 dark:bg-gray-900/50 rounded-2xl border border-gray-100 dark:border-gray-850 flex items-center justify-between gap-4 hover:border-pink-500/30 transition-colors duration-300"
+            >
+              <div class="min-w-0">
+                <span class="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-widest block mb-1">
+                  {{ type }}
+                </span>
+                <span class="text-2xl font-black text-gray-900 dark:text-white tabular-nums">
+                  {{ count.toLocaleString() }}
+                </span>
+              </div>
+              <div class="text-right flex flex-col items-end gap-1 shrink-0">
+                <span
+                  class="text-xs font-bold font-mono px-2 py-0.5 rounded-lg"
+                  :class="[
+                    frequencies[type] > 0
+                      ? 'bg-green-100 dark:bg-green-950/40 text-green-700 dark:text-green-400'
+                      : 'bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500'
+                  ]"
+                >
+                  <span v-if="frequencies[type] > 0" class="inline-block h-1.5 w-1.5 rounded-full bg-green-500 animate-ping mr-1"></span>
+                  {{ frequencies[type] !== undefined ? frequencies[type].toFixed(2) : '0.00' }} obj/s
+                </span>
+                <span class="text-[10px] text-gray-400">Ingress Rate</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Listen Tab -->
+      <div v-show="activeTab === 'listen'" class="space-y-6 w-full max-w-[98%] mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <!-- Main Panel Split Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          
+          <!-- Left directory tree widget (col-span-4) -->
+          <div class="lg:col-span-4 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col min-h-[800px]">
+            <!-- Watchlist Header -->
+            <div class="p-4 border-b border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shrink-0">
+              <div>
+                <h3 class="text-sm font-black uppercase tracking-wider text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                  <Radio class="h-4 w-4 text-teal-500 animate-pulse" />
+                  <span>Listen Directory</span>
+                </h3>
+                <p class="text-[11px] text-gray-400 mt-0.5">Hierarchical live watchlists</p>
+              </div>
+              <div class="flex items-center gap-1.5 self-end sm:self-auto">
+                <button
+                  @click="openAddModal('', true)"
+                  class="px-2 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 rounded-lg text-xs font-bold text-gray-600 dark:text-gray-300 flex items-center gap-1 transition-colors"
+                  title="Add Root Folder"
+                >
+                  <FolderPlus class="h-3 w-3 text-yellow-500" />
+                  <span>Folder</span>
+                </button>
+                <button
+                  @click="openAddModal('', false)"
+                  class="px-2 py-1 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/30 dark:hover:bg-teal-900/30 rounded-lg text-xs font-bold text-teal-600 dark:text-teal-400 flex items-center gap-1 transition-colors"
+                  title="Add Root Listen"
+                >
+                  <Plus class="h-3 w-3" />
+                  <span>Listen</span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Scrollable Directories Stream -->
+            <div class="p-3 overflow-y-auto flex-1 space-y-1 select-none max-h-[750px]">
+              <div v-if="visibleDirectoryNodes.length === 0" class="flex flex-col items-center justify-center py-16 text-center text-gray-400 dark:text-gray-500">
+                <Inbox class="h-10 w-10 mb-2 opacity-50" />
+                <p class="text-xs">No watchlists configured.</p>
+                <p class="text-[10px] opacity-75 mt-1">Click the action buttons above to get started.</p>
+              </div>
+
+              <div
+                v-for="node in visibleDirectoryNodes"
+                :key="node.item.id"
+                class="group text-sm font-medium rounded-xl transition-all duration-200 flex items-center justify-between px-3 py-2 border relative"
+                draggable="true"
+                @dragstart="onDragStart($event, node)"
+                @dragover="onDragOver($event, node)"
+                @dragend="onDragEnd"
+                @drop="onDrop($event, node)"
+                :class="[
+                  selectedListenNode && selectedListenNode.id === node.item.id
+                    ? 'bg-teal-50 hover:bg-teal-100/80 border-teal-100 text-teal-700 dark:bg-teal-950/20 dark:hover:bg-teal-900/10 dark:border-teal-900/30 dark:text-teal-400'
+                    : 'bg-transparent hover:bg-gray-50 border-transparent text-gray-700 dark:text-gray-300 dark:hover:bg-gray-700/40',
+                  dragOverNode && dragOverNode.item.id === node.item.id && dragOverPosition === 'inside'
+                    ? 'border-dashed border-teal-500 bg-teal-50/30 dark:bg-teal-950/20 scale-[0.98]'
+                    : '',
+                  draggedNode && draggedNode.item.id === node.item.id
+                    ? 'opacity-40 border-dashed border-gray-300 dark:border-gray-600'
+                    : ''
+                ]"
+                :style="{ paddingLeft: `calc(0.5rem + ${node.depth * 1.25}rem)` }"
+              >
+                <!-- Drop indicator lines -->
+                <div v-if="dragOverNode && dragOverNode.item.id === node.item.id && dragOverPosition === 'before'" class="absolute top-0 left-0 right-0 h-0.5 bg-teal-500 z-50 pointer-events-none"></div>
+                <div v-if="dragOverNode && dragOverNode.item.id === node.item.id && dragOverPosition === 'after'" class="absolute bottom-0 left-0 right-0 h-0.5 bg-teal-500 z-50 pointer-events-none"></div>
+
+                <!-- Indent guidance bar -->
+                <div 
+                  v-if="node.depth > 0" 
+                  class="absolute top-0 bottom-0 border-l border-gray-100 dark:border-gray-700/60"
+                  :style="{ left: `calc(${node.depth * 1.25}rem - 0.25rem)` }"
+                ></div>
+
+                <!-- Drag handle/grip -->
+                <div class="cursor-grab text-gray-300 dark:text-gray-600 hover:text-gray-500 dark:hover:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 shrink-0 relative z-30 mr-1" title="Drag node to move or reorder">
+                  <GripVertical class="h-3 w-3" />
+                </div>
+
+                <!-- Interaction click targets -->
+                <div 
+                  @click="selectListenItem(node.item)"
+                  class="flex items-center gap-2 min-w-0 flex-1 cursor-pointer relative z-10"
+                >
+                  <!-- Arrow indicators for directories/folders -->
+                  <span v-if="node.item.isFolder" class="text-gray-400 dark:text-gray-500 shrink-0">
+                    <ChevronDown v-if="node.isExpanded" class="h-3.5 w-3.5" />
+                    <ChevronRight v-else class="h-3.5 w-3.5" />
+                  </span>
+                  <span v-else class="w-3.5 h-3.5 flex items-center justify-center shrink-0">
+                    <span 
+                      class="h-1.5 w-1.5 rounded-full"
+                      :class="[
+                        node.item.type === 'channel' ? 'bg-orange-400' : 'bg-cyan-400'
+                      ]"
+                    ></span>
+                  </span>
+
+                  <!-- Folder / File icon indicators -->
+                  <component 
+                    :is="node.item.isFolder ? Folder : Radio" 
+                    class="h-4 w-4 shrink-0"
+                    :class="[
+                      node.item.isFolder 
+                        ? 'text-yellow-500 dark:text-yellow-600 fill-yellow-500/10'
+                        : selectedListenNode && selectedListenNode.id === node.item.id
+                          ? 'text-teal-500' 
+                          : 'text-gray-400 dark:text-gray-500'
+                    ]"
+                  />
+
+                  <span class="truncate font-semibold tracking-tight text-xs sm:text-sm">
+                    {{ node.item.name }}
+                  </span>
+                </div>
+
+                <!-- Action Button Hover Overlay -->
+                <div class="flex items-center gap-1 relative z-20 shrink-0 pl-1">
+                  <!-- Add submenu trigger to folders -->
+                  <button
+                    v-if="node.item.isFolder"
+                    @click.stop="openAddModal(node.item.id, false)"
+                    class="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md text-gray-400 hover:text-teal-500 transition-colors"
+                    title="Add Listen Item here"
+                  >
+                    <Plus class="h-3 w-3" />
+                  </button>
+                  <button
+                    v-if="node.item.isFolder"
+                    @click.stop="openAddModal(node.item.id, true)"
+                    class="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md text-gray-400 hover:text-yellow-500 transition-colors"
+                    title="Add Subfolder here"
+                  >
+                    <FolderPlus class="h-3 w-3" />
+                  </button>
+
+                  <!-- Edit configs -->
+                  <button
+                    @click.stop="openEditModal(node.item)"
+                    class="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md text-gray-400 hover:text-blue-500 transition-colors"
+                    title="Edit Configs"
+                  >
+                    <Edit class="h-3 w-3" />
+                  </button>
+
+                  <!-- Delete node -->
+                  <button
+                    @click.stop="deleteListenItem(node.item.id, node.item.name)"
+                    class="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md text-gray-400 hover:text-red-500 transition-colors"
+                    title="Delete item"
+                  >
+                    <Trash2 class="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right telemetry posts viewer (col-span-8) -->
+          <div class="lg:col-span-8 space-y-6">
+            
+            <!-- Empty state when no node is selected -->
+            <div v-if="!selectedListenNode" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center p-8 py-24 text-center w-full min-h-[800px]">
+              <div class="max-w-md mx-auto flex flex-col items-center">
+                <div class="h-16 w-16 bg-teal-50 dark:bg-teal-950/20 rounded-full flex items-center justify-center text-teal-500 mb-6 border border-teal-100/50 dark:border-teal-900/20 scale-110">
+                  <Radio class="h-8 w-8 text-teal-600 dark:text-teal-400 animate-pulse" />
+                </div>
+                <h3 class="text-lg font-black text-gray-900 dark:text-white uppercase tracking-wider">
+                  Live Real-Time Listen Feed
+                </h3>
+                <p class="text-sm text-gray-400 mt-2 leading-relaxed">
+                  Configure your listeners in the tree workspace on the left. Click on any public Telegram channel or Keyword tracker to wiretap inbound real-time feed alerts.
+                </p>
+                <div class="mt-6 flex flex-wrap gap-2 justify-center">
+                  <span class="text-xs px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-full font-mono font-medium">Channel Listening</span>
+                  <span class="text-xs px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-full font-mono font-medium">Keyword Filtering</span>
+                  <span class="text-xs px-3 py-1 bg-green-50 dark:bg-green-950/20 text-green-700 dark:text-green-400 rounded-full font-mono font-bold flex items-center gap-1">
+                    <span class="h-1.5 w-1.5 rounded-full bg-green-500 animate-ping"></span>
+                    Polling engine ready
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Active Listen feed pane -->
+            <div v-else class="space-y-6 select-text">
+              <!-- Active Info Header -->
+              <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2">
+                    <span 
+                      class="text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full"
+                      :class="[
+                        selectedListenNode.type === 'channel'
+                          ? 'bg-orange-50 dark:bg-orange-950/30 text-orange-600 dark:text-orange-400 border border-orange-100 dark:border-orange-900/30'
+                          : 'bg-cyan-50 dark:bg-cyan-950/30 text-cyan-600 dark:text-cyan-400 border border-cyan-100 dark:border-cyan-900/30'
+                      ]"
+                    >
+                      Telegram {{ selectedListenNode.type }}
+                    </span>
+                    <span v-if="listenAutoRefreshActive" class="text-[10px] bg-green-500/10 text-green-500 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider animate-pulse flex items-center gap-1">
+                      <span class="h-1.5 w-1.5 bg-green-500 rounded-full"></span>
+                      Listening Live
+                    </span>
+                  </div>
+                  <h2 class="text-xl font-black text-gray-900 dark:text-white tracking-tight">
+                    {{ selectedListenNode.name }}
+                  </h2>
+                  <div class="text-xs font-mono text-gray-400 flex flex-wrap gap-x-4 gap-y-1">
+                    <span>Target: <strong class="text-gray-700 dark:text-gray-200">{{ selectedListenNode.argument }}</strong></span>
+                    <span>Created: <strong>{{ new Date(selectedListenNode.create_time).toLocaleDateString() }}</strong></span>
+                  </div>
+                  <p v-if="selectedListenNode.description" class="text-xs text-gray-550 dark:text-gray-400 italic max-w-xl">
+                    {{ selectedListenNode.description }}
+                  </p>
+                </div>
+
+                <!-- Listen Control Bar -->
+                <div class="flex items-center gap-2 self-start md:self-center shrink-0">
+                  <!-- Local Saved Post Counter Badge with Clear Button -->
+                  <div class="flex items-center bg-gray-100 dark:bg-gray-800/80 px-3 py-1.5 rounded-xl border border-gray-200/50 dark:border-gray-700/50 text-xs font-semibold text-gray-600 dark:text-gray-300 gap-1.5">
+                    <Database class="h-3.5 w-3.5 text-teal-500" />
+                    <span>{{ listenPosts.length }} cached</span>
+                    <button
+                      v-if="listenPosts.length > 0"
+                      @click="clearCachedListenPosts"
+                      class="ml-1 p-0.5 text-gray-400 hover:text-red-500 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors"
+                      title="Clear Cached Posts"
+                    >
+                      <X class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  <button
+                    @click="toggleListenAutoRefresh"
+                    class="px-4 py-2 text-xs font-bold rounded-xl flex items-center gap-2 transition-all duration-300"
+                    :class="[
+                      listenAutoRefreshActive
+                        ? 'bg-green-600 hover:bg-green-700 text-white shadow-md shadow-green-600/10'
+                        : 'bg-gray-150 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600'
+                    ]"
+                  >
+                    <span 
+                      class="h-2 w-2 rounded-full bg-white block" 
+                      :class="[listenAutoRefreshActive ? 'animate-ping' : '']"
+                    ></span>
+                    <span>{{ selectedListenNode?.type === 'keyword' ? '30s' : '15s' }} Live Polling: {{ listenAutoRefreshActive ? 'ON' : 'OFF' }}</span>
+                  </button>
+
+                  <button
+                    @click="fetchListenPosts(selectedListenNode)"
+                    class="p-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-xl text-gray-500 dark:text-gray-300 transition-colors"
+                    title="Manual Sync"
+                    :disabled="isFetchingListenPosts"
+                  >
+                    <RefreshCw class="h-4 w-4" :class="[isFetchingListenPosts ? 'animate-spin' : '']" />
+                  </button>
+                </div>
+              </div>
+
+              <!-- Stream Messages Feed Area -->
+              <div class="space-y-6">
+                
+                <!-- Loading State -->
+                <div v-if="isFetchingListenPosts && listenPosts.length === 0" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center py-20 text-gray-400">
+                  <LoaderCircle class="h-10 w-10 animate-spin text-teal-500 mb-4" />
+                  <p class="text-sm font-semibold text-gray-500">Connecting internal pipeline...</p>
+                </div>
+
+                <!-- Empty Feed alert -->
+                <div v-else-if="listenPosts.length === 0" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center py-24 text-center max-w-sm mx-auto text-gray-400">
+                  <Inbox class="h-12 w-12 mb-4 opacity-40 text-teal-400" />
+                  <p class="text-sm font-bold text-gray-700 dark:text-gray-300">No intercepted logs found</p>
+                  <p class="text-xs mt-1">This query didn't trigger any historical records, or the public service is currently offline.</p>
+                </div>
+
+                <!-- Active post list feeds cascade -->
+                <div v-else class="space-y-6">
+                  <div
+                    v-for="(post, index) in listenPosts"
+                    :key="post.key || index"
+                    class="rounded-3xl shadow-sm border p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden bg-white dark:bg-gray-800"
+                    :class="[
+                      newlyFetchedListenKeys.has(post.key) || (post.id && newlyFetchedListenKeys.has(post.id))
+                        ? 'border-amber-400 dark:border-amber-500 ring-2 ring-amber-500/20'
+                        : 'border-gray-150 dark:border-gray-700'
+                    ]"
+                  >
+                    <div class="absolute -top-10 -right-10 w-24 h-24 bg-teal-50/50 dark:bg-teal-900/10 rounded-full blur-2xl pointer-events-none"></div>
+
+                    <!-- Quoted / Hover actions -->
+                    <div class="absolute top-4 right-4 flex space-x-1.5 z-20">
+                      <button
+                        @click.stop="addToWorkspaceFromPost(post)"
+                        class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-700 px-2.5 py-1 rounded-full"
+                        title="Add to Workspace Analysis"
+                      >
+                        <Layers class="h-3 w-3 mr-1" /> Add
+                      </button>
+                      <button
+                        @click.stop="sharePost(post)"
+                        class="text-[10px] font-bold text-gray-400 hover:text-blue-650 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-700 px-2.5 py-1 rounded-full"
+                        title="Share Links"
+                      >
+                        <Share2 class="h-3 w-3 mr-1" /> Share
+                      </button>
+                    </div>
+
+                    <!-- Post top profile header card -->
+                    <div class="flex justify-between items-start mb-4 relative z-10">
+                      <div class="flex items-center space-x-3">
+                        <div class="w-10 h-10 rounded-full bg-teal-50 dark:bg-teal-900/30 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-sm overflow-hidden ring-1 ring-white dark:ring-gray-800 shadow-sm shrink-0">
+                          <img
+                            :src="getPostAvatarUrl(post)"
+                            @error="handleImageError"
+                            alt="TelegAvatar"
+                            class="w-full h-full object-cover"
+                          />
+                        </div>
+                        <div>
+                          <h4 class="text-xs sm:text-sm font-extrabold text-gray-900 dark:text-white block hover:text-teal-500 transition-colors">
+                            {{ post.data?.author || post.data?.user || selectedListenNode.name }}
+                          </h4>
+                          <div class="flex items-center gap-x-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5">
+                            <span>{{ formatDate(post.data?.date) }}</span>
+                            <span v-if="post.mtime" class="text-[9px] text-teal-500 lowercase normal-case tracking-normal">
+                              (Scraped {{ formatScrapedDate(post.mtime) }})
+                            </span>
+                            <span 
+                              v-if="newlyFetchedListenKeys.has(post.key) || (post.id && newlyFetchedListenKeys.has(post.id))"
+                              class="text-[9px] bg-amber-550 dark:bg-amber-500 text-white dark:text-white font-extrabold px-1.5 py-0.5 rounded-md tracking-wider animate-pulse inline-flex items-center"
+                            >
+                              NEW
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                      <a
+                        v-if="post.url || post.link"
+                        :href="post.url || post.link"
+                        target="_blank"
+                        class="text-[10px] font-bold text-teal-600 dark:text-teal-400 hover:text-teal-700 dark:hover:text-teal-350 transition-colors flex items-center bg-teal-50 dark:bg-teal-900/30 px-2 py-0.5 rounded-full shrink-0"
+                      >
+                        View TG <ExternalLink class="h-2.5 w-2.5 ml-0.5" />
+                      </a>
+                    </div>
+
+                    <!-- Reply Segment Quoted -->
+                    <div
+                      v-if="post.data?.reply && post.data.reply.length >= 2"
+                      class="mb-4 border-l-4 border-teal-400 dark:border-teal-500 bg-teal-50/30 dark:bg-teal-900/10 p-3.5 rounded-r-2xl relative z-10"
+                    >
+                      <div class="flex items-center justify-between text-[9px] font-black uppercase tracking-widest text-teal-600 dark:text-teal-400 mb-1">
+                        <div class="flex items-center gap-1">
+                          <Reply class="h-3 w-3" />
+                          <span>Reply to Message</span>
+                        </div>
+                      </div>
+                      <div class="text-gray-600 dark:text-gray-350 text-xs sm:text-sm whitespace-pre-wrap break-words italic line-clamp-2">
+                        {{ post.data.reply[1] }}
+                      </div>
+                    </div>
+
+                    <!-- Forward Subcard Segment -->
+                    <div
+                      v-if="post.data?.forward_url"
+                      class="mb-4 border-l-4 border-purple-400 dark:border-purple-500 bg-purple-50/50 dark:bg-purple-900/10 p-3.5 rounded-r-2xl relative z-10"
+                    >
+                      <div class="flex items-center justify-between text-[9px] font-black uppercase tracking-widest text-purple-600 dark:text-purple-400 mb-1">
+                        <div class="flex items-center gap-1">
+                          <Forward class="h-3 w-3" />
+                          <span>Forward</span>
+                        </div>
+                      </div>
+                      <div class="text-gray-700 dark:text-gray-300 text-xs sm:text-sm whitespace-pre-wrap break-words italic">
+                        {{ getForwardInfo(post)?.text || post.data.forward_url }}
+                      </div>
+                    </div>
+
+                    <!-- Post content string messages -->
+                    <div v-if="post.data?.content" class="flex items-start gap-2 mb-4 relative z-10">
+                      <div 
+                        v-html="post.key in translatedPosts ? highlightTextByKeywords(post.data.content) + '\n--------\n' + translatedPosts[post.key] : highlightTextByKeywords(post.data.content)"
+                        class="text-gray-800 dark:text-gray-100 text-[14px] leading-relaxed whitespace-pre-wrap break-words flex-1"
+                      ></div>
+                      <button
+                        @click="translatePost(post)"
+                        class="p-1 -mt-1 text-gray-400 hover:text-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-md transition-colors flex-shrink-0"
+                        title="Translate contents"
+                      >
+                        <Languages v-if="!isTranslating[post.key]" class="h-4 w-4" />
+                        <Loader2 v-else class="h-4 w-4 animate-spin" />
+                      </button>
+                    </div>
+
+                    <!-- Contact details -->
+                    <div
+                      v-if="post.data?.contact && Object.keys(post.data.contact).length > 0"
+                      class="mb-4 rounded-xl border border-blue-250 dark:border-blue-900/50 bg-blue-50/30 dark:bg-blue-950/20 p-4 relative z-10"
+                    >
+                      <div class="flex items-center text-[10px] font-black tracking-widest text-blue-500 uppercase mb-2">
+                        <User class="h-3.5 w-3.5 mr-1" /> Contact Shared
+                      </div>
+                      <div class="text-xs text-gray-800 dark:text-gray-300 font-mono">
+                        {{ post.data.contact.first_name }} {{ post.data.contact.last_name }} 
+                        <span v-if="post.data.contact.phone_number" class="block text-blue-500 mt-1 font-bold">{{ post.data.contact.phone_number }}</span>
+                      </div>
+                    </div>
+
+                    <!-- Multimedia Embeddings photos -->
+                    <div
+                      v-if="post.data?.photos && post.data.photos.length > 0"
+                      class="mb-4 rounded-2xl overflow-hidden shadow-sm border border-gray-150 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/30 group-cursor cursor-zoom-in max-w-sm"
+                      @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`)"
+                    >
+                      <img
+                        :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`"
+                        class="w-full h-auto max-h-[300px] object-cover transition-transform duration-700 hover:scale-105"
+                        alt="TelegPhoto"
+                        referrerpolicy="no-referrer"
+                      />
+                    </div>
+
+                    <!-- Videos playables -->
+                    <div
+                      v-if="post.data?.videos && post.data.videos.length > 0"
+                      class="mb-4 rounded-2xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-black max-w-sm shadow-sm"
+                    >
+                      <video controls class="w-full h-auto max-h-[300px]">
+                        <source :src="getVideoUrl(post)" type="video/mp4" />
+                      </video>
+                    </div>
+
+                    <!-- Link Metadata Embeds -->
+                    <div
+                      v-if="post.data?.linkPreview"
+                      class="mb-3 rounded-2xl overflow-hidden border border-gray-150 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/10 flex flex-col sm:flex-row shadow-sm hover:shadow-md transition-shadow shrink-0"
+                    >
+                      <div
+                        v-if="post.data.linkPreview.image"
+                        class="sm:w-24 sm:h-24 shrink-0 bg-gray-200 dark:bg-gray-800 overflow-hidden cursor-zoom-in"
+                        @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)"
+                      >
+                        <img
+                          :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`"
+                          class="w-full h-full object-cover transition-transform duration-500 hover:scale-105"
+                          alt="PreTelegPhoto"
+                        />
+                      </div>
+                      <div class="p-4 flex-1 min-w-0">
+                        <div class="text-[10px] font-black uppercase tracking-widest text-teal-500 truncate mb-1">
+                          {{ post.data.linkPreview.site_name || 'Embed Webpage' }}
+                        </div>
+                        <a
+                          v-if="post.data.linkPreview.url"
+                          :href="post.data.linkPreview.url"
+                          target="_blank"
+                          class="text-xs sm:text-sm font-bold text-gray-950 dark:text-gray-100 hover:text-blue-500 hover:underline transition-colors block line-clamp-1 mb-1"
+                        >
+                          {{ post.data.linkPreview.title || 'Embed Link URL' }}
+                        </a>
+                        <p v-if="post.data.linkPreview.description" class="text-xs text-gray-400 dark:text-gray-500 line-clamp-2">
+                          {{ post.data.linkPreview.description }}
+                        </p>
+                      </div>
+                    </div>
+
+                    <!-- Bottom Metadata Bar -->
+                    <div
+                      class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400"
+                    >
+                      <div class="flex items-center space-x-4">
+                        <span v-if="post.data?.views != null"
+                          >{{ formatViews(post.data.views) }} views</span
+                        >
+                      </div>
+                      <div class="flex items-center gap-2">
+                        <button
+                          class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-900/20 transition-colors"
+                          @click="
+                            activeTab = 'explorer';
+                            channelName = post.key.split('.')[0];
+                            searchChannel();
+                          "
+                        >
+                          {{ post.key.split('.')[0] }}
+                        </button>
+                        <span
+                          v-if="post.key"
+                          class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-gray-400 dark:text-gray-500"
+                          >ID: {{ post.key }}</span
+                        >
+                      </div>
+                    </div>
+
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Add/Edit Directory Item Modal Popup -->
+      <div 
+        v-if="isListenModalOpen" 
+        class="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm"
+        @click.self="isListenModalOpen = false"
+      >
+        <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-3xl overflow-hidden shadow-2xl border border-gray-150 dark:border-gray-700 animate-in fade-in zoom-in duration-300">
+          <div class="p-6">
+            <div class="flex items-center justify-between mb-4 border-b border-gray-150 dark:border-gray-700 pb-3">
+              <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
+                <component :is="listenItemForm.isFolder ? FolderOpen : Radio" class="h-5 w-5 text-teal-500" />
+                <span>{{ isEditingListenItem ? 'Modify Configurations' : listenItemForm.isFolder ? 'Add Watch Directory' : 'Add Telemetry Monitor' }}</span>
+              </h3>
+              <button @click="isListenModalOpen = false" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg p-1">
+                <X class="h-5 w-5" />
+              </button>
+            </div>
+
+            <div class="space-y-4">
+              <!-- Name inputs -->
+              <div>
+                <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">Node Name Label</label>
+                <input
+                  v-model="listenItemForm.name"
+                  type="text"
+                  placeholder="e.g. Durov Crypto Chat, Web3 Alerts"
+                  class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-750 bg-transparent text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                />
+              </div>
+
+              <!-- Only show metadata fields if NOT a folder -->
+              <div v-if="!listenItemForm.isFolder" class="space-y-4 animate-in fade-in duration-200">
+                <div class="grid grid-cols-2 gap-4">
+                  <!-- Type select options -->
+                  <div>
+                    <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">Stream Type</label>
+                    <select
+                      v-model="listenItemForm.type"
+                      class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                    >
+                      <option value="channel">Telegram Channel</option>
+                      <option value="keyword">Search Keywords</option>
+                    </select>
+                  </div>
+
+                  <!-- Argument inputs -->
+                  <div>
+                    <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">
+                      {{ listenItemForm.type === 'channel' ? 'Channel Username' : 'Filter Keyword Terms' }}
+                    </label>
+                    <input
+                      v-model="listenItemForm.argument"
+                      type="text"
+                      :placeholder="listenItemForm.type === 'channel' ? 'e.g. durov' : 'e.g. solana, block'"
+                      class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-750 bg-transparent text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Description comments -->
+              <div>
+                <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">Description Context (Optional)</label>
+                <textarea
+                  v-model="listenItemForm.description"
+                  rows="3"
+                  placeholder="Brief annotations explaining what this stream monitors..."
+                  class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-750 bg-transparent text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                ></textarea>
+              </div>
+            </div>
+
+            <!-- Footer Buttons -->
+            <div class="mt-6 flex items-center justify-end gap-2.5 border-t border-gray-150 dark:border-gray-700 pt-4">
+              <button
+                @click="isListenModalOpen = false"
+                class="px-4 py-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-xl text-sm font-semibold text-gray-750 dark:text-gray-300 transition-colors"
+                >
+                Cancel
+              </button>
+              <button
+                @click="saveListenItemForm"
+                :disabled="!listenItemForm.name.trim()"
+                class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl text-sm font-bold shadow-md shadow-teal-500/10 transition-colors"
+              >
+                Confirm Save
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Custom Delete Confirmation Modal -->
+      <div 
+        v-if="isDeleteConfirmOpen" 
+        class="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm"
+        @click.self="isDeleteConfirmOpen = false"
+      >
+        <div class="w-full max-w-sm bg-white dark:bg-gray-800 rounded-2xl overflow-hidden shadow-2xl border border-gray-150 dark:border-gray-700 animate-in fade-in zoom-in duration-200">
+          <div class="p-6">
+            <div class="flex items-center gap-3 mb-4 text-red-500">
+              <div class="p-2 bg-red-50 dark:bg-red-950/30 rounded-xl">
+                <Trash2 class="h-6 w-6" />
+              </div>
+              <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white">
+                Delete Item?
+              </h3>
+            </div>
+            
+            <p class="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mb-6 leading-relaxed">
+              Are you sure you want to delete <span class="font-extrabold text-gray-900 dark:text-white">"{{ itemToDeleteName }}"</span>? This action is permanent and cannot be undone.
+            </p>
+
+            <div class="flex items-center justify-end gap-2.5">
+              <button
+                @click="isDeleteConfirmOpen = false"
+                class="px-4 py-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-xl text-sm font-semibold text-gray-750 dark:text-gray-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                @click="confirmDeleteListenItem"
+                class="px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-bold shadow-md shadow-red-500/10 transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+       <!-- Auto Finding Tab -->
       <div v-show="activeTab === 'auto-finding'" class="space-y-6">
         <div class="max-w-6xl mx-auto mb-8 px-4 sm:px-0 space-y-4">
           <div
