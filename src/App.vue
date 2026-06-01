@@ -1055,6 +1055,25 @@ const saveListenDirectory = () => {
   localStorage.setItem("listen_directory_tree", JSON.stringify(listenDirectory.value));
 };
 
+const addChannelToListenDirectory = (name: string, username: string) => {
+  const newItem: ListenItem = {
+    id: Date.now().toString(),
+    name: name,
+    isFolder: false,
+    create_time: new Date().toISOString(),
+    type: "channel",
+    argument: username,
+    description: `Auto-added channel: @${username}`,
+    children: []
+  };
+  listenDirectory.value.push(newItem);
+  saveListenDirectory();
+  
+  toastMessage.value = `Added ${name} to Listen Directory`;
+  toastType.value = 'info';
+  setTimeout(() => { toastMessage.value = ""; }, 3000);
+};
+
 const openAddModal = (parentId: string = "", isFolder: boolean = false) => {
   isEditingListenItem.value = false;
   listenItemForm.value = {
@@ -1777,7 +1796,7 @@ watch(activeTab, (newTab) => {
 const workspaceGraph = ref<any>(null);
 const graphState = ref<any>(null);
 const toastMessage = ref("");
-const toastType = ref<'error' | 'success'>('error');
+const toastType = ref<'error' | 'success' | 'info'>('error');
 const contextMenu = ref({ visible: false, x: 0, y: 0, node: null });
 const nodeSearchQuery = ref("");
 const graphNameInput = ref("");
@@ -2546,7 +2565,6 @@ const initGraph = () => {
             'text-border-opacity': 1,
             'text-wrap': 'wrap',
             'text-max-width': '100px',
-            'curve-style': 'bezier', 
             'control-point-step-size': 10
           }
         }
@@ -3113,7 +3131,7 @@ const fetchChannelProfile = async (channel: string) => {
         const clist = clistRes.keys.map(item => decodeURIComponent(item)).sort((a, b) => {
           const dateA = new Date(a.replace(`${profileName}-`, '') + ':00')
           const dateB = new Date(b.replace(`${profileName}-`, '') + ':00')
-          return dateB - dateA
+          return dateB.getTime() - dateA.getTime()
         })
         console.log(clistRes.keys)
         console.log(clist)
@@ -4998,12 +5016,12 @@ const timelineTicks = computed(() => {
 
         <!-- Glass Tabs -->
         <div
-          class="inline-flex bg-gray-200/50 dark:bg-gray-800/50 p-1.5 rounded-2xl backdrop-blur-xl border border-gray-200/50 dark:border-gray-700/50 shadow-inner"
+          class="flex items-center overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-w-[calc(100vw-7.5rem)] md:max-w-full bg-gray-200/50 dark:bg-gray-800/50 p-1.5 rounded-2xl backdrop-blur-xl border border-gray-200/50 dark:border-gray-700/50 shadow-inner whitespace-nowrap scroll-smooth mr-20 md:mr-0"
         >
           <button
             @click="activeTab = 'channel'"
             :class="[
-              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
               activeTab === 'channel'
                 ? 'bg-white dark:bg-gray-700 text-yellow-600 dark:text-yellow-400 shadow-md shadow-yellow-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -5011,7 +5029,7 @@ const timelineTicks = computed(() => {
           >
             <Library
               :class="[
-                'h-4 w-4 mr-2 transition-transform duration-300',
+                'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
                 activeTab === 'channel' ? 'scale-110' : '',
               ]"
             />
@@ -5020,7 +5038,7 @@ const timelineTicks = computed(() => {
           <button
             @click="activeTab = 'explorer'"
             :class="[
-              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
               activeTab === 'explorer'
                 ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-md shadow-blue-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -5028,7 +5046,7 @@ const timelineTicks = computed(() => {
           >
             <Layout
               :class="[
-                'h-4 w-4 mr-2 transition-transform duration-300',
+                'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
                 activeTab === 'explorer' ? 'scale-110' : '',
               ]"
             />
@@ -5037,7 +5055,7 @@ const timelineTicks = computed(() => {
           <button
             @click="activeTab = 'search'"
             :class="[
-              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
               activeTab === 'search'
                 ? 'bg-white dark:bg-gray-700 text-cyan-600 dark:text-cyan-400 shadow-md shadow-cyan-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -5045,7 +5063,7 @@ const timelineTicks = computed(() => {
           >
             <Globe
               :class="[
-                'h-4 w-4 mr-2 transition-transform duration-300',
+                'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
                 activeTab === 'search' ? 'scale-110' : '',
               ]"
             />
@@ -5054,7 +5072,7 @@ const timelineTicks = computed(() => {
           <button
             @click="activeTab = 'listen'"
             :class="[
-              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
               activeTab === 'listen'
                 ? 'bg-white dark:bg-gray-700 text-teal-600 dark:text-teal-400 shadow-md shadow-teal-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -5062,7 +5080,7 @@ const timelineTicks = computed(() => {
           >
             <Radio
               :class="[
-                'h-4 w-4 mr-2 transition-transform duration-300',
+                'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
                 activeTab === 'listen' ? 'scale-110' : '',
               ]"
             />
@@ -5071,7 +5089,7 @@ const timelineTicks = computed(() => {
           <button
             @click="activeTab = 'auto-finding'"
             :class="[
-              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
               activeTab === 'auto-finding'
                 ? 'bg-white dark:bg-gray-700 text-green-600 dark:text-green-400 shadow-md shadow-green-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -5079,7 +5097,7 @@ const timelineTicks = computed(() => {
           >
             <BotMessageSquare
               :class="[
-                'h-4 w-4 mr-2 transition-transform duration-300',
+                'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
                 activeTab === 'auto-finding' ? 'scale-110' : '',
               ]"
             />
@@ -5088,7 +5106,7 @@ const timelineTicks = computed(() => {
           <button
             @click="activeTab = 'workspace'"
             :class="[
-              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
               activeTab === 'workspace'
                 ? 'bg-white dark:bg-gray-700 text-purple-600 dark:text-purple-400 shadow-md shadow-purple-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -5096,7 +5114,7 @@ const timelineTicks = computed(() => {
           >
             <Layers
               :class="[
-                'h-4 w-4 mr-2 transition-transform duration-300',
+                'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
                 activeTab === 'workspace' ? 'scale-110' : '',
               ]"
             />
@@ -5106,7 +5124,7 @@ const timelineTicks = computed(() => {
             v-show="loginToken"
             @click="activeTab = 'profile'"
             :class="[
-              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
               activeTab === 'profile'
                 ? 'bg-white dark:bg-gray-700 text-orange-600 dark:text-orange-400 shadow-md shadow-orange-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -5114,7 +5132,7 @@ const timelineTicks = computed(() => {
           >
             <Layers
               :class="[
-                'h-4 w-4 mr-2 transition-transform duration-300',
+                'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
                 activeTab === 'profile' ? 'scale-110' : '',
               ]"
             />
@@ -5123,7 +5141,7 @@ const timelineTicks = computed(() => {
           <button
             @click="activeTab = 'monitor'"
             :class="[
-              'px-6 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 flex items-center justify-center',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
               activeTab === 'monitor'
                 ? 'bg-white dark:bg-gray-700 text-pink-600 dark:text-pink-400 shadow-md shadow-pink-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -5131,7 +5149,7 @@ const timelineTicks = computed(() => {
           >
             <Activity
               :class="[
-                'h-4 w-4 mr-2 transition-transform duration-300',
+                'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
                 activeTab === 'monitor' ? 'scale-110' : '',
               ]"
             />
@@ -5472,7 +5490,11 @@ const timelineTicks = computed(() => {
                     @{{ metadata.username || metadata.name || channelName }}
                     <button @click="addToWorkspace" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-teal-600 dark:text-teal-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all">
                       <Layout class="h-2.5 w-2.5" />
-                      Add
+                      Workspace
+                    </button>
+                    <button @click="addChannelToListenDirectory(metadata.title || channelName, metadata.username || channelName)" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-purple-600 dark:text-purple-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all">
+                      <Radio class="h-2.5 w-2.5" />
+                      Listen
                     </button>
                   </p>
 
@@ -5585,7 +5607,7 @@ const timelineTicks = computed(() => {
                     class="mt-3 bg-gray-50/50 dark:bg-gray-900/10 p-4 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center"
                   >
                     <span class="text-xs font-black text-gray-700 dark:text-gray-200">
-                      {{ 'IDC Center DC: ' + metadata.cdnNumber }} <span v-if="metadata.cdnRegion" class="text-teal-600 dark:text-teal-400">({{ Array.isArray(metadata.cdnRegion) ? metadata.cdnRegion[1] : metadata.cdnRegion }})</span>
+                      {{ 'Data Center: ' + metadata.cdnNumber }} <span v-if="metadata.cdnRegion" class="text-teal-600 dark:text-teal-400">({{ Array.isArray(metadata.cdnRegion) ? metadata.cdnRegion[1] : metadata.cdnRegion }})</span>
                     </span>
                   </div>
                 </div>
@@ -7734,7 +7756,7 @@ const timelineTicks = computed(() => {
       </div>
 
       <!-- Toast Message -->
-      <div v-if="toastMessage" class="fixed top-5 right-5 z-[100] px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 text-white" :class="toastType === 'success' ? 'bg-green-500' : 'bg-red-500'">
+      <div v-if="toastMessage" class="fixed top-5 right-5 z-[100] px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 text-white" :class="toastType === 'success' ? 'bg-green-500' : (toastType === 'info' ? 'bg-blue-500' : 'bg-red-500')">
         <AlertCircle class="w-5 h-5" />
         {{ toastMessage }}
       </div>
