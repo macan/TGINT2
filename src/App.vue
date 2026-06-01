@@ -9658,7 +9658,7 @@ const timelineTicks = computed(() => {
                 <span class="p-1.5 rounded-xl bg-teal-500/10 text-teal-600 dark:text-teal-400">
                   <User class="h-5 w-5" />
                 </span>
-                <span class="text-[10px] font-black text-teal-650 dark:text-teal-400 uppercase tracking-widest">Dossier Workspace</span>
+                <span class="text-[10px] font-black text-teal-655 dark:text-teal-400 uppercase tracking-widest">Dossier Workspace</span>
               </div>
               <h2 class="text-xl md:text-2xl font-black text-gray-900 dark:text-white tracking-tight">Identity & User Profile Explorer</h2>
               <p class="text-xs text-gray-400 dark:text-gray-500 font-semibold max-w-xl">
@@ -9667,7 +9667,7 @@ const timelineTicks = computed(() => {
             </div>
 
             <!-- Dashboard micro-indicator -->
-            <div class="flex items-center gap-6 text-[11px] font-semibold text-gray-400 dark:text-gray-500 shrink-0 self-start md:self-center border-t md:border-t-0 md:border-l border-gray-200/60 dark:border-gray-750 pt-4 md:pt-0 md:pl-6">
+            <div class="grid grid-cols-2 gap-4 md:flex md:items-center md:gap-6 text-[11px] font-semibold text-gray-400 dark:text-gray-500 shrink-0 self-stretch md:self-center border-t md:border-t-0 md:border-l border-gray-200/60 dark:border-gray-750 pt-4 md:pt-0 md:pl-6">
               <div class="space-y-1">
                 <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">History Pool</p>
                 <p class="font-mono text-gray-900 dark:text-white font-bold">{{ lookupUserHistory.length }} lookups</p>
@@ -9681,10 +9681,10 @@ const timelineTicks = computed(() => {
         </div>
 
         <!-- Search Dossier Box Block -->
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        <div class="grid grid-cols-1 xl:grid-cols-12 gap-8 items-start w-full">
           
           <!-- Outer lookup panel -->
-          <div class="lg:col-span-5 space-y-6">
+          <div class="col-span-12 xl:col-span-5 space-y-6 w-full">
             <div class="bg-white dark:bg-gray-800 border border-gray-200/75 dark:border-gray-750 rounded-3xl p-6 shadow-sm space-y-6 relative">
               <div class="space-y-1">
                 <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Search Identity Node</h3>
@@ -9757,31 +9757,35 @@ const timelineTicks = computed(() => {
             <!-- Searched User Dossier Sheet Card -->
             <transition v-if="telegramUser" enter-active-class="transition duration-300 ease-out" enter-from-class="transform scale-98 opacity-0" enter-to-class="transform scale-100 opacity-100">
               <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm relative overflow-hidden space-y-6">
-                <!-- Top right badge / DC Region context -->
-                <div v-if="telegramUser.cdnNumber || telegramUser.cdnRegion" class="absolute top-6 right-6 text-right space-y-1 select-none">
-                  <span v-if="telegramUser.cdnNumber" class="text-[9px] font-mono font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 bg-teal-500/[0.04] border border-teal-500/10 px-2 py-0.5 rounded-lg">
-                    DC {{ telegramUser.cdnNumber }}
-                  </span>
-                  <p v-if="telegramUser.cdnRegion && telegramUser.cdnRegion[1]" class="text-[10px] font-bold text-gray-400 mt-1 uppercase tracking-wider">
-                    {{ telegramUser.cdnRegion[1] }}
-                  </p>
-                </div>
-
-                <div class="flex flex-col sm:flex-row items-start sm:items-center gap-5 pb-5 border-b border-gray-100 dark:border-gray-800/80">
-                  <div class="relative shrink-0">
-                    <img 
-                      :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" 
-                      @error="handleImageError" 
-                      class="w-16 h-16 rounded-2xl object-cover border-2 border-teal-500/10 shadow-sm" 
-                      alt="Profile photo" 
-                    />
-                    <span class="absolute -bottom-1 -right-1 p-1 bg-teal-600 rounded-lg text-white border border-white dark:border-gray-800 shadow-md">
-                      <User class="h-3 w-3" />
-                    </span>
+                
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-5 pb-5 border-b border-gray-100 dark:border-gray-800/80">
+                  <div class="flex flex-col sm:flex-row items-start sm:items-center gap-5">
+                    <div class="relative shrink-0">
+                      <img 
+                        :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" 
+                        @error="handleImageError" 
+                        class="w-16 h-16 rounded-2xl object-cover border-2 border-teal-500/10 shadow-sm" 
+                        referrerPolicy="no-referrer"
+                        alt="Profile photo" 
+                      />
+                      <span class="absolute -bottom-1 -right-1 p-1 bg-teal-600 rounded-lg text-white border border-white dark:border-gray-800 shadow-md">
+                        <User class="h-3 w-3" />
+                      </span>
+                    </div>
+                    <div class="space-y-1">
+                      <h3 class="text-base font-black text-gray-900 dark:text-white leading-tight break-words max-w-[280px] sm:max-w-xs">{{ telegramUser.title || telegramUser.username }}</h3>
+                      <p class="text-xs font-bold text-teal-655 dark:text-teal-400 flex items-center gap-1">@{{ telegramUser.username }}</p>
+                    </div>
                   </div>
-                  <div class="space-y-1">
-                    <h3 class="text-base font-black text-gray-900 dark:text-white leading-tight">{{ telegramUser.title || telegramUser.username }}</h3>
-                    <p class="text-xs font-bold text-teal-655 dark:text-teal-400 flex items-center gap-1">@{{ telegramUser.username }}</p>
+
+                  <!-- Responsive badge / DC Region context -->
+                  <div v-if="telegramUser.cdnNumber || telegramUser.cdnRegion" class="flex flex-row sm:flex-col items-center sm:items-end gap-1.5 sm:gap-1 select-none shrink-0 bg-gray-50 dark:bg-gray-900/30 sm:bg-transparent p-2.5 sm:p-0 rounded-xl sm:rounded-none">
+                    <span v-if="telegramUser.cdnNumber" class="text-[9px] font-mono font-black uppercase tracking-wider text-teal-655 dark:text-teal-400 bg-teal-500/[0.04] border border-teal-500/10 px-2 py-0.5 rounded-lg">
+                      DC {{ telegramUser.cdnNumber }}
+                    </span>
+                    <p v-if="telegramUser.cdnRegion && telegramUser.cdnRegion[1]" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider leading-none">
+                      {{ telegramUser.cdnRegion[1] }}
+                    </p>
                   </div>
                 </div>
 
@@ -9870,7 +9874,7 @@ const timelineTicks = computed(() => {
                 <Loader2 class="w-6 h-6 animate-spin text-teal-500" />
               </div>
 
-              <div v-else class="grid grid-cols-2 gap-3 pt-2">
+              <div v-else class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2 gap-3 pt-2">
                 <button 
                   v-for="profile in remoteProfiles" 
                   :key="profile" 
@@ -9892,7 +9896,7 @@ const timelineTicks = computed(() => {
           </div>
 
           <!-- Inspector Dossier Visualizer Panel -->
-          <div class="lg:col-span-7 space-y-6">
+          <div class="col-span-12 xl:col-span-7 space-y-6 w-full">
             
             <!-- Fallback empty state -->
             <div v-if="!selectedRemoteProfileContent" class="flex flex-col items-center justify-center py-24 bg-white dark:bg-gray-800 border border-gray-200/60 dark:border-gray-750 rounded-3xl p-8 text-center shadow-sm relative overflow-hidden">
@@ -9917,7 +9921,7 @@ const timelineTicks = computed(() => {
                     </span>
                     <div>
                       <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">Catalog Target</h3>
-                      <h4 class="text-sm font-black text-gray-900 dark:text-white mt-1">{{ selectedRemoteProfileName }}</h4>
+                      <h4 class="text-xs sm:text-sm font-black text-gray-900 dark:text-white mt-1 break-all max-w-[180px] xs:max-w-xs sm:max-w-md">{{ selectedRemoteProfileName }}</h4>
                     </div>
                   </div>
                   <!-- Close binding button -->
