@@ -2931,17 +2931,21 @@ const getForwardInfo = (post: any) => {
     const yyyy = parts[parts.length - 2] || 'unknown';
     const zzzz = parts[parts.length - 1] || 'unknown';
     if (yyyy == 't.me') {
+      // this should be a user?
       return {
+        target: null,
         text: `Forward from ${post.data.forward_from} (ID: ${zzzz})`,
         date: null
       }
     }
     return {
+      target: yyyy,
       text: `Forward from ${post.data.forward_from} (ID: ${yyyy}.${zzzz})`,
       date: null
     };
   } else {
     return {
+      target: post.data.forward_from.username,
       text: `Forward from ${post.data.forward_from.title} (ID: ${post.data.forward_from.username}.${post.data.forward_from.post})`,
       date: post.data.forward_from.date
     };
@@ -5159,7 +5163,7 @@ const timelineTicks = computed(() => {
       </header>
 
       <!-- Channel Tab -->
-      <div v-show="activeTab === 'channel'" class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 pt-1 pb-16 space-y-8">
+      <div v-show="activeTab === 'channel'" class="w-full max-w-full mx-auto px-0 pt-1 pb-16 space-y-8">
         <!-- Control Bar Card -->
         <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 shadow-sm relative overflow-hidden">
           <!-- Ambient highlights -->
@@ -5257,7 +5261,7 @@ const timelineTicks = computed(() => {
         </div>
 
         <!-- Directory Cards Grid -->
-        <div v-else class="columns-1 md:columns-2 lg:columns-3 xl:columns-4 gap-6">
+        <div v-else class="columns-1 sm:columns-2 md:columns-3 lg:columns-4 xl:columns-5 2xl:columns-6 gap-6">
           <div v-for="channel in channels" :key="channel.name"
                class="break-inside-avoid bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/75 dark:border-gray-750 shadow-sm hover:shadow-xl hover:border-teal-500/20 dark:hover:border-teal-500/15 transition-all duration-300 mb-6 relative overflow-hidden group">
             <!-- Subtle Hover Gradient Accent -->
@@ -6111,7 +6115,7 @@ const timelineTicks = computed(() => {
                           title="Add to Workspace"
                         >
                           <Layout class="h-3 w-3 text-teal-500" />
-                          <span>Add</span>
+                          <span>Workspace</span>
                         </button>
                         <button
                           @click.stop="sharePost(post)"
@@ -6194,8 +6198,19 @@ const timelineTicks = computed(() => {
                           {{ getForwardInfo(post)?.date }}
                         </span>
                       </div>
-                      <div class="text-gray-600 dark:text-gray-300 text-xs font-medium whitespace-pre-wrap break-words italic line-clamp-3">
-                        {{ getForwardInfo(post)?.text }}
+                      <div class="flex items-start justify-between gap-4">
+                        <div class="text-gray-600 dark:text-gray-300 text-xs font-medium whitespace-pre-wrap break-words italic line-clamp-3 flex-1">
+                          {{ getForwardInfo(post)?.text }}
+                        </div>
+                        <button
+                          v-if="getForwardInfo(post)?.target"
+                          @click="activeTab = 'explorer'; channelName = getForwardInfo(post).target; searchChannel()"
+                          class="inline-flex items-center gap-1 px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/40 dark:hover:bg-indigo-900/70 text-indigo-600 dark:text-indigo-400 rounded-xl border border-indigo-200/50 dark:border-indigo-850 text-[10px] font-bold transition-all shrink-0 cursor-pointer self-start"
+                          title="View Channel"
+                        >
+                          <span>@{{ getForwardInfo(post).target }}</span>
+                          <ChevronRight class="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     </div>
 
@@ -6824,21 +6839,21 @@ const timelineTicks = computed(() => {
       <!-- Global Search Tab -->
       <div
         v-show="activeTab === 'search'"
-        class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10"
+        class="w-full max-w-full mx-auto px-0 pt-1 pb-16 space-y-8"
       >
         <div
           class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 sm:p-8 mb-8 shadow-sm relative overflow-hidden"
         >
           <!-- Background Decoration -->
           <div
-            class="absolute -top-20 -right-20 w-40 h-40 bg-teal-500/5 dark:bg-teal-505/10 rounded-full blur-3xl pointer-events-none"
+            class="absolute -top-20 -right-20 w-40 h-40 bg-teal-500/5 dark:bg-teal-500/10 rounded-full blur-3xl pointer-events-none"
           ></div>
           <div
             class="absolute -bottom-20 -left-20 w-40 h-40 bg-indigo-500/5 dark:bg-indigo-500/10 rounded-full blur-3xl pointer-events-none"
           ></div>
 
-          <form @submit.prevent="performGlobalSearch" class="relative z-10">
-            <div class="relative flex items-center mb-6 group">
+          <form @submit.prevent="performGlobalSearch" class="relative z-10 space-y-6">
+            <div class="relative flex items-center group">
               <div
                 class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-teal-600 z-10"
               >
@@ -6860,63 +6875,68 @@ const timelineTicks = computed(() => {
               </button>
             </div>
 
-            <div class="flex flex-col gap-4">
-              <div class="flex flex-wrap gap-2 items-center">
-                <span
-                  class="text-[9px] font-black text-gray-400 dark:text-gray-500 mr-2 uppercase tracking-widest"
-                  >Search in</span
-                >
-                <button
-                  v-for="(val, field) in searchFields"
-                  :key="field"
-                  type="button"
-                  @click="toggleField(field)"
-                  :class="[
-                    'flex items-center px-3 py-1.5 rounded-xl border text-[11px] font-bold tracking-tight transition-all duration-350 cursor-pointer',
-                    searchFields[field]
-                      ? 'bg-teal-600 border-teal-600 text-white shadow-sm shadow-teal-500/10'
-                      : 'bg-white/50 dark:bg-gray-800/50 border-gray-150 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400',
-                  ]"
-                >
-                  <component :is="getFieldIcon(field)" class="h-3.5 w-3.5 mr-1.5" />
-                  <span
-                    class="capitalize"
-                    >{{ field === "content" ? "Post" : field }}</span
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-gray-100 dark:border-gray-700/50">
+              <!-- Target Fields -->
+              <div class="space-y-2.5">
+                <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">
+                  Search In Fields
+                </label>
+                <div class="flex flex-wrap gap-1.5">
+                  <button
+                    v-for="(val, field) in searchFields"
+                    :key="field"
+                    type="button"
+                    @click="toggleField(field)"
+                    :class="[
+                      'flex items-center px-3 py-1.5 rounded-xl border text-[11px] font-bold tracking-tight transition-all duration-300 cursor-pointer shrink-0',
+                      searchFields[field]
+                        ? 'bg-teal-600 border-teal-600 text-white shadow-sm shadow-teal-500/10'
+                        : 'bg-gray-50 dark:bg-gray-900 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400',
+                    ]"
                   >
-                </button>
+                    <component :is="getFieldIcon(field)" class="h-3.5 w-3.5 mr-1.5" />
+                    <span class="capitalize">{{ field === 'content' ? 'Post' : field }}</span>
+                  </button>
+                </div>
               </div>
 
-              <div class="flex flex-wrap items-center gap-2">
-                <div
-                  class="flex flex-wrap items-center bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-xl border border-gray-150 dark:border-gray-700 backdrop-blur-sm gap-1"
-                >
+              <!-- Time Horizon -->
+              <div class="space-y-2.5">
+                <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">
+                  Time Horizon
+                </label>
+                <div class="flex items-center bg-gray-50 dark:bg-gray-900 px-3 py-2 rounded-2xl border border-gray-200 dark:border-gray-700 gap-2">
                   <input
                     type="datetime-local"
                     v-model="searchStartDate"
-                    class="bg-transparent text-[10px] p-0.5 text-gray-605 dark:text-gray-300 focus:outline-none w-[130px] font-mono font-semibold"
+                    class="bg-transparent text-[11px] text-gray-700 dark:text-gray-200 focus:outline-none w-[125px] sm:w-[135px] font-mono font-semibold"
                   />
-                  <span class="text-[10px] text-gray-400 px-1 font-mono">to</span>
+                  <span class="text-[10px] text-gray-400 font-mono">➜</span>
                   <input
                     type="datetime-local"
                     v-model="searchEndDate"
-                    class="bg-transparent text-[10px] p-0.5 text-gray-650 dark:text-gray-300 focus:outline-none w-[130px] font-mono font-semibold"
+                    class="bg-transparent text-[11px] text-gray-700 dark:text-gray-200 focus:outline-none w-[125px] sm:w-[135px] font-mono font-semibold"
                   />
                 </div>
+              </div>
 
-                <div
-                  class="flex items-center bg-gray-50/80 dark:bg-gray-900/50 p-1.5 rounded-xl border border-gray-150 dark:border-gray-700 backdrop-blur-sm"
-                >
+              <!-- Results Cap -->
+              <div class="space-y-2.5">
+                <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">
+                  Results Cap Limit
+                </label>
+                <div class="flex items-center bg-gray-50 dark:bg-gray-900 p-1 rounded-2xl border border-gray-200 dark:border-gray-700 w-fit">
                   <div class="px-2 text-gray-450 dark:text-gray-550">
                     <ListFilter class="h-3.5 w-3.5" />
                   </div>
-                  <div class="flex space-x-0.5">
+                  <div class="flex space-x-1">
                     <button
                       v-for="limit in limitOptions"
                       :key="limit"
                       type="button"
                       @click="searchLimit = limit"
                       :class="[
-                        'px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer',
+                        'px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer',
                         searchLimit === limit
                           ? 'bg-white dark:bg-gray-700 text-teal-650 dark:text-teal-400 shadow-sm'
                           : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
@@ -7247,12 +7267,20 @@ const timelineTicks = computed(() => {
                   <!-- Header Action Controls -->
                   <div class="flex items-center gap-1.5 sm:self-center">
                     <button
+                      @click.stop="addChannelToListenDirectory(post.data?.owner || (post.key ? post.key.split('.')[0] : 'Channel'), post.key ? post.key.split('.')[0] : '')"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-purple-600 dark:text-purple-400 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
+                      title="Add to Listen Directory"
+                    >
+                      <Radio class="h-3 w-3 text-purple-500" />
+                      <span>Listen</span>
+                    </button>
+                    <button
                       @click.stop="addToWorkspaceFromPost(post)"
                       class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
                       title="Add to Workspace"
                     >
                       <Layout class="h-3 w-3 text-teal-500" />
-                      <span>Add</span>
+                      <span>Workspace</span>
                     </button>
                     <button
                       @click.stop="sharePost(post)"
@@ -7334,10 +7362,21 @@ const timelineTicks = computed(() => {
                       {{ getForwardInfo(post)?.date }}
                     </span>
                   </div>
-                  <div
-                    class="text-gray-650 dark:text-gray-300 text-xs font-semibold whitespace-pre-wrap break-words italic line-clamp-3"
-                  >
-                    {{ getForwardInfo(post)?.text }}
+                  <div class="flex items-start justify-between gap-4">
+                    <div
+                      class="text-gray-650 dark:text-gray-350 text-xs font-semibold whitespace-pre-wrap break-words italic line-clamp-3 flex-1"
+                    >
+                      {{ getForwardInfo(post)?.text }}
+                    </div>
+                    <button
+                      v-if="getForwardInfo(post)?.target"
+                      @click="activeTab = 'explorer'; channelName = getForwardInfo(post).target; searchChannel()"
+                      class="inline-flex items-center gap-1 px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/40 dark:hover:bg-indigo-900/70 text-indigo-600 dark:text-indigo-400 rounded-xl border border-indigo-200/50 dark:border-indigo-850 text-[10px] font-bold transition-all shrink-0 cursor-pointer self-start"
+                      title="View Channel"
+                    >
+                      <span>@{{ getForwardInfo(post).target }}</span>
+                      <ChevronRight class="h-3.5 w-3.5" />
+                    </button>
                   </div>
                 </div>
 
@@ -8423,12 +8462,12 @@ const timelineTicks = computed(() => {
       </div>
 
       <!-- Listen Tab -->
-      <div v-show="activeTab === 'listen'" class="space-y-6 w-full max-w-[98%] mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <div v-show="activeTab === 'listen'" class="space-y-6 w-full max-w-full mx-auto px-0 py-6">
         <!-- Main Panel Split Grid -->
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start w-full">
           
           <!-- Left directory tree widget (col-span-4) -->
-          <div class="lg:col-span-4 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col min-h-[800px]">
+          <div class="lg:col-span-4 xl:col-span-3 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col min-h-[800px] w-full">
             <!-- Watchlist Header -->
             <div class="p-4 border-b border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shrink-0">
               <div>
@@ -8584,7 +8623,7 @@ const timelineTicks = computed(() => {
           </div>
 
           <!-- Right telemetry posts viewer (col-span-8) -->
-          <div class="lg:col-span-8 space-y-6">
+          <div class="lg:col-span-8 xl:col-span-9 space-y-6 w-full">
             
             <!-- Empty state when no node is selected -->
             <div v-if="!selectedListenNode" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center p-8 py-24 text-center w-full min-h-[800px]">
@@ -8789,7 +8828,7 @@ const timelineTicks = computed(() => {
                         class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-700 px-2.5 py-1 rounded-full"
                         title="Add to Workspace Analysis"
                       >
-                        <Layers class="h-3 w-3 mr-1" /> Add
+                        <Layers class="h-3 w-3 mr-1" /> Workspace
                       </button>
                       <button
                         @click.stop="sharePost(post)"
@@ -8866,8 +8905,19 @@ const timelineTicks = computed(() => {
                           <span>Forward</span>
                         </div>
                       </div>
-                      <div class="text-gray-700 dark:text-gray-300 text-xs sm:text-sm whitespace-pre-wrap break-words italic">
-                        {{ getForwardInfo(post)?.text || post.data.forward_url }}
+                      <div class="flex items-start justify-between gap-4">
+                        <div class="text-gray-700 dark:text-gray-300 text-xs sm:text-sm whitespace-pre-wrap break-words italic flex-1">
+                          {{ getForwardInfo(post)?.text || post.data.forward_url }}
+                        </div>
+                        <button
+                          v-if="getForwardInfo(post)?.target"
+                          @click="activeTab = 'explorer'; channelName = getForwardInfo(post).target; searchChannel()"
+                          class="inline-flex items-center gap-1 px-2.5 py-1.5 bg-purple-50 hover:bg-purple-100 dark:bg-purple-900/40 dark:hover:bg-purple-900/70 text-purple-600 dark:text-purple-400 rounded-xl border border-purple-200/50 dark:border-purple-850 text-[10px] font-bold transition-all shrink-0 cursor-pointer self-start"
+                          title="View Channel"
+                        >
+                          <span>@{{ getForwardInfo(post).target }}</span>
+                          <ChevronRight class="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     </div>
 
@@ -8943,11 +8993,11 @@ const timelineTicks = computed(() => {
                       </div>
                       <div class="p-4 flex-1 min-w-0">
                         <div class="text-[10px] font-black uppercase tracking-widest text-teal-500 truncate mb-1">
-                          {{ post.data.linkPreview.site_name || 'Embed Webpage' }}
+                          {{ post.data.linkPreview.siteName || 'Embed Webpage' }}
                         </div>
                         <a
-                          v-if="post.data.linkPreview.url"
-                          :href="post.data.linkPreview.url"
+                          v-if="post.data.linkPreview.href"
+                          :href="post.data.linkPreview.href"
                           target="_blank"
                           class="text-xs sm:text-sm font-bold text-gray-950 dark:text-gray-100 hover:text-blue-500 hover:underline transition-colors block line-clamp-1 mb-1"
                         >
@@ -9666,7 +9716,7 @@ const timelineTicks = computed(() => {
       </div>
 
        <!-- Profile Tab -->
-      <div v-show="activeTab === 'profile'" class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 pt-1 pb-24 space-y-10">
+      <div v-show="activeTab === 'profile'" class="w-full max-w-full mx-auto px-0 pt-1 pb-24 space-y-10">
         
         <!-- Header Banner Section -->
         <div class="relative bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm overflow-hidden mb-2">
