@@ -63,6 +63,10 @@ import {
   SlidersHorizontal,
   ChevronDown,
   ChevronRight,
+  ZoomIn,
+  ZoomOut,
+  RotateCcw,
+  Network,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -3130,6 +3134,11 @@ onUnmounted(() => {
   if (pendingJobsTimer) clearInterval(pendingJobsTimer);
   if (pollingTimer) clearInterval(pollingTimer);
   if (listenRefreshInterval) clearInterval(listenRefreshInterval);
+  if (activeLoopAnimId) cancelAnimationFrame(activeLoopAnimId);
+  if (graphResizeObserver) {
+    graphResizeObserver.disconnect();
+    graphResizeObserver = null;
+  }
 });
 const isProfileVisible = ref(true);
 
@@ -3138,6 +3147,52 @@ const channelName = ref("");
 const isInputFocused = ref(false);
 const currentChannelName = ref("");
 const forwardsChannels = ref<string[]>([]);
+const ftoChannels = ref<string[]>([]);
+
+// Graph Widget Types & State
+interface GraphNode {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  r: number;
+  color: string;
+  isCenter: boolean;
+  avatarImg?: HTMLImageElement | null;
+  avatarLoaded?: boolean;
+}
+
+interface GraphEdge {
+  source: string;
+  target: string;
+}
+
+const graphNodes = ref<GraphNode[]>([]);
+const graphEdges = ref<GraphEdge[]>([]);
+const graphCanvas = ref<HTMLCanvasElement | null>(null);
+const graphCanvasContainer = ref<HTMLDivElement | null>(null);
+const graphCanvasWidth = ref(300);
+const graphCanvasHeight = ref(300);
+
+const graphZoomLevel = ref(1);
+const graphPanOffset = ref({ x: 0, y: 0 });
+const draggedNodeId = ref<string | null>(null);
+const hoveredNodeId = ref<string | null>(null);
+const isPanningGraph = ref(false);
+const lastPanMousePos = ref({ x: 0, y: 0 });
+const graphAlpha = ref(1.0);
+
+const getInitials = (title: string): string => {
+  if (!title) return "?";
+  const cleaned = title.replace(/^@/, "").trim();
+  const parts = cleaned.split(/[\s_\-]+/);
+  if (parts.length > 1) {
+    return (parts[0][0] + parts[1][0]).toUpperCase();
+  }
+  return cleaned.slice(0, 2).toUpperCase();
+};
 const userProfile = ref<any>(null);
 const loadingUserProfile = ref(false);
 const savedProfiles = ref<{channel: string[], user: string[], person: string[]}>({ channel: [], user: [], person: [] });
@@ -3203,6 +3258,44 @@ const fetchChannelProfile = async (channel: string) => {
 
 watch(currentChannelName, (newChannel) => {
     if (newChannel) fetchChannelProfile(newChannel);
+});
+
+watch(graphCanvasContainer, (containerEl) => {
+  if (graphResizeObserver) {
+    graphResizeObserver.disconnect();
+    graphResizeObserver = null;
+  }
+  
+  if (containerEl) {
+    graphResizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const width = entry.contentRect.width || 300;
+        graphCanvasWidth.value = width;
+        graphCanvasHeight.value = 300;
+        
+        if (graphCanvas.value) {
+          const dpr = window.devicePixelRatio || 1;
+          graphCanvas.value.width = width * dpr;
+          graphCanvas.value.height = 300 * dpr;
+          graphCanvas.value.style.width = `${width}px`;
+          graphCanvas.value.style.height = `300px`;
+          
+          const ctx = graphCanvas.value.getContext("2d");
+          if (ctx) {
+            ctx.scale(dpr, dpr);
+          }
+        }
+      }
+    });
+    graphResizeObserver.observe(containerEl);
+    initRelationsGraph();
+  }
+});
+
+watch([currentChannelName, forwardsChannels, ftoChannels], () => {
+  if (graphCanvasContainer.value) {
+    initRelationsGraph();
+  }
 });
 
 const openPostModal = (post: any) => {
@@ -4189,6 +4282,589 @@ const viewSavedGraphRemotely = async (name: string) => {
   } 
 }
 
+const draggedNodeMoved = ref(false);
+let activeLoopAnimId: number | null = null;
+let graphResizeObserver: ResizeObserver | null = null;
+
+const initRelationsGraph = () => {
+  const centerId = currentChannelName.value.trim().replace(/^@/, "") || 'center';
+  const width = graphCanvasWidth.value || 300;
+  const height = graphCanvasHeight.value || 300;
+  
+  const nodes: GraphNode[] = [];
+  const edges: GraphEdge[] = [];
+  
+  // Center node
+  const centerNode: GraphNode = {
+    id: centerId,
+    name: metadata.value?.title || metadata.value?.name || centerId,
+    x: width / 2,
+    y: height / 2,
+    vx: 0,
+    vy: 0,
+    r: 28,
+    color: '#0d9488',
+    isCenter: true,
+    avatarImg: null,
+    avatarLoaded: false
+  };
+  
+  const centerAvatar = new Image();
+  centerAvatar.crossOrigin = "anonymous";
+  centerAvatar.src = `https://i.gogingko.net/api/v1/v/telegram-profile/${centerId}`;
+  centerAvatar.onload = () => {
+    centerNode.avatarImg = centerAvatar;
+    centerNode.avatarLoaded = true;
+  };
+  centerAvatar.onerror = () => {
+    centerNode.avatarLoaded = false;
+  };
+  nodes.push(centerNode);
+  
+  // Neighbors
+  const uniqueNeighborsMap = new Map<string, { incoming: boolean; outgoing: boolean }>();
+
+  if (forwardsChannels.value && forwardsChannels.value.length > 0) {
+    forwardsChannels.value.forEach(source => {
+      const sourceId = source.trim().replace(/^@/, "");
+      if (!sourceId || sourceId === centerId) return;
+      if (!uniqueNeighborsMap.has(sourceId)) {
+        uniqueNeighborsMap.set(sourceId, { incoming: true, outgoing: false });
+      } else {
+        uniqueNeighborsMap.get(sourceId)!.incoming = true;
+      }
+    });
+  }
+
+  if (ftoChannels.value && ftoChannels.value.length > 0) {
+    ftoChannels.value.forEach(target => {
+      const targetId = target.trim().replace(/^@/, "");
+      if (!targetId || targetId === centerId) return;
+      if (!uniqueNeighborsMap.has(targetId)) {
+        uniqueNeighborsMap.set(targetId, { incoming: false, outgoing: true });
+      } else {
+        uniqueNeighborsMap.get(targetId)!.outgoing = true;
+      }
+    });
+  }
+
+  const neighborList = Array.from(uniqueNeighborsMap.entries());
+  if (neighborList.length > 0) {
+    neighborList.forEach(([neighborId, relations], index) => {
+      const angle = (index / neighborList.length) * Math.PI * 2;
+      const dist = 110 + Math.random() * 15;
+      
+      let nodeColor = '#4f46e5'; // Indigo for incoming
+      if (relations.incoming && relations.outgoing) {
+        nodeColor = '#8b5cf6'; // Violet for mutual
+      } else if (relations.outgoing) {
+        nodeColor = '#ec4899'; // Pink for outgoing
+      }
+      
+      const neighborNode: GraphNode = {
+        id: neighborId,
+        name: '@' + neighborId,
+        x: width / 2 + Math.cos(angle) * dist,
+        y: height / 2 + Math.sin(angle) * dist,
+        vx: 0,
+        vy: 0,
+        r: 20,
+        color: nodeColor,
+        isCenter: false,
+        avatarImg: null,
+        avatarLoaded: false
+      };
+      
+      const neighborAvatar = new Image();
+      neighborAvatar.crossOrigin = "anonymous";
+      neighborAvatar.src = `https://i.gogingko.net/api/v1/v/telegram-profile/${neighborId}`;
+      neighborAvatar.onload = () => {
+        neighborNode.avatarImg = neighborAvatar;
+        neighborNode.avatarLoaded = true;
+      };
+      neighborAvatar.onerror = () => {
+        neighborNode.avatarLoaded = false;
+      };
+      
+      nodes.push(neighborNode);
+      if (relations.incoming) {
+        edges.push({
+          source: neighborId,
+          target: centerId
+        });
+      }
+      if (relations.outgoing) {
+        edges.push({
+          source: centerId,
+          target: neighborId
+        });
+      }
+    });
+  }
+  
+  graphNodes.value = nodes;
+  graphEdges.value = edges;
+  
+  // Reset zoom & pan on channel change
+  graphZoomLevel.value = 1;
+  graphPanOffset.value = { x: 0, y: 0 };
+  
+  // Warm up simulation
+  for (let i = 0; i < 40; i++) {
+    updateRelationsGraphPhysics();
+  }
+  
+  graphAlpha.value = 1.0;
+  startRelationsCanvasLoop();
+};
+
+const updateRelationsGraphPhysics = () => {
+  const nodes = graphNodes.value;
+  const edges = graphEdges.value;
+  if (nodes.length === 0) return;
+  
+  const width = graphCanvasWidth.value;
+  const height = graphCanvasHeight.value;
+  const centerX = width / 2;
+  const centerY = height / 2;
+
+  // Decay or keep alpha high depending on drag
+  if (draggedNodeId.value) {
+    graphAlpha.value = 1.0;
+  } else if (graphAlpha.value > 0.005) {
+    graphAlpha.value *= 0.95; // 5% decay rate per frame
+  } else {
+    graphAlpha.value = 0;
+  }
+
+  // If fully cool and steady, damp the velocities completely and early exit
+  if (graphAlpha.value === 0) {
+    let allStopped = true;
+    for (const node of nodes) {
+      if (node.id === draggedNodeId.value) continue;
+      if (Math.abs(node.vx) > 0.01 || Math.abs(node.vy) > 0.01) {
+        node.vx *= 0.8;
+        node.vy *= 0.8;
+        node.x += node.vx;
+        node.y += node.vy;
+        allStopped = false;
+      } else {
+        node.vx = 0;
+        node.vy = 0;
+      }
+    }
+    if (allStopped) return;
+  }
+  
+  // 1. Repulsion force
+  const repulsionK = 550 * graphAlpha.value;
+  for (let i = 0; i < nodes.length; i++) {
+    const nodeA = nodes[i];
+    for (let j = i + 1; j < nodes.length; j++) {
+      const nodeB = nodes[j];
+      const dx = nodeB.x - nodeA.x;
+      const dy = nodeB.y - nodeA.y;
+      const distSq = dx * dx + dy * dy || 0.01;
+      const dist = Math.sqrt(distSq);
+      
+      const minDist = nodeA.r + nodeB.r + 35;
+      if (dist < minDist) {
+        const force = repulsionK / (distSq + 1);
+        const fx = (dx / dist) * force * 12;
+        const fy = (dy / dist) * force * 12;
+        
+        if (!nodeA.isCenter && nodeA.id !== draggedNodeId.value) {
+          nodeA.vx -= fx;
+          nodeA.vy -= fy;
+        }
+        if (!nodeB.isCenter && nodeB.id !== draggedNodeId.value) {
+          nodeB.vx += fx;
+          nodeB.vy += fy;
+        }
+      }
+    }
+  }
+  
+  // 2. Spring pull along edges
+  const springK = 0.045 * graphAlpha.value;
+  const restLength = 95;
+  for (const edge of edges) {
+    const sourceNode = nodes.find(n => n.id === edge.source);
+    const targetNode = nodes.find(n => n.id === edge.target);
+    if (sourceNode && targetNode) {
+      const dx = targetNode.x - sourceNode.x;
+      const dy = targetNode.y - sourceNode.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      const force = springK * (dist - restLength);
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+      
+      if (!sourceNode.isCenter && sourceNode.id !== draggedNodeId.value) {
+        sourceNode.vx += fx;
+        sourceNode.vy += fy;
+      }
+      if (!targetNode.isCenter && targetNode.id !== draggedNodeId.value) {
+        targetNode.vx -= fx;
+        targetNode.vy -= fy;
+      }
+    }
+  }
+  
+  // 3. Central gravitational pull
+  const gravityK = 0.025 * graphAlpha.value;
+  for (const node of nodes) {
+    if (node.isCenter) {
+      if (node.id !== draggedNodeId.value) {
+        node.x += (centerX - node.x) * 0.08;
+        node.y += (centerY - node.y) * 0.08;
+      }
+    } else {
+      if (node.id !== draggedNodeId.value) {
+        const dx = centerX - node.x;
+        const dy = centerY - node.y;
+        node.vx += dx * gravityK;
+        node.vy += dy * gravityK;
+      }
+    }
+  }
+  
+  // 4. Update coordinates with dampening
+  const friction = 0.83;
+  for (const node of nodes) {
+    if (node.id === draggedNodeId.value) continue;
+    node.vx *= friction;
+    node.vy *= friction;
+    node.x += node.vx;
+    node.y += node.vy;
+    
+    const border = node.r + 5;
+    if (node.x < border) { node.x = border; node.vx = 0; }
+    if (node.x > width - border) { node.x = width - border; node.vx = 0; }
+    if (node.y < border) { node.y = border; node.vy = 0; }
+    if (node.y > height - border) { node.y = height - border; node.vy = 0; }
+  }
+};
+
+const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
+  const width = graphCanvasWidth.value;
+  const height = graphCanvasHeight.value;
+  
+  const dpr = window.devicePixelRatio || 1;
+  ctx.save();
+  ctx.clearRect(0, 0, width, height);
+  
+  // Subtle grids
+  const spacing = 32;
+  ctx.save();
+  ctx.strokeStyle = isDark.value ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.04)';
+  ctx.lineWidth = 1;
+  
+  const startX = (graphPanOffset.value.x % (spacing * graphZoomLevel.value));
+  const startY = (graphPanOffset.value.y % (spacing * graphZoomLevel.value));
+  
+  ctx.beginPath();
+  for (let x = startX; x < width; x += spacing * graphZoomLevel.value) {
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+  }
+  for (let y = startY; y < height; y += spacing * graphZoomLevel.value) {
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+  
+  // Translate & Scale Graph Viewport
+  ctx.translate(graphPanOffset.value.x, graphPanOffset.value.y);
+  ctx.scale(graphZoomLevel.value, graphZoomLevel.value);
+  
+  // Edges drawing
+  const pulseProgress = (Date.now() / 2000) % 1.0;
+  for (const edge of graphEdges.value) {
+    const sourceNode = graphNodes.value.find(n => n.id === edge.source);
+    const targetNode = graphNodes.value.find(n => n.id === edge.target);
+    if (sourceNode && targetNode) {
+      const dx = targetNode.x - sourceNode.x;
+      const dy = targetNode.y - sourceNode.y;
+      const dist = Math.hypot(dx, dy) || 0.01;
+      
+      const startX = sourceNode.x + (dx / dist) * sourceNode.r;
+      const startY = sourceNode.y + (dy / dist) * sourceNode.r;
+      const endX = targetNode.x - (dx / dist) * targetNode.r;
+      const endY = targetNode.y - (dy / dist) * targetNode.r;
+      
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      
+      const isRelatedHovered = hoveredNodeId.value === sourceNode.id || hoveredNodeId.value === targetNode.id;
+      if (isRelatedHovered) {
+        ctx.strokeStyle = isDark.value ? 'rgba(45, 212, 191, 0.65)' : 'rgba(13, 148, 136, 0.5)';
+        ctx.lineWidth = 2.5;
+      } else {
+        ctx.strokeStyle = isDark.value ? 'rgba(129, 140, 248, 0.25)' : 'rgba(79, 70, 229, 0.15)';
+        ctx.lineWidth = 1.5;
+      }
+      ctx.stroke();
+      ctx.restore();
+      
+      // Arrow head at target node border
+      const arrowSize = 6;
+      const angle = Math.atan2(dy, dx);
+      ctx.save();
+      ctx.fillStyle = isRelatedHovered ? '#0d9488' : (isDark.value ? '#818cf8' : '#4f46e5');
+      ctx.beginPath();
+      ctx.moveTo(endX, endY);
+      ctx.lineTo(endX - arrowSize * Math.cos(angle - Math.PI / 6), endY - arrowSize * Math.sin(angle - Math.PI / 6));
+      ctx.lineTo(endX - arrowSize * Math.cos(angle + Math.PI / 6), endY - arrowSize * Math.sin(angle + Math.PI / 6));
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+      
+      // Animated pulse signals
+      const px = startX + (endX - startX) * pulseProgress;
+      const py = startY + (endY - startY) * pulseProgress;
+      ctx.save();
+      ctx.beginPath();
+      ctx.fillStyle = isDark.value ? '#38bdf8' : '#0d9488';
+      ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+  
+  // Nodes drawing
+  for (const node of graphNodes.value) {
+    const isHovered = hoveredNodeId.value === node.id;
+    const isDragged = draggedNodeId.value === node.id;
+    
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
+    
+    if (isHovered || isDragged) {
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = node.isCenter ? '#0d9488' : node.color;
+    } else {
+      ctx.shadowBlur = 4;
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.08)';
+    }
+    
+    ctx.fillStyle = isDark.value ? '#111827' : '#ffffff';
+    ctx.fill();
+    ctx.restore();
+    
+    if (node.avatarLoaded && node.avatarImg) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.drawImage(node.avatarImg, node.x - node.r, node.y - node.r, node.r * 2, node.r * 2);
+      ctx.restore();
+    } else {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
+      const grad = ctx.createLinearGradient(node.x - node.r, node.y - node.r, node.x + node.r, node.y + node.r);
+      if (node.isCenter) {
+        grad.addColorStop(0, '#0d9488');
+        grad.addColorStop(1, '#0f766e');
+      } else {
+        if (node.color === '#ec4899') { // Pink / Outgoing
+          grad.addColorStop(0, '#f472b6');
+          grad.addColorStop(1, '#db2777');
+        } else if (node.color === '#8b5cf6') { // Violet / Mutual
+          grad.addColorStop(0, '#a78bfa');
+          grad.addColorStop(1, '#6d28d9');
+        } else { // Indigo / Incoming
+          grad.addColorStop(0, '#6366f1');
+          grad.addColorStop(1, '#4338ca');
+        }
+      }
+      ctx.fillStyle = grad;
+      ctx.fill();
+      
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `bold ${Math.floor(node.r * 0.7)}px Inter, system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(getInitials(node.name), node.x, node.y);
+      ctx.restore();
+    }
+    
+    // Bounds/Ring border
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
+    if (node.isCenter) {
+      ctx.strokeStyle = '#0d9488';
+      ctx.lineWidth = isHovered || isDragged ? 3 : 2;
+    } else {
+      ctx.strokeStyle = isHovered || isDragged ? node.color : (isDark.value ? '#4b5563' : '#e5e7eb');
+      ctx.lineWidth = isHovered || isDragged ? 2.5 : 1.5;
+    }
+    ctx.stroke();
+    ctx.restore();
+    
+    // Node Name/Label below circle
+    ctx.save();
+    ctx.shadowBlur = 4;
+    ctx.shadowColor = isDark.value ? 'rgba(0, 0, 0, 0.95)' : 'rgba(255, 255, 255, 0.95)';
+    ctx.fillStyle = isDark.value ? '#f3f4f6' : '#1f2937';
+    ctx.font = node.isCenter ? "bold 10px Inter, sans-serif" : "600 9px Inter, sans-serif";
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    
+    let displayName = node.name;
+    if (displayName.length > 15) {
+      displayName = displayName.slice(0, 13) + '...';
+    }
+    ctx.fillText(displayName, node.x, node.y + node.r + 5);
+    ctx.restore();
+  }
+  
+  ctx.restore();
+};
+
+const startRelationsCanvasLoop = () => {
+  if (activeLoopAnimId) {
+    cancelAnimationFrame(activeLoopAnimId);
+  }
+  
+  const tick = () => {
+    updateRelationsGraphPhysics();
+    if (graphCanvas.value) {
+      const ctx = graphCanvas.value.getContext("2d");
+      if (ctx) {
+        drawRelationsGraph(ctx);
+      }
+    }
+    activeLoopAnimId = requestAnimationFrame(tick);
+  };
+  activeLoopAnimId = requestAnimationFrame(tick);
+};
+
+const getRelationsGraphCoordinates = (e: MouseEvent) => {
+  if (!graphCanvas.value) return { x: 0, y: 0 };
+  const rect = graphCanvas.value.getBoundingClientRect();
+  const screenX = e.clientX - rect.left;
+  const screenY = e.clientY - rect.top;
+  const x = (screenX - graphPanOffset.value.x) / graphZoomLevel.value;
+  const y = (screenY - graphPanOffset.value.y) / graphZoomLevel.value;
+  return { x, y };
+};
+
+const onCanvasMouseDown = (e: MouseEvent) => {
+  const coords = getRelationsGraphCoordinates(e);
+  let found: GraphNode | null = null;
+  for (const node of graphNodes.value) {
+    const dx = node.x - coords.x;
+    const dy = node.y - coords.y;
+    if (Math.hypot(dx, dy) <= node.r) {
+      found = node;
+      break;
+    }
+  }
+  
+  if (found) {
+    draggedNodeId.value = found.id;
+    draggedNodeMoved.value = false;
+  } else {
+    isPanningGraph.value = true;
+    lastPanMousePos.value = { x: e.clientX, y: e.clientY };
+  }
+};
+
+const onCanvasMouseMove = (e: MouseEvent) => {
+  const coords = getRelationsGraphCoordinates(e);
+  if (draggedNodeId.value) {
+    const node = graphNodes.value.find(n => n.id === draggedNodeId.value);
+    if (node) {
+      node.x = coords.x;
+      node.y = coords.y;
+      node.vx = 0;
+      node.vy = 0;
+      draggedNodeMoved.value = true;
+    }
+  } else if (isPanningGraph.value) {
+    const dx = e.clientX - lastPanMousePos.value.x;
+    const dy = e.clientY - lastPanMousePos.value.y;
+    graphPanOffset.value.x += dx;
+    graphPanOffset.value.y += dy;
+    lastPanMousePos.value = { x: e.clientX, y: e.clientY };
+  }
+  
+  // Set pointer cursor on hover
+  let hitNode = false;
+  for (const node of graphNodes.value) {
+    const dx = node.x - coords.x;
+    const dy = node.y - coords.y;
+    if (Math.hypot(dx, dy) <= node.r) {
+      hoveredNodeId.value = node.id;
+      hitNode = true;
+      break;
+    }
+  }
+  
+  if (!hitNode) {
+    hoveredNodeId.value = null;
+  }
+  
+  if (graphCanvas.value) {
+    if (hitNode) {
+      graphCanvas.value.style.cursor = 'pointer';
+    } else {
+      graphCanvas.value.style.cursor = isPanningGraph.value ? 'grabbing' : 'grab';
+    }
+  }
+};
+
+const onCanvasMouseUp = (e: MouseEvent) => {
+  if (draggedNodeId.value) {
+    if (!draggedNodeMoved.value) {
+      const node = graphNodes.value.find(n => n.id === draggedNodeId.value);
+      if (node && !node.isCenter) {
+        channelName.value = node.id;
+        searchChannel();
+      }
+    }
+    draggedNodeId.value = null;
+  }
+  isPanningGraph.value = false;
+};
+
+const onCanvasWheel = (e: WheelEvent) => {
+  e.preventDefault();
+  if (!graphCanvas.value) return;
+  const rect = graphCanvas.value.getBoundingClientRect();
+  const mouseX = e.clientX - rect.left;
+  const mouseY = e.clientY - rect.top;
+  
+  const factor = e.deltaY < 0 ? 1.08 : 0.92;
+  const nextZoom = Math.max(0.4, Math.min(3.5, graphZoomLevel.value * factor));
+  
+  const graphMouseX = (mouseX - graphPanOffset.value.x) / graphZoomLevel.value;
+  const graphMouseY = (mouseY - graphPanOffset.value.y) / graphZoomLevel.value;
+  
+  graphZoomLevel.value = nextZoom;
+  graphPanOffset.value.x = mouseX - graphMouseX * nextZoom;
+  graphPanOffset.value.y = mouseY - graphMouseY * nextZoom;
+};
+
+const resetGraphView = () => {
+  graphZoomLevel.value = 1;
+  graphPanOffset.value = { x: 0, y: 0 };
+};
+
+const onGraphZoomIn = () => {
+  graphZoomLevel.value = Math.min(3.5, graphZoomLevel.value * 1.25);
+};
+
+const onGraphZoomOut = () => {
+  graphZoomLevel.value = Math.max(0.4, graphZoomLevel.value * 0.8);
+};
+
 const searchChannel = async () => {
   if (!channelName.value.trim()) return;
 
@@ -4209,6 +4885,7 @@ const searchChannel = async () => {
   metadata.value = null;
   posts.value = [];
   forwardsChannels.value = [];
+  ftoChannels.value = [];
   hasMorePosts.value = true;
   suggestedChannels.value = [];
   
@@ -4279,6 +4956,7 @@ const searchChannel = async () => {
       if (profileRes.ok) {
         const profileData = await profileRes.json();
         forwardsChannels.value = profileData.forwards || [];
+        ftoChannels.value = profileData.fto || [];
       }
     } catch (e) {
       console.error("Failed to fetch forwards", e);
@@ -5855,6 +6533,70 @@ const timelineTicks = computed(() => {
               <p v-else-if="!isSearchingX" class="text-[11px] text-gray-400 dark:text-gray-500 italic text-center py-2">
                 No results. Click an author name to search on X.
               </p>
+            </div>
+
+            <!-- Relations Graph Widget -->
+            <div
+              v-show="isProfileVisible"
+              class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 sticky top-20 shadow-sm shadow-indigo-100/5 dark:shadow-none flex flex-col group/chart transition-all"
+            >
+              <div class="flex items-center justify-between mb-4">
+                <div class="flex items-center gap-2">
+                  <div class="p-1.5 bg-teal-50 dark:bg-teal-950/40 rounded-lg">
+                    <Network class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                  </div>
+                  <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                    Relations Graph
+                  </h3>
+                </div>
+                
+                <div class="flex items-center gap-1">
+                  <button
+                    @click="onGraphZoomIn"
+                    class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                    title="Zoom In"
+                  >
+                    <ZoomIn class="h-3.5 w-3.5 animate-pulse" />
+                  </button>
+                  <button
+                    @click="onGraphZoomOut"
+                    class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                    title="Zoom Out"
+                  >
+                    <ZoomOut class="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    @click="resetGraphView"
+                    class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                    title="Reset View"
+                  >
+                    <RotateCcw class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+              
+              <div
+                ref="graphCanvasContainer"
+                class="relative h-[300px] w-full bg-gray-50/50 dark:bg-gray-950/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/80 overflow-hidden"
+              >
+                <canvas
+                  ref="graphCanvas"
+                  @mousedown="onCanvasMouseDown"
+                  @mousemove="onCanvasMouseMove"
+                  @mouseup="onCanvasMouseUp"
+                  @wheel.prevent="onCanvasWheel"
+                  class="block w-full h-full"
+                ></canvas>
+                
+                <div class="absolute bottom-2.5 left-3 right-3 flex flex-wrap items-center justify-between gap-1.5 text-[9px] font-medium text-gray-400 dark:text-gray-500 pointer-events-none select-none">
+                  <div>Drag nodes • Scroll / Drag background to Zoom & Pan</div>
+                  <div class="flex items-center gap-2">
+                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>Inbound</span>
+                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-pink-500"></span>Outbound</span>
+                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>Mutual</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
