@@ -1171,11 +1171,32 @@ const confirmDeleteListenItem = () => {
   itemToDeleteName.value = "";
 };
 
-const getVisibleNodes = (nodes: ListenItem[], depth = 0, parentId: string | null = null): any[] => {
+const listenSearchQuery = ref("");
+
+const nodeMatchesSearch = (node: ListenItem, term: string): boolean => {
+  if (!term) return true;
+  const lowerTerm = term.toLowerCase();
+  
+  const selfMatches = (node.name && node.name.toLowerCase().includes(lowerTerm)) ||
+                      (node.argument && node.argument.toLowerCase().includes(lowerTerm));
+  
+  if (selfMatches) return true;
+  
+  if (node.isFolder && node.children) {
+    return node.children.some(child => nodeMatchesSearch(child, term));
+  }
+  
+  return false;
+};
+
+const getFilteredVisibleNodes = (nodes: ListenItem[], term: string, depth = 0, parentId: string | null = null): any[] => {
   const list: any[] = [];
   for (const node of nodes) {
+    if (term && !nodeMatchesSearch(node, term)) {
+      continue;
+    }
     const hasChildren = !!(node.isFolder && node.children && node.children.length > 0);
-    const isExpanded = !!expandedFolders.value[node.id];
+    const isExpanded = term ? true : !!expandedFolders.value[node.id];
     
     list.push({
       item: node,
@@ -1186,14 +1207,34 @@ const getVisibleNodes = (nodes: ListenItem[], depth = 0, parentId: string | null
     });
     
     if (node.isFolder && isExpanded && node.children) {
-      list.push(...getVisibleNodes(node.children, depth + 1, node.id));
+      list.push(...getFilteredVisibleNodes(node.children, term, depth + 1, node.id));
     }
   }
   return list;
 };
 
+const getFolderItemsCount = (item: ListenItem): number => {
+  if (!item.isFolder) return 0;
+  let count = 0;
+  const countLeaves = (node: ListenItem) => {
+    if (!node.isFolder) {
+      count++;
+    } else if (node.children) {
+      for (const child of node.children) {
+        countLeaves(child);
+      }
+    }
+  };
+  if (item.children) {
+    for (const child of item.children) {
+      countLeaves(child);
+    }
+  }
+  return count;
+};
+
 const visibleDirectoryNodes = computed(() => {
-  return getVisibleNodes(listenDirectory.value);
+  return getFilteredVisibleNodes(listenDirectory.value, listenSearchQuery.value.trim());
 });
 
 // Drag and drop states for Listen Directory items
@@ -4151,6 +4192,13 @@ const viewSavedGraphRemotely = async (name: string) => {
 const searchChannel = async () => {
   if (!channelName.value.trim()) return;
 
+  // Reset explorer tab scroll position and scroll to top
+  tabScrollPositions.value['explorer'] = 0;
+  window.scrollTo(0, 0);
+  nextTick(() => {
+    window.scrollTo(0, 0);
+  });
+
   if (explorerTab.value) {
     explorerMinHeight.value = `${explorerTab.value.clientHeight}px`;
   }
@@ -5134,7 +5182,7 @@ const timelineTicks = computed(() => {
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
             ]"
           >
-            <Layers
+            <Users
               :class="[
                 'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
                 activeTab === 'profile' ? 'scale-110' : '',
@@ -8497,6 +8545,27 @@ const timelineTicks = computed(() => {
               </div>
             </div>
 
+            <!-- Search Bar -->
+            <div class="px-4 py-3 border-b border-gray-100 dark:border-gray-700/60 bg-gray-50/30 dark:bg-gray-800/30 shrink-0">
+              <div class="relative flex items-center group">
+                <Search class="absolute left-3.5 h-4 w-4 text-gray-400 dark:text-gray-500 group-focus-within:text-teal-500 transition-colors pointer-events-none z-10" />
+                <input
+                  type="text"
+                  v-model="listenSearchQuery"
+                  placeholder="Search label, channel, keyword..."
+                  class="w-full pl-10 pr-8 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-teal-500/50 focus:border-teal-500 text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500 transition-all shadow-sm"
+                />
+                <button
+                  v-if="listenSearchQuery"
+                  @click="listenSearchQuery = ''"
+                  class="absolute right-2.5 p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors cursor-pointer"
+                  title="Clear search"
+                >
+                  <X class="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+
             <!-- Scrollable Directories Stream -->
             <div class="p-3 overflow-y-auto flex-1 space-y-1 select-none max-h-[750px]">
               <div v-if="visibleDirectoryNodes.length === 0" class="flex flex-col items-center justify-center py-16 text-center text-gray-400 dark:text-gray-500">
@@ -8577,6 +8646,14 @@ const timelineTicks = computed(() => {
 
                   <span class="truncate font-semibold tracking-tight text-xs sm:text-sm">
                     {{ node.item.name }}
+                  </span>
+
+                  <span 
+                    v-if="node.item.isFolder"
+                    class="ml-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-extrabold tracking-normal bg-gray-100 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400 border border-gray-200/50 dark:border-gray-700/40 flex items-center justify-center shrink-0"
+                    title="Total items inside this folder and subfolders"
+                  >
+                    {{ getFolderItemsCount(node.item) }}
                   </span>
                 </div>
 
@@ -9556,25 +9633,29 @@ const timelineTicks = computed(() => {
 
         <div
           v-if="autoCells.length === 0 && !isAutoFinding"
-          class="text-center py-20 sm:py-24 max-w-lg mx-auto bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-8 shadow-sm my-8"
+          class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10"
         >
           <div
-            class="inline-flex items-center justify-center w-20 h-20 rounded-3xl bg-teal-50 dark:bg-teal-950/40 mb-6 shadow-inner ring-4 ring-teal-500/10 border-2 border-teal-100 dark:border-teal-850"
+            class="text-center py-20 sm:py-24 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-8 shadow-sm mb-8"
           >
-            <BotMessageSquare
-              class="h-8 w-8 text-teal-600 dark:text-teal-400 animate-pulse"
-            />
+            <div
+              class="inline-flex items-center justify-center w-20 h-20 rounded-3xl bg-teal-50 dark:bg-teal-950/40 mb-6 shadow-inner ring-4 ring-teal-500/10 border-2 border-teal-100 dark:border-teal-850"
+            >
+              <BotMessageSquare
+                class="h-8 w-8 text-teal-600 dark:text-teal-400 animate-pulse"
+              />
+            </div>
+            <h2
+              class="text-xl font-extrabold tracking-tight text-gray-900 dark:text-white mb-2"
+            >
+              Auto Sequence Finding
+            </h2>
+            <p
+              class="text-gray-400 dark:text-gray-500 text-xs font-semibold leading-relaxed max-w-lg mx-auto"
+            >
+              Enter a channel or user handle above to automatically trace, analyze, and verify continuous posts consecutively.
+            </p>
           </div>
-          <h2
-            class="text-xl font-extrabold tracking-tight text-gray-900 dark:text-white mb-2"
-          >
-            Auto Sequence Finding
-          </h2>
-          <p
-            class="text-gray-400 dark:text-gray-500 text-xs font-semibold leading-relaxed"
-          >
-            Enter a channel or user handle above to automatically trace, analyze, and verify continuous posts consecutively.
-          </p>
         </div>
 
         <div
