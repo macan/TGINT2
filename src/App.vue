@@ -3128,6 +3128,8 @@ onMounted(() => {
   loadListenDirectory();
 });
 
+let graphIntersectionObserver: IntersectionObserver | null = null;
+
 onUnmounted(() => {
   window.removeEventListener("scroll", handleScroll);
   if (counterTimer) clearInterval(counterTimer);
@@ -3138,6 +3140,10 @@ onUnmounted(() => {
   if (graphResizeObserver) {
     graphResizeObserver.disconnect();
     graphResizeObserver = null;
+  }
+  if (graphIntersectionObserver) {
+    graphIntersectionObserver.disconnect();
+    graphIntersectionObserver = null;
   }
 });
 const isProfileVisible = ref(true);
@@ -3183,6 +3189,7 @@ const hoveredNodeId = ref<string | null>(null);
 const isPanningGraph = ref(false);
 const lastPanMousePos = ref({ x: 0, y: 0 });
 const graphAlpha = ref(1.0);
+const isGraphVisible = ref(false);
 
 const getInitials = (title: string): string => {
   if (!title) return "?";
@@ -3265,6 +3272,10 @@ watch(graphCanvasContainer, (containerEl) => {
     graphResizeObserver.disconnect();
     graphResizeObserver = null;
   }
+  if (graphIntersectionObserver) {
+    graphIntersectionObserver.disconnect();
+    graphIntersectionObserver = null;
+  }
   
   if (containerEl) {
     graphResizeObserver = new ResizeObserver((entries) => {
@@ -3288,7 +3299,24 @@ watch(graphCanvasContainer, (containerEl) => {
       }
     });
     graphResizeObserver.observe(containerEl);
+
+    graphIntersectionObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        isGraphVisible.value = entry.isIntersecting;
+        if (entry.isIntersecting) {
+          startRelationsCanvasLoop();
+        }
+      }
+    }, { threshold: 0.1 });
+    graphIntersectionObserver.observe(containerEl);
+
     initRelationsGraph();
+  }
+});
+
+watch(isProfileVisible, (visible) => {
+  if (visible) {
+    startRelationsCanvasLoop();
   }
 });
 
@@ -4593,7 +4621,7 @@ const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
       const endX = targetNode.x - (dx / dist) * targetNode.r;
       const endY = targetNode.y - (dy / dist) * targetNode.r;
       
-      ctx.save();
+      // Edge Line
       ctx.beginPath();
       ctx.moveTo(startX, startY);
       ctx.lineTo(endX, endY);
@@ -4607,12 +4635,10 @@ const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
         ctx.lineWidth = 1.5;
       }
       ctx.stroke();
-      ctx.restore();
       
       // Arrow head at target node border
       const arrowSize = 6;
       const angle = Math.atan2(dy, dx);
-      ctx.save();
       ctx.fillStyle = isRelatedHovered ? '#0d9488' : (isDark.value ? '#818cf8' : '#4f46e5');
       ctx.beginPath();
       ctx.moveTo(endX, endY);
@@ -4620,17 +4646,14 @@ const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
       ctx.lineTo(endX - arrowSize * Math.cos(angle + Math.PI / 6), endY - arrowSize * Math.sin(angle + Math.PI / 6));
       ctx.closePath();
       ctx.fill();
-      ctx.restore();
       
       // Animated pulse signals
       const px = startX + (endX - startX) * pulseProgress;
       const py = startY + (endY - startY) * pulseProgress;
-      ctx.save();
       ctx.beginPath();
       ctx.fillStyle = isDark.value ? '#38bdf8' : '#0d9488';
       ctx.arc(px, py, 2.5, 0, Math.PI * 2);
       ctx.fill();
-      ctx.restore();
     }
   }
   
@@ -4639,21 +4662,19 @@ const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
     const isHovered = hoveredNodeId.value === node.id;
     const isDragged = draggedNodeId.value === node.id;
     
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
-    
+    // Smooth, modern outer glow ring using transparent vector fill directly
     if (isHovered || isDragged) {
-      ctx.shadowBlur = 10;
-      ctx.shadowColor = node.isCenter ? '#0d9488' : node.color;
-    } else {
-      ctx.shadowBlur = 4;
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.08)';
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, node.r + 4, 0, Math.PI * 2);
+      ctx.fillStyle = node.isCenter ? 'rgba(13, 148, 136, 0.15)' : `${node.color}22`;
+      ctx.fill();
     }
     
+    // Core circle background
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
     ctx.fillStyle = isDark.value ? '#111827' : '#ffffff';
     ctx.fill();
-    ctx.restore();
     
     if (node.avatarLoaded && node.avatarImg) {
       ctx.save();
@@ -4663,7 +4684,6 @@ const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
       ctx.drawImage(node.avatarImg, node.x - node.r, node.y - node.r, node.r * 2, node.r * 2);
       ctx.restore();
     } else {
-      ctx.save();
       ctx.beginPath();
       ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
       const grad = ctx.createLinearGradient(node.x - node.r, node.y - node.r, node.x + node.r, node.y + node.r);
@@ -4690,11 +4710,9 @@ const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(getInitials(node.name), node.x, node.y);
-      ctx.restore();
     }
     
     // Bounds/Ring border
-    ctx.save();
     ctx.beginPath();
     ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
     if (node.isCenter) {
@@ -4705,12 +4723,8 @@ const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
       ctx.lineWidth = isHovered || isDragged ? 2.5 : 1.5;
     }
     ctx.stroke();
-    ctx.restore();
     
     // Node Name/Label below circle
-    ctx.save();
-    ctx.shadowBlur = 4;
-    ctx.shadowColor = isDark.value ? 'rgba(0, 0, 0, 0.95)' : 'rgba(255, 255, 255, 0.95)';
     ctx.fillStyle = isDark.value ? '#f3f4f6' : '#1f2937';
     ctx.font = node.isCenter ? "bold 10px Inter, sans-serif" : "600 9px Inter, sans-serif";
     ctx.textAlign = 'center';
@@ -4721,7 +4735,6 @@ const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
       displayName = displayName.slice(0, 13) + '...';
     }
     ctx.fillText(displayName, node.x, node.y + node.r + 5);
-    ctx.restore();
   }
   
   ctx.restore();
@@ -4733,6 +4746,11 @@ const startRelationsCanvasLoop = () => {
   }
   
   const tick = () => {
+    if (!isGraphVisible.value || !isProfileVisible.value) {
+      activeLoopAnimId = null;
+      return;
+    }
+
     updateRelationsGraphPhysics();
     if (graphCanvas.value) {
       const ctx = graphCanvas.value.getContext("2d");
@@ -4742,7 +4760,10 @@ const startRelationsCanvasLoop = () => {
     }
     activeLoopAnimId = requestAnimationFrame(tick);
   };
-  activeLoopAnimId = requestAnimationFrame(tick);
+  
+  if (isGraphVisible.value && isProfileVisible.value) {
+    activeLoopAnimId = requestAnimationFrame(tick);
+  }
 };
 
 const getRelationsGraphCoordinates = (e: MouseEvent) => {
