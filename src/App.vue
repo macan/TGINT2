@@ -6444,158 +6444,162 @@ const timelineTicks = computed(() => {
               </div>
             </div>
 
-            <!-- X Similar Users Widget -->
+            <!-- Sticky Sidebar Block -->
             <div
               v-show="isProfileVisible"
-              class="mt-6 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 sticky top-20 shadow-sm"
+              class="sticky top-20 space-y-6"
             >
-              <div class="flex items-center justify-between mb-4 relative">
-                <div class="flex items-center gap-2">
-                  <h3
-                    class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
-                  >
-                    X Similar Users
-                  </h3>
-                  <div class="group relative inline-block">
-                    <Info class="h-4 w-4 text-gray-400 cursor-help" />
-                    <div class="absolute -left-2 top-full mt-2 w-48 p-2 bg-gray-900 border border-gray-700 text-white text-[10px] rounded-lg shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10 leading-normal">
-                      Search for similar users on X to find matching profiles.
+              <!-- Relations Graph Widget -->
+              <div
+                class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm shadow-indigo-100/5 dark:shadow-none flex flex-col group/chart transition-all"
+              >
+                <div class="flex items-center justify-between mb-4">
+                  <div class="flex items-center gap-2">
+                    <div class="p-1.5 bg-teal-50 dark:bg-teal-950/40 rounded-lg">
+                      <Network class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                    </div>
+                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                      Relations Graph
+                    </h3>
+                  </div>
+                  
+                  <div class="flex items-center gap-1">
+                    <button
+                      @click="onGraphZoomIn"
+                      class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                      title="Zoom In"
+                    >
+                      <ZoomIn class="h-3.5 w-3.5 animate-pulse" />
+                    </button>
+                    <button
+                      @click="onGraphZoomOut"
+                      class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                      title="Zoom Out"
+                    >
+                      <ZoomOut class="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      @click="resetGraphView"
+                      class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                      title="Reset View"
+                    >
+                      <RotateCcw class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+                
+                <div
+                  ref="graphCanvasContainer"
+                  class="relative h-[300px] w-full bg-gray-50/50 dark:bg-gray-950/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/80 overflow-hidden"
+                >
+                  <canvas
+                    ref="graphCanvas"
+                    @mousedown="onCanvasMouseDown"
+                    @mousemove="onCanvasMouseMove"
+                    @mouseup="onCanvasMouseUp"
+                    @wheel.prevent="onCanvasWheel"
+                    class="block w-full h-full"
+                  ></canvas>
+                  
+                  <div class="absolute bottom-2.5 left-3 right-3 flex flex-wrap items-center justify-between gap-1.5 text-[9px] font-medium text-gray-400 dark:text-gray-500 pointer-events-none select-none">
+                    <div>Drag nodes • Scroll / Drag background to Zoom & Pan</div>
+                    <div class="flex items-center gap-2">
+                      <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>Inbound</span>
+                      <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-pink-500"></span>Outbound</span>
+                      <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>Mutual</span>
                     </div>
                   </div>
                 </div>
-                <LoaderCircle
-                  v-if="isSearchingX"
-                  class="h-4 w-4 animate-spin text-teal-500 absolute top-0 -right-1"
-                />
               </div>
 
-              <div class="mb-4 flex gap-1.5">
-                <input
-                  v-model="xSearchInput"
-                  @keyup.enter="searchXUser(xSearchInput)"
-                  placeholder="Search X users..."
-                  class="w-full px-3.5 py-2 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all dark:text-gray-100 placeholder:text-gray-400"
-                />
-                <button
-                  @click="searchXUser(xSearchInput)"
-                  :disabled="isSearchingX || !xSearchInput.trim()"
-                  class="px-3.5 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0 flex items-center justify-center min-w-[36px] cursor-pointer"
-                >
-                  <Search class="h-3.5 w-3.5" />
-                </button>
-              </div>
-
+              <!-- X Similar Users Widget -->
               <div
-                v-if="xSearchResults.length > 0"
-                class="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar"
+                class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm"
               >
-                <div
-                  v-for="user in xSearchResults"
-                  :key="user.id"
-                  class="p-3 bg-gray-50 dark:bg-gray-900/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/40 space-y-2"
-                >
-                  <div class="flex items-center gap-2.5">
-                    <img
-                      v-if="user.profile_image_url"
-                      :src="user.profile_image_url"
-                      class="w-8 h-8 rounded-lg object-cover border border-gray-150 dark:border-gray-800 shrink-0"
-                      alt="Profile"
-                    />
-                    <div class="min-w-0">
-                      <p
-                        class="text-xs font-bold text-gray-900 dark:text-gray-100 truncate"
-                      >
-                        {{ user.name }}
-                      </p>
-                      <p class="text-[10px] text-gray-400 dark:text-gray-500 truncate">
-                        @{{ user.screen_name }}
-                      </p>
+                <div class="flex items-center justify-between mb-4 relative">
+                  <div class="flex items-center gap-2">
+                    <h3
+                      class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
+                    >
+                      X Similar Users
+                    </h3>
+                    <div class="group relative inline-block">
+                      <Info class="h-4 w-4 text-gray-400 cursor-help" />
+                      <div class="absolute -left-2 top-full mt-2 w-48 p-2 bg-gray-900 border border-gray-700 text-white text-[10px] rounded-lg shadow-lg opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-10 leading-normal">
+                        Search for similar users on X to find matching profiles.
+                      </div>
                     </div>
                   </div>
-                  <p class="text-[11px] text-gray-600 dark:text-gray-300 leading-normal line-clamp-3">
-                    {{ user.description }}
-                  </p>
-                  <div class="flex text-[9px] text-gray-400 gap-2.5 pt-1 border-t border-gray-100 dark:border-gray-800/60">
-                    <span v-if="user.location" class="truncate max-w-[80px]">📍 {{ user.location }}</span>
-                    <span v-if="user.followers_count != null" class="font-mono"
-                      >👥 {{ user.followers_count.toLocaleString() }}</span
+                  <LoaderCircle
+                    v-if="isSearchingX"
+                    class="h-4 w-4 animate-spin text-teal-500 absolute top-0 -right-1"
+                  />
+                </div>
+
+                <div class="mb-4 flex gap-1.5">
+                  <input
+                    v-model="xSearchInput"
+                    @keyup.enter="searchXUser(xSearchInput)"
+                    placeholder="Search X users..."
+                    class="w-full px-3.5 py-2 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all dark:text-gray-100 placeholder:text-gray-400"
+                  />
+                  <button
+                    @click="searchXUser(xSearchInput)"
+                    :disabled="isSearchingX || !xSearchInput.trim()"
+                    class="px-3.5 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0 flex items-center justify-center min-w-[36px] cursor-pointer"
+                  >
+                    <Search class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                <div
+                  v-if="xSearchResults.length > 0"
+                  class="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar"
+                >
+                  <div
+                    v-for="user in xSearchResults"
+                    :key="user.id"
+                    class="p-3 bg-gray-50 dark:bg-gray-900/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/40 space-y-2"
+                  >
+                    <div class="flex items-center gap-2.5">
+                      <img
+                        v-if="user.profile_image_url"
+                        :src="user.profile_image_url"
+                        class="w-8 h-8 rounded-lg object-cover border border-gray-150 dark:border-gray-800 shrink-0"
+                        alt="Profile"
+                      />
+                      <div class="min-w-0">
+                        <p
+                          class="text-xs font-bold text-gray-900 dark:text-gray-100 truncate"
+                        >
+                          {{ user.name }}
+                        </p>
+                        <p class="text-[10px] text-gray-400 dark:text-gray-500 truncate">
+                          @{{ user.screen_name }}
+                        </p>
+                      </div>
+                    </div>
+                    <p class="text-[11px] text-gray-600 dark:text-gray-300 leading-normal line-clamp-3">
+                      {{ user.description }}
+                    </p>
+                    <div class="flex text-[9px] text-gray-400 gap-2.5 pt-1 border-t border-gray-100 dark:border-gray-800/60">
+                      <span v-if="user.location" class="truncate max-w-[80px]">📍 {{ user.location }}</span>
+                      <span v-if="user.followers_count != null" class="font-mono"
+                        >👥 {{ user.followers_count.toLocaleString() }}</span
+                      >
+                    </div>
+                    <a
+                      v-if="user.screen_name"
+                      :href="`https://x.com/${user.screen_name}`"
+                      target="_blank"
+                      class="inline-flex items-center gap-1 text-[10px] text-teal-600 dark:text-teal-400 font-extrabold hover:underline"
+                      >View X Profile <ExternalLink class="h-2.5 w-2.5" /></a
                     >
                   </div>
-                  <a
-                    v-if="user.screen_name"
-                    :href="`https://x.com/${user.screen_name}`"
-                    target="_blank"
-                    class="inline-flex items-center gap-1 text-[10px] text-teal-600 dark:text-teal-400 font-extrabold hover:underline"
-                    >View X Profile <ExternalLink class="h-2.5 w-2.5" /></a
-                  >
                 </div>
-              </div>
-              <p v-else-if="!isSearchingX" class="text-[11px] text-gray-400 dark:text-gray-500 italic text-center py-2">
-                No results. Click an author name to search on X.
-              </p>
-            </div>
-
-            <!-- Relations Graph Widget -->
-            <div
-              v-show="isProfileVisible"
-              class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 sticky top-20 shadow-sm shadow-indigo-100/5 dark:shadow-none flex flex-col group/chart transition-all"
-            >
-              <div class="flex items-center justify-between mb-4">
-                <div class="flex items-center gap-2">
-                  <div class="p-1.5 bg-teal-50 dark:bg-teal-950/40 rounded-lg">
-                    <Network class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
-                  </div>
-                  <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-                    Relations Graph
-                  </h3>
-                </div>
-                
-                <div class="flex items-center gap-1">
-                  <button
-                    @click="onGraphZoomIn"
-                    class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
-                    title="Zoom In"
-                  >
-                    <ZoomIn class="h-3.5 w-3.5 animate-pulse" />
-                  </button>
-                  <button
-                    @click="onGraphZoomOut"
-                    class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
-                    title="Zoom Out"
-                  >
-                    <ZoomOut class="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    @click="resetGraphView"
-                    class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
-                    title="Reset View"
-                  >
-                    <RotateCcw class="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-              
-              <div
-                ref="graphCanvasContainer"
-                class="relative h-[300px] w-full bg-gray-50/50 dark:bg-gray-950/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/80 overflow-hidden"
-              >
-                <canvas
-                  ref="graphCanvas"
-                  @mousedown="onCanvasMouseDown"
-                  @mousemove="onCanvasMouseMove"
-                  @mouseup="onCanvasMouseUp"
-                  @wheel.prevent="onCanvasWheel"
-                  class="block w-full h-full"
-                ></canvas>
-                
-                <div class="absolute bottom-2.5 left-3 right-3 flex flex-wrap items-center justify-between gap-1.5 text-[9px] font-medium text-gray-400 dark:text-gray-500 pointer-events-none select-none">
-                  <div>Drag nodes • Scroll / Drag background to Zoom & Pan</div>
-                  <div class="flex items-center gap-2">
-                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>Inbound</span>
-                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-pink-500"></span>Outbound</span>
-                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>Mutual</span>
-                  </div>
-                </div>
+                <p v-else-if="!isSearchingX" class="text-[11px] text-gray-400 dark:text-gray-500 italic text-center py-2">
+                  No results. Click an author name to search on X.
+                </p>
               </div>
             </div>
           </div>
