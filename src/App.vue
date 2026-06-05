@@ -67,6 +67,8 @@ import {
   ZoomOut,
   RotateCcw,
   Network,
+  Download,
+  Upload,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -785,7 +787,24 @@ const runAutoFinding = async () => {
           throw newErr;
         }
         if (!analysisRes.ok) throw new Error("Analysis failed");
-        const analysisData = await analysisRes.json();
+        let analysisData = await analysisRes.json();
+        for (let i = 0; i < 5 && analysisData.token; i++) {
+          // need to wait the final result here
+          try {
+            analysisRes = await fetch("https://ask.gingkogo.uk/answer?id=" + analysisData.token);
+            if (analysisRes.ok) {
+              analysisData = await analysisRes.json();
+            }
+          } catch (err: any) {
+            const newErr = new Error(
+              err.message && err.message.toLowerCase().includes("failed to fetch")
+                ? "Analysis Network error or CORS issue: Failed to fetch from https://ask.gingkogo.uk/answer?id=" + analysisData.token
+                : err.message
+            );
+            (newErr as any).url = "https://ask.gingkogo.uk/answer";
+            throw newErr;
+          }
+        }
         cell.analysisResult = analysisData.reply;
         cell.logs.push(`Analysis received: ${analysisRes.status}`);
         autoCells.value = [...autoCells.value];
@@ -822,7 +841,25 @@ const runAutoFinding = async () => {
               checkRes.statusText || ""
             }`
           );
-        const checkData = await checkRes.json();
+        let checkData = await checkRes.json();
+
+        for (let i = 0; i < 5 && checkData.token; i++) {
+          // need to wait the final result here
+          try {
+            checkRes = await fetch("https://ask.gingkogo.uk/answer?id=" + checkData.token);
+            if (checkRes.ok) {
+              checkData = await checkRes.json();
+            }
+          } catch (err: any) {
+            const newErr = new Error(
+              err.message && err.message.toLowerCase().includes("failed to fetch")
+                ? "Analysis Network error or CORS issue: Failed to fetch from https://ask.gingkogo.uk/answer?id=" + checkData.token
+                : err.message
+            );
+            (newErr as any).url = "https://ask.gingkogo.uk/answer";
+            throw newErr;
+          }
+        }
         cell.verificationResult = checkData.reply;
         cell.logs.push("Verification finished.");
         cell.status = "completed";
@@ -994,6 +1031,9 @@ const listenAutoRefreshActive = ref(false);
 let listenRefreshInterval: any = null;
 
 const isListenModalOpen = ref(false);
+const isImportModalOpen = ref(false);
+const importJsonInput = ref("");
+const importErrorMessage = ref("");
 const isEditingListenItem = ref(false);
 const listenItemForm = ref({
   id: "",
@@ -1057,6 +1097,93 @@ const loadListenDirectory = () => {
 
 const saveListenDirectory = () => {
   localStorage.setItem("listen_directory_tree", JSON.stringify(listenDirectory.value));
+};
+
+const exportListenDirectoryToClipboard = () => {
+  try {
+    const dataStr = JSON.stringify(listenDirectory.value, null, 2);
+    if (!navigator.clipboard) {
+      const textArea = document.createElement("textarea");
+      textArea.value = dataStr;
+      document.body.appendChild(textArea);
+      textArea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textArea);
+      toastMessage.value = "Directory exported to clipboard!";
+      toastType.value = "success";
+      setTimeout(() => { toastMessage.value = ""; }, 3000);
+      return;
+    }
+    navigator.clipboard.writeText(dataStr)
+      .then(() => {
+        toastMessage.value = "Directory exported to clipboard!";
+        toastType.value = "success";
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+      })
+      .catch((err) => {
+        console.error("Clipboard copy failed:", err);
+        const textArea = document.createElement("textarea");
+        textArea.value = dataStr;
+        document.body.appendChild(textArea);
+        textArea.select();
+        try {
+          document.execCommand("copy");
+          toastMessage.value = "Directory exported to clipboard!";
+          toastType.value = "success";
+        } catch (e) {
+          toastMessage.value = "Failed to copy directory content";
+          toastType.value = "error";
+        }
+        document.body.removeChild(textArea);
+        setTimeout(() => { toastMessage.value = ""; }, 3000);
+      });
+  } catch (err: any) {
+    toastMessage.value = `Export failed: ${err.message || err}`;
+    toastType.value = "error";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  }
+};
+
+const importListenDirectoryFromClipboard = () => {
+  importJsonInput.value = "";
+  importErrorMessage.value = "";
+  isImportModalOpen.value = true;
+  
+  if (navigator.clipboard && navigator.clipboard.readText) {
+    navigator.clipboard.readText()
+      .then((text) => {
+        if (text && text.trim()) {
+          importJsonInput.value = text.trim();
+        }
+      })
+      .catch((err) => {
+        console.warn("Clipboard auto-read skipped or blocked by browser permission.", err);
+      });
+  }
+};
+
+const confirmListenDirectoryImport = () => {
+  if (!importJsonInput.value.trim()) {
+    importErrorMessage.value = "Please insert or paste JSON config contents first.";
+    return;
+  }
+  try {
+    const parsed = JSON.parse(importJsonInput.value);
+    if (Array.isArray(parsed)) {
+      listenDirectory.value = parsed;
+      saveListenDirectory();
+      toastMessage.value = "Directory tree imported successfully!";
+      toastType.value = "success";
+      isImportModalOpen.value = false;
+      importJsonInput.value = "";
+      importErrorMessage.value = "";
+    } else {
+      importErrorMessage.value = "Invalid configuration structure. Top-level element must be a folder/channel array.";
+    }
+  } catch (err: any) {
+    importErrorMessage.value = `JSON Parsing Error: ${err.message || 'Malformed structure'}`;
+  }
+  setTimeout(() => { toastMessage.value = ""; }, 3000);
 };
 
 const addChannelToListenDirectory = (name: string, username: string) => {
@@ -1556,6 +1683,25 @@ const fetchListenPosts = async (node: ListenItem) => {
   }
 };
 
+const scheduleScrapeForListen = async (channelName) => {
+  if (!channelName) return;
+  try {
+    const res = await fetch(
+      `https://i.gogingko.net/api/v1/lq/${encodeURIComponent(
+        channelName
+      )}`,
+      {
+        method: "POST",
+      }
+    );
+    if (!res.ok)
+      throw new Error(`Failed to schedule scrape: ${res.statusText}`);
+  } catch (err: any) {
+    console.error(err);
+    alert("Failed to schedule scrape: " + err.message);
+  }
+};
+
 const startListenPolling = () => {
   if (listenRefreshInterval) {
     clearInterval(listenRefreshInterval);
@@ -1563,10 +1709,14 @@ const startListenPolling = () => {
   }
   if (!listenAutoRefreshActive.value || !selectedListenNode.value) return;
 
-  const intervalTime = selectedListenNode.value.type === "keyword" ? 30000 : 15000;
-  listenRefreshInterval = setInterval(() => {
+  const intervalTime = selectedListenNode.value.type === "keyword" ? 60000 : 30000;
+  listenRefreshInterval = setInterval(async () => {
     if (selectedListenNode.value) {
       fetchListenPosts(selectedListenNode.value);
+      // random issue q0 scrape
+      if (selectedListenNode.value.type === 'channel' && Math.random() < 0.25) {
+        await scheduleScrapeForListen(selectedListenNode.value.argument);
+      }
     }
   }, intervalTime);
 };
@@ -2841,7 +2991,7 @@ const generateFinalTable = async () => {
   isGeneratingFinalTable.value = true;
   try {
     const context = JSON.stringify(summaryResults.value);
-    const response = await fetch("https://ask.gingkogo.uk/", {
+    let response = await fetch("https://ask.gingkogo.uk/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2852,16 +3002,37 @@ const generateFinalTable = async () => {
           context,
       }),
     });
-    const data = await response.json();
+    let data = await response.json();
+    for (let i = 0; i < 5 && data.token; i++) {
+      // need to wait the final result here
+      try {
+        response = await fetch("https://ask.gingkogo.uk/answer?id=" + data.token);
+        if (response.ok) {
+          data = await response.json();
+        }
+      } catch (err: any) {
+        const newErr = new Error(
+          err.message && err.message.toLowerCase().includes("failed to fetch")
+            ? "Analysis Network error or CORS issue: Failed to fetch from https://ask.gingkogo.uk/answer?id=" + data.token
+            : err.message
+        );
+        (newErr as any).url = "https://ask.gingkogo.uk/answer";
+        throw newErr;
+      }
+    }
+    // sometimes the response need more time to wait and return only the qid
     finalTableHtml.value = md.render(data.reply);
     // save the results to localStorage
+    const profileName = `profile-${searchMode.value}-${autoChannelName.value.trim().replace(/^@/, "")}-${new Date().toISOString().slice(0, 13)}`;
     localStorage.setItem(
-      `profile-${searchMode.value}-${autoChannelName.value.trim().replace(/^@/, "")}-${new Date().toISOString().slice(0, 13)}`,
+      profileName,
       JSON.stringify(data)
     );
     if (loginToken.value) {
-        await saveProfileRemotely(`profile-${searchMode.value}-${autoChannelName.value.trim().replace(/^@/, "")}-${new Date().toISOString().slice(0, 13)}`, loginToken.value, JSON.stringify(data));
+        await saveProfileRemotely(profileName, loginToken.value, JSON.stringify(data));
     }
+    // try to save the profile to remote ES
+    await indexProfileToBackendInternal(profileName, JSON.stringify(data));
   } catch (err) {
     console.error(err);
     finalTableHtml.value =
@@ -3111,6 +3282,7 @@ watch(activeTab, (newTab) => {
   }
   if (newTab === 'profile') {
     fetchRemoteProfiles();
+    fetchIndexedProfilesCount();
   }
 });
 
@@ -3126,6 +3298,7 @@ onMounted(() => {
   loadSavedProfiles();
   loadLogin();
   loadListenDirectory();
+  fetchIndexedProfilesCount();
 });
 
 let graphIntersectionObserver: IntersectionObserver | null = null;
@@ -4096,9 +4269,120 @@ const saveProfileRemotely = async (profileName: string, gosToken: string, dataCo
 };
 
 const remoteProfiles = ref<string[]>([]);
+const indexedProfilesCount = ref<number | null>(null);
+const loadingIndexedProfilesCount = ref(false);
+
+const fetchIndexedProfilesCount = async () => {
+  loadingIndexedProfilesCount.value = true;
+  try {
+    const response = await fetch("https://i.gogingko.net/api/v1/es/p/count", {
+      method: "GET"
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const data = await response.json();
+    if (typeof data.count === "number") {
+      indexedProfilesCount.value = data.count;
+    } else if (data.hits && typeof data.hits.total === "object" && typeof data.hits.total.value === "number") {
+      indexedProfilesCount.value = data.hits.total.value;
+    } else if (data.hits && typeof data.hits.total === "number") {
+      indexedProfilesCount.value = data.hits.total;
+    } else {
+      indexedProfilesCount.value = 0;
+    }
+  } catch (err) {
+    console.error("Failed to fetch indexed profiles count:", err);
+  } finally {
+    loadingIndexedProfilesCount.value = false;
+  }
+};
+
 const selectedRemoteProfileContent = ref("");
 const selectedRemoteProfileName = ref("");
+const selectedRemoteProfileRawText = ref("");
+const isIndexingProfile = ref(false);
 const loadingRemoteProfiles = ref(false);
+
+const profileSearchQuery = ref("");
+const profileSearchLimit = ref(10);
+const profileSearchResults = ref<any>(null);
+const isSearchingProfiles = ref(false);
+const profileSearchError = ref("");
+const profileSearchStats = ref({ tookMs: 0, total: 0 });
+
+const selectProfileFromSearchResult = (hit: any) => {
+  if (!hit || !hit._source) return;
+  selectedRemoteProfileName.value = hit._source.name || hit._id || "Search Result";
+  const rawText = hit._source.content || "";
+  selectedRemoteProfileRawText.value = rawText;
+  selectedRemoteProfileContent.value = md.render(rawText);
+};
+
+const searchProfilesFullText = async () => {
+  const queryStr = profileSearchQuery.value.trim();
+  if (!queryStr) {
+    profileSearchError.value = "Please enter a search query.";
+    return;
+  }
+  
+  isSearchingProfiles.value = true;
+  profileSearchError.value = "";
+  profileSearchResults.value = null;
+  profileSearchStats.value = { tookMs: 0, total: 0 };
+  
+  try {
+    const match_type = (queryStr.startsWith('"') && queryStr.endsWith('"')) ? 'match_phrase' : 'match';
+    const payload = {
+      size: Number(profileSearchLimit.value) || 10,
+      query: {
+        [match_type]: {
+          content: queryStr
+        }
+      },
+      highlight: {
+        fields: {
+          content: {
+            pre_tags: ["<em>"],
+            post_tags: ["</em>"],
+            fragment_size: 150,
+            number_of_fragments: 5,
+            order: "score"
+          }
+        }
+      }
+    };
+    
+    const response = await fetch("https://i.gogingko.net/api/v1/es/p/search", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    profileSearchResults.value = data;
+    
+    // Parse Elastic Search total hits structure
+    const totalHits = data.hits?.total;
+    const totalCount = typeof totalHits === "object" ? (totalHits.value || 0) : (totalHits || 0);
+    
+    profileSearchStats.value = {
+      tookMs: data.took || 0,
+      total: totalCount
+    };
+  } catch (err: any) {
+    console.error("ES Search failed:", err);
+    profileSearchError.value = `Search index failed: ${err.message || err}`;
+  } finally {
+    isSearchingProfiles.value = false;
+  }
+};
 
 const fetchRemoteProfiles = async () => {
   // use this function to auto check the loginToken
@@ -4187,7 +4471,9 @@ const viewRemoteProfile = async (profileName: string) => {
         } catch (e) {
             // Keep original if parsing fails
         }
-        selectedRemoteProfileContent.value = md.render(data.reply + '\n---\n# **Inputs >>>>>>>**\n---\n' + jsonData + '');
+        const rawText = data.reply + '\n---\n# **Inputs >>>>>>>**\n---\n' + jsonData;
+        selectedRemoteProfileRawText.value = rawText;
+        selectedRemoteProfileContent.value = md.render(rawText);
     } catch(e) {
         console.error(e);
         toastMessage.value = "Failed to load profile.";
@@ -4197,6 +4483,64 @@ const viewRemoteProfile = async (profileName: string) => {
         loadingRemoteProfiles.value = false;
     }
 }
+
+const indexProfileToBackend = async () => {
+  if (!selectedRemoteProfileName.value) return;
+  // Extract content
+  const contentValue = selectedRemoteProfileRawText.value || selectedRemoteProfileContent.value;
+  
+  await indexProfileToBackendInternal(selectedRemoteProfileName.value, contentValue)
+}
+
+const indexProfileToBackendInternal = async (profileName, contentValue) => {
+  isIndexingProfile.value = true;
+  
+  // Extract type: person / channel / other
+  const lowerName = profileName.toLowerCase();
+  let extractedType = "other";
+  if (lowerName.includes("person")) {
+    extractedType = "person";
+  } else if (lowerName.includes("channel")) {
+    extractedType = "channel";
+  }
+  
+  // Extract date: looking for YYYY-MM-DD
+  const dateMatch = profileName.match(/\d{4}-\d{2}-\d{2}/);
+  const extractedDate = dateMatch ? dateMatch[0] : new Date().toISOString().slice(0, 10);
+  
+
+  try {
+    const response = await fetch("https://i.gogingko.net/api/v1/es/p/doc", {
+      method: "POST",
+      headers: {
+        "tg-doc-id": encodeURIComponent(profileName),
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        name: profileName,
+        type: extractedType,
+        date: extractedDate,
+        content: contentValue
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    toastMessage.value = "Profile indexed successfully!";
+    toastType.value = "success";
+  } catch (err: any) {
+    console.error("Indexing failed:", err);
+    toastMessage.value = `Failed to index: ${err.message || err}`;
+    toastType.value = "error";
+  } finally {
+    isIndexingProfile.value = false;
+    setTimeout(() => {
+      toastMessage.value = "";
+    }, 4000);
+  }
+};
 
 const loadSavedProfiles = () => {
     const profiles = { channel: [] as string[], user: [] as string[], person: [] as string[] };
@@ -5911,8 +6255,224 @@ const timelineTicks = computed(() => {
 
       <!-- Channel Tab -->
       <div v-show="activeTab === 'channel'" class="w-full max-w-full mx-auto px-0 pt-1 pb-16 space-y-8">
+
+        <!-- User Identity Node & Result (when present) -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+          <div :class="telegramUser ? 'lg:col-span-12 xl:col-span-5 flex flex-col xl:h-full' : 'lg:col-span-12'">
+            <!-- User Identity Node Widget Div -->
+            <div :class="[
+              'bg-white dark:bg-gray-800 border border-gray-200/75 dark:border-gray-700 rounded-3xl p-6 shadow-sm relative flex flex-col justify-between transition-all duration-300 w-full',
+              telegramUser ? 'xl:h-full' : ''
+            ]">
+              <div class="space-y-6 flex-grow">
+                <div class="space-y-1">
+                  <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">User Identity Node</h3>
+                  <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">Provide an exact Telegram username to extract remote server descriptors.</p>
+                </div>
+
+                <!-- Input dropdown wrap -->
+                <div ref="dropdownContainer" class="relative">
+                  <div class="flex gap-2">
+                    <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl px-4 py-2.5 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all w-full">
+                      <User class="h-4 w-4 text-teal-600 dark:text-teal-400 mr-2 shrink-0" />
+                      <input 
+                        v-model="telegramUsername" 
+                        @keyup.enter="fetchTelegramUser" 
+                        @focus="isHistoryVisible = true" 
+                        @blur="handleBlur"
+                        placeholder="e.g. durov, telegram" 
+                        class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
+                      />
+                    </div>
+                    <button 
+                      @click="fetchTelegramUser" 
+                      class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-teal-500/20 hover:shadow-teal-500/30 cursor-pointer transition-all duration-300 hover:-translate-y-0.5 active:translate-y-0 shrink-0"
+                    >
+                      <Search class="h-3.5 w-3.5" />
+                      <span>Search</span>
+                    </button>
+                  </div>
+                  
+                  <!-- Suggestions Dropdown -->
+                  <transition enter-active-class="transition duration-150 ease-out" enter-from-class="transform scale-95 opacity-0" enter-to-class="transform scale-100 opacity-100" leave-active-class="transition duration-100 ease-in" leave-from-class="transform scale-100 opacity-100" leave-to-class="transform scale-95 opacity-0">
+                    <div v-if="isHistoryVisible && lookupUserHistory.length > 0" class="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-750 rounded-2xl shadow-xl max-h-48 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
+                      <div class="px-3.5 py-2 bg-gray-50/50 dark:bg-gray-900/30 text-[10px] font-black uppercase tracking-widest text-gray-400">
+                        Recent Queries
+                      </div>
+                      <div 
+                        v-for="user in lookupUserHistory" 
+                        :key="user" 
+                        class="w-full text-left px-3.5 py-2.5 text-xs hover:bg-gray-50 dark:hover:bg-gray-700/50 text-gray-900 dark:text-white flex justify-between items-center group/item transition-colors"
+                      >
+                        <button @click="selectHistory(user)" class="flex-grow text-left font-semibold hover:text-teal-600 dark:hover:text-teal-400 cursor-pointer flex items-center gap-2">
+                          <Clock class="h-3 w-3 text-gray-400" />
+                          <span>@{{ user }}</span>
+                        </button>
+                        <button @click.stop="deleteHistory(user)" class="opacity-0 group-hover/item:opacity-100 p-1 text-gray-400 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg cursor-pointer transition-all">
+                          <X class="w-3.5 h-3.5"/>
+                        </button>
+                      </div>
+                    </div>
+                  </transition>
+                </div>
+
+                <!-- Loader and Error outputs -->
+                <div v-if="loadingTelegramUser" class="flex flex-col items-center justify-center py-10 text-gray-400">
+                  <div class="relative h-10 w-10 animate-spin rounded-full border-[3px] border-teal-500 border-t-transparent flex items-center justify-center shadow-md mb-2">
+                    <Bot class="h-4.5 w-4.5 text-teal-600 dark:text-teal-400 animate-pulse" />
+                  </div>
+                  <p class="text-[10px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 animate-pulse">Syncing User profile...</p>
+                </div>
+
+                <div v-if="telegramError" class="rounded-2xl bg-rose-500/[0.04] p-4 border border-rose-500/10 flex items-start gap-3">
+                  <AlertCircle class="h-4 w-4 text-rose-500 shrink-0 mt-0.5" />
+                  <div class="space-y-0.5">
+                    <p class="text-xs font-black uppercase tracking-wide text-rose-600 dark:text-rose-400">Query Dispatch Failure</p>
+                    <p class="text-xs text-rose-500/90 dark:text-gray-400 font-semibold leading-relaxed">{{ telegramError }}</p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Premium Bottom Status Bar to align visual content and vertical height -->
+              <div v-if="telegramUser" class="mt-8 pt-4 border-t border-gray-100 dark:border-gray-800/80 flex items-center justify-between text-[11px] text-gray-400 dark:text-gray-500 font-semibold select-none">
+                <div class="flex items-center gap-1.5">
+                  <span class="relative flex h-2 w-2">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-teal-400 opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-teal-500"></span>
+                  </span>
+                  <span>Active Descriptor Session</span>
+                </div>
+                <div class="flex items-center gap-1.5 text-teal-600 dark:text-teal-400 font-bold uppercase tracking-wider text-[9px] bg-teal-50 dark:bg-teal-950/30 px-2 py-0.5 rounded-md">
+                  <span>Sync Complete</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="telegramUser" class="lg:col-span-12 xl:col-span-7 flex flex-col xl:h-full">
+            <!-- Searched User Dossier Sheet Card -->
+            <transition enter-active-class="transition duration-300 ease-out" enter-from-class="transform scale-98 opacity-0" enter-to-class="transform scale-100 opacity-100">
+              <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700 p-6 md:p-8 shadow-sm relative overflow-hidden space-y-6 flex-grow xl:h-full flex flex-col justify-between">
+                
+                <div class="space-y-6">
+                  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-5 pb-5 border-b border-gray-100 dark:border-gray-800/80">
+                    <div class="flex flex-col sm:flex-row items-start sm:items-center gap-5">
+                      <div class="relative shrink-0">
+                        <img 
+                          :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" 
+                          @error="handleImageError" 
+                          class="w-16 h-16 rounded-2xl object-cover border-2 border-teal-500/10 shadow-sm" 
+                          referrerPolicy="no-referrer"
+                          alt="Profile photo" 
+                        />
+                        <span class="absolute -bottom-1 -right-1 p-1 bg-teal-600 rounded-lg text-white border border-white dark:border-gray-800 shadow-md">
+                          <User class="h-3 w-3" />
+                        </span>
+                      </div>
+                      <div class="space-y-1">
+                        <div class="flex items-center gap-2">
+                          <h3 class="text-base font-black text-gray-900 dark:text-white leading-tight break-words max-w-[280px] sm:max-w-xs">{{ telegramUser.title || telegramUser.username }}</h3>
+                          <button 
+                            @click="telegramUser = null" 
+                            class="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
+                            title="Close dossier"
+                          >
+                            <X class="h-4 w-4" />
+                          </button>
+                        </div>
+                        <p class="text-xs font-bold text-teal-600 dark:text-teal-400 flex items-center gap-1">@{{ telegramUser.username }}</p>
+                      </div>
+                    </div>
+
+                    <!-- Responsive badge / DC Region context -->
+                    <div v-if="telegramUser.cdnNumber || telegramUser.cdnRegion" class="flex items-center gap-2.5 px-3.5 py-1.5 rounded-2xl bg-gray-55/40 dark:bg-gray-900/65 border border-gray-200/60 dark:border-gray-700/80 shadow-sm backdrop-blur-sm shrink-0 select-none">
+                      <span v-if="telegramUser.cdnNumber" class="inline-flex items-center gap-1.5 px-2 py-0.5 text-[9px] font-mono font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 bg-teal-500/[0.08] dark:bg-teal-500/15 border border-teal-500/20 dark:border-teal-400/25 rounded-lg">
+                        <span class="inline-block w-1 h-1 rounded-full bg-teal-500 dark:bg-teal-400 animate-pulse"></span>
+                        DC {{ telegramUser.cdnNumber }}
+                      </span>
+                      <div v-if="telegramUser.cdnRegion && telegramUser.cdnRegion[1]" class="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-300">
+                        <Globe class="h-3.5 w-3.5 text-gray-400 dark:text-teal-400/50 shrink-0" />
+                        <span>{{ telegramUser.cdnRegion[1] }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Description / Bio -->
+                  <div v-if="telegramUser.description" class="space-y-2">
+                    <h4 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Biography Desk</h4>
+                    <p class="text-xs text-gray-600 dark:text-gray-300 leading-relaxed font-semibold bg-gray-50/50 dark:bg-gray-900/35 p-4 rounded-2xl border border-gray-200/40 dark:border-gray-700/50 whitespace-pre-wrap break-words">
+                      {{ telegramUser.description }}
+                    </p>
+                  </div>
+
+                  <!-- Bento Metrics layout -->
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <!-- ID -->
+                    <div class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-200/40 dark:border-gray-700/50 rounded-2xl flex items-center gap-3">
+                      <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 shrink-0">
+                        <Hash class="h-4 w-4" />
+                      </div>
+                      <div class="space-y-0.5">
+                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Unique Node ID</p>
+                        <p class="text-xs font-bold font-mono text-gray-900 dark:text-white">{{ telegramUser.id || 'N/A' }}</p>
+                      </div>
+                    </div>
+
+                    <!-- Lang context -->
+                    <div class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-200/40 dark:border-gray-700/50 rounded-2xl flex items-center gap-3">
+                      <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 shrink-0">
+                        <Globe class="h-4 w-4" />
+                      </div>
+                      <div class="space-y-0.5">
+                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Locale Profile</p>
+                        <p class="text-xs font-bold text-gray-900 dark:text-white">{{ telegramUser.lang || 'Global (Default)' }}</p>
+                      </div>
+                    </div>
+
+                    <!-- Phone number -->
+                    <div v-if="telegramUser.phone" class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-200/40 dark:border-gray-700/50 rounded-2xl flex items-center gap-3">
+                      <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 shrink-0">
+                        <Phone class="h-4 w-4" />
+                      </div>
+                      <div class="space-y-0.5">
+                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Linked Phone</p>
+                        <p class="text-xs font-bold text-gray-900 dark:text-white">{{ telegramUser.phone }}</p>
+                      </div>
+                    </div>
+
+                    <!-- Presence Status -->
+                    <div v-if="telegramUser.status" class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-200/40 dark:border-gray-700/50 rounded-2xl flex items-center gap-3">
+                      <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 shrink-0">
+                        <Activity class="h-4 w-4" />
+                      </div>
+                      <div class="space-y-0.5">
+                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Remote Status</p>
+                        <p class="text-xs font-bold text-gray-900 dark:text-white">{{ telegramUser.status }}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Raw inspector dropdown -->
+                <details class="bg-gray-50 dark:bg-gray-900/30 rounded-2xl border border-gray-200/60 dark:border-gray-700/60 group mt-5">
+                  <summary class="flex items-center justify-between p-4 cursor-pointer outline-none select-none">
+                    <span class="text-xs font-black text-gray-700 dark:text-gray-300 uppercase tracking-widest flex items-center gap-2">
+                      <Database class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                      <span>Schema Inspector</span>
+                    </span>
+                    <ChevronDown class="h-4 w-4 text-gray-400 group-open:rotate-180 duration-200 transition-transform" />
+                  </summary>
+                  <div class="p-4 pt-0 border-t border-gray-100 dark:border-gray-700 col-span-2">
+                    <pre class="mt-4 text-[10px] font-mono text-teal-600 dark:text-teal-400 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-48 custom-scrollbar">{{ JSON.stringify(telegramUser, null, 2) }}</pre>
+                  </div>
+                </details>
+              </div>
+            </transition>
+          </div>
+        </div>
+
         <!-- Control Bar Card -->
-        <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 shadow-sm relative overflow-hidden">
+        <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700 p-6 shadow-sm relative overflow-hidden">
           <!-- Ambient highlights -->
           <div class="absolute -top-16 -right-16 w-32 h-32 bg-teal-500/5 dark:bg-teal-500/10 rounded-full blur-2xl pointer-events-none"></div>
           <div class="absolute -bottom-16 -left-16 w-32 h-32 bg-indigo-500/5 dark:bg-indigo-500/10 rounded-full blur-2xl pointer-events-none"></div>
@@ -5921,7 +6481,7 @@ const timelineTicks = computed(() => {
             <!-- Left: Beautiful Tab Switches -->
             <div class="space-y-2.5">
               <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Metadata Directory</label>
-              <div class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900 border border-gray-150/80 dark:border-gray-850 p-1 rounded-2xl w-full sm:w-80">
+              <div class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900 border border-gray-200/80 dark:border-gray-700 p-1 rounded-2xl w-full sm:w-80">
                 <button 
                   @click="activeChannelOrUser = 'channel'; fetchChannels(false)"
                   :class="[
@@ -5954,7 +6514,7 @@ const timelineTicks = computed(() => {
               <!-- Language Filter input -->
               <div v-if="activeChannelOrUser === 'channel'" class="space-y-2.5">
                 <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Language Target</label>
-                <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-850 rounded-2xl px-4 py-2 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all w-full sm:w-56">
+                <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl px-4 py-2 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all w-full sm:w-56">
                   <Globe class="h-4 w-4 text-teal-600 dark:text-teal-400 mr-2 shrink-0" />
                   <input 
                     v-model="langCode" 
@@ -5983,7 +6543,7 @@ const timelineTicks = computed(() => {
             </div>
           </div>
         </div>
-        
+
         <!-- Loading Registry State -->
         <div v-if="isLoadingChannels" class="flex flex-col items-center justify-center py-32 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-750/60 shadow-sm relative overflow-hidden">
           <div class="relative flex items-center justify-center mb-6">
@@ -9282,7 +9842,7 @@ const timelineTicks = computed(() => {
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start w-full">
           
           <!-- Left directory tree widget (col-span-4) -->
-          <div class="lg:col-span-4 xl:col-span-3 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col min-h-[800px] w-full">
+          <div class="lg:col-span-4 xl:col-span-3 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col min-h-[920px] w-full">
             <!-- Watchlist Header -->
             <div class="p-4 border-b border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shrink-0">
               <div>
@@ -9334,7 +9894,7 @@ const timelineTicks = computed(() => {
             </div>
 
             <!-- Scrollable Directories Stream -->
-            <div class="p-3 overflow-y-auto flex-1 space-y-1 select-none max-h-[750px]">
+            <div class="p-3 overflow-y-auto flex-1 space-y-1 select-none max-h-[820px]">
               <div v-if="visibleDirectoryNodes.length === 0" class="flex flex-col items-center justify-center py-16 text-center text-gray-400 dark:text-gray-500">
                 <Inbox class="h-10 w-10 mb-2 opacity-50" />
                 <p class="text-xs">No watchlists configured.</p>
@@ -9464,13 +10024,38 @@ const timelineTicks = computed(() => {
                 </div>
               </div>
             </div>
+
+            <!-- Bottom Panel: Export / Import -->
+            <div class="px-4 py-3 bg-gray-50/80 dark:bg-gray-900/40 border-t border-gray-150 dark:border-gray-700 flex items-center justify-between gap-2.5 shrink-0">
+              <div class="flex items-center gap-1.5">
+                <button
+                  @click="exportListenDirectoryToClipboard"
+                  class="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer"
+                  title="Export entire directory tree config as JSON to clipboard"
+                >
+                  <Download class="h-3 w-3" />
+                  <span>Export</span>
+                </button>
+                <button
+                  @click="importListenDirectoryFromClipboard"
+                  class="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer"
+                  title="Import directory tree config from JSON in clipboard"
+                >
+                  <Upload class="h-3 w-3" />
+                  <span>Import</span>
+                </button>
+              </div>
+              <span class="text-[9px] font-semibold text-gray-400 uppercase tracking-widest select-none">
+                Local Config
+              </span>
+            </div>
           </div>
 
           <!-- Right telemetry posts viewer (col-span-8) -->
           <div class="lg:col-span-8 xl:col-span-9 space-y-6 w-full">
             
             <!-- Empty state when no node is selected -->
-            <div v-if="!selectedListenNode" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center p-8 py-24 text-center w-full min-h-[800px]">
+            <div v-if="!selectedListenNode" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center p-8 py-24 text-center w-full min-h-[920px]">
               <div class="max-w-md mx-auto flex flex-col items-center">
                 <div class="h-16 w-16 bg-teal-50 dark:bg-teal-950/20 rounded-full flex items-center justify-center text-teal-500 mb-6 border border-teal-100/50 dark:border-teal-900/20 scale-110">
                   <Radio class="h-8 w-8 text-teal-600 dark:text-teal-400 animate-pulse" />
@@ -9493,7 +10078,7 @@ const timelineTicks = computed(() => {
             </div>
 
             <!-- Active Listen feed pane -->
-            <div v-else class="space-y-6 select-text">
+            <div v-else class="space-y-6 select-text min-h-[920px]">
               <!-- Active Info Header -->
               <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div class="space-y-1">
@@ -9557,7 +10142,7 @@ const timelineTicks = computed(() => {
                       class="h-2 w-2 rounded-full bg-white block" 
                       :class="[listenAutoRefreshActive ? 'animate-ping' : '']"
                     ></span>
-                    <span>{{ selectedListenNode?.type === 'keyword' ? '30s' : '15s' }} Live Polling: {{ listenAutoRefreshActive ? 'ON' : 'OFF' }}</span>
+                    <span>{{ selectedListenNode?.type === 'keyword' ? '60s' : '30s' }} Live Polling: {{ listenAutoRefreshActive ? 'ON' : 'OFF' }}</span>
                   </button>
 
                   <button
@@ -10016,6 +10601,65 @@ const timelineTicks = computed(() => {
                 class="px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-bold shadow-md shadow-red-500/10 transition-colors"
               >
                 Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Custom Import Directory Modal -->
+      <div 
+        v-if="isImportModalOpen" 
+        class="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm"
+        @click.self="isImportModalOpen = false"
+      >
+        <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-3xl overflow-hidden shadow-2xl border border-gray-150 dark:border-gray-700 animate-in fade-in zoom-in duration-300">
+          <div class="p-6">
+            <div class="flex items-center justify-between mb-4 border-b border-gray-150 dark:border-gray-700 pb-3">
+              <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
+                <Upload class="h-5 w-5 text-teal-500" />
+                <span>Import Directory Tree</span>
+              </h3>
+              <button @click="isImportModalOpen = false" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg p-1">
+                <X class="h-5 w-5" />
+              </button>
+            </div>
+
+            <p class="text-[11px] text-gray-500 dark:text-gray-400 mb-4 leading-normal">
+              Paste the exported directory tree JSON configuration into the input box below. This will replace your current Directory Config.
+            </p>
+
+            <div class="space-y-4">
+              <div>
+                <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 font-sans">JSON Raw Content</label>
+                <textarea
+                  v-model="importJsonInput"
+                  rows="8"
+                  placeholder='[ { "id": "node-1", "name": "Folder", "isFolder": true, "children": [] } ]'
+                  class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-750 bg-gray-55/40 dark:bg-gray-900/50 text-xs font-mono text-gray-900 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all"
+                ></textarea>
+              </div>
+
+              <!-- Error Box if any -->
+              <div v-if="importErrorMessage" class="p-3 bg-red-50 dark:bg-red-950/20 border border-red-150 dark:border-red-900/40 rounded-xl text-xs font-semibold text-red-600 dark:text-red-400 animate-in fade-in duration-200">
+                {{ importErrorMessage }}
+              </div>
+            </div>
+
+            <!-- Footer Buttons -->
+            <div class="mt-6 flex items-center justify-end gap-2.5 border-t border-gray-150 dark:border-gray-700 pt-4">
+              <button
+                @click="isImportModalOpen = false"
+                class="px-4 py-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-xl text-sm font-semibold text-gray-750 dark:text-gray-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                @click="confirmListenDirectoryImport"
+                class="px-5 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold shadow-md shadow-teal-500/10 transition-colors flex items-center gap-1.5"
+              >
+                <Upload class="h-3.5 w-3.5" />
+                <span>Import Directory</span>
               </button>
             </div>
           </div>
@@ -10587,7 +11231,7 @@ const timelineTicks = computed(() => {
             </div>
 
             <!-- Dashboard micro-indicator -->
-            <div class="grid grid-cols-2 gap-4 md:flex md:items-center md:gap-6 text-[11px] font-semibold text-gray-400 dark:text-gray-500 shrink-0 self-stretch md:self-center border-t md:border-t-0 md:border-l border-gray-200/60 dark:border-gray-750 pt-4 md:pt-0 md:pl-6">
+            <div class="grid grid-cols-3 gap-4 md:flex md:items-center md:gap-6 text-[11px] font-semibold text-gray-400 dark:text-gray-500 shrink-0 self-stretch md:self-center border-t md:border-t-0 md:border-l border-gray-200/60 dark:border-gray-750 pt-4 md:pt-0 md:pl-6">
               <div class="space-y-1">
                 <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">History Pool</p>
                 <p class="font-mono text-gray-900 dark:text-white font-bold">{{ lookupUserHistory.length }} lookups</p>
@@ -10595,6 +11239,14 @@ const timelineTicks = computed(() => {
               <div class="space-y-1">
                 <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">Registry Archives</p>
                 <p class="font-mono text-gray-900 dark:text-white font-bold">{{ remoteProfiles.length }} catalogs</p>
+              </div>
+              <div class="space-y-1">
+                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">Indexed Profiles</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold">
+                  <span v-if="loadingIndexedProfilesCount && indexedProfilesCount === null" class="animate-pulse text-teal-600 dark:text-teal-400 font-semibold text-xs">syncing...</span>
+                  <span v-else-if="indexedProfilesCount !== null">{{ indexedProfilesCount.toLocaleString() }} docs</span>
+                  <span v-else class="text-rose-500">offline</span>
+                </p>
               </div>
             </div>
           </div>
@@ -10605,180 +11257,141 @@ const timelineTicks = computed(() => {
           
           <!-- Outer lookup panel -->
           <div class="col-span-12 xl:col-span-5 space-y-6 w-full">
-            <div class="bg-white dark:bg-gray-800 border border-gray-200/75 dark:border-gray-750 rounded-3xl p-6 shadow-sm space-y-6 relative">
+            <!-- Profile Index Full-Text Search Card -->
+            <div class="bg-white dark:bg-gray-800 border border-gray-200/75 dark:border-gray-750 rounded-3xl p-6 shadow-sm space-y-5 relative">
               <div class="space-y-1">
-                <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Search Identity Node</h3>
-                <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">Provide an exact Telegram handle to extract remote server descriptors.</p>
+                <div class="flex items-center gap-2">
+                  <span class="p-1.5 rounded-xl bg-teal-500/10 text-teal-600 dark:text-teal-400">
+                    <Database class="h-4 w-4" />
+                  </span>
+                  <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Search Profile Index</h3>
+                </div>
+                <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">Perform high-performance full-text searches across indexed dossiers.</p>
               </div>
 
-              <!-- Input dropdown wrap -->
-              <div ref="dropdownContainer" class="relative">
-                <div class="flex gap-2">
-                  <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-850 rounded-2xl px-4 py-2.5 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all w-full">
-                    <User class="h-4 w-4 text-teal-600 dark:text-teal-400 mr-2 shrink-0" />
+              <!-- Search controls grid -->
+              <div class="space-y-3.5">
+                <!-- Limit and Query inputs side-by-side -->
+                <div class="flex flex-col gap-2.5 sm:flex-row sm:items-center">
+                  <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-850 rounded-2xl px-4 py-2.5 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all flex-grow">
+                    <Search class="h-4 w-4 text-teal-650 dark:text-teal-400 mr-2 shrink-0" />
                     <input 
-                      v-model="telegramUsername" 
-                      @keyup.enter="fetchTelegramUser" 
-                      @focus="isHistoryVisible = true" 
-                      @blur="handleBlur"
-                      placeholder="e.g. durov, telegram" 
+                      v-model="profileSearchQuery" 
+                      @keyup.enter="searchProfilesFullText" 
+                      placeholder="e.g. bio, location, channels..." 
                       class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
                     />
                   </div>
-                  <button 
-                    @click="fetchTelegramUser" 
-                    class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-teal-500/20 hover:shadow-teal-500/30 cursor-pointer transition-all duration-300 hover:-translate-y-0.5 active:translate-y-0 shrink-0"
-                  >
-                    <Search class="h-3.5 w-3.5" />
-                    <span>Search</span>
-                  </button>
-                </div>
-                
-                <!-- Suggestions Dropdown -->
-                <transition enter-active-class="transition duration-150 ease-out" enter-from-class="transform scale-95 opacity-0" enter-to-class="transform scale-100 opacity-100" leave-active-class="transition duration-100 ease-in" leave-from-class="transform scale-100 opacity-100" leave-to-class="transform scale-95 opacity-0">
-                  <div v-if="isHistoryVisible && lookupUserHistory.length > 0" class="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl shadow-xl max-h-48 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
-                    <div class="px-3.5 py-2 bg-gray-50/50 dark:bg-gray-900/30 text-[10px] font-black uppercase tracking-widest text-gray-400">
-                      Recent Queries
-                    </div>
-                    <div 
-                      v-for="user in lookupUserHistory" 
-                      :key="user" 
-                      class="w-full text-left px-3.5 py-2.5 text-xs hover:bg-gray-50 dark:hover:bg-gray-750 text-gray-900 dark:text-white flex justify-between items-center group/item transition-colors"
-                    >
-                      <button @click="selectHistory(user)" class="flex-grow text-left font-semibold hover:text-teal-600 dark:hover:text-teal-400 cursor-pointer flex items-center gap-2">
-                        <Clock class="h-3 w-3 text-gray-400" />
-                        <span>@{{ user }}</span>
-                      </button>
-                      <button @click.stop="deleteHistory(user)" class="opacity-0 group-hover/item:opacity-100 p-1 text-gray-400 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg cursor-pointer transition-all">
-                        <X class="w-3 h-3"/>
-                      </button>
-                    </div>
-                  </div>
-                </transition>
-              </div>
 
-              <!-- Loader and Error outputs -->
-              <div v-if="loadingTelegramUser" class="flex flex-col items-center justify-center py-10 text-gray-400">
-                <div class="relative h-10 w-10 animate-spin rounded-full border-[3px] border-teal-500 border-t-transparent flex items-center justify-center shadow-md mb-2">
-                  <Bot class="h-4.5 w-4.5 text-teal-600 dark:text-teal-400 animate-pulse" />
-                </div>
-                <p class="text-[10px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 animate-pulse">Syncing User profile...</p>
-              </div>
-
-              <div v-if="telegramError" class="rounded-2xl bg-rose-500/[0.04] p-4 border border-rose-500/10 flex items-start gap-3">
-                <AlertCircle class="h-4 w-4 text-rose-500 shrink-0 mt-0.5" />
-                <div class="space-y-0.5">
-                  <p class="text-xs font-black uppercase tracking-wide text-rose-600 dark:text-rose-450">Query Dispatch Failure</p>
-                  <p class="text-xs text-rose-500/90 dark:text-gray-400 font-semibold leading-relaxed">{{ telegramError }}</p>
-                </div>
-              </div>
-            </div>
-
-            <!-- Searched User Dossier Sheet Card -->
-            <transition v-if="telegramUser" enter-active-class="transition duration-300 ease-out" enter-from-class="transform scale-98 opacity-0" enter-to-class="transform scale-100 opacity-100">
-              <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm relative overflow-hidden space-y-6">
-                
-                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-5 pb-5 border-b border-gray-100 dark:border-gray-800/80">
-                  <div class="flex flex-col sm:flex-row items-start sm:items-center gap-5">
-                    <div class="relative shrink-0">
-                      <img 
-                        :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" 
-                        @error="handleImageError" 
-                        class="w-16 h-16 rounded-2xl object-cover border-2 border-teal-500/10 shadow-sm" 
-                        referrerPolicy="no-referrer"
-                        alt="Profile photo" 
-                      />
-                      <span class="absolute -bottom-1 -right-1 p-1 bg-teal-600 rounded-lg text-white border border-white dark:border-gray-800 shadow-md">
-                        <User class="h-3 w-3" />
+                  <!-- Return Limit select -->
+                  <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-auto">
+                    <label class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest pl-1">Limit:</label>
+                    <div class="relative min-w-[75px]">
+                      <select 
+                        v-model="profileSearchLimit" 
+                        class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-850 rounded-xl px-3 py-2 pr-8 text-xs font-bold text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 cursor-pointer appearance-none"
+                      >
+                        <option :value="5">5 hits</option>
+                        <option :value="10">10 hits</option>
+                        <option :value="20">20 hits</option>
+                        <option :value="50">50 hits</option>
+                      </select>
+                      <span class="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400">
+                        <ChevronDown class="h-3.5 w-3.5" />
                       </span>
                     </div>
-                    <div class="space-y-1">
-                      <h3 class="text-base font-black text-gray-900 dark:text-white leading-tight break-words max-w-[280px] sm:max-w-xs">{{ telegramUser.title || telegramUser.username }}</h3>
-                      <p class="text-xs font-bold text-teal-655 dark:text-teal-400 flex items-center gap-1">@{{ telegramUser.username }}</p>
-                    </div>
-                  </div>
-
-                  <!-- Responsive badge / DC Region context -->
-                  <div v-if="telegramUser.cdnNumber || telegramUser.cdnRegion" class="flex flex-row sm:flex-col items-center sm:items-end gap-1.5 sm:gap-1 select-none shrink-0 bg-gray-50 dark:bg-gray-900/30 sm:bg-transparent p-2.5 sm:p-0 rounded-xl sm:rounded-none">
-                    <span v-if="telegramUser.cdnNumber" class="text-[9px] font-mono font-black uppercase tracking-wider text-teal-655 dark:text-teal-400 bg-teal-500/[0.04] border border-teal-500/10 px-2 py-0.5 rounded-lg">
-                      DC {{ telegramUser.cdnNumber }}
-                    </span>
-                    <p v-if="telegramUser.cdnRegion && telegramUser.cdnRegion[1]" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider leading-none">
-                      {{ telegramUser.cdnRegion[1] }}
-                    </p>
                   </div>
                 </div>
 
-                <!-- Description / Bio -->
-                <div v-if="telegramUser.description" class="space-y-2">
-                  <h4 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Biography Desk</h4>
-                  <p class="text-xs text-gray-600 dark:text-gray-300 leading-relaxed font-semibold bg-gray-50/50 dark:bg-gray-900/35 p-4 rounded-2xl border border-gray-150/40 dark:border-gray-850/50 whitespace-pre-wrap break-words">
-                    {{ telegramUser.description }}
-                  </p>
-                </div>
-
-                <!-- Bento Metrics layout -->
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <!-- ID -->
-                  <div class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl flex items-center gap-3">
-                    <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-650 dark:text-teal-400 shrink-0">
-                      <Hash class="h-4 w-4" />
-                    </div>
-                    <div class="space-y-0.5">
-                      <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Unique Node ID</p>
-                      <p class="text-xs font-bold font-mono text-gray-955 dark:text-white">{{ telegramUser.id || 'N/A' }}</p>
-                    </div>
-                  </div>
-
-                  <!-- Lang context -->
-                  <div class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl flex items-center gap-3">
-                    <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-650 dark:text-teal-400 shrink-0">
-                      <Globe class="h-4 w-4" />
-                    </div>
-                    <div class="space-y-0.5">
-                      <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Locale Profile</p>
-                      <p class="text-xs font-bold text-gray-955 dark:text-white">{{ telegramUser.lang || 'Global (Default)' }}</p>
-                    </div>
-                  </div>
-
-                  <!-- Phone number -->
-                  <div v-if="telegramUser.phone" class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl flex items-center gap-3">
-                    <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-650 dark:text-teal-400 shrink-0">
-                      <Phone class="h-4 w-4" />
-                    </div>
-                    <div class="space-y-0.5">
-                      <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Linked Phone</p>
-                      <p class="text-xs font-bold text-gray-955 dark:text-white">{{ telegramUser.phone }}</p>
-                    </div>
-                  </div>
-
-                  <!-- Presence Status -->
-                  <div v-if="telegramUser.status" class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl flex items-center gap-3">
-                    <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-650 dark:text-teal-400 shrink-0">
-                      <Activity class="h-4 w-4" />
-                    </div>
-                    <div class="space-y-0.5">
-                      <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Remote Status</p>
-                      <p class="text-xs font-bold text-gray-955 dark:text-white">{{ telegramUser.status }}</p>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Raw inspector dropdown -->
-                <details class="bg-gray-50 dark:bg-gray-950 rounded-2xl border border-gray-200/60 dark:border-gray-900 group">
-                  <summary class="flex items-center justify-between p-4 cursor-pointer outline-none select-none">
-                    <span class="text-xs font-black text-gray-700 dark:text-gray-300 uppercase tracking-widest flex items-center gap-2">
-                      <Database class="h-3.5 w-3.5 text-teal-650 dark:text-teal-400" />
-                      <span>Schema Inspector</span>
-                    </span>
-                    <ChevronDown class="h-4 w-4 text-gray-400 group-open:rotate-180 duration-200 transition-transform" />
-                  </summary>
-                  <div class="p-4 pt-0 border-t border-gray-150 dark:border-gray-900 col-span-2">
-                    <pre class="mt-4 text-[10px] font-mono text-teal-650 dark:text-teal-400 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-48 custom-scrollbar">{{ JSON.stringify(telegramUser, null, 2) }}</pre>
-                  </div>
-                </details>
+                <!-- Action Button -->
+                <button 
+                  @click="searchProfilesFullText" 
+                  :disabled="isSearchingProfiles"
+                  class="w-full px-5 py-2.5 bg-teal-650 hover:bg-teal-700 disabled:opacity-50 text-white rounded-2xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-teal-500/10 hover:shadow-teal-500/20 cursor-pointer transition-all duration-300 hover:-translate-y-0.5 active:translate-y-0"
+                >
+                  <LoaderCircle v-if="isSearchingProfiles" class="h-3.5 w-3.5 animate-spin" />
+                  <Search v-else class="h-3.5 w-3.5" />
+                  <span>Execute Search</span>
+                </button>
               </div>
-            </transition>
+
+              <!-- Search Status & Error -->
+              <div v-if="profileSearchError" class="rounded-2xl bg-rose-500/[0.04] p-4 border border-rose-500/10 flex items-start gap-3">
+                <AlertCircle class="h-4 w-4 text-rose-500 shrink-0 mt-0.5" />
+                <div class="space-y-0.5">
+                  <p class="text-xs font-black uppercase tracking-wide text-rose-650 dark:text-rose-400">Search failed</p>
+                  <p class="text-xs text-rose-500/95 dark:text-gray-450 font-semibold leading-relaxed">{{ profileSearchError }}</p>
+                </div>
+              </div>
+
+              <!-- Statistics / Results Header -->
+              <div v-if="profileSearchResults" class="flex items-center justify-between border-t border-gray-100 dark:border-gray-800/85 pt-4">
+                <span class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">
+                  Found {{ profileSearchStats.total }} Matching Nodes
+                </span>
+                <span class="text-[9px] font-mono font-medium text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-900/40 px-2 py-0.5 rounded-md">
+                  Took {{ profileSearchStats.tookMs }} ms
+                </span>
+              </div>
+
+              <!-- List of matching entries inside the Search Results Area -->
+              <div v-if="profileSearchResults && profileSearchResults.hits?.hits?.length > 0" class="space-y-3 max-h-[360px] overflow-y-auto pr-1">
+                <div 
+                  v-for="hit in profileSearchResults.hits.hits" 
+                  :key="hit._id" 
+                  @click="selectProfileFromSearchResult(hit)"
+                  :class="[
+                    'p-3.5 rounded-2xl border text-xs cursor-pointer transition-all duration-300 flex flex-col gap-2 relative overflow-hidden group',
+                    selectedRemoteProfileName === (hit._source?.name || hit._id)
+                      ? 'bg-teal-600/[0.04] dark:bg-teal-600/[0.08] border-teal-500 hover:border-teal-500'
+                      : 'bg-gray-50/50 dark:bg-gray-900/30 hover:bg-white dark:hover:bg-gray-800 border-gray-200/50 dark:border-gray-750/50 hover:border-teal-500/30'
+                  ]"
+                >
+                  <!-- Document title/name -->
+                  <div class="flex items-start justify-between gap-2">
+                    <span class="font-extrabold text-gray-900 dark:text-white truncate max-w-[180px] sm:max-w-xs group-hover:text-teal-650 dark:group-hover:text-teal-400 transition-colors">
+                      {{ hit._source?.name || hit._id }}
+                    </span>
+                    <!-- Score badge -->
+                    <span class="text-[9px] font-mono font-bold text-teal-650 dark:text-teal-400 bg-teal-500/[0.04] px-1.5 py-0.5 rounded border border-teal-500/10">
+                      Score: {{ parseFloat(hit._score || 0).toFixed(2) }}
+                    </span>
+                  </div>
+
+                  <!-- Optional type & date badges -->
+                  <div class="flex items-center gap-1.5 flex-wrap">
+                    <span v-if="hit._source?.type" class="text-[9px] font-mono uppercase font-black text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded">
+                      {{ hit._source.type }}
+                    </span>
+                    <span v-if="hit._source?.date" class="text-[9px] font-mono font-semibold text-gray-400 dark:text-gray-500 bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded">
+                      {{ hit._source.date }}
+                    </span>
+                  </div>
+
+                  <!-- Highlighter Content snippets -->
+                  <div 
+                    v-if="hit.highlight && hit.highlight.content" 
+                    class="p-2.5 bg-gray-100/40 dark:bg-gray-950/40 border border-gray-150/10 dark:border-gray-850/40 rounded-xl text-[10px] text-gray-500 dark:text-gray-400 leading-relaxed font-semibold italic mt-1 font-sans space-y-1.5"
+                  >
+                    <div 
+                      v-for="(fragment, idx) in hit.highlight.content" 
+                      :key="idx" 
+                      v-html="fragment" 
+                      class="profile-highlight-text"
+                    ></div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Empty state when search triggered but hits are 0 -->
+              <div v-else-if="profileSearchResults && profileSearchResults.hits?.hits?.length === 0" class="flex flex-col items-center justify-center py-8 text-center text-gray-400 dark:text-gray-500">
+                <Inbox class="w-8 h-8 mb-2 opacity-50" />
+                <p class="text-xs font-semibold">No dossiers match search</p>
+                <p class="text-[10px] text-gray-450 dark:text-gray-500 mt-1 max-w-[200px] leading-normal">
+                  Try adjusting search term or scaling search queries.
+                </p>
+              </div>
+            </div>
 
             <!-- Beautiful collateral panel: remote dossier categories -->
             <div class="bg-gradient-to-br from-white to-gray-50/50 dark:from-gray-800 dark:to-gray-900/40 border border-gray-200/80 dark:border-gray-750/80 rounded-3xl p-6 shadow-sm space-y-4">
@@ -10844,10 +11457,22 @@ const timelineTicks = computed(() => {
                       <h4 class="text-xs sm:text-sm font-black text-gray-900 dark:text-white mt-1 break-all max-w-[180px] xs:max-w-xs sm:max-w-md">{{ selectedRemoteProfileName }}</h4>
                     </div>
                   </div>
-                  <!-- Close binding button -->
-                  <button @click="selectedRemoteProfileContent = null; selectedRemoteProfileName = ''" class="p-1.5 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-750 text-gray-400 hover:text-gray-900 dark:hover:text-white transition-all cursor-pointer">
-                    <X class="h-4 w-4" />
-                  </button>
+                  <!-- Index & Close buttons -->
+                  <div class="flex items-center gap-2">
+                    <button 
+                      @click="indexProfileToBackend" 
+                      :disabled="isIndexingProfile"
+                      class="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+                      title="Index profile target to database"
+                    >
+                      <LoaderCircle v-if="isIndexingProfile" class="h-3.5 w-3.5 animate-spin" />
+                      <Database v-else class="h-3.5 w-3.5" />
+                      <span>Index</span>
+                    </button>
+                    <button @click="selectedRemoteProfileContent = null; selectedRemoteProfileName = ''; selectedRemoteProfileRawText = '';" class="p-1.5 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-750 text-gray-400 hover:text-gray-900 dark:hover:text-white transition-all cursor-pointer">
+                      <X class="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
 
                 <!-- Document reader contents -->
@@ -10879,3 +11504,20 @@ const timelineTicks = computed(() => {
 
   </div>
 </template>
+
+<style>
+/* Custom high-contrast highlights for Elasticsearch matching terms */
+.profile-highlight-text em {
+  font-weight: 800;
+  font-style: normal;
+  color: #0d9488 !important; /* teal-600 */
+  background-color: rgba(13, 148, 136, 0.08) !important;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  border-radius: 0.25rem;
+}
+.dark .profile-highlight-text em {
+  color: #2dd4bf !important; /* teal-400 */
+  background-color: rgba(45, 212, 191, 0.12) !important;
+}
+</style>
