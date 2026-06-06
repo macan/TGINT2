@@ -44,6 +44,7 @@ import {
   LoaderCircle,
   Forward,
   Share2,
+  Send,
   Languages,
   PanelRightOpen,
   PanelRightClose,
@@ -353,30 +354,83 @@ const endDrag = () => {
 
 const generalAsk = async (userInputText) => {
   try {
-    const targetPosts =
-      activeTab.value === "search" ? searchResults.value : (activeTab.value === "explorer" ? posts.value : listenPosts.value);
-    // Strip unnecessary fields
-    const strippedPosts = targetPosts
-      .map((p) => {
-        const { data, key } = p;
-        // Keep essential data only
-        return {
-          key,
-          content: data?.content,
-          date: data?.date,
-          author: data?.author || data?.user,
-          reply: data?.reply,
-          linkPreview: data?.linkPreview
-            ? {
-                title: data.linkPreview.title,
-                description: data.linkPreview.description,
+    let strippedPosts = [];
+    if (userInputText.includes('$POSTS$')) {
+      if (activeTab.value === "profile") {
+        // To avoid recursive query, we only do ES search if this is the final user prompt (and not an internal precheck prompt)
+        const isInternalPrecheck = userInputText.includes("Is user's ask intent") || userInputText.includes("extract the key entities");
+        if (!isInternalPrecheck) {
+          try {
+            // Perform precheck to extract search query token
+            const queryTokenPrompt = `Please extract the key entities, names, locations, or skills from this query to run a database search. Return ONLY the space-separated keywords as a simple flat query string, with no quotes, explanations, or label. Query: "${userInputText}"`;
+            const queryToken = await generalAsk(queryTokenPrompt);
+            const cleanQuery = (queryToken || "").trim().replace(/^['"\s]+|['"\s]+$/g, "");
+            
+            if (cleanQuery) {
+              // Do a profile index search on ES
+              const esPayload = {
+                size: 10,
+                query: {
+                  match: {
+                    content: cleanQuery
+                  }
+                }
+              };
+              const esRes = await fetch("https://i.gogingko.net/api/v1/es/p/search", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(esPayload)
+              });
+              if (esRes.ok) {
+                const esData = await esRes.json();
+                const hits = esData.hits?.hits || [];
+                strippedPosts = hits.map((hit: any) => {
+                  return {
+                    key: hit._id,
+                    content: hit._source?.content || "",
+                    author: hit._source?.name || hit._id || "Profile Hit",
+                    date: new Date().toISOString()
+                  };
+                });
               }
-            : undefined,
-          outlinks: data?.outlinks,
-        };
-      })
-      .filter((p) => p.content || p.reply || p.linkPreview);
-
+            }
+          } catch (e) {
+            console.error("Profile ES auto-precheck search error:", e);
+          }
+        }
+      } else {
+        let targetPosts = [];
+        if (activeTab.value === "search") {
+          targetPosts = searchResults.value;
+        } else if (activeTab.value === "explorer") {
+          targetPosts = posts.value;
+        } else if (activeTab.value === "listen") {
+          targetPosts = listenPosts.value;
+        }
+        // Strip unnecessary fields
+        strippedPosts = targetPosts
+          .map((p) => {
+            const { data, key } = p;
+            // Keep essential data only
+            return {
+              key,
+              content: data?.content,
+              date: data?.date,
+              author: data?.author || data?.user,
+              reply: data?.reply,
+              linkPreview: data?.linkPreview
+                ? {
+                    title: data.linkPreview.title,
+                    description: data.linkPreview.description,
+                  }
+                : undefined,
+              outlinks: data?.outlinks,
+            };
+          })
+          .filter((p) => p.content || p.reply || p.linkPreview);
+      }
+    }
+    
     const response = await fetch("https://ask.gingkogo.uk/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -976,6 +1030,55 @@ const handleChatSubmit = async () => {
     chatMessages.value.push({ role: 'bot', content: reply || "No response." });
     isChatLoading.value = false;
 };
+
+const profileChatMessages = ref<{role: 'user' | 'bot', content: string}[]>([]);
+const profileChatInput = ref('');
+const isProfileChatLoading = ref(false);
+const profileChatContentRef = ref<HTMLElement | null>(null);
+
+const scrollProfileChatToBottom = () => {
+  nextTick(() => {
+    if (profileChatContentRef.value) {
+      profileChatContentRef.value.scrollTop = profileChatContentRef.value.scrollHeight;
+    }
+  });
+};
+
+watch(profileChatMessages, () => {
+  scrollProfileChatToBottom();
+}, { deep: true });
+
+watch(isProfileChatLoading, (val) => {
+  if (val) {
+    scrollProfileChatToBottom();
+  }
+});
+
+const handleProfileChatSubmit = async () => {
+    if (!profileChatInput.value.trim()) return;
+    const userMessage = profileChatInput.value;
+    profileChatMessages.value.push({ role: 'user', content: userMessage });
+    profileChatInput.value = '';
+    isProfileChatLoading.value = true;
+    
+    // Construct the prompt with instructions
+    const precheck = `Is user's ask intent related with the profile metadata, bio, or contact information? Please only answer 'yes' or 'no'. The user's input is: ${userMessage}`;
+    const precheckResult = await generalAsk(precheck);
+    
+    let prompt = null;
+
+    if (precheckResult.toLowerCase().includes('yes')) {
+      prompt = `Based on the scanned profiles data below, answer the following question: ${userMessage}\n\nProfiles: $POSTS$`;
+    } else {
+      prompt = `${userMessage}`;
+    }
+    
+    const reply = await generalAsk(prompt);
+    
+    profileChatMessages.value.push({ role: 'bot', content: reply || "No response." });
+    isProfileChatLoading.value = false;
+};
+
 const explorerTab = ref<HTMLElement | null>(null);
 const explorerMinHeight = ref("0px");
 const suggestedChannels = ref<string[]>([]);
@@ -11441,6 +11544,55 @@ const timelineTicks = computed(() => {
                 </p>
               </div>
             </div>
+          </div>
+        </div>
+
+        <!-- Profile Chat Dialog Widget -->
+        <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm flex flex-col space-y-4">
+          <div class="flex items-center gap-2 border-b border-gray-150 dark:border-gray-750 pb-3">
+            <span class="p-1.5 rounded-xl bg-teal-500/10 text-teal-600 dark:text-teal-400">
+              <MessageSquare class="h-5 w-5" />
+            </span>
+            <div>
+              <h3 class="text-sm font-black text-gray-900 dark:text-white uppercase tracking-wider">Cognitive Profile Assistant</h3>
+              <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">Ask dynamic questions directly referencing the entire profile intelligence pool.</p>
+            </div>
+          </div>
+          
+          <!-- Chat Content Area -->
+          <div ref="profileChatContentRef" class="h-64 overflow-y-auto space-y-3 p-3 bg-gray-50/50 dark:bg-gray-900/30 rounded-2xl border border-gray-150/50 dark:border-gray-750/30">
+            <div v-if="profileChatMessages.length === 0" class="text-center text-xs text-gray-400 dark:text-gray-500 py-12">
+              No conversations entered. Ask a question regarding profiles to start the analysis.
+            </div>
+            <div v-for="(msg, idx) in profileChatMessages" :key="idx" :class="msg.role === 'user' ? 'text-right' : 'text-left'">
+              <div :class="msg.role === 'user' ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-900 dark:text-teal-200 px-3 py-2 rounded-2xl rounded-tr-none inline-block text-xs font-semibold max-w-xl' : 'text-left text-xs bg-white dark:bg-gray-800 shadow-sm border border-gray-150 dark:border-gray-750 px-4 py-3 rounded-2xl rounded-tl-none inline-block prose prose-xs dark:prose-invert max-w-full'">
+                <div v-html="md.render(msg.content)"></div>
+              </div>
+            </div>
+            <div v-if="isProfileChatLoading" class="text-xs text-teal-600 dark:text-teal-400 italic flex items-center gap-2">
+              <Loader2 class="h-3.5 w-3.5 animate-spin" /> Querying search registers and compiling response...
+            </div>
+          </div>
+
+          <!-- Input Block -->
+          <div class="flex gap-2.5">
+            <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-850 rounded-2xl px-4 py-2.5 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all flex-grow">
+              <input 
+                v-model="profileChatInput" 
+                @keyup.enter="handleProfileChatSubmit" 
+                placeholder="Ask profile-related questions (e.g. Find all developers, list active admins...)" 
+                class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
+                :disabled="isProfileChatLoading"
+              />
+            </div>
+            <button 
+              @click="handleProfileChatSubmit" 
+              :disabled="isProfileChatLoading" 
+              class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-teal-400 text-white font-bold rounded-2xl text-xs transition-colors flex items-center gap-1.5 shrink-0 shadow-sm"
+            >
+              <Send class="h-3.5 w-3.5" />
+              <span>Ask</span>
+            </button>
           </div>
         </div>
 
