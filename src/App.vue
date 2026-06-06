@@ -3213,7 +3213,17 @@ const generateFinalTable = async () => {
         await saveProfileRemotely(profileName, loginToken.value, JSON.stringify(data));
     }
     // try to save the profile to remote ES
-    await indexProfileToBackendInternal(profileName, JSON.stringify(data));
+    let jsonData = data.text.split('Here is the context input: ')[1] || '';
+        try {
+            const parsed = JSON.parse(jsonData);
+            if (Array.isArray(parsed)) {
+              jsonData = parsed.map(item => `\n---\n# **ID ${item.id}**\n${item.analysis}`).join('\n')
+            }
+        } catch (e) {
+            // Keep original if parsing fails
+        }
+    const rawText = data.reply + '\n---\n# **Inputs >>>>>>>**\n---\n' + jsonData;
+    await indexProfileToBackendInternal(profileName, rawText);
   } catch (err) {
     console.error(err);
     finalTableHtml.value =
