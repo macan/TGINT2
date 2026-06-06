@@ -354,7 +354,7 @@ const endDrag = () => {
 const generalAsk = async (userInputText) => {
   try {
     const targetPosts =
-      activeTab.value === "search" ? searchResults.value : posts.value;
+      activeTab.value === "search" ? searchResults.value : (activeTab.value === "explorer" ? posts.value : listenPosts.value);
     // Strip unnecessary fields
     const strippedPosts = targetPosts
       .map((p) => {
@@ -398,7 +398,7 @@ const generalAsk = async (userInputText) => {
 
 const analyzePosts = async () => {
   const targetPosts =
-    activeTab.value === "search" ? searchResults.value : posts.value;
+    activeTab.value === "search" ? searchResults.value : (activeTab.value === "explorer" ? posts.value : listenPosts.value);
   if (!targetPosts || targetPosts.length === 0) return;
 
   isAnalyzing.value = true;
@@ -450,7 +450,7 @@ const analyzePosts = async () => {
 };
 
 const summarizePosts = async () => {
-    const targetPosts = activeTab.value === "search" ? searchResults.value : posts.value;
+    const targetPosts = activeTab.value === "search" ? searchResults.value : (activeTab.value === 'explorer' ? posts.value : listenPosts.value);
     if (!targetPosts || targetPosts.length === 0) return;
 
     isSummarizing.value = true;
@@ -926,6 +926,32 @@ const isChatDragging = ref(false);
 const chatDragOffset = ref({ x: 0, y: 0 });
 const isChatResizing = ref(false);
 
+const chatContentRef = ref<HTMLElement | null>(null);
+
+const scrollToBottom = () => {
+  nextTick(() => {
+    if (chatContentRef.value) {
+      chatContentRef.value.scrollTop = chatContentRef.value.scrollHeight;
+    }
+  });
+};
+
+watch(isChatWidgetVisible, (val) => {
+  if (val) {
+    scrollToBottom();
+  }
+});
+
+watch(chatMessages, () => {
+  scrollToBottom();
+}, { deep: true });
+
+watch(isChatLoading, (val) => {
+  if (val) {
+    scrollToBottom();
+  }
+});
+
 const handleChatSubmit = async () => {
     if (!chatInput.value.trim()) return;
     const userMessage = chatInput.value;
@@ -934,12 +960,12 @@ const handleChatSubmit = async () => {
     isChatLoading.value = true;
     
     // Construct the prompt with instructions
-    const precheck = `Is user's ask intent related with the posts of channel/group or search context? Please only answer 'yes' or 'no'. The user's input is: ${userMessage}`;
+    const precheck = `Is user's ask intent related with the posts of channel/group or search context or listen channels? Please only answer 'yes' or 'no'. The user's input is: ${userMessage}`;
     const precheckResult = await generalAsk(precheck);
     
     let prompt = null;
 
-    if (precheckResult.includes('yes')) {
+    if (precheckResult.toLowerCase().includes('yes')) {
       prompt = `Based on the provided posts below, answer the following question: ${userMessage}\n\nPosts: $POSTS$`;
     } else {
       prompt = `${userMessage}`;
@@ -1522,6 +1548,10 @@ const fetchListenPosts = async (node: ListenItem) => {
   if (!node || node.isFolder) return;
   if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
   
+  const getPostId = (post: any): string => {
+    return post.key || post.id || (post.data && post.data.id) || '';
+  };
+
   // 1. Immediately load cached posts from localStorage for instant display
   const cachedStorageKey = `listen_cached_posts_${node.id}`;
   let cached: any[] = [];
@@ -1532,6 +1562,21 @@ const fetchListenPosts = async (node: ListenItem) => {
     }
   } catch (err) {
     console.error("Failed to parse cached listen posts:", err);
+  }
+
+  // Find the max post number (as savedMaxPostNumber) of saved posts
+  let savedMaxPostNumber = 0;
+  for (const p of cached) {
+    const id = getPostId(p);
+    if (id) {
+      const parts = id.split('.');
+      if (parts.length > 1) {
+        const num = parseInt(parts[1], 10);
+        if (!isNaN(num) && num > savedMaxPostNumber) {
+          savedMaxPostNumber = num;
+        }
+      }
+    }
   }
 
   // Bind cached items directly
@@ -1550,13 +1595,58 @@ const fetchListenPosts = async (node: ListenItem) => {
         }
         return;
       }
-      const response = await fetch(`https://i.gogingko.net/api/v1/last/${username}?n=50`);
-      if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
-      if (response.ok) {
+
+      let allFetched: any[] = [];
+      let batchMinPostNumber = Infinity;
+      let url = `https://i.gogingko.net/api/v1/last/${username}?n=50`;
+      let iterationCount = 0;
+      const MAX_ITERATIONS = 20;
+
+      while (iterationCount < MAX_ITERATIONS) {
+        const response = await fetch(url);
+        if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
+        if (!response.ok) break;
+
         const data = await response.json();
         if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
-        fetchedPosts = Array.isArray(data) ? data : (data.data || data.posts || data.items || []);
+
+        const batchPosts = Array.isArray(data) ? data : (data.data || data.posts || data.items || []);
+        if (batchPosts.length === 0) {
+          break;
+        }
+
+        allFetched.push(...batchPosts);
+
+        // Find the min post number of this batch
+        let currentBatchMin = Infinity;
+        for (const p of batchPosts) {
+          const id = getPostId(p);
+          if (id) {
+            const parts = id.split('.');
+            if (parts.length > 1) {
+              const num = parseInt(parts[1], 10);
+              if (!isNaN(num) && num < currentBatchMin) {
+                currentBatchMin = num;
+              }
+            }
+          }
+        }
+
+        batchMinPostNumber = currentBatchMin;
+
+        if (
+          batchMinPostNumber === Infinity || 
+          savedMaxPostNumber === 0 || 
+          batchMinPostNumber <= savedMaxPostNumber
+        ) {
+          break;
+        }
+
+        url = `https://i.gogingko.net/api/v1/last/${username}?n=50&b=${batchMinPostNumber}`;
+        iterationCount++;
       }
+
+      fetchedPosts = allFetched;
     } else if (node.type === "keyword") {
       const keywords = node.argument?.trim().split(',');
       if (!keywords) {
@@ -1616,10 +1706,6 @@ const fetchListenPosts = async (node: ListenItem) => {
     }
 
     if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
-
-    const getPostId = (post: any): string => {
-      return post.key || post.id || (post.data && post.data.id) || '';
-    };
 
     const getPostTimestamp = (dateVal: any) => {
       if (!dateVal) return 0;
@@ -5941,7 +6027,8 @@ const timelineTicks = computed(() => {
       <button
         v-if="
           (activeTab === 'explorer' && posts.length > 0) ||
-          (activeTab === 'search' && searchResults.length > 0)
+          (activeTab === 'search' && searchResults.length > 0) ||
+          (activeTab === 'listen' && listenPosts.length > 0)
         "
         @mousedown="startLongPressInSummarize"
         @mouseup="endLongPressInSummarize"
@@ -5974,7 +6061,7 @@ const timelineTicks = computed(() => {
               <button @click="isChatWidgetVisible = false" class="text-gray-500 hover:text-red-500"><X class="h-4 w-4" /></button>
           </div>
           <!-- Chat Content -->
-          <div class="flex-grow p-4 overflow-y-auto text-gray-900 dark:text-white text-sm space-y-3">
+          <div ref="chatContentRef" class="flex-grow p-4 overflow-y-auto text-gray-900 dark:text-white text-sm space-y-3">
              <div v-for="(msg, index) in chatMessages" :key="index" :class="msg.role === 'user' ? 'text-right' : 'text-left'">
                  <div :class="msg.role === 'user' ? 'bg-blue-100 dark:bg-blue-900 p-2 rounded-lg inline-block' : 'prose prose-sm dark:prose-invert'">
                      <div v-html="md.render(msg.content)"></div>
