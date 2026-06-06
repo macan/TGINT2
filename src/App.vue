@@ -1544,6 +1544,105 @@ function formatDateForSearch(date) {
     return `${YYYY}-${MM}-${DD}T${hh}:${mm}:${ss}${tz}`;
 }
 
+const initIndexedDB = (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    // Open (or create) database for caching listen posts
+    const request = indexedDB.open("GingkoListenPostsDB", 1);
+    request.onupgradeneeded = (event: any) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains("posts")) {
+        db.createObjectStore("posts");
+      }
+    };
+    request.onsuccess = (event: any) => {
+      resolve(event.target.result);
+    };
+    request.onerror = (event: any) => {
+      reject(request.target?.error || new Error("Failed to open IndexedDB"));
+    };
+  });
+};
+
+const getCachedPostsIndexedDB = async (nodeId: string): Promise<any[]> => {
+  try {
+    const db = await initIndexedDB();
+    return new Promise((resolve) => {
+      const transaction = db.transaction("posts", "readonly");
+      const store = transaction.objectStore("posts");
+      const request = store.get(nodeId);
+      request.onsuccess = () => {
+        resolve(request.result || []);
+      };
+      request.onerror = () => {
+        resolve([]);
+      };
+    });
+  } catch (err) {
+    console.error("IndexedDB get cached posts error:", err);
+    return [];
+  }
+};
+
+const setCachedPostsIndexedDB = async (nodeId: string, posts: any[]): Promise<void> => {
+  try {
+    const db = await initIndexedDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction("posts", "readwrite");
+      const store = transaction.objectStore("posts");
+      const request = store.put(posts, nodeId);
+      request.onsuccess = () => {
+        resolve();
+      };
+      request.onerror = () => {
+        reject(request.target?.error || new Error("Failed to save to IndexedDB"));
+      };
+    });
+  } catch (err) {
+    console.error("IndexedDB set cached posts error:", err);
+  }
+};
+
+const clearCachedPostsIndexedDB = async (nodeId: string): Promise<void> => {
+  try {
+    const db = await initIndexedDB();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction("posts", "readwrite");
+      const store = transaction.objectStore("posts");
+      const request = store.delete(nodeId);
+      request.onsuccess = () => {
+        resolve();
+      };
+      request.onerror = () => {
+        reject(request.target?.error || new Error("Failed to delete from IndexedDB"));
+      };
+    });
+  } catch (err) {
+    console.error("IndexedDB clear cached posts error:", err);
+  }
+};
+
+const getListenPostsCacheLimit = (): number => {
+  // Determine memory limits (defaulting to 4GB if not accessible/supported)
+  const memory = (navigator as any).deviceMemory || 4;
+  // Determine concurrency/cores limits (defaulting to 4 threads if not supported)
+  const threads = navigator.hardwareConcurrency || 4;
+
+  // High capability (e.g. 12+ threads or 8+ threads with 8GB+ RAM): Cache up to 2000 posts
+  if (threads >= 12 || (threads >= 8 && memory >= 8)) {
+    return 2000;
+  }
+  // Mid-high capability (e.g. 8+ threads or 6GB+ RAM): Cache up to 1500 posts
+  if (threads >= 8 || memory >= 6) {
+    return 1500;
+  }
+  // Baseline capability (e.g. 4+ threads or 4GB+ RAM): Cache up to 1000 posts
+  if (threads >= 4 || memory >= 4) {
+    return 1000;
+  }
+  // Low performance (e.g., old/dual-core or low RAM): Cache fewer (500) to keep localStorage loading and parsing instantaneous
+  return 500;
+};
+
 const fetchListenPosts = async (node: ListenItem) => {
   if (!node || node.isFolder) return;
   if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
@@ -1552,16 +1651,12 @@ const fetchListenPosts = async (node: ListenItem) => {
     return post.key || post.id || (post.data && post.data.id) || '';
   };
 
-  // 1. Immediately load cached posts from localStorage for instant display
-  const cachedStorageKey = `listen_cached_posts_${node.id}`;
+  // 1. Immediately load cached posts from IndexedDB for instant display
   let cached: any[] = [];
   try {
-    const cachedRaw = localStorage.getItem(cachedStorageKey);
-    if (cachedRaw) {
-      cached = JSON.parse(cachedRaw);
-    }
+    cached = await getCachedPostsIndexedDB(node.id);
   } catch (err) {
-    console.error("Failed to parse cached listen posts:", err);
+    console.error("Failed to load cached listen posts from IndexedDB:", err);
   }
 
   // Find the max post number (as savedMaxPostNumber) of saved posts
@@ -1734,14 +1829,15 @@ const fetchListenPosts = async (node: ListenItem) => {
       // Sort by date descending
       merged.sort((a, b) => getPostTimestamp(b.data?.date) - getPostTimestamp(a.data?.date));
 
-      // Slice to keep reasonable history limit (max 1000)
-      const finalPosts = merged.slice(0, 1000);
+      // Slice to keep reasonable history limit based on client device capability
+      const cacheLimit = getListenPostsCacheLimit();
+      const finalPosts = merged.slice(0, cacheLimit);
 
       // Save to cache
       try {
-        localStorage.setItem(cachedStorageKey, JSON.stringify(finalPosts));
+        await setCachedPostsIndexedDB(node.id, finalPosts);
       } catch (err) {
-        console.error("Failed to save cached posts:", err);
+        console.error("Failed to save cached posts to IndexedDB:", err);
       }
 
       if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
@@ -1862,10 +1958,9 @@ watch(selectedListenNode, (newNode) => {
   }
 });
 
-const clearCachedListenPosts = () => {
+const clearCachedListenPosts = async () => {
   if (!selectedListenNode.value) return;
-  const cachedStorageKey = `listen_cached_posts_${selectedListenNode.value.id}`;
-  localStorage.removeItem(cachedStorageKey);
+  await clearCachedPostsIndexedDB(selectedListenNode.value.id);
   listenPosts.value = [];
   newlyFetchedListenKeys.value.clear();
 };
