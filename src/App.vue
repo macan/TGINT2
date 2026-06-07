@@ -451,6 +451,7 @@ const generalAsk = async (userInputText) => {
 }
 
 const analyzePosts = async () => {
+  // this function is used to detect any evidence from the posts
   const targetPosts =
     activeTab.value === "search" ? searchResults.value : (activeTab.value === "explorer" ? posts.value : listenPosts.value);
   if (!targetPosts || targetPosts.length === 0) return;
@@ -486,8 +487,15 @@ const analyzePosts = async () => {
         sender: "mc",
         chat_id: "mc",
         text:
-          "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some post might be a submission from other users which can be identified by the content signatures, some post might contain non empty reply field which means the content is a reply to that post. For each grouped account, try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours(reference to China), job postion, career, gender, age, location, tour, language, education, interests, hobby, favorite things, politic opinions, special opinions, technology skills, troubles, cognitive state. Output the findings in Chinese, , for any confirmed evidence please attach with the post id.\n\n" +
-          JSON.stringify(strippedPosts),
+          "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. \
+           Note that some posts might be submissions from other users which can be identified by the content signatures, \
+           some posts might contain non empty reply field or quoted content which means the content is a reply to that post (you shoud distinguish which dialog is truely the target expressed) and \
+           some posts' content is copy-paste from other platfrom which can be identified by the head and/or tail of the content where might contains links or platfrom or website names (you should not use these content to build any personality evidence or connection with the analysis target). \
+           For each grouped account, keep record their username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in life, for example living city or country, \
+           post date that reflect the active hours(reference to China), job postion, career, gender, age, location, tour, language, education, interests, hobby, favorite things, \
+           politic opinions, special opinions, technology skills, troubles, cognitive state, social relations, or any pattern or regularity you found. Output the findings in Chinese with post id range hint in proper place.\
+           For any confirmed evidence please attach with the post id.\n\n" +
+           JSON.stringify(strippedPosts),
       }),
     });
 
@@ -827,7 +835,14 @@ const runAutoFinding = async () => {
               sender: "mc",
               chat_id: "mc",
               text:
-                "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. Note that some posts might be submissions from other users which can be identified by the content signatures and some posts might contain non empty reply field or quoted content which means the content is a reply to that (you shoud distinguish which dialog is truely the target expressed). For each grouped account, keep record their username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in life, for example living city or country, post date that reflect the active hours(reference to China), job postion, career, gender, age, location, tour, language, education, interests, hobby, favorite things, politic opinions, special opinions, technology skills, troubles, cognitive state, social relations, or any pattern or regularity you found. Output the findings in Chinese with post id range hint in proper place.\n " +
+                "Please analyze the following posts from a telegram group. You should consider grouping by the sent user or account. \
+                Note that some posts might be submissions from other users which can be identified by the content signatures, \
+                some posts might contain non empty reply field or quoted content which means the content is a reply to that post (you shoud distinguish which dialog is truely the target expressed) and \
+                some posts' content is copy-paste from other platfrom which can be identified by the head and/or tail of the content where might contains links or platfrom or website names. \
+                For each grouped account, keep record their username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in life, for example living city or country, \
+                post date that reflect the active hours(reference to China), job postion, career, gender, age, location, tour, language, education, interests, hobby, favorite things, \
+                politic opinions, special opinions, technology skills, troubles, cognitive state, social relations, or any pattern or regularity you found. Output the findings in Chinese with post id range hint in proper place.\
+                For any confirmed evidence please attach with the post id.\n\n" +
                 JSON.stringify(strippedPosts),
             }),
           });
@@ -2540,7 +2555,14 @@ const analyzeGraph = async () => {
             sender: "mc",
             chat_id: "mc",
             text:
-              "Please analyze the following posts that MIGHT from one user. You should consider grouping by the sent user or account. Note that some posts might be submission from other users which can be identified by the content signatures and some posts might contain non empty reply field or quoted content which means the content is a reply to that content (you should distinguish which dialog is truely the target expressed). For each grouped account, keep record the username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in social life, for example living city or country, post date that reflect the active hours(reference to China), job postion, career, gender, age, location, tour, language, education, interests, hobby, favorite things, politic opinions, special opinions, technology skills, troubles, cognitive state. Output the findings for each grouped account or user in Chinese including a table to clearly view, for any confirmed evidence please attach with the post id.\n\n" +
+              "Please analyze the following posts that MIGHT from one user. You should consider grouping by the sent user or account. \
+              Note that some posts might be submissions from other users which can be identified by the content signatures, \
+              some posts might contain non empty reply field or quoted content which means the content is a reply to that post (you shoud distinguish which dialog is truely the target expressed) and \
+              some posts' content is copy-paste from other platfrom which can be identified by the head and/or tail of the content where might contains links or platfrom or website names. \
+              For each grouped account, keep record their username (extract from 'user' field if non empty) and try hard to find anything that represented the personality of the account in life, for example living city or country, \
+              post date that reflect the active hours(reference to China), job postion, career, gender, age, location, tour, language, education, interests, hobby, favorite things, \
+              politic opinions, special opinions, technology skills, troubles, cognitive state, social relations, or any pattern or regularity you found. \
+              Output the findings for each grouped account or user in Chinese including a table to clearly view, for any confirmed evidence please attach with the post id.\n\n" +
               JSON.stringify(strippedPosts),
           }),
         });
@@ -7765,6 +7787,9 @@ const timelineTicks = computed(() => {
                             >
                               {{ getToolName(post) }}
                             </span>
+                            <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full bg-teal-50 dark:bg-teal-950/30 text-teal-650 dark:text-teal-400 border border-teal-100/40 dark:border-teal-900/20">
+                              {{ getUsername(post) }}
+                            </span>
                           </div>
                           <p
                             class="flex items-center gap-2 text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
@@ -8053,9 +8078,9 @@ const timelineTicks = computed(() => {
                       </div>
                     </div>
 
-                    <!-- PDF Document Preview -->
+                    <!-- PDF or Other Document Preview -->
                     <div
-                      v-if="post.data?.documents && post.data.documents.length > 0 && post.data.documents[0].mime_type == 'application/pdf'"
+                      v-if="post.data?.documents && post.data.documents.length > 0"
                       class="mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/50 flex items-center p-4 shadow-sm hover:shadow-md transition-shadow relative z-10"
                     >
                       <div class="mr-4">
@@ -8063,9 +8088,10 @@ const timelineTicks = computed(() => {
                       </div>
                       <div class="flex-1 min-w-0">
                         <h4 class="text-sm font-bold text-gray-900 dark:text-white mb-1">
-                          {{ post.data.documents[0].attributes[0].file_name || 'Document.pdf' }}
+                          {{ post.data.documents[0].attributes?.[0]?.file_name || (post.data.documents[0].title || '') + (post.data.documents[0].extra ? ' ' + post.data.documents[0].extra : '') || 'Document' }}
                         </h4>
                         <a
+                          v-if="post.data.documents[0].attributes?.[0]?.file_name"
                           :href="`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`"
                           target="_blank"
                           class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-semibold"
@@ -11560,8 +11586,8 @@ const timelineTicks = computed(() => {
           </div>
           
           <!-- Chat Content Area -->
-          <div ref="profileChatContentRef" class="h-64 overflow-y-auto space-y-3 p-3 bg-gray-50/50 dark:bg-gray-900/30 rounded-2xl border border-gray-150/50 dark:border-gray-750/30">
-            <div v-if="profileChatMessages.length === 0" class="text-center text-xs text-gray-400 dark:text-gray-500 py-12">
+          <div ref="profileChatContentRef" class="h-[480px] overflow-y-auto space-y-3 p-3 bg-gray-50/50 dark:bg-gray-900/30 rounded-2xl border border-gray-150/50 dark:border-gray-750/30">
+            <div v-if="profileChatMessages.length === 0" class="text-center text-xs text-gray-400 dark:text-gray-500 py-36">
               No conversations entered. Ask a question regarding profiles to start the analysis.
             </div>
             <div v-for="(msg, idx) in profileChatMessages" :key="idx" :class="msg.role === 'user' ? 'text-right' : 'text-left'">
