@@ -431,7 +431,7 @@ const generalAsk = async (userInputText) => {
       }
     }
     
-    const response = await fetch("https://ask.gingkogo.uk/", {
+    let response = await fetch("https://ask.gingkogo.uk/", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -442,7 +442,26 @@ const generalAsk = async (userInputText) => {
       }),
     });
     if (!response.ok) throw new Error("Ask request failed: " + response.status);
-    const data = await response.json();
+    let data = await response.json();
+
+    for (let i = 0; i < 5 && data.token; i++) {
+      // need to wait the final result here
+      try {
+        response = await fetch("https://ask.gingkogo.uk/answer?id=" + data.token);
+        if (response.ok) {
+          data = await response.json();
+        }
+      } catch (err: any) {
+        const newErr = new Error(
+          err.message && err.message.toLowerCase().includes("failed to fetch")
+            ? "Analysis Network error or CORS issue: Failed to fetch from https://ask.gingkogo.uk/answer?id=" + data.token
+            : err.message
+        );
+        (newErr as any).url = "https://ask.gingkogo.uk/answer";
+        throw newErr;
+      }
+    }
+
     return data.reply || "No ask data received."
   } catch (err) {
     console.error(err);
@@ -1049,6 +1068,7 @@ const handleChatSubmit = async () => {
 const profileChatMessages = ref<{role: 'user' | 'bot', content: string}[]>([]);
 const profileChatInput = ref('');
 const isProfileChatLoading = ref(false);
+const useProfileDB = ref(true);
 const profileChatContentRef = ref<HTMLElement | null>(null);
 
 const scrollProfileChatToBottom = () => {
@@ -1069,20 +1089,17 @@ watch(isProfileChatLoading, (val) => {
   }
 });
 
-const handleProfileChatSubmit = async () => {
+const handleProfileChatSubmit = async (forceProfileDB?: boolean) => {
     if (!profileChatInput.value.trim()) return;
     const userMessage = profileChatInput.value;
     profileChatMessages.value.push({ role: 'user', content: userMessage });
     profileChatInput.value = '';
     isProfileChatLoading.value = true;
     
-    // Construct the prompt with instructions
-    const precheck = `Is user's ask intent related with the profile metadata, bio, or contact information? Please only answer 'yes' or 'no'. The user's input is: ${userMessage}`;
-    const precheckResult = await generalAsk(precheck);
-    
+    const activeDB = forceProfileDB !== undefined ? forceProfileDB : useProfileDB.value;
     let prompt = null;
 
-    if (precheckResult.toLowerCase().includes('yes')) {
+    if (activeDB) {
       prompt = `Based on the scanned profiles data below, answer the following question: ${userMessage}\n\nProfiles: $POSTS$`;
     } else {
       prompt = `${userMessage}`;
@@ -11601,24 +11618,41 @@ const timelineTicks = computed(() => {
           </div>
 
           <!-- Input Block -->
-          <div class="flex gap-2.5">
+          <div class="flex flex-col sm:flex-row gap-2.5">
             <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-850 rounded-2xl px-4 py-2.5 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all flex-grow">
               <input 
                 v-model="profileChatInput" 
-                @keyup.enter="handleProfileChatSubmit" 
+                @keyup.enter="handleProfileChatSubmit(useProfileDB)" 
                 placeholder="Ask profile-related questions (e.g. Find all developers, list active admins...)" 
                 class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
                 :disabled="isProfileChatLoading"
               />
             </div>
-            <button 
-              @click="handleProfileChatSubmit" 
-              :disabled="isProfileChatLoading" 
-              class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-teal-400 text-white font-bold rounded-2xl text-xs transition-colors flex items-center gap-1.5 shrink-0 shadow-sm"
-            >
-              <Send class="h-3.5 w-3.5" />
-              <span>Ask</span>
-            </button>
+            <div class="flex gap-2 shrink-0">
+              <button 
+                @click="useProfileDB = !useProfileDB" 
+                type="button"
+                :class="[
+                  'px-4 py-2.5 rounded-2xl text-xs font-bold transition-all flex items-center gap-2 border cursor-pointer select-none',
+                  useProfileDB 
+                    ? 'bg-teal-50 dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 border-teal-200 dark:border-teal-900/30 font-black' 
+                    : 'bg-gray-50 dark:bg-gray-900 text-gray-400 dark:text-gray-500 border-gray-150 dark:border-gray-850 hover:bg-gray-100 dark:hover:bg-gray-850'
+                ]"
+                title="Toggle Profile Database Reference"
+              >
+                <span :class="['w-2 h-2 rounded-full shrink-0', useProfileDB ? 'bg-teal-500 animate-pulse' : 'bg-gray-300']"></span>
+                <Database class="h-3.5 w-3.5" />
+                <span>Use Profile DB</span>
+              </button>
+              <button 
+                @click="handleProfileChatSubmit(useProfileDB)" 
+                :disabled="isProfileChatLoading" 
+                class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-teal-400 text-white font-bold rounded-2xl text-xs transition-colors flex items-center gap-1.5 shrink-0 shadow-sm cursor-pointer"
+              >
+                <Send class="h-3.5 w-3.5" />
+                <span>Ask</span>
+              </button>
+            </div>
           </div>
         </div>
 
