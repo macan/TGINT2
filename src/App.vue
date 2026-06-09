@@ -3352,7 +3352,7 @@ const generateFinalTable = async () => {
       JSON.stringify(data)
     );
     if (loginToken.value) {
-        await saveProfileRemotely(profileName, loginToken.value, JSON.stringify(data));
+        await saveProfileRemotely(profileName, loginToken.value, data);
     }
     // try to save the profile to remote ES
     let jsonData = data.text.split('Here is the context input: ')[1] || '';
@@ -4724,7 +4724,7 @@ const fetchRemoteProfiles = async () => {
   profileError.value = "";
   loadingRemoteProfiles.value = true;
   try {
-    const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=profile-&k=32`, {
+    const response = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=profile-&k=32&order=reverse_insert`, {
       method: 'GET',
       headers: {
         'x-gos-token': loginToken.value,
@@ -4775,7 +4775,7 @@ const viewRemoteProfile = async (profileName: string) => {
             method: 'GET',
         });
         if (!response.ok) throw new Error("Failed to load profile");
-        let data = JSON.parse(await response.json());
+        let data = await response.json();
         if (data.token) {
           // this is a marker of in-completed result, need to fetch the true result.
             try {
@@ -4792,6 +4792,10 @@ const viewRemoteProfile = async (profileName: string) => {
               toastType.value = "error";
               setTimeout(() => { toastMessage.value = ""; }, 3000);
             }
+        }
+        // dirty fix for saved profile content
+        if (!data.text) {
+          data = JSON.parse(data)
         }
         // Assuming data structure: { reply: "markdown content" }
         selectedRemoteProfileName.value = profileName;
