@@ -369,7 +369,7 @@ const generalAsk = async (userInputText) => {
             if (cleanQuery) {
               // Do a profile index search on ES
               const esPayload = {
-                size: 10,
+                size: 30,
                 query: {
                   match: {
                     content: cleanQuery
@@ -2675,19 +2675,58 @@ const fetchChannelDates = async (nodeId: string) => {
           min = new Date(Math.min(...dates)).toISOString();
         }
         
-        // Update facts
-        let factsStr = editingEdgeData.value.facts || '';
-        const dateLine = `post date: ${min} to ${max}`;
-        
+        // Update facts if truly changed
+        let factsStr = (editingEdgeData.value && editingEdgeData.value.facts) || '';
         const lines = factsStr.split('\n');
-        const newLines = lines.filter((l: string) => !l.startsWith('post date:'));
-        newLines.push(dateLine);
-        
-        editingEdgeData.value.facts = newLines.join('\n');
-        saveChanges();
-        
-        toastMessage.value = 'Dates detected!';
-        toastType.value = 'success';
+        const existingLine = lines.find((l: string) => l.startsWith('post date:'));
+
+        let existingMin = '';
+        let existingMax = '';
+        if (existingLine) {
+          const parts = existingLine.replace(/^post date:\s*/i, '').split(' to ');
+          if (parts.length === 2) {
+            existingMin = parts[0].trim();
+            existingMax = parts[1].trim();
+          }
+        }
+
+        let shouldUpdate = false;
+        let finalMin = min;
+        let finalMax = max;
+
+        if (!existingMin || !existingMax) {
+          shouldUpdate = true;
+        } else {
+          if (min < existingMin) {
+            finalMin = min;
+            shouldUpdate = true;
+          } else {
+            finalMin = existingMin;
+          }
+          if (max > existingMax) {
+            finalMax = max;
+            shouldUpdate = true;
+          } else {
+            finalMax = existingMax;
+          }
+        }
+
+        if (shouldUpdate) {
+          const dateLine = `post date: ${finalMin} to ${finalMax}`;
+          const newLines = lines.filter((l: string) => !l.startsWith('post date:'));
+          newLines.push(dateLine);
+          
+          if (editingEdgeData.value) {
+            editingEdgeData.value.facts = newLines.join('\n');
+            saveChanges();
+          }
+          
+          toastMessage.value = 'Dates detected and updated!';
+          toastType.value = 'success';
+        } else {
+          toastMessage.value = 'Dates detected! Already up to date.';
+          toastType.value = 'success';
+        }
         setTimeout(() => { toastMessage.value = ""; }, 3000);
     } catch (e) {
         toastMessage.value = 'Fetch failed.';
@@ -3346,7 +3385,7 @@ const generateFinalTable = async () => {
     // sometimes the response need more time to wait and return only the qid
     finalTableHtml.value = md.render(data.reply);
     // save the results to localStorage
-    const profileName = `profile-${searchMode.value}-${autoChannelName.value.trim().replace(/^@/, "")}-${new Date().toISOString().slice(0, 13)}`;
+    const profileName = `profile-${searchMode.value}-${autoChannelName.value.trim().replace(/^@/, "")}-${new Date().toISOString().slice(0, 16)}`;
     localStorage.setItem(
       profileName,
       JSON.stringify(data)
