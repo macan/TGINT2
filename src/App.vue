@@ -70,6 +70,8 @@ import {
   Network,
   Download,
   Upload,
+  Maximize2,
+  Minimize2,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -391,7 +393,7 @@ const generalAsk = async (userInputText, details) => {
                     key: hit._id,
                     content: hit._source?.content || "",
                     author: hit._source?.name || hit._id || "Profile Hit",
-                    date: new Date().toISOString()
+                    date: new Date(hit._source?.date).toISOString()
                   };
                 });
               }
@@ -417,7 +419,24 @@ const generalAsk = async (userInputText, details) => {
             return {
               key,
               content: data?.content,
-              date: data?.date,
+              date: (() => {
+                const dStr = data?.date;
+                if (!dStr) return dStr;
+                try {
+                  const dObj = new Date(dStr);
+                  if (isNaN(dObj.getTime())) return dStr;
+                  const offset = -dObj.getTimezoneOffset();
+                  const sign = offset >= 0 ? "+" : "-";
+                  const pad = (num: number) => String(num).padStart(2, '0');
+                  const absOffset = Math.abs(offset);
+                  const hrs = pad(Math.floor(absOffset / 60));
+                  const mins = pad(absOffset % 60);
+                  const localTime = new Date(dObj.getTime() + offset * 60 * 1000);
+                  return localTime.toISOString().slice(0, 19) + sign + hrs + ":" + mins;
+                } catch {
+                  return dStr;
+                }
+              })(),
               author: data?.author || data?.user,
               reply: data?.reply,
               linkPreview: data?.linkPreview
@@ -488,7 +507,24 @@ const analyzePosts = async () => {
         return {
           key,
           content: data?.content,
-          date: data?.date,
+          date: (() => {
+                const dStr = data?.date;
+                if (!dStr) return dStr;
+                try {
+                  const dObj = new Date(dStr);
+                  if (isNaN(dObj.getTime())) return dStr;
+                  const offset = -dObj.getTimezoneOffset();
+                  const sign = offset >= 0 ? "+" : "-";
+                  const pad = (num: number) => String(num).padStart(2, '0');
+                  const absOffset = Math.abs(offset);
+                  const hrs = pad(Math.floor(absOffset / 60));
+                  const mins = pad(absOffset % 60);
+                  const localTime = new Date(dObj.getTime() + offset * 60 * 1000);
+                  return localTime.toISOString().slice(0, 19) + sign + hrs + ":" + mins;
+                } catch {
+                  return dStr;
+                }
+              })(),
           author: data?.author || data?.user,
           reply: data?.reply,
           linkPreview: data?.linkPreview
@@ -545,7 +581,24 @@ const summarizePosts = async () => {
         return {
           key,
           content: data?.content,
-          date: data?.date,
+          date: (() => {
+                const dStr = data?.date;
+                if (!dStr) return dStr;
+                try {
+                  const dObj = new Date(dStr);
+                  if (isNaN(dObj.getTime())) return dStr;
+                  const offset = -dObj.getTimezoneOffset();
+                  const sign = offset >= 0 ? "+" : "-";
+                  const pad = (num: number) => String(num).padStart(2, '0');
+                  const absOffset = Math.abs(offset);
+                  const hrs = pad(Math.floor(absOffset / 60));
+                  const mins = pad(absOffset % 60);
+                  const localTime = new Date(dObj.getTime() + offset * 60 * 1000);
+                  return localTime.toISOString().slice(0, 19) + sign + hrs + ":" + mins;
+                } catch {
+                  return dStr;
+                }
+              })(),
           author: data?.author || data?.user,
           reply: data?.reply,
           linkPreview: data?.linkPreview
@@ -1057,7 +1110,7 @@ const handleChatSubmit = async () => {
     
     let prompt = null;
 
-    if (precheckResult.toLowerCase().includes('yes')) {
+    if (precheckResult && precheckResult.toLowerCase().includes('yes')) {
       chatLoadingDetails.value = "Scanning posts database and compiling answers...";
       prompt = `Based on the provided posts below, answer the following question: ${userMessage}\n\nPosts: $POSTS$`;
     } else {
@@ -3551,15 +3604,18 @@ const getForwardInfo = (post: any) => {
 };
 
 const fetchSinglePost = async () => {
-  if (!autoChannelName.value.trim() || !singlePostId.value.trim()) return;
+  const trimmedPostId = (singlePostId.value || "").trim();
+  if (!trimmedPostId) return;
+
+  const hasDot = trimmedPostId.includes(".");
+  const name = (autoChannelName.value || "").trim().replace(/^@/, "");
+
+  if (!hasDot && !name) return;
+
   isFetchingPost.value = true;
   singlePost.value = null;
-  const name = autoChannelName.value.trim().replace(/^@/, "");
   try {
-    let _key = `${name}.${singlePostId.value.trim()}`;
-    if (singlePostId.value.includes(".")) {
-      _key = singlePostId.value.trim();
-    }
+    let _key = hasDot ? trimmedPostId : `${name}.${trimmedPostId}`;
     const url = `https://i.gogingko.net/api/v1/v/telegram-post/${_key}`;
     const res = await fetch(url);
     if (!res.ok) throw new Error("Post not found");
@@ -3723,6 +3779,7 @@ interface GraphNode {
   isCenter: boolean;
   avatarImg?: HTMLImageElement | null;
   avatarLoaded?: boolean;
+  displayName: string;
 }
 
 interface GraphEdge {
@@ -3745,6 +3802,9 @@ const isPanningGraph = ref(false);
 const lastPanMousePos = ref({ x: 0, y: 0 });
 const graphAlpha = ref(1.0);
 const isGraphVisible = ref(false);
+const isGraphEnlarged = ref(false);
+const totalNeighborsCount = ref(0);
+const graphStableSince = ref<number | null>(null);
 
 const getInitials = (title: string): string => {
   if (!title) return "?";
@@ -3836,15 +3896,16 @@ watch(graphCanvasContainer, (containerEl) => {
     graphResizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const width = entry.contentRect.width || 300;
+        const height = isGraphEnlarged.value ? 540 : 300;
         graphCanvasWidth.value = width;
-        graphCanvasHeight.value = 300;
+        graphCanvasHeight.value = height;
         
         if (graphCanvas.value) {
           const dpr = window.devicePixelRatio || 1;
           graphCanvas.value.width = width * dpr;
-          graphCanvas.value.height = 300 * dpr;
+          graphCanvas.value.height = height * dpr;
           graphCanvas.value.style.width = `${width}px`;
-          graphCanvas.value.style.height = `300px`;
+          graphCanvas.value.style.height = `${height}px`;
           
           const ctx = graphCanvas.value.getContext("2d");
           if (ctx) {
@@ -3865,7 +3926,11 @@ watch(graphCanvasContainer, (containerEl) => {
     }, { threshold: 0.1 });
     graphIntersectionObserver.observe(containerEl);
 
-    initRelationsGraph();
+    if (isGraphEnlarged.value) {
+      setTimeout(initRelationsGraph, 350);
+    } else {
+      initRelationsGraph();
+    }
   }
 });
 
@@ -5064,7 +5129,10 @@ const initRelationsGraph = () => {
     color: '#0d9488',
     isCenter: true,
     avatarImg: null,
-    avatarLoaded: false
+    avatarLoaded: false,
+    displayName: (metadata.value?.title || metadata.value?.name || centerId).length > 15 
+      ? (metadata.value?.title || metadata.value?.name || centerId).slice(0, 13) + '...' 
+      : (metadata.value?.title || metadata.value?.name || centerId)
   };
   
   const centerAvatar = new Image();
@@ -5106,11 +5174,63 @@ const initRelationsGraph = () => {
     });
   }
 
-  const neighborList = Array.from(uniqueNeighborsMap.entries());
+  const rawNeighborList = Array.from(uniqueNeighborsMap.entries());
+  totalNeighborsCount.value = rawNeighborList.length;
+
+  // Sort neighbors by relevance: Mutual connections first, then single direction, stabilized alphabetically
+  const sortedNeighborList = rawNeighborList.sort((a, b) => {
+    const scoreA = (a[1].incoming ? 1 : 0) + (a[1].outgoing ? 1 : 0) + (a[1].incoming && a[1].outgoing ? 2 : 0);
+    const scoreB = (b[1].incoming ? 1 : 0) + (b[1].outgoing ? 1 : 0) + (b[1].incoming && b[1].outgoing ? 2 : 0);
+    if (scoreB !== scoreA) {
+      return scoreB - scoreA;
+    }
+    return a[0].localeCompare(b[0]);
+  });
+
+  const isEnlarged = isGraphEnlarged.value;
+  // Compact view is limited to 12 neighbors, enlarged view shows up to 60 neighbors
+  const neighborList = isEnlarged ? sortedNeighborList.slice(0, 60) : sortedNeighborList.slice(0, 12);
+
+  // Dynamically scale maximum placement range inside the canvas container to prevent boundary squeeze
+  const maxDist = Math.min(width, height) * 0.42;
+
   if (neighborList.length > 0) {
+    const total = neighborList.length;
     neighborList.forEach(([neighborId, relations], index) => {
-      const angle = (index / neighborList.length) * Math.PI * 2;
-      const dist = 110 + Math.random() * 15;
+      let angle = 0;
+      let dist = maxDist;
+
+      if (total <= 6) {
+        angle = (index / total) * Math.PI * 2;
+        dist = maxDist * 0.85;
+      } else if (total <= 16) {
+        // 2 concentric rings: 5 in inner ring, rest in outer ring
+        if (index < 5) {
+          angle = (index / 5) * Math.PI * 2;
+          dist = maxDist * 0.48;
+        } else {
+          const outerCount = total - 5;
+          angle = ((index - 5) / outerCount) * Math.PI * 2 + Math.PI / 10;
+          dist = maxDist * 0.9;
+        }
+      } else {
+        // 3 concentric rings: 6 inner, 12 middle, rest outer
+        if (index < 6) {
+          angle = (index / 6) * Math.PI * 2;
+          dist = maxDist * 0.38;
+        } else if (index < 18) {
+          angle = ((index - 6) / 12) * Math.PI * 2 + Math.PI / 12;
+          dist = maxDist * 0.72;
+        } else {
+          const outerCount = total - 18;
+          angle = ((index - 18) / outerCount) * Math.PI * 2 + Math.PI / 24;
+          dist = maxDist * 1.02;
+        }
+      }
+
+      // Add a tiny deterministic spread to avoid random overlaps on render
+      angle += Math.sin(index) * 0.05;
+      dist += Math.cos(index) * (maxDist * 0.03);
       
       let nodeColor = '#4f46e5'; // Indigo for incoming
       if (relations.incoming && relations.outgoing) {
@@ -5130,7 +5250,8 @@ const initRelationsGraph = () => {
         color: nodeColor,
         isCenter: false,
         avatarImg: null,
-        avatarLoaded: false
+        avatarLoaded: false,
+        displayName: ('@' + neighborId).length > 15 ? ('@' + neighborId).slice(0, 13) + '...' : ('@' + neighborId)
       };
       
       const neighborAvatar = new Image();
@@ -5176,6 +5297,78 @@ const initRelationsGraph = () => {
   startRelationsCanvasLoop();
 };
 
+const resolveOverlaps = (nodes: GraphNode[], width: number, height: number) => {
+  // 10 multi-pass relaxation rounds to completely eliminate overlaps
+  for (let step = 0; step < 10; step++) {
+    for (let i = 0; i < nodes.length; i++) {
+      const nodeA = nodes[i];
+      for (let j = i + 1; j < nodes.length; j++) {
+        const nodeB = nodes[j];
+        
+        const dx = nodeB.x - nodeA.x;
+        const dy = nodeB.y - nodeA.y;
+        
+        // Spacious clearances to completely prevent overlap of text labels and nodes
+        const minXDist = nodeA.r + nodeB.r + 85;
+        const minYDist = nodeA.r + nodeB.r + 38;
+        
+        // Elliptical overlap check
+        const ex = dx / minXDist;
+        const ey = dy / minYDist;
+        const d = Math.hypot(ex, ey);
+        
+        if (d < 1.0) {
+          // They overlap!
+          const overlap = 1.0 - d;
+          
+          let pushX = 0;
+          let pushY = 0;
+          if (d < 0.001) {
+            // If they are exactly on top of each other, nudge them deterministically apart
+            const angle = (i * 0.17) * Math.PI * 2;
+            pushX = Math.cos(angle) * minXDist * 0.6;
+            pushY = Math.sin(angle) * minYDist * 0.6;
+          } else {
+            // Push along the physical relative path with elliptical clearance multiplier
+            const length = Math.hypot(dx, dy) || 0.01;
+            pushX = (dx / length) * overlap * minXDist * 0.65;
+            pushY = (dy / length) * overlap * minYDist * 0.65;
+          }
+          
+          const moveA = !nodeA.isCenter && nodeA.id !== draggedNodeId.value;
+          const moveB = !nodeB.isCenter && nodeB.id !== draggedNodeId.value;
+          
+          if (moveA && moveB) {
+            nodeA.x -= pushX * 0.5;
+            nodeA.y -= pushY * 0.5;
+            nodeB.x += pushX * 0.5;
+            nodeB.y += pushY * 0.5;
+          } else if (moveA) {
+            nodeA.x -= pushX;
+            nodeA.y -= pushY;
+          } else if (moveB) {
+            nodeB.x += pushX;
+            nodeB.y += pushY;
+          }
+        }
+      }
+    }
+  }
+
+  // Constrain nodes but with a very spacious sandbox size so they don't crowd/squeeze
+  const limitXMin = -width * 0.35;
+  const limitXMax = width * 1.35;
+  const limitYMin = -height * 0.35;
+  const limitYMax = height * 1.35;
+  for (const node of nodes) {
+    if (node.id === draggedNodeId.value) continue;
+    if (node.x < limitXMin) { node.x = limitXMin; node.vx = 0; }
+    if (node.x > limitXMax) { node.x = limitXMax; node.vx = 0; }
+    if (node.y < limitYMin) { node.y = limitYMin; node.vx = 0; }
+    if (node.y > limitYMax) { node.y = limitYMax; node.vy = 0; }
+  }
+};
+
 const updateRelationsGraphPhysics = () => {
   const nodes = graphNodes.value;
   const edges = graphEdges.value;
@@ -5200,9 +5393,9 @@ const updateRelationsGraphPhysics = () => {
     let allStopped = true;
     for (const node of nodes) {
       if (node.id === draggedNodeId.value) continue;
-      if (Math.abs(node.vx) > 0.01 || Math.abs(node.vy) > 0.01) {
-        node.vx *= 0.8;
-        node.vy *= 0.8;
+      if (Math.abs(node.vx) > 0.015 || Math.abs(node.vy) > 0.015) {
+        node.vx *= 0.75;
+        node.vy *= 0.75;
         node.x += node.vx;
         node.y += node.vy;
         allStopped = false;
@@ -5211,95 +5404,99 @@ const updateRelationsGraphPhysics = () => {
         node.vy = 0;
       }
     }
-    if (allStopped) return;
-  }
-  
-  // 1. Repulsion force
-  const repulsionK = 550 * graphAlpha.value;
-  for (let i = 0; i < nodes.length; i++) {
-    const nodeA = nodes[i];
-    for (let j = i + 1; j < nodes.length; j++) {
-      const nodeB = nodes[j];
-      const dx = nodeB.x - nodeA.x;
-      const dy = nodeB.y - nodeA.y;
-      const distSq = dx * dx + dy * dy || 0.01;
-      const dist = Math.sqrt(distSq);
-      
-      const minDist = nodeA.r + nodeB.r + 35;
-      if (dist < minDist) {
-        const force = repulsionK / (distSq + 1);
-        const fx = (dx / dist) * force * 12;
-        const fy = (dy / dist) * force * 12;
-        
-        if (!nodeA.isCenter && nodeA.id !== draggedNodeId.value) {
-          nodeA.vx -= fx;
-          nodeA.vy -= fy;
-        }
-        if (!nodeB.isCenter && nodeB.id !== draggedNodeId.value) {
-          nodeB.vx += fx;
-          nodeB.vy += fy;
-        }
-      }
-    }
-  }
-  
-  // 2. Spring pull along edges
-  const springK = 0.045 * graphAlpha.value;
-  const restLength = 95;
-  for (const edge of edges) {
-    const sourceNode = nodes.find(n => n.id === edge.source);
-    const targetNode = nodes.find(n => n.id === edge.target);
-    if (sourceNode && targetNode) {
-      const dx = targetNode.x - sourceNode.x;
-      const dy = targetNode.y - sourceNode.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-      const force = springK * (dist - restLength);
-      const fx = (dx / dist) * force;
-      const fy = (dy / dist) * force;
-      
-      if (!sourceNode.isCenter && sourceNode.id !== draggedNodeId.value) {
-        sourceNode.vx += fx;
-        sourceNode.vy += fy;
-      }
-      if (!targetNode.isCenter && targetNode.id !== draggedNodeId.value) {
-        targetNode.vx -= fx;
-        targetNode.vy -= fy;
-      }
-    }
-  }
-  
-  // 3. Central gravitational pull
-  const gravityK = 0.025 * graphAlpha.value;
-  for (const node of nodes) {
-    if (node.isCenter) {
-      if (node.id !== draggedNodeId.value) {
-        node.x += (centerX - node.x) * 0.08;
-        node.y += (centerY - node.y) * 0.08;
-      }
-    } else {
-      if (node.id !== draggedNodeId.value) {
-        const dx = centerX - node.x;
-        const dy = centerY - node.y;
-        node.vx += dx * gravityK;
-        node.vy += dy * gravityK;
-      }
-    }
-  }
-  
-  // 4. Update coordinates with dampening
-  const friction = 0.83;
-  for (const node of nodes) {
-    if (node.id === draggedNodeId.value) continue;
-    node.vx *= friction;
-    node.vy *= friction;
-    node.x += node.vx;
-    node.y += node.vy;
     
-    const border = node.r + 5;
-    if (node.x < border) { node.x = border; node.vx = 0; }
-    if (node.x > width - border) { node.x = width - border; node.vx = 0; }
-    if (node.y < border) { node.y = border; node.vy = 0; }
-    if (node.y > height - border) { node.y = height - border; node.vy = 0; }
+    if (allStopped) {
+      return;
+    }
+    
+    // Resolve any passive overlap (e.g. from resize)
+    resolveOverlaps(nodes, width, height);
+    return;
+  } else {
+    // 1. Repulsion force
+    const repulsionK = 550 * graphAlpha.value;
+    for (let i = 0; i < nodes.length; i++) {
+      const nodeA = nodes[i];
+      for (let j = i + 1; j < nodes.length; j++) {
+        const nodeB = nodes[j];
+        const dx = nodeB.x - nodeA.x;
+        const dy = nodeB.y - nodeA.y;
+        const distSq = dx * dx + dy * dy || 0.01;
+        const dist = Math.sqrt(distSq);
+        
+        const minDist = nodeA.r + nodeB.r + 35;
+        if (dist < minDist) {
+          const force = repulsionK / (distSq + 1);
+          const fx = (dx / dist) * force * 12;
+          const fy = (dy / dist) * force * 12;
+          
+          if (!nodeA.isCenter && nodeA.id !== draggedNodeId.value) {
+            nodeA.vx -= fx;
+            nodeA.vy -= fy;
+          }
+          if (!nodeB.isCenter && nodeB.id !== draggedNodeId.value) {
+            nodeB.vx += fx;
+            nodeB.vy += fy;
+          }
+        }
+      }
+    }
+    
+    // 2. Spring pull along edges
+    const springK = 0.045 * graphAlpha.value;
+    const restLength = 95;
+    for (const edge of edges) {
+      const sourceNode = nodes.find(n => n.id === edge.source);
+      const targetNode = nodes.find(n => n.id === edge.target);
+      if (sourceNode && targetNode) {
+        const dx = targetNode.x - sourceNode.x;
+        const dy = targetNode.y - sourceNode.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+        const force = springK * (dist - restLength);
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        
+        if (!sourceNode.isCenter && sourceNode.id !== draggedNodeId.value) {
+          sourceNode.vx += fx;
+          sourceNode.vy += fy;
+        }
+        if (!targetNode.isCenter && targetNode.id !== draggedNodeId.value) {
+          targetNode.vx -= fx;
+          targetNode.vy -= fy;
+        }
+      }
+    }
+    
+    // 3. Central gravitational pull
+    const gravityK = 0.025 * graphAlpha.value;
+    for (const node of nodes) {
+      if (node.isCenter) {
+        if (node.id !== draggedNodeId.value) {
+          node.x += (centerX - node.x) * 0.08;
+          node.y += (centerY - node.y) * 0.08;
+        }
+      } else {
+        if (node.id !== draggedNodeId.value) {
+          const dx = centerX - node.x;
+          const dy = centerY - node.y;
+          node.vx += dx * gravityK;
+          node.vy += dy * gravityK;
+        }
+      }
+    }
+    
+    // 4. Update coordinates with dampening
+    const friction = 0.83;
+    for (const node of nodes) {
+      if (node.id === draggedNodeId.value) continue;
+      node.vx *= friction;
+      node.vy *= friction;
+      node.x += node.vx;
+      node.y += node.vy;
+    }
+    
+    // Run the active overlap resolver
+    resolveOverlaps(nodes, width, height);
   }
 };
 
@@ -5336,8 +5533,15 @@ const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
   ctx.translate(graphPanOffset.value.x, graphPanOffset.value.y);
   ctx.scale(graphZoomLevel.value, graphZoomLevel.value);
   
-  // Edges drawing
+  // Batched arrays of coordinates for highly efficient high-performance rendering
+  const normalEdgesPath: { startX: number; startY: number; endX: number; endY: number }[] = [];
+  const hoveredEdgesPath: { startX: number; startY: number; endX: number; endY: number }[] = [];
+  const normalArrows: { endX: number; endY: number; angle: number }[] = [];
+  const hoveredArrows: { endX: number; endY: number; angle: number }[] = [];
+  const pulsePoints: { px: number; py: number }[] = [];
+  
   const pulseProgress = (Date.now() / 2000) % 1.0;
+  
   for (const edge of graphEdges.value) {
     const sourceNode = graphNodes.value.find(n => n.id === edge.source);
     const targetNode = graphNodes.value.find(n => n.id === edge.target);
@@ -5351,40 +5555,86 @@ const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
       const endX = targetNode.x - (dx / dist) * targetNode.r;
       const endY = targetNode.y - (dy / dist) * targetNode.r;
       
-      // Edge Line
-      ctx.beginPath();
-      ctx.moveTo(startX, startY);
-      ctx.lineTo(endX, endY);
-      
       const isRelatedHovered = hoveredNodeId.value === sourceNode.id || hoveredNodeId.value === targetNode.id;
-      if (isRelatedHovered) {
-        ctx.strokeStyle = isDark.value ? 'rgba(45, 212, 191, 0.65)' : 'rgba(13, 148, 136, 0.5)';
-        ctx.lineWidth = 2.5;
-      } else {
-        ctx.strokeStyle = isDark.value ? 'rgba(129, 140, 248, 0.25)' : 'rgba(79, 70, 229, 0.15)';
-        ctx.lineWidth = 1.5;
-      }
-      ctx.stroke();
       
-      // Arrow head at target node border
-      const arrowSize = 6;
-      const angle = Math.atan2(dy, dx);
-      ctx.fillStyle = isRelatedHovered ? '#0d9488' : (isDark.value ? '#818cf8' : '#4f46e5');
-      ctx.beginPath();
+      if (isRelatedHovered) {
+        hoveredEdgesPath.push({ startX, startY, endX, endY });
+        hoveredArrows.push({ endX, endY, angle: Math.atan2(dy, dx) });
+      } else {
+        normalEdgesPath.push({ startX, startY, endX, endY });
+        normalArrows.push({ endX, endY, angle: Math.atan2(dy, dx) });
+      }
+      
+      // Calculate animated pulse signals
+      const px = startX + (endX - startX) * pulseProgress;
+      const py = startY + (endY - startY) * pulseProgress;
+      pulsePoints.push({ px, py });
+    }
+  }
+  
+  // 1. Draw Normal Edges in ONE stroke call
+  if (normalEdgesPath.length > 0) {
+    ctx.beginPath();
+    for (const e of normalEdgesPath) {
+      ctx.moveTo(e.startX, e.startY);
+      ctx.lineTo(e.endX, e.endY);
+    }
+    ctx.strokeStyle = isDark.value ? 'rgba(129, 140, 248, 0.22)' : 'rgba(79, 70, 229, 0.12)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+  
+  // 2. Draw Hovered Edges in ONE stroke call
+  if (hoveredEdgesPath.length > 0) {
+    ctx.beginPath();
+    for (const e of hoveredEdgesPath) {
+      ctx.moveTo(e.startX, e.startY);
+      ctx.lineTo(e.endX, e.endY);
+    }
+    ctx.strokeStyle = isDark.value ? 'rgba(45, 212, 191, 0.65)' : 'rgba(13, 148, 136, 0.5)';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+  }
+  
+  // 3. Draw Normal Arrowheads in ONE fill call
+  if (normalArrows.length > 0) {
+    ctx.beginPath();
+    const arrowSize = 6;
+    for (const arr of normalArrows) {
+      const { endX, endY, angle } = arr;
       ctx.moveTo(endX, endY);
       ctx.lineTo(endX - arrowSize * Math.cos(angle - Math.PI / 6), endY - arrowSize * Math.sin(angle - Math.PI / 6));
       ctx.lineTo(endX - arrowSize * Math.cos(angle + Math.PI / 6), endY - arrowSize * Math.sin(angle + Math.PI / 6));
       ctx.closePath();
-      ctx.fill();
-      
-      // Animated pulse signals
-      const px = startX + (endX - startX) * pulseProgress;
-      const py = startY + (endY - startY) * pulseProgress;
-      ctx.beginPath();
-      ctx.fillStyle = isDark.value ? '#38bdf8' : '#0d9488';
-      ctx.arc(px, py, 2.5, 0, Math.PI * 2);
-      ctx.fill();
     }
+    ctx.fillStyle = isDark.value ? '#818cf8' : '#4f46e5';
+    ctx.fill();
+  }
+  
+  // 4. Draw Hovered Arrowheads in ONE fill call
+  if (hoveredArrows.length > 0) {
+    ctx.beginPath();
+    const arrowSize = 6;
+    for (const arr of hoveredArrows) {
+      const { endX, endY, angle } = arr;
+      ctx.moveTo(endX, endY);
+      ctx.lineTo(endX - arrowSize * Math.cos(angle - Math.PI / 6), endY - arrowSize * Math.sin(angle - Math.PI / 6));
+      ctx.lineTo(endX - arrowSize * Math.cos(angle + Math.PI / 6), endY - arrowSize * Math.sin(angle + Math.PI / 6));
+      ctx.closePath();
+    }
+    ctx.fillStyle = '#0d9488';
+    ctx.fill();
+  }
+  
+  // 5. Draw Pulse signals in ONE fill call
+  if (pulsePoints.length > 0) {
+    ctx.beginPath();
+    ctx.fillStyle = isDark.value ? '#38bdf8' : '#0d9488';
+    for (const p of pulsePoints) {
+      ctx.moveTo(p.px + 2.5, p.py);
+      ctx.arc(p.px, p.py, 2.5, 0, Math.PI * 2);
+    }
+    ctx.fill();
   }
   
   // Nodes drawing
@@ -5460,11 +5710,8 @@ const drawRelationsGraph = (ctx: CanvasRenderingContext2D) => {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     
-    let displayName = node.name;
-    if (displayName.length > 15) {
-      displayName = displayName.slice(0, 13) + '...';
-    }
-    ctx.fillText(displayName, node.x, node.y + node.r + 5);
+    // Optimization: Cache truncated display name pre-calculated in node object
+    ctx.fillText(node.displayName, node.x, node.y + node.r + 5);
   }
   
   ctx.restore();
@@ -5488,7 +5735,45 @@ const startRelationsCanvasLoop = () => {
         drawRelationsGraph(ctx);
       }
     }
-    activeLoopAnimId = requestAnimationFrame(tick);
+
+    // Determine if we need to schedule another animation frame to save battery/cycles when idle
+    const isInteracting = draggedNodeId.value !== null || isPanningGraph.value || hoveredNodeId.value !== null;
+    let needsMoreTicks = graphAlpha.value > 0.005 || isInteracting;
+
+    if (!needsMoreTicks) {
+      // Check if any node is still moving/sliding significantly
+      for (const node of graphNodes.value) {
+        if (Math.abs(node.vx) > 0.015 || Math.abs(node.vy) > 0.015) {
+          needsMoreTicks = true;
+          break;
+        }
+      }
+    }
+
+    if (needsMoreTicks) {
+      graphStableSince.value = null; // Reset stability timer
+    } else {
+      // Node physics is stable. Let's animate pulses for up to 8 seconds, then sleep.
+      if (graphStableSince.value === null) {
+        graphStableSince.value = Date.now();
+      }
+      if (Date.now() - graphStableSince.value < 8000) {
+        needsMoreTicks = true; // Keep ticking for pulse animation
+      }
+    }
+
+    if (needsMoreTicks) {
+      activeLoopAnimId = requestAnimationFrame(tick);
+    } else {
+      activeLoopAnimId = null;
+      // Guarantee a pristine, finalized static render in stabilized coordinates
+      if (graphCanvas.value) {
+        const ctx = graphCanvas.value.getContext("2d");
+        if (ctx) {
+          drawRelationsGraph(ctx);
+        }
+      }
+    }
   };
   
   if (isGraphVisible.value && isProfileVisible.value) {
@@ -5525,10 +5810,13 @@ const onCanvasMouseDown = (e: MouseEvent) => {
     isPanningGraph.value = true;
     lastPanMousePos.value = { x: e.clientX, y: e.clientY };
   }
+  startRelationsCanvasLoop();
 };
 
 const onCanvasMouseMove = (e: MouseEvent) => {
   const coords = getRelationsGraphCoordinates(e);
+  let stateChanged = false;
+
   if (draggedNodeId.value) {
     const node = graphNodes.value.find(n => n.id === draggedNodeId.value);
     if (node) {
@@ -5537,6 +5825,7 @@ const onCanvasMouseMove = (e: MouseEvent) => {
       node.vx = 0;
       node.vy = 0;
       draggedNodeMoved.value = true;
+      stateChanged = true;
     }
   } else if (isPanningGraph.value) {
     const dx = e.clientX - lastPanMousePos.value.x;
@@ -5544,10 +5833,12 @@ const onCanvasMouseMove = (e: MouseEvent) => {
     graphPanOffset.value.x += dx;
     graphPanOffset.value.y += dy;
     lastPanMousePos.value = { x: e.clientX, y: e.clientY };
+    stateChanged = true;
   }
   
   // Set pointer cursor on hover
   let hitNode = false;
+  const previousHoveredId = hoveredNodeId.value;
   for (const node of graphNodes.value) {
     const dx = node.x - coords.x;
     const dy = node.y - coords.y;
@@ -5561,6 +5852,10 @@ const onCanvasMouseMove = (e: MouseEvent) => {
   if (!hitNode) {
     hoveredNodeId.value = null;
   }
+
+  if (hoveredNodeId.value !== previousHoveredId) {
+    stateChanged = true;
+  }
   
   if (graphCanvas.value) {
     if (hitNode) {
@@ -5568,6 +5863,11 @@ const onCanvasMouseMove = (e: MouseEvent) => {
     } else {
       graphCanvas.value.style.cursor = isPanningGraph.value ? 'grabbing' : 'grab';
     }
+  }
+
+  // Only wake up the canvas draw loop if something actually changed (hover state, drag, or pan in progress)
+  if (stateChanged) {
+    startRelationsCanvasLoop();
   }
 };
 
@@ -5583,6 +5883,8 @@ const onCanvasMouseUp = (e: MouseEvent) => {
     draggedNodeId.value = null;
   }
   isPanningGraph.value = false;
+  // Wake the loop to allow physics to decay/relax nodes to rest
+  startRelationsCanvasLoop();
 };
 
 const onCanvasWheel = (e: WheelEvent) => {
@@ -5601,19 +5903,24 @@ const onCanvasWheel = (e: WheelEvent) => {
   graphZoomLevel.value = nextZoom;
   graphPanOffset.value.x = mouseX - graphMouseX * nextZoom;
   graphPanOffset.value.y = mouseY - graphMouseY * nextZoom;
+
+  startRelationsCanvasLoop();
 };
 
 const resetGraphView = () => {
   graphZoomLevel.value = 1;
   graphPanOffset.value = { x: 0, y: 0 };
+  startRelationsCanvasLoop();
 };
 
 const onGraphZoomIn = () => {
   graphZoomLevel.value = Math.min(3.5, graphZoomLevel.value * 1.25);
+  startRelationsCanvasLoop();
 };
 
 const onGraphZoomOut = () => {
   graphZoomLevel.value = Math.max(0.4, graphZoomLevel.value * 0.8);
+  startRelationsCanvasLoop();
 };
 
 const searchChannel = async () => {
@@ -7426,9 +7733,23 @@ const timelineTicks = computed(() => {
                     <div class="p-1.5 bg-teal-50 dark:bg-teal-950/40 rounded-lg">
                       <Network class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
                     </div>
-                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-                      Relations Graph
-                    </h3>
+                    <div class="flex flex-col">
+                      <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                        Relations Graph
+                      </h3>
+                      <!-- Filter Count Badge -->
+                      <div class="flex items-center gap-1 mt-0.5">
+                        <span v-if="totalNeighborsCount > 12" class="text-[9px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-1.5 py-0.5 rounded-full cursor-help whitespace-nowrap" title="Filtered to top 12 connections inside compact view. Click Enlarge to see all.">
+                          Showing 12 of {{ totalNeighborsCount }}
+                        </span>
+                        <span v-else-if="totalNeighborsCount > 0" class="text-[9px] font-semibold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-1.5 py-0.5 rounded-full whitespace-nowrap">
+                          {{ totalNeighborsCount }} nodes
+                        </span>
+                        <span v-else class="text-[9px] font-semibold text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-950/40 px-1.5 py-0.5 rounded-full whitespace-nowrap">
+                          0 nodes
+                        </span>
+                      </div>
+                    </div>
                   </div>
                   
                   <div class="flex items-center gap-1">
@@ -7453,10 +7774,18 @@ const timelineTicks = computed(() => {
                     >
                       <RotateCcw class="h-3.5 w-3.5" />
                     </button>
+                    <button
+                      @click="isGraphEnlarged = true"
+                      class="p-1.5 hover:bg-teal-50 dark:hover:bg-teal-950/35 text-teal-600 dark:text-teal-400 rounded-lg transition-colors cursor-pointer"
+                      title="Enlarge Interactive View"
+                    >
+                      <Maximize2 class="h-3.5 w-3.5" />
+                    </button>
                   </div>
                 </div>
                 
                 <div
+                  v-if="!isGraphEnlarged"
                   ref="graphCanvasContainer"
                   class="relative h-[300px] w-full bg-gray-50/50 dark:bg-gray-950/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/80 overflow-hidden"
                 >
@@ -7477,6 +7806,16 @@ const timelineTicks = computed(() => {
                       <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>Mutual</span>
                     </div>
                   </div>
+                </div>
+
+                <!-- CTA Notice Link if connections are filtered inside compact list -->
+                <div v-if="totalNeighborsCount > 12 && !isGraphEnlarged" class="mt-2 text-center">
+                  <button 
+                    @click="isGraphEnlarged = true" 
+                    class="text-[10px] font-semibold text-teal-600 dark:text-teal-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    View remaining {{ totalNeighborsCount - 12 }} connections in Enlarge View <Maximize2 class="h-2.5 w-2.5" />
+                  </button>
                 </div>
               </div>
 
@@ -9405,6 +9744,103 @@ const timelineTicks = computed(() => {
           </p>
         </div>
       </div>
+
+      <!-- Relations Graph Enlarged Modal -->
+      <Transition
+        enter-active-class="transition duration-300 ease-out"
+        enter-from-class="opacity-0 scale-95"
+        enter-to-class="opacity-100 scale-100"
+        leave-active-class="transition duration-200 ease-in"
+        leave-from-class="opacity-100 scale-100"
+        leave-to-class="opacity-0 scale-95"
+      >
+        <div class="contents">
+          <div
+            v-if="isGraphEnlarged"
+            class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 sm:p-6"
+            @click="isGraphEnlarged = false"
+          >
+            <div
+              class="bg-white dark:bg-gray-800 rounded-[2.5rem] shadow-2xl p-6 sm:p-8 max-w-5xl w-full relative flex flex-col overflow-hidden border border-gray-150/50 dark:border-gray-700/60"
+              @click.stop
+            >
+              <!-- Modal Closable button top-right -->
+              <button
+                @click="isGraphEnlarged = false"
+                class="absolute top-4 right-4 p-2 bg-gray-150 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-full text-gray-500 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer z-10"
+                title="Close Full Screen"
+              >
+                <Minimize2 class="h-5 w-5" />
+              </button>
+
+              <div class="flex items-center justify-between mb-4 mr-10">
+                <div class="flex items-center gap-2.5">
+                  <div class="p-2 bg-teal-50 dark:bg-teal-950/40 rounded-xl">
+                    <Network class="h-5 w-5 text-teal-600 dark:text-teal-400" />
+                  </div>
+                  <div>
+                    <h3 class="text-base font-black text-gray-800 dark:text-white">
+                      Relations Graph
+                    </h3>
+                    <p class="text-xs text-gray-400 dark:text-gray-500">
+                      Showing {{ Math.min(60, totalNeighborsCount) }} connections out of {{ totalNeighborsCount }} detected.
+                    </p>
+                  </div>
+                </div>
+
+                <div class="flex items-center gap-1">
+                  <button
+                    @click="onGraphZoomIn"
+                    class="p-2 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-350 rounded-lg transition-colors cursor-pointer"
+                    title="Zoom In"
+                  >
+                    <ZoomIn class="h-4 w-4 animate-pulse" />
+                  </button>
+                  <button
+                    @click="onGraphZoomOut"
+                    class="p-2 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-350 rounded-lg transition-colors cursor-pointer"
+                    title="Zoom Out"
+                  >
+                    <ZoomOut class="h-4 w-4" />
+                  </button>
+                  <button
+                    @click="resetGraphView"
+                    class="p-2 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-350 rounded-lg transition-colors cursor-pointer"
+                    title="Reset View"
+                  >
+                    <RotateCcw class="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+
+              <!-- Main Canvas viewport for enlarged graph -->
+              <div
+                v-if="isGraphEnlarged"
+                ref="graphCanvasContainer"
+                class="relative h-[540px] w-full bg-gray-50/50 dark:bg-gray-950/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/80 overflow-hidden"
+              >
+                <canvas
+                  ref="graphCanvas"
+                  @mousedown="onCanvasMouseDown"
+                  @mousemove="onCanvasMouseMove"
+                  @mouseup="onCanvasMouseUp"
+                  @wheel.prevent="onCanvasWheel"
+                  class="block w-full h-full cursor-grab active:cursor-grabbing"
+                ></canvas>
+
+                <div class="absolute bottom-3 left-4 right-4 flex flex-wrap items-center justify-between gap-1.5 text-[10px] font-medium text-gray-400 dark:text-gray-500 pointer-events-none select-none">
+                  <div>Drag nodes to rearrange • Scroll / Drag backgrounds to Zoom & Pan</div>
+                  <div class="flex items-center gap-2">
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-indigo-500"></span>Inbound</span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-pink-500"></span>Outbound</span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-violet-500"></span>Mutual</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
 
       <!-- Photo Lightbox -->
       <Transition
