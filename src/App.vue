@@ -352,7 +352,7 @@ const endDrag = () => {
   window.removeEventListener("mouseup", endDrag);
 };
 
-const generalAsk = async (userInputText) => {
+const generalAsk = async (userInputText, details) => {
   try {
     let strippedPosts = [];
     if (userInputText.includes('$POSTS$')) {
@@ -362,8 +362,9 @@ const generalAsk = async (userInputText) => {
         if (!isInternalPrecheck) {
           try {
             // Perform precheck to extract search query token
+            details.value = 'Extract keywords from the request...'
             const queryTokenPrompt = `Please extract the key entities, names, locations, or skills from this query to run a database search. Return ONLY the space-separated keywords as a simple flat query string, with no quotes, explanations, or label. Query: "${userInputText}"`;
-            const queryToken = await generalAsk(queryTokenPrompt);
+            const queryToken = await generalAsk(queryTokenPrompt, details);
             const cleanQuery = (queryToken || "").trim().replace(/^['"\s]+|['"\s]+$/g, "");
             
             if (cleanQuery) {
@@ -376,6 +377,7 @@ const generalAsk = async (userInputText) => {
                   }
                 }
               };
+              details.value = `Searching keywords '${cleanQuery}' in database...`
               const esRes = await fetch("https://i.gogingko.net/api/v1/es/p/search", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
@@ -1008,6 +1010,7 @@ const isChatWidgetVisible = ref(false);
 const chatMessages = ref<{role: 'user' | 'bot', content: string}[]>([]);
 const chatInput = ref('');
 const isChatLoading = ref(false);
+const chatLoadingDetails = ref("AI is thinking...");
 const widgetPosition = ref({ top: 100, left: 100 });
 const widgetSize = ref({ width: 320, height: 384 });
 const isChatDragging = ref(false);
@@ -1046,20 +1049,23 @@ const handleChatSubmit = async () => {
     chatMessages.value.push({ role: 'user', content: userMessage });
     chatInput.value = '';
     isChatLoading.value = true;
+    chatLoadingDetails.value = "Pre-checking question context...";
     
     // Construct the prompt with instructions
     const precheck = `Is user's ask intent related with the posts of channel/group or search context or listen channels? Please only answer 'yes' or 'no'. The user's input is: ${userMessage}`;
-    const precheckResult = await generalAsk(precheck);
+    const precheckResult = await generalAsk(precheck, chatLoadingDetails);
     
     let prompt = null;
 
     if (precheckResult.toLowerCase().includes('yes')) {
+      chatLoadingDetails.value = "Scanning posts database and compiling answers...";
       prompt = `Based on the provided posts below, answer the following question: ${userMessage}\n\nPosts: $POSTS$`;
     } else {
+      chatLoadingDetails.value = "Querying model for general answer...";
       prompt = `${userMessage}`;
     }
     
-    const reply = await generalAsk(prompt);
+    const reply = await generalAsk(prompt, chatLoadingDetails);
     
     chatMessages.value.push({ role: 'bot', content: reply || "No response." });
     isChatLoading.value = false;
@@ -1068,6 +1074,7 @@ const handleChatSubmit = async () => {
 const profileChatMessages = ref<{role: 'user' | 'bot', content: string}[]>([]);
 const profileChatInput = ref('');
 const isProfileChatLoading = ref(false);
+const profileChatLoadingDetails = ref("Querying search registers and compiling response...");
 const useProfileDB = ref(true);
 const profileChatContentRef = ref<HTMLElement | null>(null);
 
@@ -1095,17 +1102,20 @@ const handleProfileChatSubmit = async (forceProfileDB?: boolean) => {
     profileChatMessages.value.push({ role: 'user', content: userMessage });
     profileChatInput.value = '';
     isProfileChatLoading.value = true;
+    profileChatLoadingDetails.value = "Initializing query routing...";
     
     const activeDB = forceProfileDB !== undefined ? forceProfileDB : useProfileDB.value;
     let prompt = null;
 
     if (activeDB) {
+      profileChatLoadingDetails.value = "Scanning saved profile storage and compiling answers...";
       prompt = `Based on the scanned profiles data below, answer the following question: ${userMessage}\n\nProfiles: $POSTS$`;
     } else {
+      profileChatLoadingDetails.value = "Querying model for general answer...";
       prompt = `${userMessage}`;
     }
     
-    const reply = await generalAsk(prompt);
+    const reply = await generalAsk(prompt, profileChatLoadingDetails);
     
     profileChatMessages.value.push({ role: 'bot', content: reply || "No response." });
     isProfileChatLoading.value = false;
@@ -6358,7 +6368,7 @@ const timelineTicks = computed(() => {
                  </div>
              </div>
              <div v-if="isChatLoading" class="text-gray-500 text-xs italic flex items-center gap-2">
-                 <Loader2 class="h-4 w-4 animate-spin" /> AI is thinking...
+                 <Loader2 class="h-4 w-4 animate-spin" /> {{ chatLoadingDetails }}
              </div>
           </div>
           <!-- Input -->
@@ -11656,7 +11666,7 @@ const timelineTicks = computed(() => {
               </div>
             </div>
             <div v-if="isProfileChatLoading" class="text-xs text-teal-600 dark:text-teal-400 italic flex items-center gap-2">
-              <Loader2 class="h-3.5 w-3.5 animate-spin" /> Querying search registers and compiling response...
+              <Loader2 class="h-3.5 w-3.5 animate-spin" /> {{ profileChatLoadingDetails }}
             </div>
           </div>
 
