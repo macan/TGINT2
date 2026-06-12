@@ -325,6 +325,37 @@ let dragOffsetX = 0;
 let dragOffsetY = 0;
 let currentDragWidget: "analysis" | "post" | null = null;
 
+// Resizable state for floating post widget
+const postWidgetWidth = ref(320);
+const postWidgetHeight = ref(450);
+const isResizing = ref(false);
+let startWidth = 0;
+let startHeight = 0;
+let startMouseX = 0;
+let startMouseY = 0;
+
+const startResize = (e: MouseEvent) => {
+  isResizing.value = true;
+  startWidth = postWidgetWidth.value;
+  startHeight = postWidgetHeight.value;
+  startMouseX = e.clientX;
+  startMouseY = e.clientY;
+  window.addEventListener("mousemove", onResize);
+  window.addEventListener("mouseup", endResize);
+};
+
+const onResize = (e: MouseEvent) => {
+  if (!isResizing.value) return;
+  postWidgetWidth.value = Math.max(260, Math.min(1000, startWidth + (e.clientX - startMouseX)));
+  postWidgetHeight.value = Math.max(200, Math.min(1000, startHeight + (e.clientY - startMouseY)));
+};
+
+const endResize = () => {
+  isResizing.value = false;
+  window.removeEventListener("mousemove", onResize);
+  window.removeEventListener("mouseup", endResize);
+};
+
 const startDrag = (e: MouseEvent, widgetType: "analysis" | "post") => {
   isDragging.value = true;
   currentDragWidget = widgetType;
@@ -742,8 +773,8 @@ const runAutoFinding = async () => {
 
       try {
         if (searchMode.value === "channel") {
-          cell.logs[0] = `Iteration ${iteration}:\nFetching 150 posts (${searchMode.value})...`;
-          let url = `https://i.gogingko.net/api/v1/last/${name}?n=150`;
+          cell.logs[0] = `Iteration ${iteration}:\nFetching 100 posts (${searchMode.value})...`;
+          let url = `https://i.gogingko.net/api/v1/last/${name}?n=100`;
           if (minId) url += `&b=${minId}`;
 
           const res = await fetch(url);
@@ -1311,24 +1342,42 @@ const addChildToFolder = (nodes: ListenItem[], folderId: string, child: ListenIt
   return false;
 };
 
+const listenDirectoryTimestamp = ref<number>(0);
+
 const loadListenDirectory = () => {
   const cached = localStorage.getItem("listen_directory_tree");
   if (cached) {
     try {
-      listenDirectory.value = JSON.parse(cached);
+      const parsed = JSON.parse(cached);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        listenDirectory.value = parsed.tree || [];
+        listenDirectoryTimestamp.value = typeof parsed.timestamp === "number" ? parsed.timestamp : 0;
+      } else if (Array.isArray(parsed)) {
+        listenDirectory.value = parsed;
+        listenDirectoryTimestamp.value = 0;
+      }
     } catch (e) {
       console.error("Failed to load listen_directory_tree", e);
     }
   }
 };
 
-const saveListenDirectory = () => {
-  localStorage.setItem("listen_directory_tree", JSON.stringify(listenDirectory.value));
+const saveListenDirectory = (customTimestamp: number | null = null) => {
+  listenDirectoryTimestamp.value = customTimestamp !== null ? customTimestamp : Date.now();
+  const data = {
+    tree: listenDirectory.value,
+    timestamp: listenDirectoryTimestamp.value
+  };
+  localStorage.setItem("listen_directory_tree", JSON.stringify(data));
 };
 
 const exportListenDirectoryToClipboard = () => {
   try {
-    const dataStr = JSON.stringify(listenDirectory.value, null, 2);
+    const data = {
+      tree: listenDirectory.value,
+      timestamp: listenDirectoryTimestamp.value
+    };
+    const dataStr = JSON.stringify(data, null, 2);
     if (!navigator.clipboard) {
       const textArea = document.createElement("textarea");
       textArea.value = dataStr;
@@ -1396,21 +1445,120 @@ const confirmListenDirectoryImport = () => {
   }
   try {
     const parsed = JSON.parse(importJsonInput.value);
-    if (Array.isArray(parsed)) {
-      listenDirectory.value = parsed;
-      saveListenDirectory();
+    let treeData = parsed;
+    let tStamp = Date.now();
+    
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      if (parsed.tree && Array.isArray(parsed.tree)) {
+        treeData = parsed.tree;
+        if (typeof parsed.timestamp === "number") {
+          tStamp = parsed.timestamp;
+        }
+      }
+    }
+
+    if (Array.isArray(treeData)) {
+      listenDirectory.value = treeData;
+      saveListenDirectory(tStamp);
       toastMessage.value = "Directory tree imported successfully!";
       toastType.value = "success";
       isImportModalOpen.value = false;
       importJsonInput.value = "";
       importErrorMessage.value = "";
     } else {
-      importErrorMessage.value = "Invalid configuration structure. Top-level element must be a folder/channel array.";
+      importErrorMessage.value = "Invalid configuration structure. Top-level element must be a folder/channel array or valid directory object.";
     }
   } catch (err: any) {
     importErrorMessage.value = `JSON Parsing Error: ${err.message || 'Malformed structure'}`;
   }
   setTimeout(() => { toastMessage.value = ""; }, 3000);
+};
+
+const isSyncingListen = ref(false);
+
+const syncListenDirectory = async () => {
+  if (!loginName.value || !loginToken.value || !isLoginTokenValid.value) {
+    toastMessage.value = "Credentials or Access Token is invalid!";
+    toastType.value = "error";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+    return;
+  }
+
+  isSyncingListen.value = true;
+  try {
+    const username = loginName.value;
+    const url = `https://i.gogingko.net/api/v1/v/profiles/LDT-${username}`;
+    
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "x-gos-token": loginToken.value
+      }
+    });
+
+    if (response.status === 404) {
+      await saveProfileRemotely(`LDT-${username}`, loginToken.value, {
+        tree: listenDirectory.value,
+        timestamp: listenDirectoryTimestamp.value
+      });
+      toastMessage.value = "Synced local directory to remote!";
+      toastType.value = "success";
+      setTimeout(() => { toastMessage.value = ""; }, 3000);
+      return;
+    }
+
+    if (!response.ok) {
+      throw new Error(`Sync failed with status code ${response.status}`);
+    }
+
+    const data = await response.json();
+    let parsedRemote = data;
+    if (typeof data === "string") {
+      try {
+        parsedRemote = JSON.parse(data);
+      } catch (e) {
+        console.error("Failure parsing stringified remote data", e);
+      }
+    }
+
+    // Now let's parse remote tree & timestamp
+    let remoteTree: ListenItem[] = [];
+    let remoteTimestamp = 0;
+
+    if (parsedRemote && typeof parsedRemote === "object") {
+      if (!Array.isArray(parsedRemote)) {
+        remoteTree = parsedRemote.tree || [];
+        remoteTimestamp = typeof parsedRemote.timestamp === "number" ? parsedRemote.timestamp : 0;
+      } else {
+        remoteTree = parsedRemote;
+        remoteTimestamp = 0;
+      }
+    }
+
+    if (remoteTimestamp < listenDirectoryTimestamp.value) {
+      await saveProfileRemotely(`LDT-${username}`, loginToken.value, {
+        tree: listenDirectory.value,
+        timestamp: listenDirectoryTimestamp.value
+      });
+      toastMessage.value = "Synced local directory to remote!";
+      toastType.value = "success";
+    } else if (remoteTimestamp === listenDirectoryTimestamp.value) {
+      toastMessage.value = "Local directory is up to date!";
+      toastType.value = "info";
+    } else {
+      listenDirectory.value = remoteTree;
+      saveListenDirectory(remoteTimestamp);
+      toastMessage.value = "Directory tree synced from remote!";
+      toastType.value = "success";
+    }
+  } catch (error: any) {
+    console.error("Failed to sync listen directory:", error);
+    toastMessage.value = `Sync error: ${error.message || error}`;
+    toastType.value = "error";
+  } finally {
+    isSyncingListen.value = false;
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  }
 };
 
 const addChannelToListenDirectory = (name: string, username: string) => {
@@ -3846,14 +3994,26 @@ const isGraphEnlarged = ref(false);
 const totalNeighborsCount = ref(0);
 const graphStableSince = ref<number | null>(null);
 
+const truncateString = (str: string, maxLen: number): string => {
+  if (!str) return "";
+  const chars = Array.from(str);
+  if (chars.length > maxLen) {
+    return chars.slice(0, maxLen - 2).join("") + "...";
+  }
+  return str;
+};
+
 const getInitials = (title: string): string => {
   if (!title) return "?";
   const cleaned = title.replace(/^@/, "").trim();
-  const parts = cleaned.split(/[\s_\-]+/);
+  const parts = cleaned.split(/[\s_\-]+/).filter(Boolean);
   if (parts.length > 1) {
-    return (parts[0][0] + parts[1][0]).toUpperCase();
+    const first = Array.from(parts[0])[0] || "";
+    const second = Array.from(parts[1])[0] || "";
+    return (first + second).toUpperCase();
   }
-  return cleaned.slice(0, 2).toUpperCase();
+  const chars = Array.from(cleaned);
+  return chars.slice(0, 2).join("").toUpperCase();
 };
 const userProfile = ref<any>(null);
 const loadingUserProfile = ref(false);
@@ -5178,9 +5338,10 @@ const initRelationsGraph = () => {
   const edges: GraphEdge[] = [];
   
   // Center node
+  const centerNodeName = usedMetadata.value?.title || usedMetadata.value?.name || centerId;
   const centerNode: GraphNode = {
     id: centerId,
-    name: usedMetadata.value?.title || usedMetadata.value?.name || centerId,
+    name: centerNodeName,
     x: width / 2,
     y: height / 2,
     vx: 0,
@@ -5190,9 +5351,7 @@ const initRelationsGraph = () => {
     isCenter: true,
     avatarImg: null,
     avatarLoaded: false,
-    displayName: (usedMetadata.value?.title || usedMetadata.value?.name || centerId).length > 15 
-      ? (usedMetadata.value?.title || usedMetadata.value?.name || centerId).slice(0, 13) + '...' 
-      : (usedMetadata.value?.title || usedMetadata.value?.name || centerId)
+    displayName: truncateString(centerNodeName, 15)
   };
   
   const centerAvatar = new Image();
@@ -5311,7 +5470,7 @@ const initRelationsGraph = () => {
         isCenter: false,
         avatarImg: null,
         avatarLoaded: false,
-        displayName: ('@' + neighborId).length > 15 ? ('@' + neighborId).slice(0, 13) + '...' : ('@' + neighborId)
+        displayName: truncateString('@' + neighborId, 15)
       };
       
       const neighborAvatar = new Image();
@@ -10949,7 +11108,7 @@ const timelineTicks = computed(() => {
 
             <!-- Bottom Panel: Export / Import -->
             <div class="px-4 py-3 bg-gray-50/80 dark:bg-gray-900/40 border-t border-gray-150 dark:border-gray-700 flex items-center justify-between gap-2.5 shrink-0">
-              <div class="flex items-center gap-1.5">
+              <div class="flex items-center gap-1.5 flex-wrap">
                 <button
                   @click="exportListenDirectoryToClipboard"
                   class="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer"
@@ -10965,6 +11124,15 @@ const timelineTicks = computed(() => {
                 >
                   <Upload class="h-3 w-3" />
                   <span>Import</span>
+                </button>
+                <button
+                  @click="syncListenDirectory"
+                  :disabled="!(loginName && loginToken && isLoginTokenValid) || isSyncingListen"
+                  class="px-2.5 py-1.5 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/30 dark:hover:bg-teal-900/40 text-teal-600 dark:text-teal-400 disabled:opacity-40 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:text-gray-400 dark:disabled:text-gray-600 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
+                  title="Sync directory with remote server"
+                >
+                  <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': isSyncingListen }" />
+                  <span>{{ isSyncingListen ? 'Syncing...' : 'Sync' }}</span>
                 </button>
               </div>
               <span class="text-[9px] font-semibold text-gray-400 uppercase tracking-widest select-none">
@@ -11960,19 +12128,18 @@ const timelineTicks = computed(() => {
                 <div v-html="savedFinalTableHtml" class="prose-sm overflow-x-auto"></div>
               </div>
             </div>
-          </div>
-        </div>
-
-        <!-- Floating Post Tool Widget -->
+           <!-- Floating Post Tool Widget -->
         <div
           v-show="activeTab === 'auto-finding' && isPostFetcherVisible"
           :style="{
             position: 'fixed',
             left: postWidgetX + 'px',
             top: postWidgetY + 'px',
+            width: postWidgetWidth + 'px',
+            height: singlePost ? (postWidgetHeight + 'px') : '140px',
             zIndex: 100,
           }"
-          class="w-80 bg-white/95 dark:bg-gray-800/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-gray-200/80 dark:border-gray-700/80 flex flex-col p-4 cursor-default border-t-2 border-t-teal-500"
+          class="bg-white/95 dark:bg-gray-800/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-gray-200/80 dark:border-gray-700/80 flex flex-col p-4 cursor-default border-t-2 border-t-teal-500 relative"
         >
           <div
             class="cursor-grab p-2.5 mb-3 bg-teal-500/[0.08] border-b border-teal-500/10 flex justify-between items-center rounded-xl"
@@ -12001,7 +12168,7 @@ const timelineTicks = computed(() => {
           </form>
           <div
             v-if="singlePost"
-            class="mt-3 flex-1 overflow-y-auto max-h-[300px] border border-gray-150 dark:border-gray-800 bg-gray-50/40 dark:bg-gray-900/40 backdrop-blur-sm rounded-xl custom-scrollbar"
+            class="mt-3 flex-1 overflow-y-auto border border-gray-150 dark:border-gray-800 bg-gray-50/40 dark:bg-gray-900/40 backdrop-blur-sm rounded-xl custom-scrollbar"
           >
             <div class="p-3">
               <!-- Header -->
@@ -12066,7 +12233,7 @@ const timelineTicks = computed(() => {
                   >
                 </div>
                 <div
-                  class="text-gray-600 dark:text-gray-300 text-[11px] leading-relaxed whitespace-pre-wrap break-words italic line-clamp-3"
+                  class="text-gray-650 dark:text-gray-300 text-[11px] leading-relaxed whitespace-pre-wrap break-words italic line-clamp-3"
                   v-html="highlightText(singlePost.data.reply[1])"
                 ></div>
               </div>
@@ -12133,7 +12300,28 @@ const timelineTicks = computed(() => {
               </div>
             </div>
           </div>
+
+          <!-- Resize Handle -->
+          <div
+            v-if="singlePost"
+            @mousedown.prevent.stop="startResize"
+            class="absolute bottom-1 right-1 w-4 h-4 cursor-se-resize flex items-end justify-end p-0.5 group z-50"
+          >
+            <svg
+              class="w-2.5 h-2.5 text-gray-400 dark:text-gray-500 group-hover:text-teal-500 transition-colors"
+              viewBox="0 0 10 10"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+            >
+              <line x1="8" y1="2" x2="2" y2="8" />
+              <line x1="8" y1="5" x2="5" y2="8" />
+            </svg>
+          </div>
         </div>
+      </div>
+    </div>
 
         <div
           v-if="autoCells.length === 0 && !isAutoFinding"
@@ -12554,9 +12742,19 @@ const timelineTicks = computed(() => {
 
             <!-- Beautiful collateral panel: remote dossier categories -->
             <div class="bg-gradient-to-br from-white to-gray-50/50 dark:from-gray-800 dark:to-gray-900/40 border border-gray-200/80 dark:border-gray-750/80 rounded-3xl p-6 shadow-sm space-y-4">
-              <div class="flex items-center gap-2 mb-2">
-                <FileText class="h-4.5 w-4.5 text-teal-600 dark:text-teal-400" />
-                <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Remote Profiles Index</h3>
+              <div class="flex items-center justify-between mb-2">
+                <div class="flex items-center gap-2">
+                  <FileText class="h-4.5 w-4.5 text-teal-600 dark:text-teal-400" />
+                  <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Remote Profiles Index</h3>
+                </div>
+                <button
+                  @click="fetchRemoteProfiles"
+                  :disabled="loadingRemoteProfiles"
+                  class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                  title="Reload Remote Profiles"
+                >
+                  <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingRemoteProfiles }" />
+                </button>
               </div>
               <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold leading-relaxed">
                 Unlock high-fidelity profiles maintained in foreign indexers. Select any directory source below to bind details into the inspector pane immediately.
