@@ -1241,6 +1241,9 @@ const listenDirectory = ref<ListenItem[]>([
   }
 ]);
 
+const forwardsChannelsListen = ref<string[]>([]);
+const ftoChannelsListen = ref<string[]>([]);
+
 const selectedListenNode = ref<ListenItem | null>(null);
 const expandedFolders = ref<Record<string, boolean>>({
   "folder-1": true
@@ -1849,6 +1852,11 @@ const fetchListenPosts = async (node: ListenItem) => {
     return post.key || post.id || (post.data && post.data.id) || '';
   };
 
+  if (node.type === 'channel') {
+    forwardsChannelsListen.value = [];
+    ftoChannelsListen.value = [];
+  }
+
   // 1. Immediately load cached posts from IndexedDB for instant display
   let cached: any[] = [];
   try {
@@ -1887,6 +1895,17 @@ const fetchListenPosts = async (node: ListenItem) => {
           isFetchingListenPosts.value = false;
         }
         return;
+      }
+
+      try {
+        const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${username}`);
+        if (profileRes.ok) {
+          const profileData = await profileRes.json();
+          forwardsChannelsListen.value = profileData.forwards || [];
+          ftoChannelsListen.value = profileData.fto || [];
+        }
+      } catch (e) {
+        console.error("Failed to fetch forwards and fto", e);
       }
 
       let allFetched: any[] = [];
@@ -2127,9 +2146,30 @@ const fetchSelectedChannelMetadata = async (node: ListenItem) => {
   
   isFetchingChannelMetadata.value = true;
   try {
-    const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${username}`);
-    if (!response.ok) throw new Error('Failed to fetch channel metadata');
-    const data = await response.json();
+    let metaRes = await fetch(
+      `https://i.gogingko.net/api/v1/v/telegram-channel/${username}`
+    );
+    // need to check if it is private channel id if 404
+    if (metaRes.status === 404 && username.startsWith('-100')) {
+      metaRes = await fetch(
+        `https://i.gogingko.net/api/v1/v/telegram-channel/${username.slice(4)}`
+      );
+    }
+    // try to lookup the resolve cache
+    if (metaRes.status === 404) {
+      const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${username}`)
+      if (resolveRes.ok) {
+        const data = await resolveRes.json()
+        if (data.state == 0 && data.gso?.result) {
+          username = data.gso.result
+          metaRes = await fetch(
+            `https://i.gogingko.net/api/v1/v/telegram-channel/${username}`
+          );
+        }
+      }
+    }
+    if (!metaRes.ok) throw new Error('Failed to fetch channel metadata');
+    const data = await metaRes.json();
     if (selectedListenNode.value?.id === node.id) {
       selectedChannelMetadata.value = data;
     }
@@ -3940,7 +3980,7 @@ watch(isProfileVisible, (visible) => {
   }
 });
 
-watch([currentChannelName, forwardsChannels, ftoChannels], () => {
+watch([selectedChannelMetadata, forwardsChannelsListen, ftoChannelsListen, currentChannelName, forwardsChannels, ftoChannels], () => {
   if (graphCanvasContainer.value) {
     initRelationsGraph();
   }
@@ -5110,7 +5150,27 @@ let activeLoopAnimId: number | null = null;
 let graphResizeObserver: ResizeObserver | null = null;
 
 const initRelationsGraph = () => {
-  const centerId = currentChannelName.value.trim().replace(/^@/, "") || 'center';
+  // Clear the older graph nodes, edges, and canvas
+  graphNodes.value = [];
+  graphEdges.value = [];
+  if (graphCanvas.value) {
+    const ctx = graphCanvas.value.getContext("2d");
+    if (ctx) {
+      ctx.clearRect(0, 0, graphCanvasWidth.value || 300, graphCanvasHeight.value || 300);
+    }
+  }
+
+  if (activeTab.value === 'listen' && !selectedListenNode.value) {
+    return
+  }
+  const channelNameStr = (activeTab.value === 'explorer') 
+    ? (currentChannelName.value || '') 
+    : (selectedListenNode.value?.argument || '');
+  const usedMetadata = (activeTab.value === 'explorer') ? metadata : selectedChannelMetadata;
+  const useForwardsChannels = (activeTab.value === 'explorer') ? forwardsChannels : forwardsChannelsListen;
+  const useFtoChannels = (activeTab.value === 'explorer') ? ftoChannels : ftoChannelsListen;
+  
+  const centerId = channelNameStr.trim().replace(/^@/, "") || 'center';
   const width = graphCanvasWidth.value || 300;
   const height = graphCanvasHeight.value || 300;
   
@@ -5120,7 +5180,7 @@ const initRelationsGraph = () => {
   // Center node
   const centerNode: GraphNode = {
     id: centerId,
-    name: metadata.value?.title || metadata.value?.name || centerId,
+    name: usedMetadata.value?.title || usedMetadata.value?.name || centerId,
     x: width / 2,
     y: height / 2,
     vx: 0,
@@ -5130,14 +5190,14 @@ const initRelationsGraph = () => {
     isCenter: true,
     avatarImg: null,
     avatarLoaded: false,
-    displayName: (metadata.value?.title || metadata.value?.name || centerId).length > 15 
-      ? (metadata.value?.title || metadata.value?.name || centerId).slice(0, 13) + '...' 
-      : (metadata.value?.title || metadata.value?.name || centerId)
+    displayName: (usedMetadata.value?.title || usedMetadata.value?.name || centerId).length > 15 
+      ? (usedMetadata.value?.title || usedMetadata.value?.name || centerId).slice(0, 13) + '...' 
+      : (usedMetadata.value?.title || usedMetadata.value?.name || centerId)
   };
   
   const centerAvatar = new Image();
   centerAvatar.crossOrigin = "anonymous";
-  centerAvatar.src = `https://i.gogingko.net/api/v1/v/telegram-profile/${centerId}`;
+  centerAvatar.src = (usedMetadata.value?.photo && usedMetadata.value.photo.startsWith('data:')) ? usedMetadata.value.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${centerId}`;
   centerAvatar.onload = () => {
     centerNode.avatarImg = centerAvatar;
     centerNode.avatarLoaded = true;
@@ -5150,8 +5210,8 @@ const initRelationsGraph = () => {
   // Neighbors
   const uniqueNeighborsMap = new Map<string, { incoming: boolean; outgoing: boolean }>();
 
-  if (forwardsChannels.value && forwardsChannels.value.length > 0) {
-    forwardsChannels.value.forEach(source => {
+  if (useForwardsChannels.value && useForwardsChannels.value.length > 0) {
+    useForwardsChannels.value.forEach(source => {
       const sourceId = source.trim().replace(/^@/, "");
       if (!sourceId || sourceId === centerId) return;
       if (!uniqueNeighborsMap.has(sourceId)) {
@@ -5162,8 +5222,8 @@ const initRelationsGraph = () => {
     });
   }
 
-  if (ftoChannels.value && ftoChannels.value.length > 0) {
-    ftoChannels.value.forEach(target => {
+  if (useFtoChannels.value && useFtoChannels.value.length > 0) {
+    useFtoChannels.value.forEach(target => {
       const targetId = target.trim().replace(/^@/, "");
       if (!targetId || targetId === centerId) return;
       if (!uniqueNeighborsMap.has(targetId)) {
@@ -5877,6 +5937,8 @@ const onCanvasMouseUp = (e: MouseEvent) => {
       const node = graphNodes.value.find(n => n.id === draggedNodeId.value);
       if (node && !node.isCenter) {
         channelName.value = node.id;
+        // switch to explorer tab and do new channel search
+        activeTab.value = 'explorer';
         searchChannel();
       }
     }
@@ -6363,6 +6425,19 @@ const getPostAvatarUrl = (post: any) => {
     }
   }
   return telegramLogoUrl;
+};
+
+const getPostDocuments = (post: any) => {
+  if (post.data?.documents) {
+    return post.data.documents.map(document => {
+      const file_name = document.attributes?.find(attr => attr._ === "DocumentAttributeFilename")?.file_name;
+      return {
+        title: file_name || (document.title || '') + (document.extra ? ' ' + document.extra : '') || 'Document',
+        url: file_name ? `https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}` : ''
+      };
+    });
+  }
+  return [];
 };
 
 const mediaPosts = computed(() => {
@@ -7053,7 +7128,7 @@ const timelineTicks = computed(() => {
                     <div class="flex flex-col sm:flex-row items-start sm:items-center gap-5">
                       <div class="relative shrink-0">
                         <img 
-                          :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" 
+                          :src="(telegramUser.photo && telegramUser.photo.startsWith('data:')) ? telegramUser.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" 
                           @error="handleImageError" 
                           class="w-16 h-16 rounded-2xl object-cover border-2 border-teal-500/10 shadow-sm" 
                           referrerPolicy="no-referrer"
@@ -7474,7 +7549,7 @@ const timelineTicks = computed(() => {
                   class="w-20 h-20 rounded-2xl bg-white dark:bg-gray-800 border-2 border-white dark:border-gray-800 shadow-md absolute -top-10 left-6 flex items-center justify-center overflow-hidden ring-4 ring-teal-500/10"
                 >
                   <img
-                    :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${currentChannelName}`"
+                    :src="(metadata.photo && metadata.photo.startsWith('data:')) ? metadata.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${currentChannelName}`"
                     @error="handleImageError"
                     alt="Avatar"
                     class="w-full h-full object-cover"
@@ -7785,7 +7860,7 @@ const timelineTicks = computed(() => {
                 </div>
                 
                 <div
-                  v-if="!isGraphEnlarged"
+                  v-if="activeTab === 'explorer' && !isGraphEnlarged"
                   ref="graphCanvasContainer"
                   class="relative h-[300px] w-full bg-gray-50/50 dark:bg-gray-950/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/80 overflow-hidden"
                 >
@@ -8426,6 +8501,23 @@ const timelineTicks = computed(() => {
                     </div>
 
                     <div
+                      v-if="post.data?.documents && post.data.documents.length > 0 && post.data.documents[0].mime_type && post.data.documents[0].mime_type.startsWith('image/')"
+                      class="mb-4 rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center"
+                      @click="
+                        openLightbox(
+                          `https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`
+                        )
+                      "
+                    >
+                      <img
+                        :src="`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`"
+                        class="w-full h-auto max-h-[500px] object-contain mx-auto transition-transform duration-700 group-hover/media:scale-105"
+                        alt="Post photo by document"
+                        referrerpolicy="no-referrer"
+                      />
+                    </div>
+
+                    <div
                       v-if="post.data?.videos && post.data.videos.length > 0"
                       class="mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-black shadow-lg relative z-10"
                     >
@@ -8489,19 +8581,20 @@ const timelineTicks = computed(() => {
 
                     <!-- PDF or Other Document Preview -->
                     <div
-                      v-if="post.data?.documents && post.data.documents.length > 0"
-                      class="mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/50 flex items-center p-4 shadow-sm hover:shadow-md transition-shadow relative z-10"
+                      v-for="(doc, dIdx) in getPostDocuments(post)"
+                      :key="dIdx"
+                      class="mb-3 last:mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/50 flex items-center p-4 shadow-sm hover:shadow-md transition-shadow relative z-10"
                     >
                       <div class="mr-4">
                         <FileText class="h-10 w-10 text-red-500" />
                       </div>
                       <div class="flex-1 min-w-0">
-                        <h4 class="text-sm font-bold text-gray-900 dark:text-white mb-1">
-                          {{ post.data.documents[0].attributes?.[0]?.file_name || (post.data.documents[0].title || '') + (post.data.documents[0].extra ? ' ' + post.data.documents[0].extra : '') || 'Document' }}
+                        <h4 class="text-sm font-bold text-gray-900 dark:text-white mb-1 text-wrap break-all">
+                          {{ doc.title }}
                         </h4>
                         <a
-                          v-if="post.data.documents[0].attributes?.[0]?.file_name"
-                          :href="`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`"
+                          v-if="doc.url"
+                          :href="doc.url"
                           target="_blank"
                           class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-semibold"
                         >
@@ -10668,8 +10761,10 @@ const timelineTicks = computed(() => {
         <!-- Main Panel Split Grid -->
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start w-full">
           
-          <!-- Left directory tree widget (col-span-4) -->
-          <div class="lg:col-span-4 xl:col-span-3 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col min-h-[920px] w-full">
+          <!-- Left sidebar (directory tree + Relations Graph below) -->
+          <div class="lg:col-span-4 xl:col-span-3 flex flex-col gap-6 w-full">
+            <!-- Left directory tree widget -->
+            <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col min-h-[500px] w-full">
             <!-- Watchlist Header -->
             <div class="p-4 border-b border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shrink-0">
               <div>
@@ -10878,6 +10973,102 @@ const timelineTicks = computed(() => {
             </div>
           </div>
 
+            <!-- Relations Graph Widget inside Listen Tab -->
+            <div
+              class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm shadow-indigo-100/5 dark:shadow-none flex flex-col group/chart transition-all"
+            >
+              <div class="flex items-center justify-between mb-4">
+                <div class="flex items-center gap-2">
+                  <div class="p-1.5 bg-teal-50 dark:bg-teal-950/40 rounded-lg">
+                    <Network class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                  </div>
+                  <div class="flex flex-col">
+                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                      Relations Graph
+                    </h3>
+                    <!-- Filter Count Badge -->
+                    <div class="flex items-center gap-1 mt-0.5">
+                      <span v-if="totalNeighborsCount > 12" class="text-[9px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-1.5 py-0.5 rounded-full cursor-help whitespace-nowrap" title="Filtered to top 12 connections inside compact view. Click Enlarge to see all.">
+                        Showing 12 of {{ totalNeighborsCount }}
+                      </span>
+                      <span v-else-if="totalNeighborsCount > 0" class="text-[9px] font-semibold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-1.5 py-0.5 rounded-full whitespace-nowrap">
+                        {{ totalNeighborsCount }} nodes
+                      </span>
+                      <span v-else class="text-[9px] font-semibold text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-950/40 px-1.5 py-0.5 rounded-full whitespace-nowrap">
+                        0 nodes
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                
+                <div class="flex items-center gap-1">
+                  <button
+                    @click="onGraphZoomIn"
+                    class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                    title="Zoom In"
+                  >
+                    <ZoomIn class="h-3.5 w-3.5 animate-pulse" />
+                  </button>
+                  <button
+                    @click="onGraphZoomOut"
+                    class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                    title="Zoom Out"
+                  >
+                    <ZoomOut class="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    @click="resetGraphView"
+                    class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                    title="Reset View"
+                  >
+                    <RotateCcw class="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    @click="isGraphEnlarged = true"
+                    class="p-1.5 hover:bg-teal-50 dark:hover:bg-teal-950/35 text-teal-650 dark:text-teal-400 rounded-lg transition-colors cursor-pointer"
+                    title="Enlarge Interactive View"
+                  >
+                    <Maximize2 class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+              
+              <div
+                v-if="activeTab === 'listen' && !isGraphEnlarged"
+                ref="graphCanvasContainer"
+                class="relative h-[300px] w-full bg-gray-50/50 dark:bg-gray-950/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/80 overflow-hidden"
+              >
+                <canvas
+                  ref="graphCanvas"
+                  @mousedown="onCanvasMouseDown"
+                  @mousemove="onCanvasMouseMove"
+                  @mouseup="onCanvasMouseUp"
+                  @wheel.prevent="onCanvasWheel"
+                  class="block w-full h-full"
+                ></canvas>
+                
+                <div class="absolute bottom-2.5 left-3 right-3 flex flex-wrap items-center justify-between gap-1.5 text-[9px] font-medium text-gray-400 dark:text-gray-500 pointer-events-none select-none">
+                  <div>Drag nodes • Scroll / Drag to Zoom & Pan</div>
+                  <div class="flex items-center gap-2">
+                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>Inbound</span>
+                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-pink-500"></span>Outbound</span>
+                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>Mutual</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- CTA Notice Link if connections are filtered inside compact list -->
+              <div v-if="totalNeighborsCount > 12 && !isGraphEnlarged" class="mt-2 text-center">
+                <button 
+                  @click="isGraphEnlarged = true" 
+                  class="text-[10px] font-semibold text-teal-600 dark:text-teal-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                >
+                  View remaining {{ totalNeighborsCount - 12 }} connections in Enlarge View <Maximize2 class="h-2.5 w-2.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+
           <!-- Right telemetry posts viewer (col-span-8) -->
           <div class="lg:col-span-8 xl:col-span-9 space-y-6 w-full">
             
@@ -10997,7 +11188,9 @@ const timelineTicks = computed(() => {
                   <div class="bg-gradient-to-br from-teal-500/20 to-teal-600/5 dark:from-teal-950/40 dark:to-teal-900/10 p-6 flex flex-row md:flex-col items-center justify-center gap-4 border-b md:border-b-0 md:border-r border-gray-150 dark:border-gray-700 md:w-48 shrink-0 select-none">
                     <div class="w-16 h-16 rounded-full bg-white dark:bg-gray-800 border-2 border-teal-100 dark:border-teal-900/40 shadow-md overflow-hidden shrink-0 flex items-center justify-center">
                       <img
-                        :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument}`"
+                        :src="selectedChannelMetadata.photo && (selectedChannelMetadata.photo.startsWith('data:'))
+                          ? selectedChannelMetadata.photo
+                          : `https://i.gogingko.net/api/v1/v/telegram-profile/${selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument}`"
                         @error="handleImageError"
                         alt="Channel Avatar"
                         class="w-full h-full object-cover"
@@ -11107,9 +11300,27 @@ const timelineTicks = computed(() => {
                           />
                         </div>
                         <div>
-                          <h4 class="text-xs sm:text-sm font-extrabold text-gray-900 dark:text-white block hover:text-teal-500 transition-colors">
-                            {{ post.data?.author || post.data?.user || selectedListenNode.name }}
-                          </h4>
+                          <div class="flex items-center flex-wrap gap-1.5">
+                            <h4 class="text-xs sm:text-sm font-extrabold text-gray-900 dark:text-white hover:text-teal-500 transition-colors">
+                              {{ post.data?.author || post.data?.user || selectedListenNode.name }}
+                            </h4>
+
+                            <span
+                              v-if="getToolName && getToolName(post)"
+                              class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full shrink-0"
+                              :class="
+                                getToolName(post) === 'TGB'
+                                  ? 'bg-purple-50 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400 border border-purple-100/50 dark:border-purple-900/10'
+                                  : 'bg-gray-50 dark:bg-gray-900 text-gray-450 border border-gray-150/40 dark:border-gray-800'
+                              "
+                            >
+                              {{ getToolName(post) }}
+                            </span>
+                            <span v-if="getUsername && getUsername(post)" class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full bg-teal-50 dark:bg-teal-950/30 text-teal-650 dark:text-teal-400 border border-teal-100/40 dark:border-teal-900/20 shrink-0">
+                              {{ getUsername(post) }}
+                            </span>
+                          </div>
+
                           <div class="flex items-center gap-x-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5">
                             <span>{{ formatDate(post.data?.date) }}</span>
                             <span v-if="post.mtime" class="text-[9px] text-teal-500 lowercase normal-case tracking-normal">
@@ -11221,6 +11432,23 @@ const timelineTicks = computed(() => {
                       />
                     </div>
 
+                    <div
+                      v-if="post.data?.documents && post.data.documents.length > 0 && post.data.documents[0].mime_type && post.data.documents[0].mime_type.startsWith('image/')"
+                      class="mb-4 rounded-2xl overflow-hidden shadow-sm border border-gray-150 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/30 group-cursor cursor-zoom-in max-w-sm"
+                      @click="
+                        openLightbox(
+                          `https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`
+                        )
+                      "
+                    >
+                      <img
+                        :src="`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`"
+                        class="w-full h-auto max-h-[500px] object-contain mx-auto transition-transform duration-700 group-hover/media:scale-105"
+                        alt="Post photo by document"
+                        referrerpolicy="no-referrer"
+                      />
+                    </div>
+
                     <!-- Videos playables -->
                     <div
                       v-if="post.data?.videos && post.data.videos.length > 0"
@@ -11265,6 +11493,30 @@ const timelineTicks = computed(() => {
                       </div>
                     </div>
 
+                    <!-- PDF or Other Document Preview -->
+                    <div
+                      v-for="(doc, dIdx) in getPostDocuments(post)"
+                      :key="dIdx"
+                      class="mb-3 last:mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/50 flex items-center p-4 shadow-sm hover:shadow-md transition-shadow relative z-10"
+                    >
+                      <div class="mr-4">
+                        <FileText class="h-10 w-10 text-red-500" />
+                      </div>
+                      <div class="flex-1 min-w-0">
+                        <h4 class="text-sm font-bold text-gray-900 dark:text-white mb-1 text-wrap break-all">
+                          {{ doc.title }}
+                        </h4>
+                        <a
+                          v-if="doc.url"
+                          :href="doc.url"
+                          target="_blank"
+                          class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-semibold"
+                        >
+                          View Document
+                        </a>
+                      </div>
+                    </div>
+
                     <!-- Bottom Metadata Bar -->
                     <div
                       class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400"
@@ -11292,6 +11544,20 @@ const timelineTicks = computed(() => {
                         >
                       </div>
                     </div>
+
+                    <!-- Raw Post Debug details -->
+
+                    <details class="mt-3 text-xs">
+                      <summary
+                        class="text-gray-400 dark:text-gray-500 cursor-pointer hover:text-gray-600 dark:hover:text-gray-300"
+                      >
+                        Raw Data
+                      </summary>
+                      <pre
+                        class="mt-2 p-2 bg-gray-50 dark:bg-gray-900 rounded overflow-x-auto text-gray-500 dark:text-gray-400"
+                        >{{ JSON.stringify(post, null, 2) }}</pre
+                      >
+                    </details>
 
                   </div>
                 </div>
