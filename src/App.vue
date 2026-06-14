@@ -469,7 +469,8 @@ const generalAsk = async (userInputText, details) => {
                 }
               })(),
               author: data?.author || data?.user,
-              reply: data?.reply,
+              // for now, AI model can not distinguish reply field
+              //reply: data?.reply,
               linkPreview: data?.linkPreview
                 ? {
                     title: data.linkPreview.title,
@@ -557,7 +558,8 @@ const analyzePosts = async () => {
                 }
               })(),
           author: data?.author || data?.user,
-          reply: data?.reply,
+          // for now, AI model can not distinguish reply field
+          //reply: data?.reply,
           linkPreview: data?.linkPreview
             ? {
                 title: data.linkPreview.title,
@@ -631,7 +633,8 @@ const summarizePosts = async () => {
                 }
               })(),
           author: data?.author || data?.user,
-          reply: data?.reply,
+          // for now, AI model can not distinguish reply field
+          //reply: data?.reply,
           linkPreview: data?.linkPreview
             ? {
                 title: data.linkPreview.title,
@@ -996,7 +999,8 @@ const runAutoFinding = async () => {
               sender: "mc",
               chat_id: "mc",
               text:
-                "Consider the following text, can you find any deterministic or definitive personality evidence for any user or account. If you can find it, return the evidence. Otherwise just answer No Evidence. the following are REPLY text: " +
+                "Consider the following text, can you find any deterministic or definitive personality evidence for any user or account. \
+                If you can find it, return the evidence. Otherwise just answer No Evidence. the following are REPLY text: " +
                 cell.analysisResult,
             }),
           });
@@ -2811,7 +2815,8 @@ const analyzeGraph = async () => {
            content: p.data?.content,
            date: p.data?.date,
            author: p.data?.author || p.data?.user,
-           reply: p.data?.reply,
+           // for now, the AI model can not distinguish replay field :(
+           //reply: p.data?.reply,
            forward_from: p.data?.forward_from,
          }))
          .filter((p: any) => p.content || p.reply);
