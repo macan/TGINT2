@@ -7,6 +7,7 @@ import {
   Loader2,
   AlertCircle,
   Users,
+  Lock,
   Calendar,
   Info,
   MessageSquare,
@@ -4060,8 +4061,6 @@ const fetchChannelProfile = async (channel: string) => {
           const dateB = new Date(b.replace(`${profileName}-`, '') + ':00')
           return dateB.getTime() - dateA.getTime()
         })
-        console.log(clistRes.keys)
-        console.log(clist)
         if (clist.length > 0) {
           channelProfileDate.value = clist[0].replace(`${profileName}-`, '')
           response = await fetch(`https://i.gogingko.net/api/v1/v/profiles/${clist[0]}`, {
@@ -4074,7 +4073,11 @@ const fetchChannelProfile = async (channel: string) => {
       }
     }
     if (!response.ok) throw new Error("Failed to load channel profile");
-    const data = JSON.parse(await response.json());
+    let data = await response.json();
+    // dirty fix for saved profile content
+    if (!data.text) {
+      data = JSON.parse(data)
+    }
     channelProfile.value = md.render(data.reply);
   } catch(e) {
     channelProfile.value = "Channel profile un-generated or not found.";
@@ -6183,6 +6186,12 @@ const searchChannel = async () => {
   currentChannelName.value = name;
   addToLastVisited(name);
 
+  if (name.startsWith('-100')) {
+    isScrapingDisabled.value = true;
+  } else {
+    isScrapingDisabled.value = false;
+  }
+
   try {
     let metaRes = await fetch(
       `https://i.gogingko.net/api/v1/v/telegram-channel/${name}`
@@ -6956,54 +6965,82 @@ const timelineTicks = computed(() => {
       </Transition>
 
       <!-- Title & Counters (non-sticky) -->
-      <div class="text-center pt-8 sm:pt-4 mb-8">
-        <h1
-          class="text-4xl sm:text-5xl font-black tracking-tighter text-gray-900 dark:text-white mb-4 flex items-center justify-center gap-3"
-        >
-          Telegram Explorer
-          <span
-            v-if="pendingJobs !== null"
-            class="text-xs font-bold font-mono tabular-nums text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/50 px-3 py-1 rounded-full border border-blue-200 dark:border-blue-700 shadow-sm"
-          >
-            {{ pendingJobs }}
-          </span>
-        </h1>
-        <p
-          class="text-gray-500 dark:text-gray-400 font-medium max-w-lg mx-auto leading-relaxed mb-8"
-        >
-          Discover profiles, posts and search content across public Telegram channels
-          instantly.
-        </p>
-        <div
-          v-if="Object.keys(counters).length > 0"
-          class="flex flex-wrap items-center justify-center gap-1.5 mb-8 max-w-4xl mx-auto px-4"
-        >
-          <div
-            v-for="(count, type) in counters"
-            :key="type"
-            class="inline-flex items-center gap-1.5 px-3 py-1 bg-white/40 dark:bg-gray-800/40 backdrop-blur-sm rounded-full border border-gray-150/40 dark:border-gray-700/40 text-[11px]"
-          >
-            <span class="font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider text-[9px]">
-              {{ type }}
-            </span>
-            <span class="font-extrabold text-teal-600 dark:text-teal-400 font-mono tracking-tight tabular-nums">
-              {{ count.toLocaleString() }}
-            </span>
-            <span
-              v-if="frequencies[type] !== undefined"
-              class="text-[9px] text-gray-400 dark:text-gray-500 font-mono opacity-80"
+      <div class="w-full max-w-7xl mx-auto pt-8 sm:pt-4 mb-10 px-4">
+        <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6 pb-6 border-b border-gray-200/60 dark:border-gray-800/60">
+          <div class="text-left max-w-3xl">
+            <h1
+              class="text-4xl sm:text-5xl font-black tracking-tight text-gray-900 dark:text-white mb-3 flex flex-wrap items-center gap-x-4 gap-y-2"
             >
-              ({{ frequencies[type].toFixed(1) }}/s)
-            </span>
+              <span>Telegram Explorer</span>
+              <span
+                v-if="pendingJobs !== null"
+                class="inline-flex items-center gap-2 text-xs font-extrabold font-mono uppercase tracking-wider tabular-nums px-2.5 py-1 rounded-lg border shadow-xs transition-all duration-300"
+                :class="pendingJobs > 0
+                  ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/25 border-emerald-200/60 dark:border-emerald-800/40'
+                  : 'text-gray-500 dark:text-gray-400 bg-gray-100/70 dark:bg-gray-800/40 border-gray-200/50 dark:border-gray-700/40'"
+              >
+                <span class="relative flex h-2 w-2">
+                  <span
+                    v-if="pendingJobs > 0"
+                    class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 dark:bg-emerald-500 opacity-75"
+                  ></span>
+                  <span
+                    class="relative inline-flex rounded-full h-2 w-2"
+                    :class="pendingJobs > 0 ? 'bg-emerald-500' : 'bg-gray-400 dark:bg-gray-500'"
+                  ></span>
+                </span>
+                <span>{{ pendingJobs }} {{ pendingJobs === 1 ? 'Job' : 'Jobs' }} Active</span>
+              </span>
+            </h1>
+            <p
+              class="text-gray-500 dark:text-gray-400 font-medium leading-relaxed text-sm sm:text-base"
+            >
+              Discover profiles, posts, and search content across public Telegram channels instantly. Connected to real-time engine indexers.
+            </p>
           </div>
           
-          <button
-            @click="activeTab = 'monitor'"
-            class="inline-flex items-center gap-1 px-3 py-1 bg-pink-50/50 dark:bg-pink-950/20 text-pink-600 dark:text-pink-400 hover:bg-pink-50 dark:hover:bg-pink-950/40 rounded-full border border-pink-100/50 dark:border-pink-900/20 transition-all font-bold hover:scale-105 text-[10px] uppercase tracking-wider cursor-pointer"
+          <div
+            v-if="Object.keys(counters).length > 0"
+            class="flex flex-wrap lg:justify-end items-center gap-2 lg:max-w-3xl"
           >
-            <Activity class="h-3 w-3 animate-pulse text-pink-500" />
-            <span>Monitor Engine</span>
-          </button>
+            <div
+              v-for="(count, type) in counters"
+              :key="type"
+              class="flex flex-col items-start bg-white/70 dark:bg-gray-800/70 backdrop-blur-md border border-gray-200/60 dark:border-gray-700/60 shadow-xs hover:translate-y-[-1px] transition-all duration-300"
+              :class="Object.keys(counters).length > 12 
+                ? 'px-3 py-1.5 rounded-xl min-w-[95px]' 
+                : 'px-4 py-2.5 rounded-2xl min-w-[115px]'"
+            >
+              <span 
+                class="font-extrabold text-[#0d9488] dark:text-[#2dd4bf] font-mono tracking-tight tabular-nums"
+                :class="Object.keys(counters).length > 12 ? 'text-sm' : 'text-base'"
+              >
+                {{ count.toLocaleString() }}
+              </span>
+              <div class="flex items-center gap-1 mt-0.5">
+                <span class="font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider text-[8px]">
+                  {{ type }}
+                </span>
+                <span
+                  v-if="frequencies[type] !== undefined"
+                  class="text-[8px] text-gray-400 dark:text-gray-500 font-mono opacity-80"
+                >
+                  · {{ frequencies[type].toFixed(1) }}/s
+                </span>
+              </div>
+            </div>
+            
+            <button
+              @click="activeTab = 'monitor'"
+              class="inline-flex items-center gap-1.5 bg-pink-500/10 hover:bg-pink-500/20 text-pink-600 dark:text-pink-400 border border-pink-500/20 transition-all font-black uppercase tracking-wider cursor-pointer hover:scale-[1.02]"
+              :class="Object.keys(counters).length > 12 
+                ? 'px-3 py-2 rounded-xl text-[9px]' 
+                : 'px-4 py-3 rounded-2xl text-[10px]'"
+            >
+              <Activity class="h-3.5 w-3.5 animate-pulse text-pink-500" />
+              <span>Monitor Central</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -7710,14 +7747,25 @@ const timelineTicks = computed(() => {
               </div>
               <div class="px-6 pb-8 pt-10 relative">
                 <div
-                  class="w-20 h-20 rounded-2xl bg-white dark:bg-gray-800 border-2 border-white dark:border-gray-800 shadow-md absolute -top-10 left-6 flex items-center justify-center overflow-hidden ring-4 ring-teal-500/10"
+                  class="w-20 h-20 rounded-2xl bg-white dark:bg-gray-800 border-2 shadow-md absolute -top-10 left-6 flex items-center justify-center ring-4 transition-all duration-300"
+                  :class="currentChannelName.startsWith('-100') 
+                    ? 'border-amber-400 dark:border-amber-500/60 ring-amber-500/20 bg-amber-50 dark:bg-amber-950/20' 
+                    : 'border-white dark:border-gray-800 ring-teal-500/15'"
                 >
                   <img
                     :src="(metadata.photo && metadata.photo.startsWith('data:')) ? metadata.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${currentChannelName}`"
                     @error="handleImageError"
                     alt="Avatar"
-                    class="w-full h-full object-cover"
+                    class="w-full h-full object-cover rounded-2xl"
                   />
+                  <!-- Beautiful Badge indicating Private Group/Channel -->
+                  <div
+                    v-if="currentChannelName.startsWith('-100')"
+                    class="absolute -bottom-1 w-full bg-gradient-to-r from-amber-500 to-orange-600 text-white text-[8px] font-black uppercase tracking-widest py-0.5 rounded-b-xl flex items-center justify-center gap-1 shadow-sm border-t border-white/20 select-none"
+                  >
+                    <Lock class="h-2.5 w-2.5 animate-pulse" />
+                    <span>Private</span>
+                  </div>
                 </div>
 
                 <div class="mt-2">
@@ -7729,9 +7777,10 @@ const timelineTicks = computed(() => {
                   </h2>
                   
                   <p
-                    class="text-teal-600 dark:text-teal-400 font-bold text-xs mb-5 flex items-center tracking-wide"
+                    class="font-bold text-xs mb-5 flex items-center flex-wrap gap-2 tracking-wide"
+                    :class="currentChannelName.startsWith('-100') ? 'text-amber-600 dark:text-amber-400' : 'text-teal-600 dark:text-teal-400'"
                   >
-                    @{{ metadata.username || metadata.name || channelName }}
+                    <span>@{{ metadata.username || metadata.name || channelName }}</span>
                     <button @click="addToWorkspace" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-teal-600 dark:text-teal-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all">
                       <Layout class="h-2.5 w-2.5" />
                       Workspace
@@ -10998,8 +11047,12 @@ const timelineTicks = computed(() => {
                 @drop="onDrop($event, node)"
                 :class="[
                   selectedListenNode && selectedListenNode.id === node.item.id
-                    ? 'bg-teal-50 hover:bg-teal-100/80 border-teal-100 text-teal-700 dark:bg-teal-950/20 dark:hover:bg-teal-900/10 dark:border-teal-900/30 dark:text-teal-400'
-                    : 'bg-transparent hover:bg-gray-50 border-transparent text-gray-700 dark:text-gray-300 dark:hover:bg-gray-700/40',
+                    ? (node.item.type === 'channel' && node.item.argument?.startsWith('-100'))
+                      ? 'bg-amber-500/15 hover:bg-amber-500/20 border-amber-200 dark:border-amber-800/40 text-amber-900 dark:text-amber-400 font-bold'
+                      : 'bg-teal-50 hover:bg-teal-100/80 border-teal-100 text-teal-700 dark:bg-teal-950/20 dark:hover:bg-teal-900/10 dark:border-teal-900/30 dark:text-teal-400'
+                    : (node.item.type === 'channel' && node.item.argument?.startsWith('-100'))
+                      ? 'bg-amber-500/5 hover:bg-amber-500/10 border-amber-500/10 hover:border-amber-500/20 text-amber-700/95 dark:text-amber-400'
+                      : 'bg-transparent hover:bg-gray-50 border-transparent text-gray-700 dark:text-gray-300 dark:hover:bg-gray-700/40',
                   dragOverNode && dragOverNode.item.id === node.item.id && dragOverPosition === 'inside'
                     ? 'border-dashed border-teal-500 bg-teal-50/30 dark:bg-teal-950/20 scale-[0.98]'
                     : '',
@@ -11039,21 +11092,25 @@ const timelineTicks = computed(() => {
                     <span 
                       class="h-1.5 w-1.5 rounded-full"
                       :class="[
-                        node.item.type === 'channel' ? 'bg-orange-400' : 'bg-cyan-400'
+                        node.item.type === 'channel' 
+                          ? (node.item.argument?.startsWith('-100') ? 'bg-amber-500' : 'bg-orange-400') 
+                          : 'bg-cyan-400'
                       ]"
                     ></span>
                   </span>
 
                   <!-- Folder / File icon indicators -->
                   <component 
-                    :is="node.item.isFolder ? Folder : Radio" 
+                    :is="node.item.isFolder ? Folder : (node.item.type === 'channel' && node.item.argument?.startsWith('-100') ? Lock : Radio)" 
                     class="h-4 w-4 shrink-0"
                     :class="[
                       node.item.isFolder 
                         ? 'text-yellow-500 dark:text-yellow-600 fill-yellow-500/10'
-                        : selectedListenNode && selectedListenNode.id === node.item.id
-                          ? 'text-teal-500' 
-                          : 'text-gray-400 dark:text-gray-500'
+                        : (node.item.type === 'channel' && node.item.argument?.startsWith('-100'))
+                          ? 'text-amber-500 dark:text-amber-400'
+                          : selectedListenNode && selectedListenNode.id === node.item.id
+                            ? 'text-teal-500' 
+                            : 'text-gray-400 dark:text-gray-500'
                     ]"
                   />
 
@@ -11359,18 +11416,31 @@ const timelineTicks = computed(() => {
                 <div v-else-if="selectedChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col md:flex-row items-stretch">
                   <!-- Left accent gradient and avatar bar -->
                   <div class="bg-gradient-to-br from-teal-500/20 to-teal-600/5 dark:from-teal-950/40 dark:to-teal-900/10 p-6 flex flex-row md:flex-col items-center justify-center gap-4 border-b md:border-b-0 md:border-r border-gray-150 dark:border-gray-700 md:w-48 shrink-0 select-none">
-                    <div class="w-16 h-16 rounded-full bg-white dark:bg-gray-800 border-2 border-teal-100 dark:border-teal-900/40 shadow-md overflow-hidden shrink-0 flex items-center justify-center">
+                    <div 
+                      class="w-16 h-16 rounded-2xl bg-white dark:bg-gray-800 border-2 shadow-md shrink-0 flex items-center justify-center relative transition-all duration-300"
+                      :class="(selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument || '').startsWith('-100')
+                        ? 'border-amber-400 dark:border-amber-500/60 ring-4 ring-amber-500/15'
+                        : 'border-teal-100 dark:border-teal-900/40'"
+                    >
                       <img
                         :src="selectedChannelMetadata.photo && (selectedChannelMetadata.photo.startsWith('data:'))
                           ? selectedChannelMetadata.photo
                           : `https://i.gogingko.net/api/v1/v/telegram-profile/${selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument}`"
                         @error="handleImageError"
                         alt="Channel Avatar"
-                        class="w-full h-full object-cover"
+                        class="w-full h-full object-cover rounded-2xl"
                       />
+                      <!-- Beautiful Badge indicating Private Group/Channel -->
+                      <div
+                        v-if="(selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument || '').startsWith('-100')"
+                        class="absolute -bottom-1 w-full bg-gradient-to-r from-amber-500 to-orange-600 text-white text-[7px] font-black uppercase tracking-widest py-0.5 rounded-b-xl flex items-center justify-center gap-0.5 shadow-sm border-t border-white/20 select-none"
+                      >
+                        <Lock class="h-1.5 w-1.5" />
+                        <span>Private</span>
+                      </div>
                     </div>
                     <div class="text-center md:text-center flex-1">
-                      <h4 class="text-xs font-bold text-gray-400 uppercase tracking-widest leading-none mb-1">
+                      <h4 class="text-xs font-bold text-gray-400 uppercase tracking-widest leading-none mb-1 truncate max-w-[150px]" :title="selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument">
                         @{{ selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument }}
                       </h4>
                       <span v-if="selectedChannelMetadata.subscribers || selectedChannelMetadata.members || selectedChannelMetadata.participants_count" class="inline-flex items-center gap-1 text-[10px] bg-teal-50 dark:bg-teal-950/50 text-teal-600 dark:text-teal-400 font-black px-2 py-0.5 rounded-full uppercase tracking-wider scale-95 border border-teal-100/50 dark:border-teal-900/20">
