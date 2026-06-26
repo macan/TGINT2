@@ -79,6 +79,8 @@ import MarkdownIt from "markdown-it";
 import markdownItMark from "markdown-it-mark";
 // @ts-ignore
 import clm from "country-locale-map";
+import { ListenItem, AutoFindingCell, GraphNode, GraphEdge } from "./types";
+import { getInitials, truncateString, getSha1HexDigest } from "./utils/helpers";
 const md = new MarkdownIt({ html: true }).use(markdownItMark);
 
 // Login State Logic
@@ -1228,16 +1230,6 @@ const toggleChannelOrUser = () => {
 };
 
 // --- Listen Tab Setup ---
-export interface ListenItem {
-  id: string;
-  name: string;
-  isFolder: boolean;
-  create_time: string;
-  type?: "channel" | "keyword";
-  argument?: string;
-  description?: string;
-  children?: ListenItem[];
-}
 
 const listenDirectory = ref<ListenItem[]>([
   {
@@ -3577,13 +3569,6 @@ watch(activeTab, (newTab, oldTab) => {
 });
 
 // Auto Finding State
-interface AutoFindingCell {
-  id: number;
-  logs: string[];
-  analysisResult?: string;
-  verificationResult?: string;
-  status: "running" | "completed" | "error";
-}
 const autoCells = ref<AutoFindingCell[]>([]);
 const autoChannelName = ref("");
 const searchMode = ref<"channel" | "user">("channel");
@@ -3961,26 +3946,6 @@ const forwardsChannels = ref<string[]>([]);
 const ftoChannels = ref<string[]>([]);
 
 // Graph Widget Types & State
-interface GraphNode {
-  id: string;
-  name: string;
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  r: number;
-  color: string;
-  isCenter: boolean;
-  avatarImg?: HTMLImageElement | null;
-  avatarLoaded?: boolean;
-  displayName: string;
-}
-
-interface GraphEdge {
-  source: string;
-  target: string;
-}
-
 const graphNodes = ref<GraphNode[]>([]);
 const graphEdges = ref<GraphEdge[]>([]);
 const graphCanvas = ref<HTMLCanvasElement | null>(null);
@@ -4000,27 +3965,6 @@ const isGraphEnlarged = ref(false);
 const totalNeighborsCount = ref(0);
 const graphStableSince = ref<number | null>(null);
 
-const truncateString = (str: string, maxLen: number): string => {
-  if (!str) return "";
-  const chars = Array.from(str);
-  if (chars.length > maxLen) {
-    return chars.slice(0, maxLen - 2).join("") + "...";
-  }
-  return str;
-};
-
-const getInitials = (title: string): string => {
-  if (!title) return "?";
-  const cleaned = title.replace(/^@/, "").trim();
-  const parts = cleaned.split(/[\s_\-]+/).filter(Boolean);
-  if (parts.length > 1) {
-    const first = Array.from(parts[0])[0] || "";
-    const second = Array.from(parts[1])[0] || "";
-    return (first + second).toUpperCase();
-  }
-  const chars = Array.from(cleaned);
-  return chars.slice(0, 2).join("").toUpperCase();
-};
 const userProfile = ref<any>(null);
 const loadingUserProfile = ref(false);
 const savedProfiles = ref<{channel: string[], user: string[], person: string[]}>({ channel: [], user: [], person: [] });
@@ -4875,21 +4819,6 @@ const fetchUserProfile = async (name: string) => {
     loadingUserProfile.value = false;
   }
 };
-
-const getSha1HexDigest = async (fdata) => {
-    // 1. Encode string into an array of bytes (Uint8Array)
-    const encoder = new TextEncoder();
-    const data = encoder.encode(fdata);
-    
-    // 2. Calculate the SHA-1 hash array buffer
-    const hashBuffer = await crypto.subtle.digest('SHA-1', data);
-    
-    // 3. Convert the binary buffer into a hex string
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const hexdigest = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    
-    return hexdigest;
-}
 
 const saveProfileRemotely = async (profileName: string, gosToken: string, dataContent: any) => {
   try {
@@ -6465,6 +6394,36 @@ const formatViews = (views: any) => {
   return String(views);
 };
 
+const getParsedReactions = (reactions: any): Array<{ emoji: string; count: number }> => {
+  if (!reactions) return [];
+  if (Array.isArray(reactions)) {
+    return reactions.map(item => {
+      if (!item) return null;
+      // standard fields
+      const emoji = item.reaction || item.emoticon || item.emoji || item.text;
+      const count = item.count != null ? item.count : (item.counter != null ? item.counter : item.value);
+      if (emoji && count != null) {
+        return { emoji: String(emoji), count: Number(count) };
+      }
+      // single key-value object e.g., { "👍": 12 }
+      const keys = Object.keys(item);
+      if (keys.length === 1) {
+        const k = keys[0];
+        const v = item[k];
+        if (typeof v === 'number' || !isNaN(Number(v))) {
+          return { emoji: k, count: Number(v) };
+        }
+      }
+      return null;
+    }).filter((x): x is { emoji: string; count: number } => x !== null);
+  } else if (typeof reactions === 'object') {
+    return Object.entries(reactions)
+      .map(([emoji, count]) => ({ emoji, count: Number(count) }))
+      .filter(x => !isNaN(x.count));
+  }
+  return [];
+};
+
 const telegramLogoUrl =
   "data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' fill='%232AABEE'/%3E%3Cpath fill='%23fff' d='M5.265 11.735l11.953-4.606c.553-.206 1.034.13.844.975l-2.02 9.516c-.15.676-.554.843-1.116.528l-3.085-2.274-1.488 1.433c-.165.165-.303.303-.62.303l.22-3.15 5.734-5.18c.25-.223-.054-.346-.387-.123l-7.09 4.466-3.054-.954c-.664-.208-.678-.664.14-.984z'/%3E%3C/svg%3E";
 
@@ -7632,7 +7591,7 @@ const timelineTicks = computed(() => {
                   @blur="handleBlur"
                   type="text"
                   class="block w-full pl-14 pr-[120px] py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
-                  placeholder="Enter channel name (e.g. durov)"
+                  placeholder="Enter channel name (e.g. durov) (?b=PID)"
                 />
                 <button
                   type="submit"
@@ -7878,7 +7837,7 @@ const timelineTicks = computed(() => {
                     </div>
 
                     <div
-                      v-if="metadata.videos"
+                      v-if="metadata.video"
                       class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
                     >
                       <Video
@@ -7886,11 +7845,28 @@ const timelineTicks = computed(() => {
                       />
                       <span
                         class="text-base font-black text-gray-900 dark:text-white font-mono tracking-tight"
-                        >{{ metadata.videos }}</span
+                        >{{ metadata.video }}</span
                       >
                       <span
                         class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
                         >Videos</span
+                      >
+                    </div>
+
+                    <div
+                      v-if="metadata.links"
+                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
+                    >
+                      <Link
+                        class="h-5 w-5 mb-1.5 text-blue-500"
+                      />
+                      <span
+                        class="text-base font-black text-gray-900 dark:text-white font-mono tracking-tight"
+                        >{{ metadata.links }}</span
+                      >
+                      <span
+                        class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
+                        >Links</span
                       >
                     </div>
                   </div>
@@ -8822,7 +8798,7 @@ const timelineTicks = computed(() => {
                       <div
                         class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400"
                       >
-                        <div class="flex items-center space-x-6">
+                        <div class="flex items-center space-x-4 flex-wrap gap-y-2">
                           <span
                             v-if="post.data?.views != null"
                             class="flex items-center font-semibold border border-gray-200 dark:border-gray-700 rounded-lg px-2 py-1 bg-white dark:bg-gray-800"
@@ -8830,6 +8806,22 @@ const timelineTicks = computed(() => {
                             <Users class="h-3 w-3 mr-1.5 text-gray-400" />
                             {{ formatViews(post.data.views) }}
                           </span>
+
+                          <!-- Post Reactions -->
+                          <div
+                            v-if="post.data?.reactions && getParsedReactions(post.data.reactions).length > 0"
+                            class="flex flex-wrap items-center gap-1.5"
+                          >
+                            <span
+                              v-for="(react, rIdx) in getParsedReactions(post.data.reactions)"
+                              :key="rIdx"
+                              class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-semibold bg-gray-100/70 dark:bg-gray-800/85 hover:bg-gray-200/80 dark:hover:bg-gray-750 border border-gray-200/60 dark:border-gray-700/60 transition-colors cursor-default select-none shadow-3xs"
+                              :title="`${react.count.toLocaleString()} reactions`"
+                            >
+                              <span class="text-sm leading-none">{{ react.emoji }}</span>
+                              <span class="text-[10px] font-bold font-mono text-gray-500 dark:text-gray-400 tabular-nums">{{ react.count.toLocaleString() }}</span>
+                            </span>
+                          </div>
                         </div>
                         <span
                           v-if="post.key"
@@ -9116,12 +9108,29 @@ const timelineTicks = computed(() => {
                           </p>
                         </div>
 
-                        <div
-                          v-if="post.data?.views != null"
-                          class="inline-flex items-center px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded-lg text-[9px] font-bold text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700"
-                        >
-                          <Users class="h-3 w-3 mr-1" />
-                          {{ formatViews(post.data.views) }} Views
+                        <div class="flex flex-wrap items-center gap-2 mt-1">
+                          <div
+                            v-if="post.data?.views != null"
+                            class="inline-flex items-center px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded-lg text-[9px] font-bold text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700"
+                          >
+                            <Users class="h-3 w-3 mr-1" />
+                            {{ formatViews(post.data.views) }} Views
+                          </div>
+
+                          <!-- Post Reactions (Timeline) -->
+                          <div
+                            v-if="post.data?.reactions && getParsedReactions(post.data.reactions).length > 0"
+                            class="flex flex-wrap items-center gap-1"
+                          >
+                            <span
+                              v-for="(react, rIdx) in getParsedReactions(post.data.reactions)"
+                              :key="rIdx"
+                              class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-gray-50 dark:bg-gray-850 hover:bg-gray-100 dark:hover:bg-gray-750 border border-gray-150 dark:border-gray-750/80 transition-colors cursor-default select-none shadow-3xs"
+                            >
+                              <span>{{ react.emoji }}</span>
+                              <span class="text-[9px] font-bold font-mono text-gray-400 dark:text-gray-500">{{ react.count.toLocaleString() }}</span>
+                            </span>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -9965,10 +9974,25 @@ const timelineTicks = computed(() => {
                 <div
                   class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400"
                 >
-                  <div class="flex items-center space-x-4">
+                  <div class="flex items-center space-x-4 flex-wrap gap-y-1">
                     <span v-if="post.data?.views != null"
                       >{{ formatViews(post.data.views) }} views</span
                     >
+
+                    <!-- Post Reactions (Search Results) -->
+                    <div
+                      v-if="post.data?.reactions && getParsedReactions(post.data.reactions).length > 0"
+                      class="flex flex-wrap items-center gap-1"
+                    >
+                      <span
+                        v-for="(react, rIdx) in getParsedReactions(post.data.reactions)"
+                        :key="rIdx"
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-750 border border-gray-200 dark:border-gray-700 transition-colors cursor-default select-none shadow-3xs"
+                      >
+                        <span>{{ react.emoji }}</span>
+                        <span class="text-[9px] font-bold font-mono text-gray-400 dark:text-gray-500">{{ react.count.toLocaleString() }}</span>
+                      </span>
+                    </div>
                   </div>
                   <div class="flex items-center gap-2">
                     <button
@@ -11764,10 +11788,25 @@ const timelineTicks = computed(() => {
                     <div
                       class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400"
                     >
-                      <div class="flex items-center space-x-4">
+                      <div class="flex items-center space-x-4 flex-wrap gap-y-1">
                         <span v-if="post.data?.views != null"
                           >{{ formatViews(post.data.views) }} views</span
                         >
+
+                        <!-- Post Reactions (Listen stream) -->
+                        <div
+                          v-if="post.data?.reactions && getParsedReactions(post.data.reactions).length > 0"
+                          class="flex flex-wrap items-center gap-1"
+                        >
+                          <span
+                            v-for="(react, rIdx) in getParsedReactions(post.data.reactions)"
+                            :key="rIdx"
+                            class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-750 border border-gray-200 dark:border-gray-700 transition-colors cursor-default select-none shadow-3xs"
+                          >
+                            <span>{{ react.emoji }}</span>
+                            <span class="text-[9px] font-bold font-mono text-gray-400 dark:text-gray-500">{{ react.count.toLocaleString() }}</span>
+                          </span>
+                        </div>
                       </div>
                       <div class="flex items-center gap-2">
                         <button
@@ -12353,6 +12392,21 @@ const timelineTicks = computed(() => {
                 class="mt-2 text-[10px] font-semibold p-2.5 bg-teal-500/[0.02] dark:bg-teal-950/[0.10] border border-teal-150/40 dark:border-teal-900/10 rounded-xl flex items-center text-teal-600 dark:text-teal-400"
               >
                 <Phone class="h-3.5 w-3.5 mr-1.5 text-teal-500" /> Contact Card Attached
+              </div>
+
+              <!-- Post Reactions (Popup detail) -->
+              <div
+                v-if="singlePost.data?.reactions && getParsedReactions(singlePost.data.reactions).length > 0"
+                class="flex flex-wrap items-center gap-1.5 mt-3 pt-2 border-t border-gray-150 dark:border-gray-800"
+              >
+                <span
+                  v-for="(react, rIdx) in getParsedReactions(singlePost.data.reactions)"
+                  :key="rIdx"
+                  class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-semibold bg-gray-50 dark:bg-gray-850 hover:bg-gray-100 dark:hover:bg-gray-800 border border-gray-150 dark:border-gray-750/80 transition-colors cursor-default select-none shadow-3xs"
+                >
+                  <span class="text-xs leading-none">{{ react.emoji }}</span>
+                  <span class="text-[9px] font-bold font-mono text-gray-500 dark:text-gray-400">{{ react.count.toLocaleString() }}</span>
+                </span>
               </div>
 
               <!-- Footer Stats / Links -->
