@@ -7986,7 +7986,7 @@ const timelineTicks = computed(() => {
             <!-- Sticky Sidebar Block -->
             <div
               v-show="isProfileVisible"
-              class="sticky top-20 space-y-6"
+              class="lg:sticky lg:top-20 space-y-6"
             >
               <!-- Relations Graph Widget -->
               <div
@@ -9430,7 +9430,7 @@ const timelineTicks = computed(() => {
             >
 
           <div
-            class="lg:col-span-4 xl:col-span-3 space-y-4 h-fit sticky top-20 flex-shrink-0"
+            class="lg:col-span-4 xl:col-span-3 space-y-4 h-fit lg:sticky lg:top-20 flex-shrink-0"
           >
             <!-- User Profile Widget -->
             <div
