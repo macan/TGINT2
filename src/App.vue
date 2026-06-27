@@ -7,6 +7,7 @@ import {
   Loader2,
   AlertCircle,
   Users,
+  ArrowLeft,
   Lock,
   Calendar,
   Info,
@@ -1218,6 +1219,9 @@ const suggestedChannels = ref<string[]>([]);
 let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 
 const showBackToTop = ref(false);
+const shareCardPost = ref<any>(null);
+const isShareCardView = ref(false);
+const avatarLoadError = ref(false);
 const activeTab = ref<"explorer" | "search" | "listen" | "monitor" | "auto-finding" | "workspace" | "profile" | "channel">("explorer");
 const channels = ref<any[]>([]);
 const activeChannelOrUser = ref<"channel" | "user">("channel");
@@ -3703,7 +3707,60 @@ const searchOnGoogle = (text: string) => {
 };
 
 const sharePost = async (post: any) => {
-  const postUrl = `https://i.gogingko.net/api/v1/v/telegram-post/${post.key}`;
+  const minimalPost = {
+    key: post.key,
+    mtime: post.mtime,
+    data: {
+      author: post.data?.author,
+      user: post.data?.user,
+      uid: post.data?.uid,
+      _tool: post.data?._tool,
+      date: post.data?.date,
+      views: post.data?.views,
+      reactions: post.data?.reactions,
+      content: post.data?.content || post.data?.message,
+      reply: post.data?.reply,
+      forward_url: post.data?.forward_url,
+      forward_sender_name: post.data?.forward_sender_name,
+      forward_sender_user: post.data?.forward_sender_user,
+      forward_sender_uid: post.data?.forward_sender_uid,
+      forward_date: post.data?.forward_date,
+      forward_message: post.data?.forward_message,
+      documents: post.data?.documents,
+      photos: post.data?.photos,
+      videos: post.data?.videos,
+      linkPreview: post.data?.linkPreview,
+    }
+  };
+  
+  let postUrl = '';
+  try {
+    const str = JSON.stringify(minimalPost);
+    const compressed = pako.deflate(str);
+    let binary = '';
+    for (let i = 0; i < compressed.length; i++) {
+        binary += String.fromCharCode(compressed[i]);
+    }
+    const b64 = btoa(binary);
+    // Custom ROT13/obfuscation to make it unreadable for humans
+    const obfuscated = b64.split('').map(char => {
+      const code = char.charCodeAt(0);
+      if (code >= 65 && code <= 90) { // A-Z
+        return String.fromCharCode(((code - 65 + 13) % 26) + 65);
+      } else if (code >= 97 && code <= 122) { // a-z
+        return String.fromCharCode(((code - 97 + 13) % 26) + 97);
+      } else if (code >= 48 && code <= 57) { // 0-9
+        return String.fromCharCode(((code - 48 + 5) % 10) + 48);
+      }
+      return char;
+    }).join('');
+    
+    postUrl = `${window.location.origin}${window.location.pathname}?sc=${encodeURIComponent(obfuscated)}`;
+  } catch (err) {
+    console.error('Failed to encode post URL', err);
+    postUrl = `${window.location.origin}${window.location.pathname}?postKey=${post.key}`;
+  }
+
   try {
     if (navigator.share) {
       await navigator.share({
@@ -3712,11 +3769,26 @@ const sharePost = async (post: any) => {
       });
     } else {
       await navigator.clipboard.writeText(postUrl);
-      console.log('Link copied to clipboard!');
+      toastMessage.value = 'Link copied to clipboard!';
+      toastType.value = 'success';
+      setTimeout(() => { toastMessage.value = ""; }, 3000);
     }
   } catch (err) {
     console.error('Error sharing:', err);
   }
+};
+
+const copyShareLink = () => {
+  const url = window.location.href;
+  navigator.clipboard.writeText(url).then(() => {
+    toastMessage.value = 'Link copied to clipboard!';
+    toastType.value = 'success';
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  });
+};
+
+const goBackToMainArchive = () => {
+  window.location.href = window.location.origin + window.location.pathname;
 };
 
 const searchXUser = async (term: string) => {
@@ -3904,18 +3976,48 @@ watch(activeTab, (newTab) => {
 });
 
 onMounted(() => {
-  window.addEventListener("scroll", handleScroll);
-  fetchCounters();
-  counterTimer = setInterval(fetchCounters, 30000);
-  fetchPendingJobs();
-  pendingJobsTimer = setInterval(fetchPendingJobs, 30000);
-  if (activeTab.value === 'explorer') {
-    pollingTimer = setInterval(pollLatestPosts, 30000);
+  const urlParams = new URLSearchParams(window.location.search);
+  const shareCardParam = urlParams.get('sc') || urlParams.get('sharecard');
+  if (shareCardParam) {
+    try {
+      // Decode custom ROT13/obfuscated base64
+      const b64 = shareCardParam.split('').map(char => {
+        const code = char.charCodeAt(0);
+        if (code >= 65 && code <= 90) { // A-Z
+          return String.fromCharCode(((code - 65 + 13) % 26) + 65);
+        } else if (code >= 97 && code <= 122) { // a-z
+          return String.fromCharCode(((code - 97 + 13) % 26) + 97);
+        } else if (code >= 48 && code <= 57) { // 0-9
+          return String.fromCharCode(((code - 48 + 5) % 10) + 48);
+        }
+        return char;
+      }).join('');
+      const binaryString = atob(b64);
+      const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
+      const decompressed = pako.inflate(bytes, { to: 'string' });
+      shareCardPost.value = JSON.parse(decompressed);
+      isShareCardView.value = true;
+      avatarLoadError.value = false;
+    } catch (e) {
+      console.error('Failed to parse share card post', e);
+    }
   }
-  loadSavedProfiles();
-  loadLogin();
-  loadListenDirectory();
-  fetchIndexedProfilesCount();
+
+  window.addEventListener("scroll", handleScroll);
+
+  if (!isShareCardView.value) {
+    fetchCounters();
+    counterTimer = setInterval(fetchCounters, 30000);
+    fetchPendingJobs();
+    pendingJobsTimer = setInterval(fetchPendingJobs, 30000);
+    if (activeTab.value === 'explorer') {
+      pollingTimer = setInterval(pollLatestPosts, 30000);
+    }
+    loadSavedProfiles();
+    loadLogin();
+    loadListenDirectory();
+    fetchIndexedProfilesCount();
+  }
 });
 
 let graphIntersectionObserver: IntersectionObserver | null = null;
@@ -6396,6 +6498,16 @@ const formatViews = (views: any) => {
 
 const getParsedReactions = (reactions: any): Array<{ emoji: string; count: number }> => {
   if (!reactions) return [];
+
+  const formatEmoji = (emojiVal: any): string => {
+    if (emojiVal === null || emojiVal === undefined) return "";
+    const str = String(emojiVal).trim();
+    if (str !== "" && !isNaN(Number(str))) {
+      return `<i class="inline-block align-middle bg-contain bg-center bg-no-repeat" style="background-image: url('https://t.me/i/emoji/${str}.webp'); width: 1.2em; height: 1.2em;"></i>`;
+    }
+    return String(emojiVal);
+  };
+
   if (Array.isArray(reactions)) {
     return reactions.map(item => {
       if (!item) return null;
@@ -6403,7 +6515,7 @@ const getParsedReactions = (reactions: any): Array<{ emoji: string; count: numbe
       const emoji = item.reaction || item.emoticon || item.emoji || item.text;
       const count = item.count != null ? item.count : (item.counter != null ? item.counter : item.value);
       if (emoji && count != null) {
-        return { emoji: String(emoji), count: Number(count) };
+        return { emoji: formatEmoji(emoji), count: Number(count) };
       }
       // single key-value object e.g., { "👍": 12 }
       const keys = Object.keys(item);
@@ -6411,14 +6523,14 @@ const getParsedReactions = (reactions: any): Array<{ emoji: string; count: numbe
         const k = keys[0];
         const v = item[k];
         if (typeof v === 'number' || !isNaN(Number(v))) {
-          return { emoji: k, count: Number(v) };
+          return { emoji: formatEmoji(k), count: Number(v) };
         }
       }
       return null;
     }).filter((x): x is { emoji: string; count: number } => x !== null);
   } else if (typeof reactions === 'object') {
     return Object.entries(reactions)
-      .map(([emoji, count]) => ({ emoji, count: Number(count) }))
+      .map(([emoji, count]) => ({ emoji: formatEmoji(emoji), count: Number(count) }))
       .filter(x => !isNaN(x.count));
   }
   return [];
@@ -6835,7 +6947,280 @@ const timelineTicks = computed(() => {
   <div
     class="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200"
   >
-    <div class="max-w-[98%] mx-auto p-4 sm:p-6 lg:p-8 xl:p-10">
+    <!-- Share Card Standalone Page -->
+    <div v-if="isShareCardView && shareCardPost" class="w-full max-w-2xl md:max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto py-12 px-4 sm:px-6">
+      
+      <!-- Back / Actions Navigation Bar -->
+      <div class="flex items-center justify-between mb-8">
+        <button
+          @click="goBackToMainArchive"
+          class="inline-flex items-center gap-2 px-4 py-2 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-200 rounded-xl border border-gray-200 dark:border-gray-700 text-xs font-bold transition-all shadow-xs cursor-pointer"
+        >
+          <ArrowLeft class="h-4 w-4 text-teal-500" />
+          <span>Back to Main Archive</span>
+        </button>
+
+        <div class="flex items-center gap-2">
+          <button
+            @click="copyShareLink"
+            class="inline-flex items-center gap-1.5 px-3 py-2 bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-200 rounded-xl border border-gray-200 dark:border-gray-700 text-xs font-bold transition-all shadow-xs cursor-pointer"
+            title="Copy Shareable Link"
+          >
+            <Copy class="h-3.5 w-3.5 text-teal-500" />
+            <span>Copy Link</span>
+          </button>
+          <a
+            v-if="getUsername(shareCardPost) !== 'Telegram User'"
+            :href="`https://t.me/${getUsername(shareCardPost)}`"
+            target="_blank"
+            class="inline-flex items-center gap-1.5 px-3 py-2 bg-teal-50 hover:bg-teal-100 dark:bg-teal-900/30 dark:hover:bg-teal-900/60 text-teal-650 dark:text-teal-450 rounded-xl border border-teal-100 dark:border-teal-900/30 text-xs font-bold transition-all shadow-xs"
+          >
+            <Send class="h-3.5 w-3.5" />
+            <span>Open Telegram</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- Main Beautiful Card -->
+      <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 p-6 sm:p-8 shadow-xl transition-all duration-300 relative overflow-hidden">
+        
+        <!-- Subtle Glow Accent -->
+        <div class="absolute -top-24 -right-24 w-48 h-48 bg-teal-500/5 dark:bg-teal-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <!-- Post Header -->
+        <div class="flex items-start justify-between gap-4 mb-6 pb-5 border-b border-gray-100 dark:border-gray-800">
+          <div class="flex items-center gap-3.5 min-w-0">
+            <!-- Channel Avatar Image/Icon -->
+            <div class="w-14 h-14 rounded-2xl border border-teal-500/20 overflow-hidden shrink-0 flex items-center justify-center bg-gray-100 dark:bg-gray-900 shadow-inner select-none">
+              <img
+                v-if="getUsername(shareCardPost) && getUsername(shareCardPost) !== 'Telegram User' && !avatarLoadError"
+                :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${getUsername(shareCardPost)}`"
+                @error="avatarLoadError = true"
+                class="w-full h-full object-cover rounded-2xl"
+                alt="Avatar"
+                referrerpolicy="no-referrer"
+              />
+              <div
+                v-else
+                class="w-full h-full bg-gradient-to-tr from-teal-500/10 to-emerald-500/15 flex items-center justify-center text-teal-600 dark:text-teal-450 font-black text-xl uppercase"
+              >
+                {{ (shareCardPost.data?.author || shareCardPost.data?.user || 'T').charAt(0) }}
+              </div>
+            </div>
+            
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-base font-extrabold text-gray-900 dark:text-white leading-tight">
+                  {{ shareCardPost.data?.author || shareCardPost.data?.user || 'Telegram Channel' }}
+                </span>
+                <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-teal-50 dark:bg-teal-950/30 text-teal-650 dark:text-teal-400 border border-teal-100/40 dark:border-teal-900/20">
+                  {{ getUsername(shareCardPost) }}
+                </span>
+                <span
+                  class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded"
+                  :class="
+                    getToolName(shareCardPost) === 'TGB'
+                      ? 'bg-purple-50 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400 border border-purple-100/50 dark:border-purple-900/10'
+                      : 'bg-gray-50 dark:bg-gray-900 text-gray-500 border border-gray-150/40 dark:border-gray-800'
+                  "
+                >
+                  {{ getToolName(shareCardPost) }}
+                </span>
+              </div>
+              
+              <p class="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-1.5 flex items-center gap-1.5">
+                <span>{{ formatDate(shareCardPost.data?.date) }}</span>
+                <span v-if="shareCardPost.mtime" class="text-[9px] text-teal-600 dark:text-teal-400 font-mono normal-case">
+                  (Scraped {{ formatScrapedDate(shareCardPost.mtime) }})
+                </span>
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Post Body Contents -->
+        <div class="space-y-4">
+          
+          <!-- Reply Block -->
+          <div
+            v-if="shareCardPost.data?.reply &&shareCardPost.data.reply.length > 0"
+            class="border-l-4 border-teal-500 bg-teal-500/[0.03] dark:bg-teal-950/[0.1] p-3.5 rounded-r-2xl border border-teal-100/30 dark:border-teal-900/15"
+          >
+            <div class="text-[10px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 mb-1 flex items-center justify-between">
+              <div class="flex items-center gap-1">
+                <Reply class="h-3.5 w-3.5" />
+                <span>Reply to</span>
+              </div>
+              <span class="font-mono bg-white dark:bg-gray-800 px-1.5 py-0.5 rounded border border-gray-100 dark:border-gray-700 tracking-normal text-[9px] normal-case">
+                {{
+                  shareCardPost.data._tool
+                    ? shareCardPost.data.reply[0]
+                    : String(shareCardPost.data.reply[0]).split("/").pop()
+                }}
+              </span>
+            </div>
+            <div class="text-gray-600 dark:text-gray-300 text-xs whitespace-pre-wrap break-words italic line-clamp-3">
+              {{ shareCardPost.data.reply[1] }}
+            </div>
+          </div>
+
+          <!-- Forwarded Block -->
+          <div
+            v-if="shareCardPost.data?.forward_url"
+            class="border-l-4 border-indigo-500 bg-indigo-500/[0.03] dark:bg-indigo-950/[0.15] p-3.5 rounded-r-2xl border border-indigo-100/50 dark:border-indigo-900/20"
+          >
+            <div class="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-indigo-600 dark:text-indigo-400 mb-1.5">
+              <div class="flex items-center">
+                <Forward class="h-3.5 w-3.5 mr-1" />
+                <span>Forwarded Message</span>
+              </div>
+              <span v-if="getForwardInfo(shareCardPost)?.date" class="font-mono bg-indigo-50 dark:bg-indigo-950/40 px-2 py-0.5 rounded border border-indigo-100/50 dark:border-indigo-900/10 tracking-normal text-[9px] normal-case">
+                {{ getForwardInfo(shareCardPost)?.date }}
+              </span>
+            </div>
+            <div class="text-gray-600 dark:text-gray-300 text-xs font-medium whitespace-pre-wrap break-words italic leading-relaxed">
+              {{ getForwardInfo(shareCardPost)?.text }}
+            </div>
+            <div v-if="getForwardInfo(shareCardPost)?.target" class="mt-2 text-[10px] font-bold text-indigo-500 dark:text-indigo-400 font-mono">
+              Source: @{{ getForwardInfo(shareCardPost).target }}
+            </div>
+          </div>
+
+          <!-- Photo attachment -->
+          <div
+            v-if="shareCardPost.data?.photos && shareCardPost.data.photos.length > 0"
+            class="rounded-2xl overflow-hidden border border-gray-150 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 max-h-[450px] flex items-center justify-center cursor-zoom-in group"
+            @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${shareCardPost.key}_0`)"
+          >
+            <img
+              :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${shareCardPost.key}_0`"
+              class="w-full h-auto max-h-[450px] object-contain mx-auto transition-transform duration-500 group-hover:scale-102"
+              alt="Post photo"
+              referrerpolicy="no-referrer"
+            />
+          </div>
+
+          <!-- Document / Photo attachment -->
+          <div
+            v-if="shareCardPost.data?.documents && shareCardPost.data.documents.length > 0 && shareCardPost.data.documents[0].mime_type && shareCardPost.data.documents[0].mime_type.startsWith('image/')"
+            class="rounded-2xl overflow-hidden border border-gray-150 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 max-h-[450px] flex items-center justify-center cursor-zoom-in group"
+            @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-doc/${shareCardPost.key}`)"
+          >
+            <img
+              :src="`https://i.gogingko.net/api/v1/v/telegram-doc/${shareCardPost.key}`"
+              class="w-full h-auto max-h-[450px] object-contain mx-auto transition-transform duration-500 group-hover:scale-102"
+              alt="Post photo"
+              referrerpolicy="no-referrer"
+            />
+          </div>
+
+          <!-- Video attachment -->
+          <div
+            v-if="shareCardPost.data?.videos && shareCardPost.data.videos.length > 0"
+            class="rounded-2xl overflow-hidden border border-gray-150 dark:border-gray-800 bg-black max-h-[450px]"
+          >
+            <video
+              controls
+              class="w-full h-auto max-h-[450px] mx-auto"
+            >
+              <source :src="getVideoUrl(shareCardPost)" type="video/mp4" />
+            </video>
+          </div>
+
+          <!-- Main Text Body -->
+          <div
+            v-if="shareCardPost.data?.content || shareCardPost.data?.message"
+            class="text-gray-800 dark:text-gray-100 text-[15px] leading-relaxed whitespace-pre-wrap break-words selection:bg-teal-150/50 dark:selection:bg-teal-900/50"
+          >
+            {{ shareCardPost.data?.content || shareCardPost.data?.message }}
+          </div>
+
+          <!-- Link Preview Block -->
+          <div
+            v-if="shareCardPost.data?.linkPreview"
+            class="rounded-2xl overflow-hidden border border-gray-150 dark:border-gray-750 bg-gray-50/70 dark:bg-gray-800/40 flex flex-col sm:flex-row shadow-2xs hover:shadow-xs transition-shadow mt-4"
+          >
+            <div
+              v-if="shareCardPost.data.linkPreview.image"
+              class="sm:w-32 sm:h-32 flex-shrink-0 bg-gray-200 dark:bg-gray-850 overflow-hidden cursor-zoom-in"
+              @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${shareCardPost.key}_l_0`)"
+            >
+              <img
+                :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${shareCardPost.key}_l_0`"
+                class="w-full h-full object-cover"
+                alt="Link preview image"
+                referrerpolicy="no-referrer"
+              />
+            </div>
+            <div class="p-4 sm:p-5 flex flex-col justify-center flex-1 min-w-0">
+              <span
+                v-if="shareCardPost.data.linkPreview.siteName"
+                class="text-[9px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest mb-1"
+              >
+                {{ shareCardPost.data.linkPreview.siteName }}
+              </span>
+              <a
+                :href="shareCardPost.data.linkPreview.url"
+                target="_blank"
+                class="text-xs font-black text-teal-600 dark:text-teal-400 hover:underline truncate mb-1 flex items-center gap-1"
+              >
+                <span>{{ shareCardPost.data.linkPreview.title }}</span>
+                <ExternalLink class="h-3 w-3 inline shrink-0" />
+              </a>
+              <p
+                v-if="shareCardPost.data.linkPreview.description"
+                class="text-[11px] text-gray-500 dark:text-gray-400 line-clamp-2 leading-relaxed"
+              >
+                {{ shareCardPost.data.linkPreview.description }}
+              </p>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Reactions & Views Footer Row -->
+        <div class="mt-6 pt-5 border-t border-gray-100 dark:border-gray-850 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div class="flex items-center gap-3 flex-wrap">
+            <span
+              v-if="shareCardPost.data?.views != null"
+              class="inline-flex items-center font-bold text-xs border border-gray-200 dark:border-gray-700/80 rounded-lg px-2.5 py-1 bg-gray-50 dark:bg-gray-900 text-gray-500 dark:text-gray-400"
+            >
+              <Users class="h-3.5 w-3.5 mr-1.5 text-gray-400" />
+              {{ formatViews(shareCardPost.data.views) }} views
+            </span>
+
+            <!-- Post Reactions -->
+            <div
+              v-if="shareCardPost.data?.reactions && getParsedReactions(shareCardPost.data.reactions).length > 0"
+              class="flex flex-wrap items-center gap-1.5"
+            >
+              <span
+                v-for="(react, rIdx) in getParsedReactions(shareCardPost.data.reactions)"
+                :key="rIdx"
+                class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-gray-50 dark:bg-gray-900 border border-gray-200/60 dark:border-gray-750/80 transition-colors cursor-default select-none shadow-3xs"
+              >
+                <span class="text-sm leading-none" v-html="react.emoji"></span>
+                <span class="text-[10px] font-bold font-mono text-gray-500 dark:text-gray-400">{{ react.count.toLocaleString() }}</span>
+              </span>
+            </div>
+          </div>
+
+          <span class="font-mono text-[10px] text-gray-400 dark:text-gray-500 self-end sm:self-center">
+            ID: {{ shareCardPost.key }}
+          </span>
+        </div>
+
+      </div>
+
+      <!-- Footer Brand Info -->
+      <p class="text-center text-[11px] font-medium text-gray-400 dark:text-gray-500 mt-6 tracking-wide">
+        Telegram Post Archiver Card • Powered by AI Studio
+      </p>
+
+    </div>
+
+    <!-- Regular Application View -->
+    <div v-else class="max-w-[98%] mx-auto p-4 sm:p-6 lg:p-8 xl:p-10">
 
       <!-- Analysis Button -->
       <button
@@ -8818,7 +9203,7 @@ const timelineTicks = computed(() => {
                               class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-semibold bg-gray-100/70 dark:bg-gray-800/85 hover:bg-gray-200/80 dark:hover:bg-gray-750 border border-gray-200/60 dark:border-gray-700/60 transition-colors cursor-default select-none shadow-3xs"
                               :title="`${react.count.toLocaleString()} reactions`"
                             >
-                              <span class="text-sm leading-none">{{ react.emoji }}</span>
+                              <span class="text-sm leading-none" v-html="react.emoji"></span>
                               <span class="text-[10px] font-bold font-mono text-gray-500 dark:text-gray-400 tabular-nums">{{ react.count.toLocaleString() }}</span>
                             </span>
                           </div>
@@ -9127,7 +9512,7 @@ const timelineTicks = computed(() => {
                               :key="rIdx"
                               class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold bg-gray-50 dark:bg-gray-850 hover:bg-gray-100 dark:hover:bg-gray-750 border border-gray-150 dark:border-gray-750/80 transition-colors cursor-default select-none shadow-3xs"
                             >
-                              <span>{{ react.emoji }}</span>
+                              <span v-html="react.emoji"></span>
                               <span class="text-[9px] font-bold font-mono text-gray-400 dark:text-gray-500">{{ react.count.toLocaleString() }}</span>
                             </span>
                           </div>
@@ -9989,7 +10374,7 @@ const timelineTicks = computed(() => {
                         :key="rIdx"
                         class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-750 border border-gray-200 dark:border-gray-700 transition-colors cursor-default select-none shadow-3xs"
                       >
-                        <span>{{ react.emoji }}</span>
+                        <span v-html="react.emoji"></span>
                         <span class="text-[9px] font-bold font-mono text-gray-400 dark:text-gray-500">{{ react.count.toLocaleString() }}</span>
                       </span>
                     </div>
@@ -11803,7 +12188,7 @@ const timelineTicks = computed(() => {
                             :key="rIdx"
                             class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-750 border border-gray-200 dark:border-gray-700 transition-colors cursor-default select-none shadow-3xs"
                           >
-                            <span>{{ react.emoji }}</span>
+                            <span v-html="react.emoji"></span>
                             <span class="text-[9px] font-bold font-mono text-gray-400 dark:text-gray-500">{{ react.count.toLocaleString() }}</span>
                           </span>
                         </div>
@@ -12404,7 +12789,7 @@ const timelineTicks = computed(() => {
                   :key="rIdx"
                   class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-semibold bg-gray-50 dark:bg-gray-850 hover:bg-gray-100 dark:hover:bg-gray-800 border border-gray-150 dark:border-gray-750/80 transition-colors cursor-default select-none shadow-3xs"
                 >
-                  <span class="text-xs leading-none">{{ react.emoji }}</span>
+                  <span class="text-xs leading-none" v-html="react.emoji"></span>
                   <span class="text-[9px] font-bold font-mono text-gray-500 dark:text-gray-400">{{ react.count.toLocaleString() }}</span>
                 </span>
               </div>
