@@ -4096,7 +4096,7 @@ const fetchChannelProfile = async (channel: string) => {
         headers: { 'x-gos-token': loginToken.value }
     });
     if (response.status === 404) {
-      const clistResponse = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=${profileName}-&k=24`, {
+      const clistResponse = await fetch(`https://i.gogingko.net/api/v1/zr/profiles?prefix=${profileName}-&k=24&o=reverse_insert`, {
           method: 'GET',
           headers: { 'x-gos-token': loginToken.value }
       });
@@ -6217,7 +6217,7 @@ const searchChannel = async () => {
   currentChannelName.value = name;
   addToLastVisited(name);
 
-  if (name.startsWith('-100')) {
+  if (name.startsWith('-100') || name.startsWith('+')) {
     isScrapingDisabled.value = true;
   } else {
     isScrapingDisabled.value = false;
@@ -6245,6 +6245,28 @@ const searchChannel = async () => {
             `https://i.gogingko.net/api/v1/v/telegram-channel/${name}`
           );
         }
+      }
+    }
+    // try to lookup the mjobs counter
+    if (metaRes.status === 404) {
+      const mjobsRes = await fetch(
+        `https://i.gogingko.net/api/v1/z/JOB_TG/mjobs/${name}`
+      );
+      if (mjobsRes.ok) {
+        // this means the channel/group might exists, but the metadata is missing. we should build a dummy metaRes
+        metaRes = new Response(JSON.stringify({
+          _type: 'snscrape.modules.telegram.TelegramGroup',
+          members: 0,
+          photo: '',
+          title: 'DUMMY TITLE (need to re-scrape)',
+          username: name,
+          description: 'DUMMY Description (need to res-scrape).'
+        }), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
       }
     }
     if (metaRes.status === 404) {
