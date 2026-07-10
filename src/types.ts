@@ -35,4 +35,5 @@ export interface GraphNode {
 export interface GraphEdge {
   source: string;
   target: string;
+  type?: "in" | "out" | "both";
 }

@@ -1222,7 +1222,7 @@ const showBackToTop = ref(false);
 const shareCardPost = ref<any>(null);
 const isShareCardView = ref(false);
 const avatarLoadError = ref(false);
-const activeTab = ref<"explorer" | "search" | "listen" | "monitor" | "auto-finding" | "workspace" | "profile" | "channel">("explorer");
+const activeTab = ref<"explorer" | "search" | "listen" | "monitor" | "auto-finding" | "workspace" | "network" | "profile" | "channel">("explorer");
 const channels = ref<any[]>([]);
 const activeChannelOrUser = ref<"channel" | "user">("channel");
 const isLoadingChannels = ref(false);
@@ -2988,9 +2988,14 @@ const fetchChannelDates = async (nodeId: string) => {
     }
 };
 
-const fetchChannelPosts = async (nodeId: string, atMost = 100) => {
+const fetchChannelPosts = async (nodeId: string, atMost = 100, startId = 0) => {
     try {
-        let response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=100`);
+        const firstNr = atMost > 0? Math.min(atMost + 5, 100) : 100;
+        let firstCallUrl = `https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}`;
+        if (startId > 0) {
+          firstCallUrl = `https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}&b=${startId}`;
+        }
+        let response = await fetch(firstCallUrl);
         if (!response.ok) throw new Error('Failed to fetch');
         let data = await response.json();
         
@@ -3013,8 +3018,8 @@ const fetchChannelPosts = async (nodeId: string, atMost = 100) => {
         setTimeout(() => { toastMessage.value = ""; }, 3000);
 
         // iterate to the first post
-        while (min > 1) {
-          response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=100&b=${min}`);
+        while (min > 1 && allPosts.length < atMost) {
+          response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}&b=${min}`);
           if (!response.ok) throw new Error('Failed to fetch ' + nodeId + ' b=' + min);
           data = await response.json();
           posts = data || [];
@@ -3184,24 +3189,41 @@ const startAddEdge = () => {
 const addForwardFrom = async () => {
   if (contextMenu.value.node) {
     try {
-      const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${contextMenu.value.node.id()}`);
+      const nodeId = contextMenu.value.node.id();
+      const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${nodeId}`);
       if (profileRes.ok) {
         const profileData = await profileRes.json();
         const forwards = profileData.forwards || [];
-        forwards.map(item => {
-          // add a new node to the graph
+        const fto = profileData.fto || [];
+
+        // Add forwards
+        forwards.forEach(item => {
           addNode(item, 'channel', {
-            id: item, // Custom ID used by Cytoscape graph
+            id: item,
             username: item,
             link: `https://t.me/${item}`,
             facts: ''
-         });
-         // add a new edge
-         addEdge(contextMenu.value.node.id(), item, {label: 'forward from'});
-        })
+          });
+          addEdge(nodeId, item, { label: 'forward from' });
+        });
+
+        // Add fto
+        fto.forEach(item => {
+          addNode(item, 'channel', {
+            id: item,
+            username: item,
+            link: `https://t.me/${item}`,
+            facts: ''
+          });
+          addEdge(item, nodeId, { label: 'forward to' });
+        });
+
+        toastMessage.value = `Expanded forwards (${forwards.length}) and fto (${fto.length}) for @${nodeId}`;
+        toastType.value = 'success';
+        setTimeout(() => { toastMessage.value = ""; }, 4000);
       }
     } catch (e) {
-      console.error("Failed to fetch forwards", e);
+      console.error("Failed to fetch forwards and fto", e);
     }
     contextMenu.value.visible = false;
   }
@@ -6551,9 +6573,15 @@ const getParsedReactions = (reactions: any): Array<{ emoji: string; count: numbe
       return null;
     }).filter((x): x is { emoji: string; count: number } => x !== null);
   } else if (typeof reactions === 'object') {
-    return Object.entries(reactions)
-      .map(([emoji, count]) => ({ emoji: formatEmoji(emoji), count: Number(count) }))
-      .filter(x => !isNaN(x.count));
+    if ('results' in reactions) {
+      return reactions.results
+        .map(item => ({ emoji: item.reaction, count: item.count }))
+        .filter(x => !isNaN(x.count));
+    } else {
+      return Object.entries(reactions)
+        .map(([emoji, count]) => ({ emoji: formatEmoji(emoji), count: Number(count) }))
+        .filter(x => !isNaN(x.count));
+    }
   }
   return [];
 };
@@ -6962,6 +6990,1016 @@ const timelineTicks = computed(() => {
     }
     
     return ticks;
+});
+
+// ==========================================
+// --- Network Tab Graph & Physics Engine ---
+// ==========================================
+
+const networkNodes = ref<GraphNode[]>([]);
+const networkEdges = ref<GraphEdge[]>([]);
+const selectedNetworkNode = ref<GraphNode | null>(null);
+const isFetchingSelectedNodeMetadata = ref(false);
+const selectedNodePosts = ref<any[]>([]);
+const isFetchingSelectedNodePosts = ref(false);
+
+watch(selectedNetworkNode, async (newNode) => {
+  selectedNodePosts.value = [];
+  if (!newNode) return;
+
+  isFetchingSelectedNodePosts.value = true;
+  try {
+    const posts = await fetchChannelPosts(newNode.id, 25);
+    selectedNodePosts.value = posts || [];
+  } catch (err) {
+    console.warn("Failed to fetch selected node posts on-demand:", err);
+  } finally {
+    isFetchingSelectedNodePosts.value = false;
+  }
+
+  if (!newNode.metadata) {
+    isFetchingSelectedNodeMetadata.value = true;
+    try {
+      const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${encodeURIComponent(newNode.id)}`);
+      if (response.ok) {
+        const data = await response.json();
+        newNode.metadata = data;
+        if (data) {
+          newNode.name = data.name || data.title || newNode.id;
+          newNode.displayName = data.title || newNode.id;
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to fetch selected node metadata on-demand:", err);
+    } finally {
+      isFetchingSelectedNodeMetadata.value = false;
+    }
+  }
+});
+
+const isLoadingMoreSelectedNodePosts = ref(false);
+const selectedNodeSentinelRef = ref<HTMLElement | null>(null);
+let selectedNodeInfiniteScrollObserver: IntersectionObserver | null = null;
+
+const loadMoreSelectedNodePosts = async () => {
+  if (!selectedNetworkNode.value || isLoadingMoreSelectedNodePosts.value) return;
+  const len = selectedNodePosts.value.length;
+  if (len === 0) return;
+
+  const lastPost = selectedNodePosts.value[len - 1];
+  if (!lastPost || !lastPost.key) return;
+
+  const lastKeyPart = lastPost.key.split('.').pop();
+  const startId = parseInt(lastKeyPart, 10);
+  if (isNaN(startId) || startId <= 0) return;
+
+  isLoadingMoreSelectedNodePosts.value = true;
+  try {
+    toastMessage.value = `Loading older posts from ID ${startId}...`;
+    toastType.value = "info";
+    const posts = await fetchChannelPosts(selectedNetworkNode.value.id, 25, startId);
+    if (posts && posts.length > 0) {
+      const existingKeys = new Set(selectedNodePosts.value.map(p => p.key));
+      const filtered = posts.filter(p => p && p.key && !existingKeys.has(p.key));
+      if (filtered.length > 0) {
+        selectedNodePosts.value.push(...filtered);
+        toastMessage.value = `Successfully loaded ${filtered.length} older posts.`;
+        toastType.value = "success";
+      } else {
+        toastMessage.value = "No older posts found.";
+        toastType.value = "info";
+      }
+    } else {
+      toastMessage.value = "No more posts available.";
+      toastType.value = "info";
+    }
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  } catch (err) {
+    console.warn("Failed to load more posts:", err);
+    toastMessage.value = "Failed to load more posts.";
+    toastType.value = "error";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  } finally {
+    isLoadingMoreSelectedNodePosts.value = false;
+  }
+};
+
+watch(selectedNodeSentinelRef, (el) => {
+  if (selectedNodeInfiniteScrollObserver) {
+    selectedNodeInfiniteScrollObserver.disconnect();
+    selectedNodeInfiniteScrollObserver = null;
+  }
+  if (el) {
+    selectedNodeInfiniteScrollObserver = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) {
+        loadMoreSelectedNodePosts();
+      }
+    }, {
+      root: el.parentElement,
+      rootMargin: "200px",
+    });
+    selectedNodeInfiniteScrollObserver.observe(el);
+  }
+});
+
+onUnmounted(() => {
+  if (selectedNodeInfiniteScrollObserver) {
+    selectedNodeInfiniteScrollObserver.disconnect();
+  }
+});
+
+const networkSearchTerm = ref("");
+const networkMode = ref<"drag" | "link" | "delete">("drag");
+const isGraphPhysicsRunning = ref(true);
+
+const canvasRef = ref<HTMLCanvasElement | null>(null);
+const canvasContainerRef = ref<HTMLElement | null>(null);
+
+const panX = ref(0);
+const panY = ref(0);
+const zoom = ref(1.0);
+
+const isPanning = ref(false);
+const isDraggingNode = ref(false);
+const draggedNetworkNode = ref<GraphNode | null>(null);
+const linkingSourceNode = ref<GraphNode | null>(null);
+const hoveredNode = ref<GraphNode | null>(null);
+const mouseDownOnNode = ref<GraphNode | null>(null);
+const mouseDownX = ref(0);
+const mouseDownY = ref(0);
+
+// Settings for layout physics
+const repulsionStrength = ref(800);
+const springStrength = ref(0.04);
+const linkDistance = ref(120);
+const gravityStrength = ref(0.015);
+const dampingFactor = ref(0.92);
+const physicsAlpha = ref(1.0);
+
+let animationFrameId: number | null = null;
+let canvasResizeObserver: ResizeObserver | null = null;
+
+const mouseX = ref(0);
+const mouseY = ref(0);
+
+// Helper for generating initial graph nodes
+const generateColorFromId = (id: string): string => {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = id.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const hue = Math.abs(hash % 360);
+  return `hsl(${hue}, 70%, 55%)`;
+};
+
+const fetchedNetworkNodeIds = new Set<string>();
+
+const updateNodesMetadataInBatches = async (nodeIds: string[]) => {
+  const pendingIds = nodeIds.filter(id => !fetchedNetworkNodeIds.has(id));
+  if (pendingIds.length === 0) return;
+
+  const batchSize = 3;
+  const delayMs = 600;
+
+  for (let i = 0; i < pendingIds.length; i += batchSize) {
+    const batch = pendingIds.slice(i, i + batchSize);
+    
+    await Promise.allSettled(batch.map(async (id) => {
+      fetchedNetworkNodeIds.add(id);
+      try {
+        const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${encodeURIComponent(id)}`);
+        if (response.ok) {
+          const data = await response.json();
+          const targetNode = networkNodes.value.find(n => n.id === id);
+          if (targetNode && data) {
+            targetNode.name = data.name || data.title || id;
+            targetNode.displayName = data.title || id;
+            targetNode.metadata = data;
+          }
+        }
+      } catch (err) {
+        console.warn(`Failed to fetch metadata for batch node: ${id}`, err);
+      }
+
+      // Profile image load
+      const img = new Image();
+      img.src = `https://i.gogingko.net/api/v1/v/telegram-profile/${id}`;
+      img.referrerPolicy = "no-referrer";
+      img.onload = () => {
+        const targetNode = networkNodes.value.find(n => n.id === id);
+        if (targetNode) {
+          targetNode.avatarImg = img;
+          targetNode.avatarLoaded = true;
+        }
+      };
+    }));
+
+    if (i + batchSize < pendingIds.length) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+};
+
+const fetchAndExpandConnections = async (nodeId: string, parentNode: GraphNode) => {
+  try {
+    const cgResponse = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${encodeURIComponent(nodeId)}`);
+    if (!cgResponse.ok) return;
+
+    const cgData = await cgResponse.json();
+    const forwardsList: string[] = Array.isArray(cgData?.forwards) ? cgData.forwards : [];
+    const ftoList: string[] = Array.isArray(cgData?.fto) ? cgData.fto : [];
+
+    const newlyAddedIds: string[] = [];
+
+    const addNodeShell = (id: string) => {
+      const cleanId = id.trim().replace(/^@/, "");
+      if (!cleanId) return null;
+      const normalizedId = cleanId.toLowerCase();
+      
+      let existingNode = networkNodes.value.find(n => n.id.toLowerCase() === normalizedId);
+      if (!existingNode) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = 90 + Math.random() * 50;
+        const shellNode: GraphNode = {
+          id: cleanId,
+          name: cleanId,
+          displayName: cleanId,
+          x: parentNode.x + Math.cos(angle) * dist,
+          y: parentNode.y + Math.sin(angle) * dist,
+          vx: 0,
+          vy: 0,
+          r: 20,
+          color: generateColorFromId(cleanId),
+          isCenter: false,
+          avatarLoaded: false,
+        };
+        networkNodes.value.push(shellNode);
+        newlyAddedIds.push(cleanId);
+        return shellNode;
+      }
+      return existingNode;
+    };
+
+    // IN edges: source is forwards node, target is parentNode
+    forwardsList.forEach(fw => {
+      const sourceNode = addNodeShell(fw);
+      if (sourceNode) {
+        const existingDirect = networkEdges.value.find(
+          e => e.source === sourceNode.id && e.target === nodeId
+        );
+        const existingReverse = networkEdges.value.find(
+          e => e.source === nodeId && e.target === sourceNode.id
+        );
+
+        if (existingReverse) {
+          existingReverse.type = "both";
+        } else if (!existingDirect) {
+          networkEdges.value.push({
+            source: sourceNode.id,
+            target: nodeId,
+            type: "in",
+          });
+        }
+      }
+    });
+
+    // OUT edges: source is parentNode, target is fto node
+    ftoList.forEach(ft => {
+      const targetNode = addNodeShell(ft);
+      if (targetNode) {
+        const existingDirect = networkEdges.value.find(
+          e => e.source === nodeId && e.target === targetNode.id
+        );
+        const existingReverse = networkEdges.value.find(
+          e => e.source === targetNode.id && e.target === nodeId
+        );
+
+        if (existingReverse) {
+          existingReverse.type = "both";
+        } else if (!existingDirect) {
+          networkEdges.value.push({
+            source: nodeId,
+            target: targetNode.id,
+            type: "out",
+          });
+        }
+      }
+    });
+
+    if (newlyAddedIds.length > 0) {
+      physicsAlpha.value = 1.0;
+      updateNodesMetadataInBatches(newlyAddedIds);
+    }
+  } catch (err) {
+    console.warn(`Failed to fetch and expand connections for CG-${nodeId}:`, err);
+  }
+};
+
+const addNetworkNode = async (nameInput: string) => {
+  const cleanName = nameInput.trim().replace(/^@/, "");
+  if (!cleanName) return;
+
+  const normalized = cleanName.toLowerCase();
+  const existing = networkNodes.value.find(n => n.id.toLowerCase() === normalized);
+  if (existing) {
+    selectedNetworkNode.value = existing;
+    panX.value = canvasRef.value ? canvasRef.value.width / 2 - existing.x * zoom.value : 0;
+    panY.value = canvasRef.value ? canvasRef.value.height / 2 - existing.y * zoom.value : 0;
+    toastMessage.value = `Node "${existing.displayName}" already exists! Focused.`;
+    toastType.value = "info";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+    return;
+  }
+
+  // Check if this will be the first node in the graph
+  const isFirstNode = networkNodes.value.length === 0;
+
+  toastMessage.value = `Fetching metadata for @${cleanName}...`;
+  toastType.value = "info";
+
+  try {
+    const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${encodeURIComponent(cleanName)}`);
+    let data: any = null;
+    if (response.ok) {
+      data = await response.json();
+    }
+
+    // Parse the metadata to set id, name, displayName
+    const nodeId = (data && (data.username || data.id)) ? (data.username || data.id) : cleanName;
+    const nodeName = (data && (data.name || data.title)) ? (data.name || data.title) : cleanName;
+    const nodeDisplayName = (data && data.title) ? data.title : cleanName;
+
+    const angle = Math.random() * Math.PI * 2;
+    const radius = isFirstNode ? 0 : (60 + Math.random() * 40);
+
+    let refX = 0;
+    let refY = 0;
+    if (selectedNetworkNode.value) {
+      refX = selectedNetworkNode.value.x;
+      refY = selectedNetworkNode.value.y;
+    }
+
+    const newNode: GraphNode = {
+      id: nodeId,
+      name: nodeName,
+      displayName: nodeDisplayName,
+      x: refX + Math.cos(angle) * radius,
+      y: refY + Math.sin(angle) * radius,
+      vx: 0,
+      vy: 0,
+      r: isFirstNode ? 32 : 24,
+      color: generateColorFromId(nodeId),
+      isCenter: isFirstNode,
+      avatarLoaded: false,
+      metadata: data,
+    };
+
+    const img = new Image();
+    img.src = `https://i.gogingko.net/api/v1/v/telegram-profile/${nodeId}`;
+    img.referrerPolicy = "no-referrer";
+    img.onload = () => {
+      newNode.avatarImg = img;
+      newNode.avatarLoaded = true;
+    };
+
+    networkNodes.value.push(newNode);
+
+    // Auto-connect to currently selected node if it's not the first node
+    if (selectedNetworkNode.value && !isFirstNode) {
+      networkEdges.value.push({
+        source: selectedNetworkNode.value.id,
+        target: newNode.id,
+        type: "out",
+      });
+    }
+
+    selectedNetworkNode.value = newNode;
+    physicsAlpha.value = 1.0;
+    networkSearchTerm.value = "";
+
+    toastMessage.value = `Successfully added node: ${nodeDisplayName}!`;
+    toastType.value = "success";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+
+    // Expand connections in background
+    fetchAndExpandConnections(nodeId, newNode);
+
+  } catch (err) {
+    console.error("Error fetching node metadata:", err);
+    
+    // Fallback: Add node anyway with input name if fetch fails
+    const angle = Math.random() * Math.PI * 2;
+    const radius = isFirstNode ? 0 : (60 + Math.random() * 40);
+
+    let refX = 0;
+    let refY = 0;
+    if (selectedNetworkNode.value) {
+      refX = selectedNetworkNode.value.x;
+      refY = selectedNetworkNode.value.y;
+    }
+
+    const newNode: GraphNode = {
+      id: cleanName,
+      name: cleanName,
+      displayName: cleanName,
+      x: refX + Math.cos(angle) * radius,
+      y: refY + Math.sin(angle) * radius,
+      vx: 0,
+      vy: 0,
+      r: isFirstNode ? 32 : 24,
+      color: generateColorFromId(cleanName),
+      isCenter: isFirstNode,
+      avatarLoaded: false,
+    };
+
+    const img = new Image();
+    img.src = `https://i.gogingko.net/api/v1/v/telegram-profile/${cleanName}`;
+    img.referrerPolicy = "no-referrer";
+    img.onload = () => {
+      newNode.avatarImg = img;
+      newNode.avatarLoaded = true;
+    };
+
+    networkNodes.value.push(newNode);
+
+    if (selectedNetworkNode.value && !isFirstNode) {
+      networkEdges.value.push({
+        source: selectedNetworkNode.value.id,
+        target: newNode.id,
+        type: "out",
+      });
+    }
+
+    selectedNetworkNode.value = newNode;
+    physicsAlpha.value = 1.0;
+    networkSearchTerm.value = "";
+
+    toastMessage.value = `Added node: ${cleanName} (Metadata fetch failed)`;
+    toastType.value = "warning";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+
+    // Try to expand connections anyway
+    fetchAndExpandConnections(cleanName, newNode);
+  }
+};
+
+const removeNetworkNode = (nodeId: string) => {
+  networkNodes.value = networkNodes.value.filter(n => n.id !== nodeId);
+  networkEdges.value = networkEdges.value.filter(e => e.source !== nodeId && e.target !== nodeId);
+  if (selectedNetworkNode.value?.id === nodeId) {
+    selectedNetworkNode.value = null;
+  }
+  if (hoveredNode.value?.id === nodeId) {
+    hoveredNode.value = null;
+  }
+  physicsAlpha.value = 1.0;
+};
+
+const addNetworkEdge = (sourceId: string, targetId: string) => {
+  const exists = networkEdges.value.find(
+    e => (e.source === sourceId && e.target === targetId) || (e.source === targetId && e.target === sourceId)
+  );
+  if (!exists) {
+    networkEdges.value.push({ source: sourceId, target: targetId, type: "out" });
+    physicsAlpha.value = 1.0;
+    toastMessage.value = "Edge connected successfully!";
+    toastType.value = "success";
+    setTimeout(() => { toastMessage.value = ""; }, 2500);
+  } else if (exists.source === targetId && exists.target === sourceId) {
+    exists.type = "both";
+    physicsAlpha.value = 1.0;
+    toastMessage.value = "Bidirectional connection established!";
+    toastType.value = "success";
+    setTimeout(() => { toastMessage.value = ""; }, 2500);
+  }
+};
+
+const removeNetworkEdge = (sourceId: string, targetId: string) => {
+  networkEdges.value = networkEdges.value.filter(
+    e => !(e.source === sourceId && e.target === targetId) && !(e.source === targetId && e.target === sourceId)
+  );
+  physicsAlpha.value = 1.0;
+};
+
+const manualConnectTargetId = ref("");
+const manualConnectSelectedNode = () => {
+  if (!selectedNetworkNode.value || !manualConnectTargetId.value) return;
+  addNetworkEdge(selectedNetworkNode.value.id, manualConnectTargetId.value);
+  manualConnectTargetId.value = "";
+};
+
+const resetGraphZoom = () => {
+  zoom.value = 1.0;
+  panX.value = canvasRef.value ? canvasRef.value.width / 2 : 0;
+  panY.value = canvasRef.value ? canvasRef.value.height / 2 : 0;
+};
+
+const clearNetworkGraph = () => {
+  networkNodes.value = [];
+  networkEdges.value = [];
+  selectedNetworkNode.value = null;
+  hoveredNode.value = null;
+  linkingSourceNode.value = null;
+  physicsAlpha.value = 0;
+};
+
+const updateNetworkPhysics = () => {
+  if (physicsAlpha.value < 0.005) {
+    physicsAlpha.value = 0.002;
+    return;
+  }
+
+  const len = networkNodes.value.length;
+  if (len === 0) return;
+
+  // 1. Create lookup Map and pre-assign fast indexes
+  const nodeMap = new Map<string, any>();
+  for (let i = 0; i < len; i++) {
+    const node = networkNodes.value[i];
+    node._index = i;
+    nodeMap.set(node.id, node);
+  }
+
+  // 2. Spatial hashing grid for Repulsion Force to reduce O(N^2) to near O(N)
+  const cellSize = 150;
+  const grid = new Map<string, any[]>();
+  for (let i = 0; i < len; i++) {
+    const node = networkNodes.value[i];
+    const gx = Math.floor(node.x / cellSize);
+    const gy = Math.floor(node.y / cellSize);
+    const key = `${gx},${gy}`;
+    let cell = grid.get(key);
+    if (!cell) {
+      cell = [];
+      grid.set(key, cell);
+    }
+    cell.push(node);
+  }
+
+  for (let i = 0; i < len; i++) {
+    const n1 = networkNodes.value[i];
+    const gx = Math.floor(n1.x / cellSize);
+    const gy = Math.floor(n1.y / cellSize);
+
+    for (let dxCell = -1; dxCell <= 1; dxCell++) {
+      for (let dyCell = -1; dyCell <= 1; dyCell++) {
+        const key = `${gx + dxCell},${gy + dyCell}`;
+        const cell = grid.get(key);
+        if (!cell) continue;
+
+        const cellLen = cell.length;
+        for (let k = 0; k < cellLen; k++) {
+          const n2 = cell[k];
+          if (n1._index >= n2._index) continue;
+
+          const dx = n2.x - n1.x;
+          const dy = n2.y - n1.y;
+          const distSq = dx * dx + dy * dy;
+          if (distSq < 160000 && distSq > 0.01) {
+            const dist = Math.sqrt(distSq);
+            const force = (repulsionStrength.value * (n1.r + n2.r)) / (distSq * dist);
+            const fx = dx * force * physicsAlpha.value;
+            const fy = dy * force * physicsAlpha.value;
+            n1.vx -= fx;
+            n1.vy -= fy;
+            n2.vx += fx;
+            n2.vy += fy;
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Edge attraction spring forces with Map-lookup O(E) complexity
+  const edges = networkEdges.value;
+  const edgesLen = edges.length;
+  for (let i = 0; i < edgesLen; i++) {
+    const edge = edges[i];
+    const n1 = nodeMap.get(edge.source);
+    const n2 = nodeMap.get(edge.target);
+    if (n1 && n2) {
+      const dx = n2.x - n1.x;
+      const dy = n2.y - n1.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
+      const displacement = dist - linkDistance.value;
+      const force = displacement * springStrength.value * physicsAlpha.value / dist;
+      const fx = dx * force;
+      const fy = dy * force;
+      n1.vx += fx;
+      n1.vy += fy;
+      n2.vx -= fx;
+      n2.vy -= fy;
+    }
+  }
+
+  // 4. Gravity towards center (0,0) and applying updates
+  for (let i = 0; i < len; i++) {
+    const node = networkNodes.value[i];
+    if (node.fx !== null && node.fx !== undefined) {
+      node.x = node.fx;
+      node.y = node.fy;
+      node.vx = 0;
+      node.vy = 0;
+    } else {
+      node.vx -= node.x * gravityStrength.value * physicsAlpha.value;
+      node.vy -= node.y * gravityStrength.value * physicsAlpha.value;
+
+      node.x += node.vx;
+      node.y += node.vy;
+
+      node.vx *= dampingFactor.value;
+      node.vy *= dampingFactor.value;
+    }
+  }
+
+  physicsAlpha.value *= 0.985;
+};
+
+const drawNetworkGraph = () => {
+  const canvas = canvasRef.value;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const w = canvas.width;
+  const h = canvas.height;
+
+  ctx.fillStyle = isDark.value ? "#111827" : "#f9fafb";
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.save();
+  ctx.translate(panX.value, panY.value);
+  ctx.scale(zoom.value, zoom.value);
+
+  // Background dots grid
+  const gridSize = 40;
+  const gridColor = isDark.value ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.03)";
+  ctx.fillStyle = gridColor;
+
+  const left = -panX.value / zoom.value - 100;
+  const top = -panY.value / zoom.value - 100;
+  const right = (w - panX.value) / zoom.value + 100;
+  const bottom = (h - panY.value) / zoom.value + 100;
+
+  const startGridX = Math.floor(left / gridSize) * gridSize;
+  const startGridY = Math.floor(top / gridSize) * gridSize;
+
+  for (let gx = startGridX; gx < right; gx += gridSize) {
+    for (let gy = startGridY; gy < bottom; gy += gridSize) {
+      ctx.beginPath();
+      ctx.arc(gx, gy, 1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Draw Edges
+  networkEdges.value.forEach(edge => {
+    const sourceNode = networkNodes.value.find(n => n.id === edge.source);
+    const targetNode = networkNodes.value.find(n => n.id === edge.target);
+    if (!sourceNode || !targetNode) return;
+
+    const isHighlighted = (selectedNetworkNode.value && (selectedNetworkNode.value.id === edge.source || selectedNetworkNode.value.id === edge.target)) ||
+                          (hoveredNode.value && (hoveredNode.value.id === edge.source || hoveredNode.value.id === edge.target));
+
+    // Resolve edge color based on edge.type and highlighted state
+    let edgeColor = "";
+    if (isDark.value) {
+      if (edge.type === "in") {
+        edgeColor = isHighlighted ? "#818cf8" : "rgba(129, 140, 248, 0.2)"; // Indigo
+      } else if (edge.type === "out") {
+        edgeColor = isHighlighted ? "#2dd4bf" : "rgba(45, 212, 191, 0.2)";  // Teal
+      } else if (edge.type === "both") {
+        edgeColor = isHighlighted ? "#f472b6" : "rgba(244, 114, 182, 0.22)"; // Pink/Rose
+      } else {
+        edgeColor = isHighlighted ? "#94a3b8" : "rgba(148, 163, 184, 0.12)"; // Normal Slate
+      }
+    } else {
+      if (edge.type === "in") {
+        edgeColor = isHighlighted ? "#4f46e5" : "rgba(79, 70, 229, 0.16)"; // Indigo
+      } else if (edge.type === "out") {
+        edgeColor = isHighlighted ? "#0d9488" : "rgba(13, 148, 136, 0.16)";  // Teal
+      } else if (edge.type === "both") {
+        edgeColor = isHighlighted ? "#db2777" : "rgba(219, 39, 119, 0.18)"; // Pink/Rose
+      } else {
+        edgeColor = isHighlighted ? "#64748b" : "rgba(100, 116, 139, 0.12)"; // Normal Slate
+      }
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(sourceNode.x, sourceNode.y);
+    ctx.lineTo(targetNode.x, targetNode.y);
+
+    ctx.strokeStyle = edgeColor;
+    ctx.lineWidth = isHighlighted ? 2.5 : 1.2;
+    ctx.stroke();
+
+    // Draw directional arrows
+    const drawArrow = (fromX: number, fromY: number, toX: number, toY: number, tRadius: number) => {
+      const angle = Math.atan2(toY - fromY, toX - fromX);
+      const arrowX = toX - (tRadius + 2) * Math.cos(angle);
+      const arrowY = toY - (tRadius + 2) * Math.sin(angle);
+      
+      const arrowSize = isHighlighted ? 7 : 5;
+      ctx.beginPath();
+      ctx.moveTo(arrowX, arrowY);
+      ctx.lineTo(
+        arrowX - arrowSize * Math.cos(angle - Math.PI / 6),
+        arrowY - arrowSize * Math.sin(angle - Math.PI / 6)
+      );
+      ctx.lineTo(
+        arrowX - arrowSize * Math.cos(angle + Math.PI / 6),
+        arrowY - arrowSize * Math.sin(angle + Math.PI / 6)
+      );
+      ctx.closePath();
+      ctx.fillStyle = edgeColor;
+      ctx.fill();
+    };
+
+    if (edge.type === "both") {
+      // Draw two arrowheads: one at target node boundary, one at source node boundary
+      drawArrow(sourceNode.x, sourceNode.y, targetNode.x, targetNode.y, targetNode.r);
+      drawArrow(targetNode.x, targetNode.y, sourceNode.x, sourceNode.y, sourceNode.r);
+    } else {
+      // Direct arrow from source to target
+      drawArrow(sourceNode.x, sourceNode.y, targetNode.x, targetNode.y, targetNode.r);
+    }
+
+    // Interactive animated signal dot
+    if (isHighlighted) {
+      const time = Date.now() / 1500;
+      const progress = time % 1.0;
+      
+      // Forward direction signal dot (source to target)
+      const px1 = sourceNode.x + (targetNode.x - sourceNode.x) * progress;
+      const py1 = sourceNode.y + (targetNode.y - sourceNode.y) * progress;
+      ctx.beginPath();
+      ctx.arc(px1, py1, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = edgeColor;
+      ctx.fill();
+
+      // Reverse direction signal dot (target to source) if type is both
+      if (edge.type === "both") {
+        const px2 = targetNode.x + (sourceNode.x - targetNode.x) * progress;
+        const py2 = targetNode.y + (sourceNode.y - targetNode.y) * progress;
+        ctx.beginPath();
+        ctx.arc(px2, py2, 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = edgeColor;
+        ctx.fill();
+      }
+    }
+  });
+
+  // Draw Nodes
+  networkNodes.value.forEach(node => {
+    const isSelected = selectedNetworkNode.value?.id === node.id;
+    const isHovered = hoveredNode.value?.id === node.id;
+
+    ctx.save();
+    ctx.translate(node.x, node.y);
+
+    if (isSelected || isHovered) {
+      ctx.beginPath();
+      ctx.arc(0, 0, node.r + 5, 0, Math.PI * 2);
+      ctx.fillStyle = isSelected 
+        ? (isDark.value ? "rgba(45, 212, 191, 0.15)" : "rgba(13, 148, 136, 0.12)")
+        : (isDark.value ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.05)");
+      ctx.fill();
+    }
+
+    ctx.beginPath();
+    ctx.arc(0, 0, node.r, 0, Math.PI * 2);
+    ctx.fillStyle = node.color;
+    ctx.fill();
+
+    if (node.avatarImg && node.avatarLoaded) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(0, 0, node.r, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.drawImage(node.avatarImg, -node.r, -node.r, node.r * 2, node.r * 2);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = "#ffffff";
+      ctx.font = `bold ${Math.floor(node.r * 0.85)}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const char = (node.displayName || node.name || "?").charAt(0).toUpperCase();
+      ctx.fillText(char, 0, 0);
+    }
+
+    ctx.beginPath();
+    ctx.arc(0, 0, node.r, 0, Math.PI * 2);
+    if (isSelected) {
+      ctx.strokeStyle = isDark.value ? "#2dd4bf" : "#0d9488";
+      ctx.lineWidth = 3;
+    } else if (isHovered) {
+      ctx.strokeStyle = isDark.value ? "#ffffff" : "#111827";
+      ctx.lineWidth = 2;
+    } else {
+      ctx.strokeStyle = isDark.value ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.1)";
+      ctx.lineWidth = 1.5;
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = isDark.value ? "#f3f4f6" : "#1f2937";
+    ctx.font = `${isSelected ? 'bold' : '600'} 11px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    
+    const label = node.displayName || node.name;
+    const textWidth = ctx.measureText(label).width;
+    ctx.fillStyle = isDark.value ? "rgba(17, 24, 39, 0.85)" : "rgba(255, 255, 255, 0.85)";
+    ctx.fillRect(-textWidth/2 - 4, node.r + 5, textWidth + 8, 16);
+    
+    ctx.fillStyle = isDark.value ? "#f3f4f6" : "#1f2937";
+    ctx.fillText(label, 0, node.r + 7);
+
+    ctx.restore();
+  });
+
+  if (networkMode.value === "link" && linkingSourceNode.value) {
+    ctx.beginPath();
+    ctx.moveTo(linkingSourceNode.value.x, linkingSourceNode.value.y);
+    ctx.lineTo(mouseX.value, mouseY.value);
+    ctx.strokeStyle = isDark.value ? "rgba(45, 212, 191, 0.6)" : "rgba(13, 148, 136, 0.6)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  ctx.restore();
+};
+
+const physicsTick = () => {
+  if (isGraphPhysicsRunning.value) {
+    // Run multiple sub-ticks per frame to settle the layout significantly faster
+    for (let i = 0; i < 3; i++) {
+      updateNetworkPhysics();
+    }
+  }
+  drawNetworkGraph();
+  animationFrameId = requestAnimationFrame(physicsTick);
+};
+
+let canvasStartPanX = 0;
+let canvasStartPanY = 0;
+
+const handleCanvasMouseDown = (e: MouseEvent) => {
+  const wx = (e.offsetX - panX.value) / zoom.value;
+  const wy = (e.offsetY - panY.value) / zoom.value;
+
+  const clickedNode = networkNodes.value.find(n => Math.hypot(n.x - wx, n.y - wy) <= n.r);
+
+  if (clickedNode && e.button === 2) {
+    e.preventDefault();
+    toastMessage.value = `Expanding connections for @${clickedNode.id}...`;
+    toastType.value = "info";
+    setTimeout(() => { toastMessage.value = ""; }, 5000);
+    fetchAndExpandConnections(clickedNode.id, clickedNode);
+    return;
+  }
+
+  if (clickedNode) {
+    if (networkMode.value === "delete") {
+      removeNetworkNode(clickedNode.id);
+    } else if (networkMode.value === "link") {
+      if (!linkingSourceNode.value) {
+        linkingSourceNode.value = clickedNode;
+      } else {
+        if (linkingSourceNode.value.id !== clickedNode.id) {
+          addNetworkEdge(linkingSourceNode.value.id, clickedNode.id);
+        }
+        linkingSourceNode.value = null;
+      }
+    } else {
+      // Record starting coordinates and node under mouse, but don't mark as dragging or wake physics yet
+      mouseDownOnNode.value = clickedNode;
+      mouseDownX.value = e.offsetX;
+      mouseDownY.value = e.offsetY;
+      selectedNetworkNode.value = clickedNode;
+    }
+  } else {
+    isPanning.value = true;
+    linkingSourceNode.value = null;
+    canvasStartPanX = e.offsetX - panX.value;
+    canvasStartPanY = e.offsetY - panY.value;
+  }
+};
+
+const handleCanvasMouseMove = (e: MouseEvent) => {
+  const wx = (e.offsetX - panX.value) / zoom.value;
+  const wy = (e.offsetY - panY.value) / zoom.value;
+
+  const nodeUnderMouse = networkNodes.value.find(n => Math.hypot(n.x - wx, n.y - wy) <= n.r);
+  hoveredNode.value = nodeUnderMouse || null;
+
+  // Check if we started moving the mouse beyond 3 pixels while holding a node
+  if (mouseDownOnNode.value && !isDraggingNode.value) {
+    const dist = Math.hypot(e.offsetX - mouseDownX.value, e.offsetY - mouseDownY.value);
+    if (dist > 3) {
+      isDraggingNode.value = true;
+      draggedNetworkNode.value = mouseDownOnNode.value;
+      draggedNetworkNode.value.fx = wx;
+      draggedNetworkNode.value.fy = wy;
+    }
+  }
+
+  if (isDraggingNode.value && draggedNetworkNode.value) {
+    draggedNetworkNode.value.fx = wx;
+    draggedNetworkNode.value.fy = wy;
+    draggedNetworkNode.value.x = wx;
+    draggedNetworkNode.value.y = wy;
+    physicsAlpha.value = 1.0;
+  } else if (isPanning.value) {
+    panX.value = e.offsetX - canvasStartPanX;
+    panY.value = e.offsetY - canvasStartPanY;
+  }
+
+  mouseX.value = wx;
+  mouseY.value = wy;
+};
+
+const handleCanvasMouseUp = () => {
+  if (isDraggingNode.value && draggedNetworkNode.value) {
+    draggedNetworkNode.value.fx = null;
+    draggedNetworkNode.value.fy = null;
+  }
+  isDraggingNode.value = false;
+  isPanning.value = false;
+  draggedNetworkNode.value = null;
+  mouseDownOnNode.value = null;
+};
+
+const handleCanvasWheel = (e: WheelEvent) => {
+  e.preventDefault();
+  const sx = e.offsetX;
+  const sy = e.offsetY;
+
+  const wx = (sx - panX.value) / zoom.value;
+  const wy = (sy - panY.value) / zoom.value;
+
+  const zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
+  const newZoom = Math.min(Math.max(zoom.value * zoomFactor, 0.08), 6.0);
+
+  panX.value = sx - wx * newZoom;
+  panY.value = sy - wy * newZoom;
+  zoom.value = newZoom;
+};
+
+watch(activeTab, (newTab) => {
+  if (newTab === "network") {
+    nextTick(() => {
+      const canvas = canvasRef.value;
+      const container = canvasContainerRef.value;
+      if (canvas && container) {
+        canvas.width = container.clientWidth;
+        canvas.height = container.clientHeight;
+        
+        if (panX.value === 0 && panY.value === 0) {
+          resetGraphZoom();
+        }
+
+        if (canvasResizeObserver) {
+          canvasResizeObserver.disconnect();
+        }
+        canvasResizeObserver = new ResizeObserver((entries) => {
+          for (const entry of entries) {
+            const { width, height } = entry.contentRect;
+            canvas.width = width;
+            canvas.height = height;
+            drawNetworkGraph();
+          }
+        });
+        canvasResizeObserver.observe(container);
+      }
+
+      if (animationFrameId === null) {
+        physicsAlpha.value = 1.0;
+        physicsTick();
+      }
+    });
+  } else {
+    if (animationFrameId !== null) {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = null;
+    }
+    if (canvasResizeObserver) {
+      canvasResizeObserver.disconnect();
+      canvasResizeObserver = null;
+    }
+  }
+}, { immediate: true });
+
+onUnmounted(() => {
+  if (animationFrameId !== null) {
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+  }
+  if (canvasResizeObserver) {
+    canvasResizeObserver.disconnect();
+    canvasResizeObserver = null;
+  }
 });
 </script>
 
@@ -7550,6 +8588,23 @@ const timelineTicks = computed(() => {
               ]"
             />
             Workspace
+          </button>
+          <button
+            @click="activeTab = 'network'"
+            :class="[
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
+              activeTab === 'network'
+                ? 'bg-white dark:bg-gray-700 text-teal-600 dark:text-teal-400 shadow-md shadow-teal-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+            ]"
+          >
+            <Network
+              :class="[
+                'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
+                activeTab === 'network' ? 'scale-110' : '',
+              ]"
+            />
+            Network
           </button>
           <button
             v-show="loginToken"
@@ -10993,7 +12048,7 @@ const timelineTicks = computed(() => {
                    </button>
                    <button v-if="contextMenu.node.data('type') === 'channel'" @click="addForwardFrom" class="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-750 rounded-xl text-xs font-semibold text-gray-900 dark:text-white flex items-center gap-2 cursor-pointer">
                      <Forward class="w-3.5 h-3.5 text-teal-500" />
-                     <span>Add Forward</span>
+                     <span>Expand Forwards & FTO</span>
                    </button>
                  </div>
                  <div class="py-1">
@@ -13022,6 +14077,742 @@ const timelineTicks = computed(() => {
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- Network Tab -->
+      <div v-show="activeTab === 'network'" class="w-full relative px-4 md:px-6 pt-2 pb-16 flex flex-col h-full overflow-y-auto">
+        
+        <!-- Header Banner Section -->
+        <div class="relative bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm overflow-hidden mb-6 shrink-0">
+          <div class="absolute -right-20 -top-20 w-44 h-44 bg-teal-500/[0.04] dark:bg-teal-500/[0.08] rounded-full blur-3xl pointer-events-none"></div>
+          <div class="absolute -left-20 -bottom-20 w-44 h-44 bg-indigo-500/[0.04] dark:bg-indigo-500/[0.08] rounded-full blur-3xl pointer-events-none"></div>
+
+          <div class="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+            <div class="space-y-2">
+              <div class="flex items-center gap-2">
+                <span class="p-1.5 rounded-xl bg-teal-500/10 text-teal-600 dark:text-teal-400">
+                  <Network class="h-5 w-5" />
+                </span>
+                <span class="text-[10px] font-black text-teal-600 dark:text-teal-400 uppercase tracking-widest leading-none">Topology Mapping</span>
+              </div>
+              <h2 class="text-xl md:text-2xl font-black text-gray-900 dark:text-white tracking-tight">Channel Connection Network</h2>
+              <p class="text-xs text-gray-400 dark:text-gray-500 font-semibold max-w-xl">
+                Explore, map, and link Telegram channels and groups. Leverage force-directed layouts to analyze influence propagation and connection pathways.
+              </p>
+            </div>
+
+            <!-- Stats indicator -->
+            <div class="flex items-center gap-6 text-[11px] font-semibold text-gray-400 dark:text-gray-500 shrink-0 self-start md:self-center border-t md:border-t-0 md:border-l border-gray-200/60 dark:border-gray-750 pt-4 md:pt-0 md:pl-6">
+              <div class="space-y-1">
+                <p class="text-[10px] uppercase font-black tracking-wider text-teal-600 dark:text-teal-400 leading-none">Nodes Count</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold text-base">{{ networkNodes.length }}</p>
+              </div>
+              <div class="space-y-1">
+                <p class="text-[10px] uppercase font-black tracking-wider text-teal-600 dark:text-teal-400 leading-none">Connections</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold text-base">{{ networkEdges.length }}</p>
+              </div>
+              <div class="space-y-1">
+                <p class="text-[10px] uppercase font-black tracking-wider text-teal-600 dark:text-teal-400 leading-none">Layout State</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold text-base">
+                  <span v-if="physicsAlpha > 0.005" class="text-green-500 flex items-center gap-1">
+                    <span class="relative flex h-2 w-2">
+                      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                      <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                    </span>
+                    Settling...
+                  </span>
+                  <span v-else class="text-gray-400 dark:text-gray-500">Stable</span>
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Main Layout Workspace Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 min-h-[600px] items-stretch flex-1">
+          
+          <!-- LEFT SIDEBAR: Controls & Sliders -->
+          <div class="lg:col-span-2 lg:h-[1000px] overflow-y-auto pr-1 flex flex-col gap-6 min-h-0">
+            
+            <!-- Channel Input Panel -->
+            <div class="bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm space-y-4">
+              <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider flex items-center gap-1.5">
+                <Plus class="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                <span>Add Channel / Group</span>
+              </h3>
+              
+              <div class="space-y-2">
+                <div class="relative">
+                  <input
+                    v-model="networkSearchTerm"
+                    type="text"
+                    placeholder="Enter username (e.g. @durov)"
+                    class="w-full pl-3 pr-10 py-2 text-xs font-semibold bg-gray-50 dark:bg-gray-900/60 border border-gray-200 dark:border-gray-750 rounded-xl focus:outline-none focus:ring-1 focus:ring-teal-500 placeholder-gray-400 dark:placeholder-gray-600"
+                    @keydown.enter="addNetworkNode(networkSearchTerm)"
+                  />
+                  <button
+                    @click="addNetworkNode(networkSearchTerm)"
+                    class="absolute right-2 top-1.5 p-1 rounded-lg text-gray-400 hover:text-teal-500 transition-colors"
+                  >
+                    <Send class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <p class="text-[10px] text-gray-400 dark:text-gray-500 font-semibold leading-relaxed">
+                  Tip: Adding a node when an existing node is selected will connect them automatically!
+                </p>
+              </div>
+            </div>
+
+            <!-- Editor Modes Panel -->
+            <div class="bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm space-y-4">
+              <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider flex items-center gap-1.5">
+                <SlidersHorizontal class="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                <span>Interaction Tool</span>
+              </h3>
+
+              <div class="grid grid-cols-3 gap-2">
+                <button
+                  @click="networkMode = 'drag'"
+                  :class="[
+                    'py-2.5 rounded-xl text-[10px] font-bold transition-all flex flex-col items-center justify-center gap-1 border',
+                    networkMode === 'drag'
+                      ? 'bg-teal-500/10 border-teal-500/30 text-teal-600 dark:text-teal-400 font-black'
+                      : 'bg-gray-50 dark:bg-gray-900/40 border-gray-150 dark:border-gray-800 text-gray-500 hover:text-gray-900 dark:hover:text-white'
+                  ]"
+                >
+                  <Maximize2 class="h-4 w-4" />
+                  Drag / Select
+                </button>
+                <button
+                  @click="networkMode = 'link'"
+                  :class="[
+                    'py-2.5 rounded-xl text-[10px] font-bold transition-all flex flex-col items-center justify-center gap-1 border',
+                    networkMode === 'link'
+                      ? 'bg-teal-500/10 border-teal-500/30 text-teal-600 dark:text-teal-400 font-black'
+                      : 'bg-gray-50 dark:bg-gray-900/40 border-gray-150 dark:border-gray-800 text-gray-500 hover:text-gray-900 dark:hover:text-white'
+                  ]"
+                >
+                  <Link class="h-4 w-4" />
+                  Link Nodes
+                </button>
+                <button
+                  @click="networkMode = 'delete'"
+                  :class="[
+                    'py-2.5 rounded-xl text-[10px] font-bold transition-all flex flex-col items-center justify-center gap-1 border',
+                    networkMode === 'delete'
+                      ? 'bg-red-500/10 border-red-500/30 text-red-600 dark:text-red-400 font-black'
+                      : 'bg-gray-50 dark:bg-gray-900/40 border-gray-150 dark:border-gray-800 text-gray-500 hover:text-red-500'
+                  ]"
+                >
+                  <Trash2 class="h-4 w-4" />
+                  Delete Node
+                </button>
+              </div>
+
+              <div class="text-[10px] text-gray-400 dark:text-gray-500 leading-relaxed font-semibold">
+                <span v-if="networkMode === 'drag'">• Click & Drag nodes to reposition them. Scroll mouse wheel to Zoom. Drag background to Pan.</span>
+                <span v-if="networkMode === 'link'">• Click a source node, then click a target node to establish a new direct network edge.</span>
+                <span v-if="networkMode === 'delete'">• Click any node to instantly prune it and all its connections from the network.</span>
+              </div>
+
+              <!-- Manual Link Editor inside Interaction Tool -->
+              <div class="space-y-2.5 pt-3 border-t border-gray-150/50 dark:border-gray-750/50">
+                <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Connect Selected Node</h5>
+                <div v-if="selectedNetworkNode" class="flex gap-2 w-full min-w-0">
+                  <select
+                    v-model="manualConnectTargetId"
+                    class="flex-1 min-w-0 w-full max-w-full px-2.5 py-1.5 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-750 rounded-xl text-[11px] font-semibold focus:outline-none focus:ring-1 focus:ring-teal-500 text-gray-700 dark:text-gray-300 truncate"
+                  >
+                    <option value="" disabled>Select target node...</option>
+                    <option 
+                      v-for="node in networkNodes.filter(n => n.id !== selectedNetworkNode?.id)" 
+                      :key="node.id" 
+                      :value="node.id"
+                    >
+                      {{ node.displayName }} (@{{ node.id }})
+                    </option>
+                  </select>
+                  <button
+                    @click="manualConnectSelectedNode"
+                    class="px-2.5 py-1.5 bg-teal-500 hover:bg-teal-600 text-white rounded-xl text-[11px] font-bold transition-colors shrink-0 cursor-pointer"
+                    :disabled="!manualConnectTargetId"
+                  >
+                    Link
+                  </button>
+                </div>
+                <div v-else class="text-[10px] text-gray-400 dark:text-gray-500 italic leading-snug">
+                  Select a node on the canvas to link it to another node manually.
+                </div>
+              </div>
+            </div>
+
+            <!-- Physics Modifiers Panel (Force Tuning) -->
+            <div class="bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm space-y-4">
+              <div class="flex items-center justify-between">
+                <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider flex items-center gap-1.5">
+                  <SlidersHorizontal class="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                  <span>Physics Layout</span>
+                </h3>
+                <button 
+                  @click="isGraphPhysicsRunning = !isGraphPhysicsRunning"
+                  :class="[
+                    'px-2 py-0.5 rounded text-[9px] font-bold tracking-wider uppercase transition-colors',
+                    isGraphPhysicsRunning 
+                      ? 'bg-green-500/10 text-green-600 dark:text-green-400' 
+                      : 'bg-gray-100 dark:bg-gray-900 text-gray-400 dark:text-gray-500'
+                  ]"
+                >
+                  {{ isGraphPhysicsRunning ? 'Running' : 'Paused' }}
+                </button>
+              </div>
+
+              <div class="space-y-3 pt-1">
+                <!-- Repulsion -->
+                <div class="space-y-1">
+                  <div class="flex justify-between text-[10px] font-bold">
+                    <span class="text-gray-500 dark:text-gray-400">Node Repulsion</span>
+                    <span class="font-mono text-gray-900 dark:text-white">{{ repulsionStrength }}</span>
+                  </div>
+                  <input
+                    v-model.number="repulsionStrength"
+                    type="range"
+                    min="100"
+                    max="3000"
+                    step="50"
+                    class="w-full h-1 bg-gray-100 dark:bg-gray-900 rounded-lg appearance-none cursor-pointer accent-teal-500"
+                    @input="physicsAlpha = 1.0"
+                  />
+                </div>
+
+                <!-- Link Distance -->
+                <div class="space-y-1">
+                  <div class="flex justify-between text-[10px] font-bold">
+                    <span class="text-gray-500 dark:text-gray-400">Link Distance</span>
+                    <span class="font-mono text-gray-900 dark:text-white">{{ linkDistance }}px</span>
+                  </div>
+                  <input
+                    v-model.number="linkDistance"
+                    type="range"
+                    min="40"
+                    max="300"
+                    step="5"
+                    class="w-full h-1 bg-gray-100 dark:bg-gray-900 rounded-lg appearance-none cursor-pointer accent-teal-500"
+                    @input="physicsAlpha = 1.0"
+                  />
+                </div>
+
+                <!-- Gravity -->
+                <div class="space-y-1">
+                  <div class="flex justify-between text-[10px] font-bold">
+                    <span class="text-gray-500 dark:text-gray-400">Center Gravity</span>
+                    <span class="font-mono text-gray-900 dark:text-white">{{ gravityStrength.toFixed(3) }}</span>
+                  </div>
+                  <input
+                    v-model.number="gravityStrength"
+                    type="range"
+                    min="0.001"
+                    max="0.100"
+                    step="0.002"
+                    class="w-full h-1 bg-gray-100 dark:bg-gray-900 rounded-lg appearance-none cursor-pointer accent-teal-500"
+                    @input="physicsAlpha = 1.0"
+                  />
+                </div>
+
+                <!-- Spring Stiffness -->
+                <div class="space-y-1">
+                  <div class="flex justify-between text-[10px] font-bold">
+                    <span class="text-gray-500 dark:text-gray-400">Spring Stiffness</span>
+                    <span class="font-mono text-gray-900 dark:text-white">{{ springStrength.toFixed(3) }}</span>
+                  </div>
+                  <input
+                    v-model.number="springStrength"
+                    type="range"
+                    min="0.005"
+                    max="0.200"
+                    step="0.005"
+                    class="w-full h-1 bg-gray-100 dark:bg-gray-900 rounded-lg appearance-none cursor-pointer accent-teal-500"
+                    @input="physicsAlpha = 1.0"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <!-- Connection Types Legend -->
+            <div class="bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm space-y-3 shrink-0">
+              <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider flex items-center gap-1.5">
+                <Network class="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                <span>Connection Colors</span>
+              </h3>
+              
+              <div class="space-y-2.5 pt-1">
+                <div class="flex items-center justify-between text-[11px] font-bold">
+                  <div class="flex items-center gap-2">
+                    <span class="w-2.5 h-2.5 rounded bg-indigo-500 dark:bg-indigo-400"></span>
+                    <span class="text-gray-700 dark:text-gray-300">Incoming (IN)</span>
+                  </div>
+                  <span class="text-[9px] font-mono font-semibold text-gray-400 dark:text-gray-500">From</span>
+                </div>
+                
+                <div class="flex items-center justify-between text-[11px] font-bold">
+                  <div class="flex items-center gap-2">
+                    <span class="w-2.5 h-2.5 rounded bg-teal-500 dark:bg-teal-400"></span>
+                    <span class="text-gray-700 dark:text-gray-300">Outgoing (OUT)</span>
+                  </div>
+                  <span class="text-[9px] font-mono font-semibold text-gray-400 dark:text-gray-500">TO</span>
+                </div>
+
+                <div class="flex items-center justify-between text-[11px] font-bold">
+                  <div class="flex items-center gap-2">
+                    <span class="w-2.5 h-2.5 rounded bg-pink-500 dark:bg-pink-400"></span>
+                    <span class="text-gray-700 dark:text-gray-300">Two-way (BOTH)</span>
+                  </div>
+                  <span class="text-[9px] font-mono font-semibold text-gray-400 dark:text-gray-500">Bid</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Connections List -->
+            <div class="bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm space-y-3 shrink-0">
+              <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider flex items-center gap-1.5">
+                <Network class="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                <span>Connections List</span>
+              </h3>
+
+              <div v-if="selectedNetworkNode" class="space-y-3">
+                <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">
+                  Active ({{ networkEdges.filter(e => e.source === selectedNetworkNode?.id || e.target === selectedNetworkNode?.id).length }})
+                </h5>
+
+                <div class="max-h-[140px] overflow-y-auto space-y-1.5 pr-1 border border-transparent">
+                  <div 
+                    v-for="edge in networkEdges.filter(e => e.source === selectedNetworkNode?.id || e.target === selectedNetworkNode?.id)" 
+                    :key="edge.source + '-' + edge.target"
+                    class="p-2 bg-gray-50/70 dark:bg-gray-900/40 rounded-xl border border-gray-100 dark:border-gray-750 flex items-center justify-between text-xs font-semibold"
+                  >
+                    <span class="text-gray-600 dark:text-gray-400 truncate max-w-[120px]" :title="edge.source === selectedNetworkNode?.id ? edge.target : edge.source">
+                      {{ edge.source === selectedNetworkNode?.id ? edge.target : edge.source }}
+                    </span>
+                    <button
+                      @click="removeNetworkEdge(edge.source, edge.target)"
+                      class="p-1 text-gray-400 hover:text-red-500 transition-colors cursor-pointer"
+                      title="Remove link"
+                    >
+                      <Trash2 class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  
+                  <div 
+                    v-if="networkEdges.filter(e => e.source === selectedNetworkNode?.id || e.target === selectedNetworkNode?.id).length === 0"
+                    class="text-[10px] text-gray-400 dark:text-gray-500 italic p-4 text-center border border-dashed border-gray-200 dark:border-gray-750 rounded-2xl"
+                  >
+                    No active connections.
+                  </div>
+                </div>
+              </div>
+              <div v-else class="text-[10px] text-gray-400 dark:text-gray-500 italic p-4 text-center border border-dashed border-gray-200 dark:border-gray-750 rounded-2xl">
+                Select a node to view its active connections.
+              </div>
+            </div>
+
+          </div>
+
+          <!-- CENTER CANVAS GRAPH VIEWPORT -->
+          <div class="lg:col-span-6 lg:h-[1000px] h-[500px] flex flex-col relative bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 overflow-hidden shadow-sm">
+            
+            <!-- Canvas Container -->
+            <div ref="canvasContainerRef" class="w-full flex-1 relative min-h-[400px]">
+              <canvas
+                ref="canvasRef"
+                class="absolute inset-0 cursor-grab active:cursor-grabbing w-full h-full"
+                @mousedown="handleCanvasMouseDown"
+                @mousemove="handleCanvasMouseMove"
+                @mouseup="handleCanvasMouseUp"
+                @mouseleave="handleCanvasMouseUp"
+                @wheel="handleCanvasWheel"
+                @contextmenu.prevent
+              ></canvas>
+
+              <!-- Floating Control HUD Overlay -->
+              <div class="absolute top-4 left-4 flex flex-col gap-2 z-10">
+                <button
+                  @click="zoom = Math.min(zoom * 1.2, 5.0)"
+                  class="p-2.5 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-lg border border-gray-150 dark:border-gray-800 text-gray-600 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 transition-all"
+                  title="Zoom In"
+                >
+                  <ZoomIn class="h-4 w-4" />
+                </button>
+                <button
+                  @click="zoom = Math.max(zoom * 0.8, 0.05)"
+                  class="p-2.5 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-lg border border-gray-150 dark:border-gray-800 text-gray-600 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 transition-all"
+                  title="Zoom Out"
+                >
+                  <ZoomOut class="h-4 w-4" />
+                </button>
+                <button
+                  @click="resetGraphZoom"
+                  class="p-2.5 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-lg border border-gray-150 dark:border-gray-800 text-gray-600 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 transition-all"
+                  title="Reset Zoom & Center"
+                >
+                  <Maximize2 class="h-4 w-4" />
+                </button>
+                <button
+                  @click="clearNetworkGraph"
+                  class="p-2.5 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-lg border border-gray-150 dark:border-gray-800 text-red-500 hover:bg-red-50/20 transition-all"
+                  title="Clear Graph"
+                >
+                  <Trash2 class="h-4 w-4" />
+                </button>
+              </div>
+
+              <!-- HUD Bottom Info -->
+              <div class="absolute bottom-4 left-4 right-4 flex items-center justify-between pointer-events-none z-10">
+                <div class="px-3 py-1.5 bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm rounded-xl text-[9px] text-gray-400 dark:text-gray-500 font-bold border border-gray-150 dark:border-gray-800 uppercase tracking-wider">
+                  Zoom: {{ (zoom * 100).toFixed(0) }}% | Pan: ({{ panX.toFixed(0) }}, {{ panY.toFixed(0) }})
+                </div>
+                <div class="px-3 py-1.5 bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm rounded-xl text-[9px] text-gray-400 dark:text-gray-500 font-bold border border-gray-150 dark:border-gray-800 uppercase tracking-wider">
+                  Mouse: ({{ mouseX.toFixed(0) }}, {{ mouseY.toFixed(0) }})
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- RIGHT SIDEBAR: Entity Inspector -->
+          <div class="lg:col-span-4">
+            <div class="bg-white dark:bg-gray-800 p-6 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm lg:h-[1000px] h-full flex flex-col">
+              
+              <!-- Selected State -->
+              <div v-if="selectedNetworkNode" class="flex-1 flex flex-col min-h-0 justify-between space-y-4">
+                
+                <div class="flex-1 flex flex-col min-h-0 space-y-4">
+                  <!-- Header Details -->
+                  <div class="flex items-center gap-4 border-b border-gray-100 dark:border-gray-750 pb-5">
+                    <div class="relative shrink-0">
+                      <div 
+                        class="w-14 h-14 rounded-2xl flex items-center justify-center font-black text-white text-xl shadow-md"
+                        :style="{ backgroundColor: selectedNetworkNode.color }"
+                      >
+                        <img 
+                          v-if="selectedNetworkNode.avatarImg && selectedNetworkNode.avatarLoaded" 
+                          :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${selectedNetworkNode.id}`" 
+                          class="w-full h-full object-cover rounded-2xl" 
+                          alt="Avatar"
+                          referrerpolicy="no-referrer"
+                        />
+                        <span v-else>{{ selectedNetworkNode.displayName.charAt(0).toUpperCase() }}</span>
+                      </div>
+                      <span class="absolute -bottom-1.5 -right-1.5 px-2 py-0.5 bg-teal-500 text-white rounded-lg text-[8px] font-black uppercase tracking-wider">
+                        Active
+                      </span>
+                    </div>
+
+                    <div class="space-y-0.5 min-w-0">
+                      <h4 class="font-black text-gray-900 dark:text-white truncate text-sm">
+                        {{ selectedNetworkNode.displayName }}
+                      </h4>
+                      <p class="text-xs font-mono text-gray-400 dark:text-gray-500 truncate">
+                        @{{ selectedNetworkNode.id }}
+                      </p>
+                    </div>
+                  </div>
+
+                  <!-- Channel Metadata Display Area -->
+                  <div class="space-y-2">
+                    <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Channel Metadata</h5>
+                    
+                    <div v-if="isFetchingSelectedNodeMetadata" class="bg-teal-500/5 border border-teal-500/10 rounded-2xl p-4 flex items-center justify-center gap-2 text-[11px] text-teal-600 dark:text-teal-400 font-bold">
+                      <LoaderCircle class="h-4 w-4 animate-spin text-teal-500" />
+                      <span>Loading channel metadata...</span>
+                    </div>
+
+                    <div v-else-if="selectedNetworkNode.metadata" class="space-y-2.5">
+                      <div v-if="selectedNetworkNode.metadata.description || selectedNetworkNode.metadata.about" class="bg-gray-50/70 dark:bg-gray-900 border border-gray-100 dark:border-gray-750/30 rounded-2xl p-3 text-[11px] text-gray-600 dark:text-gray-300 whitespace-pre-wrap leading-relaxed max-h-[120px] overflow-y-auto">
+                        {{ selectedNetworkNode.metadata.description || selectedNetworkNode.metadata.about }}
+                      </div>
+                      <div v-else class="text-[11px] text-gray-400 dark:text-gray-500 italic px-1">
+                        No description available for this channel.
+                      </div>
+                      
+                      <div class="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                        <div v-if="selectedNetworkNode.metadata.subscribers || selectedNetworkNode.metadata.members || selectedNetworkNode.metadata.participants_count" class="bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-750/30 p-2.5 rounded-2xl flex flex-col justify-center">
+                          <span class="text-gray-400 dark:text-gray-500 font-bold uppercase text-[8px] tracking-wider">Members</span>
+                          <span class="text-gray-800 dark:text-gray-200 font-black text-xs mt-0.5">
+                            {{ (selectedNetworkNode.metadata.subscribers || selectedNetworkNode.metadata.members || selectedNetworkNode.metadata.participants_count).toLocaleString() }}
+                          </span>
+                        </div>
+                        
+                        <div class="bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-750/30 p-2.5 rounded-2xl flex flex-col justify-center">
+                          <span class="text-gray-400 dark:text-gray-500 font-bold uppercase text-[8px] tracking-wider">CDN Server</span>
+                          <span class="text-gray-800 dark:text-gray-200 font-black text-xs mt-0.5 truncate">
+                            {{ String(selectedNetworkNode.metadata.photo || '').match(/cdn(\d+)/) ? 'CDN ' + String(selectedNetworkNode.metadata.photo || '').match(/cdn(\d+)/)[1] : (selectedNetworkNode.metadata.photo ? 'Asset CDN' : 'None') }}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div v-else class="bg-gray-50/50 dark:bg-gray-900/40 border border-gray-150/50 dark:border-gray-750/20 rounded-2xl p-4 text-[10px] text-gray-400 dark:text-gray-500 italic text-center">
+                      No additional metadata loaded for this node.
+                    </div>
+                  </div>
+
+                  <!-- Channel Posts Feed -->
+                  <div class="flex-1 flex flex-col min-h-0 pt-4 border-t border-gray-100 dark:border-gray-750/50 space-y-3">
+                    <div class="flex items-center justify-between">
+                      <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest flex items-center gap-1.5">
+                        <Layers class="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                        <span>Recent Posts ({{ selectedNodePosts.length }})</span>
+                      </h5>
+                      <button 
+                        @click="async () => {
+                          if (!selectedNetworkNode) return;
+                          isFetchingSelectedNodePosts = true;
+                          try {
+                            const posts = await fetchChannelPosts(selectedNetworkNode.id, 25);
+                            selectedNodePosts.value = posts || [];
+                          } finally {
+                            isFetchingSelectedNodePosts = false;
+                          }
+                        }"
+                        class="p-1 rounded-lg text-gray-400 hover:text-teal-500 hover:bg-teal-50 dark:hover:bg-teal-900/20 transition-all cursor-pointer"
+                        title="Reload feed"
+                        :disabled="isFetchingSelectedNodePosts"
+                      >
+                        <RefreshCw class="h-3.5 w-3.5" :class="[isFetchingSelectedNodePosts ? 'animate-spin' : '']" />
+                      </button>
+                    </div>
+
+                    <!-- Loading State -->
+                    <div v-if="isFetchingSelectedNodePosts" class="bg-gray-50/55 dark:bg-gray-900/40 border border-gray-150/50 dark:border-gray-750/20 rounded-2xl p-6 flex flex-col items-center justify-center gap-2 text-xs text-gray-500">
+                      <LoaderCircle class="h-5 w-5 animate-spin text-teal-500" />
+                      <span class="font-bold">Streaming channel posts...</span>
+                    </div>
+
+                    <!-- Empty Feed state -->
+                    <div v-else-if="selectedNodePosts.length === 0" class="bg-gray-50/30 dark:bg-gray-900/20 border border-dashed border-gray-200 dark:border-gray-750 p-6 text-center rounded-2xl text-[11px] text-gray-400 dark:text-gray-500 italic">
+                      No posts retrieved or channel is empty. Click the reload icon above to fetch.
+                    </div>
+
+                    <!-- Scrollable posts stack -->
+                    <div v-else class="space-y-3 flex-1 overflow-y-auto pr-1 border border-transparent min-h-0">
+                      <div 
+                        v-for="(post, index) in selectedNodePosts" 
+                        :key="post.key || index"
+                        class="p-3.5 bg-gray-50/70 dark:bg-gray-900/40 border border-gray-100/60 dark:border-gray-750 rounded-2xl hover:border-gray-250 dark:hover:border-gray-700/80 transition-all flex flex-col gap-2 relative overflow-hidden"
+                      >
+                        <!-- Header with meta info -->
+                        <div class="space-y-1.5 pb-1 border-b border-gray-100/60 dark:border-gray-750/30 relative z-10">
+                          <div class="flex items-center justify-between text-[10px] font-semibold text-gray-400 dark:text-gray-500">
+                            <span class="font-mono bg-white dark:bg-gray-800 border border-gray-150/50 dark:border-gray-700/50 px-1.5 py-0.5 rounded text-[8px]">
+                              ID: {{ post.key ? post.key.split('.').pop() : (index + 1) }}
+                            </span>
+                            <span class="font-medium">
+                              {{ formatDate(post.data?.date) }}
+                            </span>
+                          </div>
+                          <div class="flex items-center gap-1.5">
+                            <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 border border-blue-100/40 dark:border-blue-900/20 truncate max-w-[120px]" :title="post.data?.author || post.data?.user || 'Telegram User'">
+                              {{ post.data?.author || post.data?.user || "Telegram User" }}
+                            </span>
+                            <span
+                              v-if="getToolName"
+                              class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full"
+                              :class="
+                                getToolName(post) === 'TGB'
+                                  ? 'bg-purple-50 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400 border border-purple-100/50 dark:border-purple-900/10'
+                                  : 'bg-gray-50 dark:bg-gray-900 text-gray-450 border border-gray-150/40 dark:border-gray-800'
+                              "
+                            >
+                              {{ getToolName(post) }}
+                            </span>
+                            <span v-if="getUsername" class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full bg-teal-50 dark:bg-teal-950/30 text-teal-650 dark:text-teal-400 border border-teal-100/40 dark:border-teal-900/20 truncate max-w-[150px]" :title="getUsername(post)">
+                              {{ getUsername(post) }}
+                            </span>
+                          </div>
+                        </div>
+
+                        <!-- Forward info subcard if any -->
+                        <div v-if="post.data?.forward_url" class="border-l-2 border-indigo-400 bg-indigo-55/[0.02] dark:bg-indigo-950/[0.1] p-2 rounded-r-xl text-[10px] text-gray-500 dark:text-gray-450 italic relative z-10">
+                          <span class="font-black uppercase text-[8px] text-indigo-500 block mb-0.5 tracking-wider">Forwarded Message</span>
+                          {{ getForwardInfo(post)?.text || post.data.forward_url }}
+                        </div>
+
+                        <!-- Post text content -->
+                        <div v-if="post.data?.content" class="text-xs text-gray-700 dark:text-gray-200 leading-relaxed whitespace-pre-wrap break-words relative z-10 font-medium">
+                          {{ post.data.content }}
+                        </div>
+                        <div v-else-if="!(post.data?.photos && post.data.photos.length > 0) && !(post.data?.documents && post.data.documents.length > 0 && post.data.documents[0].mime_type && post.data.documents[0].mime_type.startsWith('image/')) && !(post.data?.videos && post.data.videos.length > 0)" class="text-xs text-gray-400 italic relative z-10">
+                          Media or metadata post with no text.
+                        </div>
+
+                        <!-- Post Media Embeds -->
+                        <!-- 1. Photos -->
+                        <div
+                          v-if="post.data?.photos && post.data.photos.length > 0"
+                          class="my-1.5 rounded-xl overflow-hidden shadow-xs border border-gray-150/40 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center relative z-10"
+                          @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`)"
+                        >
+                          <img
+                            :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`"
+                            class="w-full h-auto max-h-[220px] object-cover mx-auto transition-transform duration-500 hover:scale-[1.02]"
+                            alt="Post Photo"
+                            referrerpolicy="no-referrer"
+                          />
+                        </div>
+
+                        <!-- 2. Document Images -->
+                        <div
+                          v-if="post.data?.documents && post.data.documents.length > 0 && post.data.documents[0].mime_type && post.data.documents[0].mime_type.startsWith('image/')"
+                          class="my-1.5 rounded-xl overflow-hidden shadow-xs border border-gray-150/40 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center relative z-10"
+                          @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`)"
+                        >
+                          <img
+                            :src="`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`"
+                            class="w-full h-auto max-h-[220px] object-cover mx-auto transition-transform duration-500 hover:scale-[1.02]"
+                            alt="Post Document Image"
+                            referrerpolicy="no-referrer"
+                          />
+                        </div>
+
+                        <!-- 3. Videos -->
+                        <div
+                          v-if="post.data?.videos && post.data.videos.length > 0"
+                          class="my-1.5 rounded-xl overflow-hidden border border-gray-150/40 dark:border-gray-800 bg-black shadow-xs relative z-10"
+                        >
+                          <video
+                            controls
+                            class="w-full h-auto max-h-[220px] mx-auto"
+                          >
+                            <source :src="getVideoUrl(post)" type="video/mp4" />
+                          </video>
+                        </div>
+
+                        <!-- 4. Link Preview Image -->
+                        <div
+                          v-if="post.data?.linkPreview && post.data.linkPreview.image"
+                          class="my-1.5 rounded-xl overflow-hidden border border-gray-150/40 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/30 p-2 flex flex-col gap-2 relative z-10"
+                        >
+                          <div 
+                            class="rounded-lg overflow-hidden cursor-zoom-in max-h-[140px] flex items-center justify-center"
+                            @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)"
+                          >
+                            <img
+                              :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`"
+                              class="w-full h-auto object-cover transition-transform duration-500 hover:scale-[1.02]"
+                              alt="Link Preview Image"
+                              referrerpolicy="no-referrer"
+                            />
+                          </div>
+                          <div v-if="post.data.linkPreview.title" class="space-y-0.5">
+                            <span class="text-[9px] font-bold text-teal-600 dark:text-teal-400 uppercase tracking-wider block" v-if="post.data.linkPreview.site_name">
+                              {{ post.data.linkPreview.site_name }}
+                            </span>
+                            <a
+                              :href="post.data.linkPreview.href || post.data.linkPreview.url"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              class="text-[11px] font-bold text-gray-800 dark:text-gray-200 hover:text-teal-600 dark:hover:text-teal-400 hover:underline line-clamp-1 leading-snug block"
+                            >
+                              {{ post.data.linkPreview.title }}
+                            </a>
+                            <p v-if="post.data.linkPreview.description" class="text-[10px] text-gray-500 dark:text-gray-400 line-clamp-2 leading-normal">
+                              {{ post.data.linkPreview.description }}
+                            </p>
+                          </div>
+                        </div>
+
+                        <!-- Action controls & Views / Reactions footer -->
+                        <div class="flex items-center justify-between pt-2 border-t border-gray-100/60 dark:border-gray-750/60 mt-1 relative z-10">
+                          <div class="flex items-center gap-2">
+                            <span v-if="post.data?.views != null" class="inline-flex items-center text-[9px] text-gray-400 dark:text-gray-500 font-bold">
+                              <Users class="h-3 w-3 mr-1" />
+                              {{ formatViews(post.data.views) }}
+                            </span>
+                            
+                            <!-- Post Reactions micro container -->
+                            <div v-if="post.data?.reactions && getParsedReactions(post.data.reactions).length > 0" class="flex items-center gap-1">
+                              <span 
+                                v-for="(react, rIdx) in getParsedReactions(post.data.reactions).slice(0, 3)" 
+                                :key="rIdx"
+                                class="inline-flex items-center text-[9px] px-1 py-0.5 rounded bg-white dark:bg-gray-800 border border-gray-150/40 dark:border-gray-700/40"
+                              >
+                                <span v-html="react.emoji"></span>
+                                <span class="ml-0.5 text-gray-500 dark:text-gray-400 font-mono text-[8px]">{{ react.count }}</span>
+                              </span>
+                            </div>
+                          </div>
+
+                          <div class="flex items-center gap-1.5">
+                            <button
+                              @click.stop="addToWorkspaceFromPost(post)"
+                              class="p-1 rounded bg-white dark:bg-gray-800 border border-gray-150 dark:border-gray-750 text-gray-500 hover:text-teal-500 dark:text-gray-400 dark:hover:text-teal-400 transition-colors cursor-pointer"
+                              title="Add to Workspace analysis"
+                            >
+                              <Layers class="h-3.5 w-3.5" />
+                            </button>
+                            <a
+                              v-if="post.url || post.link"
+                              :href="post.url || post.link"
+                              target="_blank"
+                              class="p-1 rounded bg-teal-50/70 dark:bg-teal-950/40 border border-teal-100 dark:border-teal-900/30 text-teal-600 dark:text-teal-400 hover:bg-teal-100 dark:hover:bg-teal-900/60 transition-colors cursor-pointer"
+                              title="Join original post on Telegram"
+                            >
+                              <ExternalLink class="h-3.5 w-3.5" />
+                            </a>
+                          </div>
+                        </div>
+
+                      </div>
+
+                      <!-- Infinite Scroll Sentinel / Load More Status Indicator -->
+                      <div ref="selectedNodeSentinelRef" class="pt-4 pb-6 flex flex-col items-center justify-center border-t border-gray-100/30 dark:border-gray-750/30">
+                        <div v-if="isLoadingMoreSelectedNodePosts" class="flex items-center gap-2 text-xs font-semibold text-teal-600 dark:text-teal-400">
+                          <Loader2 class="w-4 h-4 animate-spin text-teal-500" />
+                          <span>Loading older posts...</span>
+                        </div>
+                        <button
+                          v-else
+                          @click="loadMoreSelectedNodePosts"
+                          class="px-4 py-2 bg-teal-50 dark:bg-teal-950/40 hover:bg-teal-150 dark:hover:bg-teal-900 border border-teal-100 dark:border-teal-900/40 rounded-xl text-xs font-bold text-teal-600 dark:text-teal-400 transition-all flex items-center gap-1.5 cursor-pointer shadow-sm hover:shadow"
+                        >
+                          <ChevronDown class="w-3.5 h-3.5" />
+                          <span>Load More Posts</span>
+                        </button>
+                      </div>
+
+                    </div>
+                  </div>
+
+                </div>
+
+                <!-- Footer Actions -->
+                <button
+                  @click="removeNetworkNode(selectedNetworkNode.id)"
+                  class="w-full py-3 bg-red-500/10 hover:bg-red-500 text-red-600 hover:text-white rounded-2xl text-xs font-black transition-all flex items-center justify-center gap-1.5"
+                >
+                  <Trash2 class="h-4 w-4" />
+                  Prune Node from Network
+                </button>
+
+              </div>
+
+              <!-- Unselected State -->
+              <div v-else class="flex-1 flex flex-col items-center justify-center text-center p-6 space-y-4">
+                <div class="p-4 bg-gray-50 dark:bg-gray-900 rounded-3xl border border-gray-100 dark:border-gray-750 text-gray-400 dark:text-gray-500">
+                  <Network class="h-8 w-8" />
+                </div>
+                <div class="space-y-1">
+                  <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">No Node Selected</h4>
+                  <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold max-w-[200px] leading-relaxed">
+                    Click on a node on the canvas layout to view profile statistics, manage connections, or jump to its parsed message streams.
+                  </p>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+        </div>
+
       </div>
 
        <!-- Profile Tab -->
