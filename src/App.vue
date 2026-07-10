@@ -180,16 +180,92 @@ const onMouseUp = () => {
     isChatResizing.value = false;
 };
 
+const handleGlobalKeyDown = (e: KeyboardEvent) => {
+    // 1. Ctrl/Cmd + K shortcut for quick channel search
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        activeTab.value = 'explorer';
+        // Focus the search input with a short timeout to ensure tab transition is handled
+        setTimeout(() => {
+            const input = document.getElementById('explorer-search-input') as HTMLInputElement | null;
+            if (input) {
+                input.focus();
+                input.select();
+                toastType.value = "info";
+                toastMessage.value = "Focusing Explorer Search";
+                setTimeout(() => {
+                    if (toastMessage.value === "Focusing Explorer Search") {
+                        toastMessage.value = "";
+                    }
+                }, 1500);
+            }
+        }, 50);
+        return;
+    }
+
+    // 2. Tab navigation between major UI segments
+    if (e.key === 'Tab') {
+        // Only trigger tab navigation if not focused on input/textarea/select/contenteditable
+        const activeEl = document.activeElement;
+        const isEditable = activeEl && (
+            activeEl.tagName === 'INPUT' || 
+            activeEl.tagName === 'TEXTAREA' || 
+            activeEl.tagName === 'SELECT' || 
+            activeEl.getAttribute('contenteditable') === 'true'
+        );
+        if (!isEditable) {
+            e.preventDefault();
+            const tabSequence: ("channel" | "explorer" | "search" | "listen" | "auto-finding" | "workspace" | "network" | "profile")[] = [
+                "channel", "explorer", "search", "listen", "auto-finding", "workspace", "network"
+            ];
+            if (loginToken.value) {
+                tabSequence.push("profile");
+            }
+            
+            const currentIndex = tabSequence.indexOf(activeTab.value);
+            let nextIndex = 0;
+            if (e.shiftKey) {
+                // Shift+Tab -> Prev Tab
+                nextIndex = currentIndex - 1;
+                if (nextIndex < 0) {
+                    nextIndex = tabSequence.length - 1;
+                }
+            } else {
+                // Tab -> Next Tab
+                nextIndex = currentIndex + 1;
+                if (nextIndex >= tabSequence.length) {
+                    nextIndex = 0;
+                }
+            }
+            
+            const nextTab = tabSequence[nextIndex];
+            activeTab.value = nextTab;
+            
+            // Show toast indicating tab navigation
+            const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1).replace('-', ' ');
+            toastType.value = "info";
+            toastMessage.value = `Switched to tab: ${capitalize(nextTab)}`;
+            setTimeout(() => {
+                if (toastMessage.value === `Switched to tab: ${capitalize(nextTab)}`) {
+                    toastMessage.value = "";
+                }
+            }, 1200);
+        }
+    }
+};
+
 onMounted(() => {
     document.addEventListener('click', handleClickOutside);
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
+    document.addEventListener('keydown', handleGlobalKeyDown);
 });
 
 onUnmounted(() => {
     document.removeEventListener('click', handleClickOutside);
     document.removeEventListener('mousemove', onMouseMove);
     document.removeEventListener('mouseup', onMouseUp);
+    document.removeEventListener('keydown', handleGlobalKeyDown);
 });
 
 const renderedMarkdown = computed(() => md.render(analysisResult.value));
@@ -7975,7 +8051,6 @@ watch(activeTab, (newTab) => {
       }
 
       if (animationFrameId === null) {
-        physicsAlpha.value = 1.0;
         physicsTick();
       }
     });
@@ -9048,6 +9123,7 @@ onUnmounted(() => {
                   <Layout class="h-5 w-5 text-gray-400" />
                 </div>
                 <input
+                  id="explorer-search-input"
                   v-model="channelName"
                   @focus="isInputFocused = true"
                   @blur="handleBlur"
@@ -14486,33 +14562,58 @@ onUnmounted(() => {
                 
                 <div class="flex-1 flex flex-col min-h-0 space-y-4">
                   <!-- Header Details -->
-                  <div class="flex items-center gap-4 border-b border-gray-100 dark:border-gray-750 pb-5">
-                    <div class="relative shrink-0">
-                      <div 
-                        class="w-14 h-14 rounded-2xl flex items-center justify-center font-black text-white text-xl shadow-md"
-                        :style="{ backgroundColor: selectedNetworkNode.color }"
-                      >
-                        <img 
-                          v-if="selectedNetworkNode.avatarImg && selectedNetworkNode.avatarLoaded" 
-                          :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${selectedNetworkNode.id}`" 
-                          class="w-full h-full object-cover rounded-2xl" 
-                          alt="Avatar"
-                          referrerpolicy="no-referrer"
-                        />
-                        <span v-else>{{ selectedNetworkNode.displayName.charAt(0).toUpperCase() }}</span>
+                  <div class="flex items-center justify-between gap-4 border-b border-gray-100 dark:border-gray-750 pb-5">
+                    <div class="flex items-center gap-4 min-w-0 flex-1">
+                      <div class="relative shrink-0">
+                        <div 
+                          class="w-14 h-14 rounded-2xl flex items-center justify-center font-black text-white text-xl shadow-md"
+                          :style="{ backgroundColor: selectedNetworkNode.color }"
+                        >
+                          <img 
+                            v-if="selectedNetworkNode.avatarImg && selectedNetworkNode.avatarLoaded" 
+                            :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${selectedNetworkNode.id}`" 
+                            class="w-full h-full object-cover rounded-2xl" 
+                            alt="Avatar"
+                            referrerpolicy="no-referrer"
+                          />
+                          <span v-else>{{ selectedNetworkNode.displayName.charAt(0).toUpperCase() }}</span>
+                        </div>
+                        <span class="absolute -bottom-1.5 -right-1.5 px-2 py-0.5 bg-teal-500 text-white rounded-lg text-[8px] font-black uppercase tracking-wider">
+                          Active
+                        </span>
                       </div>
-                      <span class="absolute -bottom-1.5 -right-1.5 px-2 py-0.5 bg-teal-500 text-white rounded-lg text-[8px] font-black uppercase tracking-wider">
-                        Active
-                      </span>
+
+                      <div class="space-y-0.5 min-w-0 flex-1">
+                        <h4 class="font-black text-gray-900 dark:text-white truncate text-sm">
+                          {{ selectedNetworkNode.displayName }}
+                        </h4>
+                        <p class="text-xs font-mono text-gray-400 dark:text-gray-500 truncate">
+                          @{{ selectedNetworkNode.id }}
+                        </p>
+                      </div>
                     </div>
 
-                    <div class="space-y-0.5 min-w-0">
-                      <h4 class="font-black text-gray-900 dark:text-white truncate text-sm">
-                        {{ selectedNetworkNode.displayName }}
-                      </h4>
-                      <p class="text-xs font-mono text-gray-400 dark:text-gray-500 truncate">
-                        @{{ selectedNetworkNode.id }}
-                      </p>
+                    <!-- Action Buttons Group -->
+                    <div class="flex items-center gap-2 shrink-0">
+                      <!-- Listen Button -->
+                      <button
+                        @click="addChannelToListenDirectory(selectedNetworkNode.displayName, selectedNetworkNode.id)"
+                        class="shrink-0 p-2 bg-purple-50/75 dark:bg-purple-950/40 hover:bg-purple-100 dark:hover:bg-purple-900/60 border border-purple-100 dark:border-purple-900/30 text-purple-600 dark:text-purple-400 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 font-bold text-[11px] shadow-sm hover:shadow"
+                        title="Add to Listen Directory"
+                      >
+                        <Radio class="h-3.5 w-3.5" />
+                        <span>Listen</span>
+                      </button>
+
+                      <!-- Jump to Explorer Button -->
+                      <button
+                        @click="activeTab = 'explorer'; channelName = selectedNetworkNode.id; searchChannel()"
+                        class="shrink-0 p-2 bg-teal-50/75 dark:bg-teal-950/40 hover:bg-teal-100 dark:hover:bg-teal-900/60 border border-teal-100 dark:border-teal-900/30 text-teal-600 dark:text-teal-400 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 font-bold text-[11px] shadow-sm hover:shadow"
+                        title="Jump to Explorer & Search"
+                      >
+                        <Search class="h-3.5 w-3.5" />
+                        <span>Explore</span>
+                      </button>
                     </div>
                   </div>
 
