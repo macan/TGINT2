@@ -215,8 +215,8 @@ const handleGlobalKeyDown = (e: KeyboardEvent) => {
         );
         if (!isEditable) {
             e.preventDefault();
-            const tabSequence: ("channel" | "explorer" | "search" | "listen" | "auto-finding" | "workspace" | "network" | "profile")[] = [
-                "channel", "explorer", "search", "listen", "auto-finding", "workspace", "network"
+            const tabSequence: ("channel" | "explorer" | "network" | "search" | "listen" | "auto-finding" | "workspace" |  "profile")[] = [
+                "channel", "explorer", "search", "network", "listen", "auto-finding", "workspace"
             ];
             if (loginToken.value) {
                 tabSequence.push("profile");
@@ -1298,7 +1298,7 @@ const showBackToTop = ref(false);
 const shareCardPost = ref<any>(null);
 const isShareCardView = ref(false);
 const avatarLoadError = ref(false);
-const activeTab = ref<"explorer" | "search" | "listen" | "monitor" | "auto-finding" | "workspace" | "network" | "profile" | "channel">("explorer");
+const activeTab = ref<"explorer" | "search" | "network" | "listen" | "monitor" | "auto-finding" | "workspace" | "profile" | "channel">("explorer");
 const channels = ref<any[]>([]);
 const activeChannelOrUser = ref<"channel" | "user">("channel");
 const isLoadingChannels = ref(false);
@@ -8611,7 +8611,24 @@ onUnmounted(() => {
                 activeTab === 'search' ? 'scale-110' : '',
               ]"
             />
-            Global Search
+            Search
+          </button>
+          <button
+            @click="activeTab = 'network'"
+            :class="[
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
+              activeTab === 'network'
+                ? 'bg-white dark:bg-gray-700 text-teal-600 dark:text-teal-400 shadow-md shadow-teal-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
+                : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+            ]"
+          >
+            <Network
+              :class="[
+                'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
+                activeTab === 'network' ? 'scale-110' : '',
+              ]"
+            />
+            Network
           </button>
           <button
             @click="activeTab = 'listen'"
@@ -8663,23 +8680,6 @@ onUnmounted(() => {
               ]"
             />
             Workspace
-          </button>
-          <button
-            @click="activeTab = 'network'"
-            :class="[
-              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
-              activeTab === 'network'
-                ? 'bg-white dark:bg-gray-700 text-teal-600 dark:text-teal-400 shadow-md shadow-teal-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
-                : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
-            ]"
-          >
-            <Network
-              :class="[
-                'h-3.5 w-3.5 sm:h-4 sm:w-4 mr-1.5 sm:mr-2 transition-transform duration-300',
-                activeTab === 'network' ? 'scale-110' : '',
-              ]"
-            />
-            Network
           </button>
           <button
             v-show="loginToken"
