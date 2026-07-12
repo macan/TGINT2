@@ -7218,6 +7218,41 @@ let canvasResizeObserver: ResizeObserver | null = null;
 const mouseX = ref(0);
 const mouseY = ref(0);
 
+// Helper to calculate node radius based on metadata member count
+const getNodeRadius = (isCenter: boolean, metadata?: any): number => {
+  if (isCenter) return 32;
+  const defaultRadius = 20;
+  if (!metadata) return defaultRadius;
+
+  const count = Number(metadata.subscribers || metadata.members || metadata.participants_count || 0);
+  if (count <= 0) return defaultRadius;
+
+  const minCount = 100;
+  const maxCount = 5000000;
+  const clampedCount = Math.max(minCount, Math.min(count, maxCount));
+  const logMin = Math.log10(minCount);
+  const logMax = Math.log10(maxCount);
+  const logVal = Math.log10(clampedCount);
+
+  const minRadius = 20;
+  const maxRadius = 45;
+  const pct = (logVal - logMin) / (logMax - logMin);
+  return Math.round(minRadius + pct * (maxRadius - minRadius));
+};
+
+// Helper to safely get the first unicode character (even if it's an emoji)
+const getSafeInitial = (name?: string): string => {
+  if (!name) return "?";
+  const trimmed = name.trim();
+  if (!trimmed) return "?";
+  try {
+    const chars = [...trimmed];
+    return chars.length > 0 ? chars[0].toUpperCase() : "?";
+  } catch (e) {
+    return trimmed.charAt(0).toUpperCase() || "?";
+  }
+};
+
 // Helper for generating initial graph nodes
 const generateColorFromId = (id: string): string => {
   let hash = 0;
@@ -7251,6 +7286,7 @@ const updateNodesMetadataInBatches = async (nodeIds: string[]) => {
             targetNode.name = data.name || data.title || id;
             targetNode.displayName = data.title || id;
             targetNode.metadata = data;
+            targetNode.r = getNodeRadius(targetNode.isCenter, data);
           }
         }
       } catch (err) {
@@ -7423,7 +7459,7 @@ const addNetworkNode = async (nameInput: string) => {
       y: refY + Math.sin(angle) * radius,
       vx: 0,
       vy: 0,
-      r: isFirstNode ? 32 : 24,
+      r: getNodeRadius(isFirstNode, data),
       color: generateColorFromId(nodeId),
       isCenter: isFirstNode,
       avatarLoaded: false,
@@ -7482,7 +7518,7 @@ const addNetworkNode = async (nameInput: string) => {
       y: refY + Math.sin(angle) * radius,
       vx: 0,
       vy: 0,
-      r: isFirstNode ? 32 : 24,
+      r: getNodeRadius(isFirstNode),
       color: generateColorFromId(cleanName),
       isCenter: isFirstNode,
       avatarLoaded: false,
@@ -7859,7 +7895,7 @@ const drawNetworkGraph = () => {
       ctx.font = `bold ${Math.floor(node.r * 0.85)}px sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      const char = (node.displayName || node.name || "?").charAt(0).toUpperCase();
+      const char = getSafeInitial(node.displayName || node.name);
       ctx.fillText(char, 0, 0);
     }
 
@@ -8139,7 +8175,7 @@ onUnmounted(() => {
                 v-else
                 class="w-full h-full bg-gradient-to-tr from-teal-500/10 to-emerald-500/15 flex items-center justify-center text-teal-600 dark:text-teal-450 font-black text-xl uppercase"
               >
-                {{ (shareCardPost.data?.author || shareCardPost.data?.user || 'T').charAt(0) }}
+                {{ getSafeInitial(shareCardPost.data?.author || shareCardPost.data?.user || 'T') }}
               </div>
             </div>
             
@@ -14576,7 +14612,7 @@ onUnmounted(() => {
                             alt="Avatar"
                             referrerpolicy="no-referrer"
                           />
-                          <span v-else>{{ selectedNetworkNode.displayName.charAt(0).toUpperCase() }}</span>
+                          <span v-else>{{ getSafeInitial(selectedNetworkNode.displayName) }}</span>
                         </div>
                         <span class="absolute -bottom-1.5 -right-1.5 px-2 py-0.5 bg-teal-500 text-white rounded-lg text-[8px] font-black uppercase tracking-wider">
                           Active
