@@ -3067,9 +3067,10 @@ const fetchChannelDates = async (nodeId: string) => {
 const fetchChannelPosts = async (nodeId: string, atMost = 100, startId = 0) => {
     try {
         const firstNr = atMost > 0? Math.min(atMost + 5, 100) : 100;
-        let firstCallUrl = `https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}`;
+        const cacheBuster = Date.now();
+        let firstCallUrl = `https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}&_t=${cacheBuster}`;
         if (startId > 0) {
-          firstCallUrl = `https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}&b=${startId}`;
+          firstCallUrl = `https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}&b=${startId}&_t=${cacheBuster}`;
         }
         let response = await fetch(firstCallUrl);
         if (!response.ok) throw new Error('Failed to fetch');
@@ -3095,7 +3096,7 @@ const fetchChannelPosts = async (nodeId: string, atMost = 100, startId = 0) => {
 
         // iterate to the first post
         while (min > 1 && allPosts.length < atMost) {
-          response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}&b=${min}`);
+          response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}&b=${min}&_t=${cacheBuster}`);
           if (!response.ok) throw new Error('Failed to fetch ' + nodeId + ' b=' + min);
           data = await response.json();
           posts = data || [];
@@ -7113,6 +7114,58 @@ watch(selectedNetworkNode, async (newNode) => {
   }
 });
 
+const reloadSelectedNodeFeed = async () => {
+  if (!selectedNetworkNode.value) return;
+  isFetchingSelectedNodePosts.value = true;
+  try {
+    const posts = await fetchChannelPosts(selectedNetworkNode.value.id, 25);
+    selectedNodePosts.value = posts || [];
+  } catch (err) {
+    console.error("Failed to reload selected node posts:", err);
+  } finally {
+    isFetchingSelectedNodePosts.value = false;
+  }
+};
+
+const toggleNodePin = (node: GraphNode) => {
+  node.isPinned = !node.isPinned;
+  if (node.isPinned) {
+    node.fx = node.x;
+    node.fy = node.y;
+    toastMessage.value = `Pinned node to position: ${node.displayName}`;
+    toastType.value = "info";
+  } else {
+    node.fx = null;
+    node.fy = null;
+    toastMessage.value = `Unpinned node: ${node.displayName}`;
+    toastType.value = "info";
+  }
+  physicsAlpha.value = Math.max(physicsAlpha.value, 0.15);
+  setTimeout(() => { if (toastMessage.value.includes(node.displayName)) toastMessage.value = ""; }, 2500);
+};
+
+const unpinAllNodes = () => {
+  networkNodes.value.forEach(node => {
+    node.isPinned = false;
+    node.fx = null;
+    node.fy = null;
+  });
+  physicsAlpha.value = 1.0;
+  toastMessage.value = "Released all pinned nodes!";
+  toastType.value = "info";
+  setTimeout(() => { if (toastMessage.value.includes("Released")) toastMessage.value = ""; }, 2500);
+};
+
+const handleCanvasDblClick = (e: MouseEvent) => {
+  const wx = (e.offsetX - panX.value) / zoom.value;
+  const wy = (e.offsetY - panY.value) / zoom.value;
+
+  const clickedNode = networkNodes.value.find(n => Math.hypot(n.x - wx, n.y - wy) <= n.r);
+  if (clickedNode) {
+    toggleNodePin(clickedNode);
+  }
+};
+
 const isLoadingMoreSelectedNodePosts = ref(false);
 const selectedNodeSentinelRef = ref<HTMLElement | null>(null);
 let selectedNodeInfiniteScrollObserver: IntersectionObserver | null = null;
@@ -7907,6 +7960,9 @@ const drawNetworkGraph = () => {
     } else if (isHovered) {
       ctx.strokeStyle = isDark.value ? "#ffffff" : "#111827";
       ctx.lineWidth = 2;
+    } else if (node.isPinned) {
+      ctx.strokeStyle = "#f59e0b"; // amber-500
+      ctx.lineWidth = 2.5;
     } else {
       ctx.strokeStyle = isDark.value ? "rgba(255,255,255,0.15)" : "rgba(0,0,0,0.1)";
       ctx.lineWidth = 1.5;
@@ -7918,7 +7974,7 @@ const drawNetworkGraph = () => {
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     
-    const label = node.displayName || node.name;
+    const label = (node.isPinned ? "📌 " : "") + (node.displayName || node.name);
     const textWidth = ctx.measureText(label).width;
     ctx.fillStyle = isDark.value ? "rgba(17, 24, 39, 0.85)" : "rgba(255, 255, 255, 0.85)";
     ctx.fillRect(-textWidth/2 - 4, node.r + 5, textWidth + 8, 16);
@@ -8022,7 +8078,8 @@ const handleCanvasMouseMove = (e: MouseEvent) => {
     draggedNetworkNode.value.fy = wy;
     draggedNetworkNode.value.x = wx;
     draggedNetworkNode.value.y = wy;
-    physicsAlpha.value = 1.0;
+    draggedNetworkNode.value.isPinned = true;
+    physicsAlpha.value = Math.max(physicsAlpha.value, 0.15);
   } else if (isPanning.value) {
     panX.value = e.offsetX - canvasStartPanX;
     panY.value = e.offsetY - canvasStartPanY;
@@ -8034,8 +8091,9 @@ const handleCanvasMouseMove = (e: MouseEvent) => {
 
 const handleCanvasMouseUp = () => {
   if (isDraggingNode.value && draggedNetworkNode.value) {
-    draggedNetworkNode.value.fx = null;
-    draggedNetworkNode.value.fy = null;
+    draggedNetworkNode.value.fx = draggedNetworkNode.value.x;
+    draggedNetworkNode.value.fy = draggedNetworkNode.value.y;
+    draggedNetworkNode.value.isPinned = true;
   }
   isDraggingNode.value = false;
   isPanning.value = false;
@@ -14541,6 +14599,7 @@ onUnmounted(() => {
                 @mouseup="handleCanvasMouseUp"
                 @mouseleave="handleCanvasMouseUp"
                 @wheel="handleCanvasWheel"
+                @dblclick="handleCanvasDblClick"
                 @contextmenu.prevent
               ></canvas>
 
@@ -14566,6 +14625,14 @@ onUnmounted(() => {
                   title="Reset Zoom & Center"
                 >
                   <Maximize2 class="h-4 w-4" />
+                </button>
+                <button
+                  v-if="networkNodes.some(n => n.isPinned)"
+                  @click="unpinAllNodes"
+                  class="p-2.5 bg-amber-50/95 dark:bg-amber-950/95 backdrop-blur-md rounded-xl shadow-lg border border-amber-200 dark:border-amber-800 text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 transition-all"
+                  title="Unpin All Nodes (release fixed layout positions)"
+                >
+                  <Pin class="h-4 w-4 fill-amber-500" />
                 </button>
                 <button
                   @click="clearNetworkGraph"
@@ -14631,6 +14698,21 @@ onUnmounted(() => {
 
                     <!-- Action Buttons Group -->
                     <div class="flex items-center gap-2 shrink-0">
+                      <!-- Pin/Unpin Button -->
+                      <button
+                        @click="toggleNodePin(selectedNetworkNode)"
+                        :class="[
+                          'shrink-0 p-2 border rounded-xl transition-all cursor-pointer flex items-center gap-1.5 font-bold text-[11px] shadow-sm hover:shadow',
+                          selectedNetworkNode.isPinned
+                            ? 'bg-amber-50/75 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/30 text-amber-600 dark:text-amber-400'
+                            : 'bg-gray-50/75 dark:bg-gray-850/40 border-gray-200 dark:border-gray-750/30 text-gray-600 dark:text-gray-400'
+                        ]"
+                        title="Toggle node layout pin (keeps its exact position)"
+                      >
+                        <Pin class="h-3.5 w-3.5" :class="[selectedNetworkNode.isPinned ? 'fill-amber-500 text-amber-500' : '']" />
+                        <span>{{ selectedNetworkNode.isPinned ? 'Pinned' : 'Pin' }}</span>
+                      </button>
+
                       <!-- Listen Button -->
                       <button
                         @click="addChannelToListenDirectory(selectedNetworkNode.displayName, selectedNetworkNode.id)"
@@ -14700,16 +14782,7 @@ onUnmounted(() => {
                         <span>Recent Posts ({{ selectedNodePosts.length }})</span>
                       </h5>
                       <button 
-                        @click="async () => {
-                          if (!selectedNetworkNode) return;
-                          isFetchingSelectedNodePosts = true;
-                          try {
-                            const posts = await fetchChannelPosts(selectedNetworkNode.id, 25);
-                            selectedNodePosts.value = posts || [];
-                          } finally {
-                            isFetchingSelectedNodePosts = false;
-                          }
-                        }"
+                        @click="reloadSelectedNodeFeed"
                         class="p-1 rounded-lg text-gray-400 hover:text-teal-500 hover:bg-teal-50 dark:hover:bg-teal-900/20 transition-all cursor-pointer"
                         title="Reload feed"
                         :disabled="isFetchingSelectedNodePosts"

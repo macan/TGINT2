@@ -30,6 +30,7 @@ export interface GraphNode {
   avatarImg?: HTMLImageElement | null;
   avatarLoaded?: boolean;
   displayName: string;
+  isPinned?: boolean;
 }
 
 export interface GraphEdge {
