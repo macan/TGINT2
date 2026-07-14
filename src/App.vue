@@ -3931,7 +3931,7 @@ const getForwardInfo = (post: any) => {
     const parts = post.data.forward_url.split('/').filter(Boolean);
     const yyyy = parts[parts.length - 2] || 'unknown';
     const zzzz = parts[parts.length - 1] || 'unknown';
-    if (yyyy == 't.me') {
+    if (yyyy == 't.me' || yyyy == 'telegram.me') {
       // this should be a user?
       return {
         target: null,
