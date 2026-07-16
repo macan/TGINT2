@@ -14702,35 +14702,41 @@ onUnmounted(() => {
                       <button
                         @click="toggleNodePin(selectedNetworkNode)"
                         :class="[
-                          'shrink-0 p-2 border rounded-xl transition-all cursor-pointer flex items-center gap-1.5 font-bold text-[11px] shadow-sm hover:shadow',
+                          'shrink-0 p-2.5 border rounded-xl transition-all cursor-pointer flex items-center justify-center shadow-sm hover:shadow',
                           selectedNetworkNode.isPinned
                             ? 'bg-amber-50/75 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/30 text-amber-600 dark:text-amber-400'
                             : 'bg-gray-50/75 dark:bg-gray-850/40 border-gray-200 dark:border-gray-750/30 text-gray-600 dark:text-gray-400'
                         ]"
-                        title="Toggle node layout pin (keeps its exact position)"
+                        :title="selectedNetworkNode.isPinned ? 'Unpin node layout position' : 'Pin node layout position'"
                       >
-                        <Pin class="h-3.5 w-3.5" :class="[selectedNetworkNode.isPinned ? 'fill-amber-500 text-amber-500' : '']" />
-                        <span>{{ selectedNetworkNode.isPinned ? 'Pinned' : 'Pin' }}</span>
+                        <Pin class="h-4 w-4" :class="[selectedNetworkNode.isPinned ? 'fill-amber-500 text-amber-500' : '']" />
+                      </button>
+
+                      <!-- Search on Google Button -->
+                      <button
+                        @click="searchOnGoogle(`site:t.me ${selectedNetworkNode.id}`)"
+                        class="shrink-0 p-2.5 bg-blue-50/75 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/60 border border-blue-100 dark:border-blue-900/30 text-blue-600 dark:text-blue-400 rounded-xl transition-all cursor-pointer flex items-center justify-center shadow-sm hover:shadow"
+                        title="Search channel on Google"
+                      >
+                        <Globe class="h-4 w-4" />
                       </button>
 
                       <!-- Listen Button -->
                       <button
                         @click="addChannelToListenDirectory(selectedNetworkNode.displayName, selectedNetworkNode.id)"
-                        class="shrink-0 p-2 bg-purple-50/75 dark:bg-purple-950/40 hover:bg-purple-100 dark:hover:bg-purple-900/60 border border-purple-100 dark:border-purple-900/30 text-purple-600 dark:text-purple-400 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 font-bold text-[11px] shadow-sm hover:shadow"
+                        class="shrink-0 p-2.5 bg-purple-50/75 dark:bg-purple-950/40 hover:bg-purple-100 dark:hover:bg-purple-900/60 border border-purple-100 dark:border-purple-900/30 text-purple-600 dark:text-purple-400 rounded-xl transition-all cursor-pointer flex items-center justify-center shadow-sm hover:shadow"
                         title="Add to Listen Directory"
                       >
-                        <Radio class="h-3.5 w-3.5" />
-                        <span>Listen</span>
+                        <Radio class="h-4 w-4" />
                       </button>
 
                       <!-- Jump to Explorer Button -->
                       <button
                         @click="activeTab = 'explorer'; channelName = selectedNetworkNode.id; searchChannel()"
-                        class="shrink-0 p-2 bg-teal-50/75 dark:bg-teal-950/40 hover:bg-teal-100 dark:hover:bg-teal-900/60 border border-teal-100 dark:border-teal-900/30 text-teal-600 dark:text-teal-400 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 font-bold text-[11px] shadow-sm hover:shadow"
+                        class="shrink-0 p-2.5 bg-teal-50/75 dark:bg-teal-950/40 hover:bg-teal-100 dark:hover:bg-teal-900/60 border border-teal-100 dark:border-teal-900/30 text-teal-600 dark:text-teal-400 rounded-xl transition-all cursor-pointer flex items-center justify-center shadow-sm hover:shadow"
                         title="Jump to Explorer & Search"
                       >
-                        <Search class="h-3.5 w-3.5" />
-                        <span>Explore</span>
+                        <Search class="h-4 w-4" />
                       </button>
                     </div>
                   </div>
