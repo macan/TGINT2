@@ -4768,6 +4768,8 @@ const postsTimelineStats = computed(() => {
     post: item.post,
   }));
 
+  const isDelayed = gaps.length > 0 && (Date.now() - newest) > avgGapMs;
+
   return {
     start: format(validResults[0].date, "MMM d, HH:mm"),
     end: format(validResults[validResults.length - 1].date, "MMM d, HH:mm"),
@@ -4779,6 +4781,7 @@ const postsTimelineStats = computed(() => {
     avgGap: (avgGapMs / 1000 / 60).toFixed(1) + " min",
     maxGap: maxGapIndex !== -1 ? Math.round(maxGap / 1000 / 60 / 60) + " hours" : "N/A",
     hourlyData,
+    isDelayed,
   };
 });
 
@@ -9976,10 +9979,14 @@ onUnmounted(() => {
                 >
                   <div class="flex items-center justify-between mb-4">
                     <h4
-                      class="text-sm font-bold text-gray-900 dark:text-white flex items-center"
+                      class="text-sm font-bold flex items-center transition-colors duration-300"
+                      :class="postsTimelineStats.isDelayed ? 'text-amber-600 dark:text-amber-400' : 'text-gray-900 dark:text-white'"
                     >
-                      <Calendar class="h-4 w-4 mr-2 text-blue-500" />
+                      <Calendar class="h-4 w-4 mr-2 transition-colors duration-300" :class="postsTimelineStats.isDelayed ? 'text-amber-500 animate-pulse' : 'text-blue-500'" />
                       Feed Activity Timeline
+                      <span v-if="postsTimelineStats.isDelayed" class="ml-2 px-1.5 py-0.5 text-[9px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 rounded-md border border-amber-200 dark:border-amber-900/30 animate-pulse">
+                        Activity Lagging
+                      </span>
                     </h4>
                     <div class="flex items-center gap-4">
                       <div class="h-8 w-20 flex items-end gap-0.5 mr-2 bg-gray-100 dark:bg-gray-700 p-1 rounded-lg">
