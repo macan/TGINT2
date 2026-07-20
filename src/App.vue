@@ -3991,6 +3991,12 @@ const scrollToTop = () => {
 const scrollToPost = (key: string) => {
   console.log("Scrolling to:", key);
   viewMode.value = "list";
+  
+  const idx = filteredPosts.value.findIndex((p) => p.key === key);
+  if (idx !== -1 && idx >= postsRenderLimit.value) {
+    postsRenderLimit.value = idx + 10;
+  }
+
   nextTick(() => {
     const el = document.getElementById(`post-${key}`);
     if (el) {
@@ -4182,6 +4188,7 @@ const viewMode = ref<"list" | "masonry" | "timeline">("list");
 const isPostModalVisible = ref(false);
 const selectedPost = ref<any>(null);
 const selectedUsernamesExplorer = ref<string[]>([]);
+const postsRenderLimit = ref(50);
 
 const fetchChannelProfile = async (channel: string) => {
   if (!channel) return;
@@ -4232,8 +4239,19 @@ const fetchChannelProfile = async (channel: string) => {
 };
 
 watch(currentChannelName, (newChannel) => {
-    if (newChannel) fetchChannelProfile(newChannel);
+    if (newChannel) {
+      fetchChannelProfile(newChannel);
+      postsRenderLimit.value = 50;
+    }
 });
+
+watch(
+  [filterAuthor, filterStartDate, filterEndDate, filterMedia, selectedUsernamesExplorer],
+  () => {
+    postsRenderLimit.value = 50;
+  },
+  { deep: true }
+);
 
 watch(graphCanvasContainer, (containerEl) => {
   if (graphResizeObserver) {
@@ -6714,6 +6732,7 @@ const loadMorePosts = async () => {
           hasMorePosts.value = false;
         } else {
           posts.value = [...posts.value, ...newPosts];
+          postsRenderLimit.value += 50;
         }
         break;
       } else {
@@ -6725,6 +6744,22 @@ const loadMorePosts = async () => {
     }
   }
   isLoadingMore.value = false;
+};
+
+const loadMoreRenderedPosts = () => {
+  if (viewMode.value === "list") {
+    if (postsRenderLimit.value < filteredPosts.value.length) {
+      postsRenderLimit.value += 50;
+    } else {
+      loadMorePosts();
+    }
+  } else {
+    if (postsRenderLimit.value < mediaPosts.value.length) {
+      postsRenderLimit.value += 50;
+    } else {
+      loadMorePosts();
+    }
+  }
 };
 
 const closeLightbox = () => {
@@ -6751,7 +6786,7 @@ onMounted(() => {
         activeTab.value === "explorer" &&
         !loading.value
       ) {
-        loadMorePosts();
+        loadMoreRenderedPosts();
       }
     },
     { threshold: 0.1 }
@@ -6821,6 +6856,14 @@ const mediaPosts = computed(() => {
       (post.data?.videos && post.data.videos.length > 0) ||
       (post.data?.linkPreview && post.data.linkPreview.image)
   );
+});
+
+const visibleFilteredPosts = computed(() => {
+  return filteredPosts.value.slice(0, postsRenderLimit.value);
+});
+
+const visibleMediaPosts = computed(() => {
+  return mediaPosts.value.slice(0, postsRenderLimit.value);
 });
 
 const colors = ['blue', 'red', 'green', 'purple', 'indigo', 'emerald', 'rose', 'cyan'];
@@ -10050,7 +10093,7 @@ onUnmounted(() => {
                 <!-- List View -->
                 <div v-if="viewMode === 'list'" class="space-y-3">
                   <div
-                    v-for="(post, index) in filteredPosts"
+                    v-for="(post, index) in visibleFilteredPosts"
                     :id="`post-${post.key}`"
                     :key="post.key || index"
                     :class="[
@@ -10062,6 +10105,7 @@ onUnmounted(() => {
                         : 'bg-white dark:bg-gray-800 border-gray-200/60 dark:border-gray-700/60',
                       post.isNewEmphasized ? 'ring-2 ring-teal-500' : '',
                     ]"
+                    :style="{ 'content-visibility': 'auto', 'contain-intrinsic-size': '250px' }"
                   >
                     <!-- Decorative Corner Glow -->
                     <div
@@ -10492,7 +10536,7 @@ onUnmounted(() => {
                   class="columns-1 sm:columns-2 md:columns-3 xl:columns-4 2xl:columns-5 min-[1900px]:columns-6 gap-6 space-y-6"
                 >
                   <div
-                    v-for="(post, index) in mediaPosts"
+                    v-for="(post, index) in visibleMediaPosts"
                     :key="post.key || index"
                     :class="[
                       'break-inside-avoid rounded-3xl shadow-sm border overflow-hidden group hover:shadow-2xl hover:-translate-y-1 transition-all duration-500',
@@ -10503,6 +10547,7 @@ onUnmounted(() => {
                           )} border-white/20 dark:border-gray-700`
                         : 'bg-white dark:bg-gray-800 border-gray-100 dark:border-gray-700',
                     ]"
+                    :style="{ 'content-visibility': 'auto', 'contain-intrinsic-size': '350px' }"
                   >
                     <div
                       class="relative overflow-hidden cursor-pointer group/inner"
@@ -10629,9 +10674,10 @@ onUnmounted(() => {
                   class="relative space-y-16 pb-12 before:absolute before:inset-0 before:left-8 md:before:left-1/2 before:-translate-x-px before:h-full before:w-0.5 before:bg-gradient-to-b before:from-blue-500/0 before:via-blue-500/30 before:to-blue-500/0"
                 >
                   <div
-                    v-for="(post, index) in mediaPosts"
+                    v-for="(post, index) in visibleMediaPosts"
                     :key="post.key || index"
                     class="relative flex flex-col md:flex-row items-start md:justify-between group"
+                    :style="{ 'content-visibility': 'auto', 'contain-intrinsic-size': '400px' }"
                   >
                     <!-- Central Timeline Axis with Date -->
                     <div
