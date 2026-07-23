@@ -6780,7 +6780,7 @@ const channelFulltextSearch = async (query: string, topk: number = 25) => {
     const rawResults = Array.isArray(resData) ? resData : resData.data || [];
 
     const results = rawResults.map((item: any) => {
-      let channelData = (item && item.data && (item.data.username || item.data.title || item.data.name || item.data.id))
+      let channelData = (item && item.data && (item.data.username || item.data.title || item.data.name || item.data.id || item.key))
         ? { ...item.data, ...item }
         : item;
       
@@ -9456,7 +9456,7 @@ onUnmounted(() => {
                 <!-- Avatar Circle Container -->
                 <div class="relative shrink-0 select-none">
                   <img 
-                    :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name)" 
+                    :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name || channel.key)" 
                     @error="handleImageError"
                     class="w-12 h-12 rounded-2xl border-2 border-teal-500/10 dark:border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900 group-hover:border-teal-500/40 transition-colors duration-300" 
                     alt="Avatar"
@@ -9471,9 +9471,9 @@ onUnmounted(() => {
                 <div class="flex-grow min-w-0 pr-4">
                   <h3 class="text-xs font-black text-gray-900 truncate dark:text-white group-hover:text-teal-600 dark:group-hover:text-teal-400 transition-colors duration-300" :title="channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : '')" v-html="getHighlightedHtml(channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : ''), channelSearchQuery)">
                   </h3>
-                  <p v-if="channel.username || channel.id" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 truncate mt-0.5 flex items-center gap-1.5">
-                    <span v-if="channel.username" v-html="'@' + getHighlightedHtml(channel.username, channelSearchQuery)"></span>
-                    <span v-if="channel.username && channel.id" class="opacity-60">•</span>
+                  <p v-if="channel.username || channel.id || channel.key" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 truncate mt-0.5 flex items-center gap-1.5">
+                    <span v-if="channel.username || channel.key" v-html="'@' + getHighlightedHtml(channel.username || channel.key, channelSearchQuery)"></span>
+                    <span v-if="(channel.username || channel.key) && channel.id" class="opacity-60">•</span>
                     <span v-if="channel.id" class="font-mono">ID: {{ channel.id }}</span>
                   </p>
                 </div>
@@ -9513,7 +9513,7 @@ onUnmounted(() => {
               <!-- View Action button -->
               <button 
                 v-if="activeChannelOrUser === 'channel'" 
-                @click="activeTab = 'explorer'; channelName = channel.username || channel.name; searchChannel()" 
+                @click="activeTab = 'explorer'; channelName = channel.username || channel.name || channel.key; searchChannel()" 
                 class="w-full mt-2 py-2 bg-gray-50 hover:bg-teal-650 text-teal-600 hover:text-white dark:bg-gray-900/80 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black tracking-wide rounded-xl border border-gray-150 dark:border-gray-800/80 hover:border-transparent cursor-pointer transition-all duration-300 hover:shadow-md hover:shadow-teal-500/10 text-center flex items-center justify-center gap-1.5"
               >
                 <span>View Channel Archive</span>
