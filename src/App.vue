@@ -1303,6 +1303,95 @@ const channels = ref<any[]>([]);
 const activeChannelOrUser = ref<"channel" | "user">("channel");
 const isLoadingChannels = ref(false);
 const langCode = ref("");
+const channelSearchQuery = ref("");
+const channelViewMode = ref<"grid" | "list">("grid");
+const hoveredChannelId = ref<string | null>(null);
+let channelHoverTimer: ReturnType<typeof setTimeout> | null = null;
+let channelLeaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+const onChannelLeftRegionMouseEnter = (channel: any) => {
+  if (channelLeaveTimer) {
+    clearTimeout(channelLeaveTimer);
+    channelLeaveTimer = null;
+  }
+  if (channelHoverTimer) {
+    clearTimeout(channelHoverTimer);
+  }
+  const id = String(channel.id || channel.username || channel.name || "");
+  if (!id) return;
+  channelHoverTimer = setTimeout(() => {
+    hoveredChannelId.value = id;
+  }, 5000); // 5 seconds hover requirement
+};
+
+const onChannelLeftRegionMouseLeave = () => {
+  if (channelHoverTimer) {
+    clearTimeout(channelHoverTimer);
+    channelHoverTimer = null;
+  }
+  if (channelLeaveTimer) {
+    clearTimeout(channelLeaveTimer);
+  }
+  channelLeaveTimer = setTimeout(() => {
+    hoveredChannelId.value = null;
+  }, 350);
+};
+
+const onChannelPopupCardMouseEnter = () => {
+  if (channelLeaveTimer) {
+    clearTimeout(channelLeaveTimer);
+    channelLeaveTimer = null;
+  }
+};
+
+const onChannelPopupCardMouseLeave = () => {
+  if (channelLeaveTimer) {
+    clearTimeout(channelLeaveTimer);
+  }
+  channelLeaveTimer = setTimeout(() => {
+    hoveredChannelId.value = null;
+  }, 250);
+};
+
+const getHighlightedHtml = (text: string | undefined | null, rawQuery: string) => {
+  if (!text) return "";
+  const safeStr = String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+
+  if (!rawQuery || !rawQuery.trim()) return safeStr;
+
+  const termRegex = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+  const tokens: string[] = [];
+  let match;
+  const cleanQuery = rawQuery.trim();
+  while ((match = termRegex.exec(cleanQuery)) !== null) {
+    let t = match[1] || match[2] || match[3] || "";
+    t = t.replace(/['"]/g, "").trim();
+    if (t && !["OR", "AND", "NOT"].includes(t.toUpperCase())) {
+      tokens.push(t);
+    }
+  }
+
+  if (tokens.length === 0) return safeStr;
+
+  const sortedTokens = [...new Set(tokens)]
+    .filter((t) => t.length > 0)
+    .sort((a, b) => b.length - a.length);
+
+  if (sortedTokens.length === 0) return safeStr;
+
+  const escapedTokens = sortedTokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const regex = new RegExp(`(${escapedTokens.join("|")})`, "gi");
+
+  return safeStr.replace(
+    regex,
+    `<mark class="bg-amber-300/90 dark:bg-amber-400/40 text-amber-950 dark:text-amber-100 font-bold px-0.5 rounded-xs inline-block">$1</mark>`
+  );
+};
 
 const toggleChannelOrUser = () => {
     activeChannelOrUser.value = activeChannelOrUser.value === 'channel' ? 'user' : 'channel';
@@ -6614,6 +6703,119 @@ const performGlobalSearch = async () => {
   }
 };
 
+const channelFulltextSearch = async (query: string, topk: number = 25) => {
+  if (!query || !query.trim()) return [];
+
+  try {
+    // 1. Split query by SPACE, considering terms surrounded by ' or "
+    const termRegex = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+    const terms: string[] = [];
+    let match;
+    while ((match = termRegex.exec(query.trim())) !== null) {
+      if (match[1] !== undefined) {
+        terms.push(`"${match[1]}"`);
+      } else if (match[2] !== undefined) {
+        terms.push(`"${match[2]}"`);
+      } else if (match[3] !== undefined) {
+        terms.push(match[3]);
+      }
+    }
+
+    if (terms.length === 0) return [];
+
+    // 2. For each split word/term, add field prefixes 'description:', 'title:', and 'user:' connected by OR
+    // 3. Connect multiple term query strings with AND
+    const queryString = terms
+      .map((t) => t.replace(/['"]/g, "").trim())
+      .filter((cleanTerm) => cleanTerm.length > 0)
+      .map((cleanTerm) => `(description:"${cleanTerm}" OR title:"${cleanTerm}" OR user:"${cleanTerm}")`)
+      .join(" AND ");
+
+    const safeQuery = encodeURIComponent(queryString);
+
+    const response = await fetch("https://i.gogingko.net/api/v1/ft/telegram-channel", {
+      method: "GET",
+      headers: {
+        "x-gos-ft-query": safeQuery,
+        "x-gos-ft-topk": String(topk),
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `Channel search failed: ${response.status} ${response.statusText || ""}`
+      );
+    }
+
+    const data = await response.json();
+    const keys = data.keys || [];
+
+    if (keys.length === 0 || !keys[0] || keys[0].length === 0) {
+      return [];
+    }
+
+    const mgetPayload = keys[0].map((fullKey: string) => {
+      const idx = fullKey.indexOf(".");
+      return {
+        ns: fullKey.slice(0, idx),
+        key: fullKey.slice(idx + 1),
+      };
+    });
+
+    const mgetResponse = await fetch("https://i.gogingko.net/api/v1/mget/_", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(mgetPayload),
+    });
+
+    if (!mgetResponse.ok) {
+      throw new Error(
+        `Failed to fetch channel details: ${mgetResponse.statusText}`
+      );
+    }
+
+    const resData = await mgetResponse.json();
+    const rawResults = Array.isArray(resData) ? resData : resData.data || [];
+
+    const results = rawResults.map((item: any) => {
+      let channelData = (item && item.data && (item.data.username || item.data.title || item.data.name || item.data.id))
+        ? { ...item.data, ...item }
+        : item;
+      
+      const photoUrl = channelData.photo || channelData.avatar;
+      if (photoUrl) {
+        const match = String(photoUrl).match(/cdn(\d+)/);
+        if (match) {
+          const cdnNum = match[1];
+          channelData.cdnNumber = cdnNum;
+          channelData.cdnRegion = TelegramCDNRegions[cdnNum as keyof typeof TelegramCDNRegions];
+        }
+      }
+      return channelData;
+    });
+
+    return results;
+  } catch (err: any) {
+    console.error("Channel fulltext search error details:", err);
+    return [];
+  }
+};
+
+const handleChannelSearch = async () => {
+  if (!channelSearchQuery.value || !channelSearchQuery.value.trim()) return;
+  isLoadingChannels.value = true;
+  try {
+    const results = await channelFulltextSearch(channelSearchQuery.value.trim(), 50);
+    channels.value = results;
+  } catch (e) {
+    console.error("Failed to perform channel search", e);
+  } finally {
+    isLoadingChannels.value = false;
+  }
+};
+
 const formatDate = (dateStr: string | number) => {
   if (!dateStr) return "";
   try {
@@ -9117,6 +9319,41 @@ onUnmounted(() => {
 
             <!-- Right: Interactive Filters & Batches -->
             <div class="flex flex-wrap items-end gap-4">
+              <!-- Channel Fulltext Search input & button -->
+              <div v-if="activeChannelOrUser === 'channel'" class="flex flex-wrap items-end gap-3">
+                <div class="space-y-2.5">
+                  <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Channel Search</label>
+                  <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl px-4 py-2 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all w-full sm:w-64">
+                    <Search class="h-4 w-4 text-teal-600 dark:text-teal-400 mr-2 shrink-0" />
+                    <input 
+                      v-model="channelSearchQuery" 
+                      placeholder="e.g. news" 
+                      class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
+                      @keyup.enter="handleChannelSearch" 
+                    />
+                    <button 
+                      v-if="channelSearchQuery" 
+                      @click="channelSearchQuery = ''" 
+                      class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xs ml-1 cursor-pointer"
+                      title="Clear search query"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+
+                <div class="space-y-2.5">
+                  <label class="hidden sm:block text-[10px] font-black text-transparent select-none uppercase tracking-widest">Search</label>
+                  <button 
+                    @click="handleChannelSearch"
+                    class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl text-xs font-black tracking-wide flex items-center justify-center gap-2 shadow-md shadow-teal-500/25 hover:shadow-teal-500/40 cursor-pointer transition-all duration-300 hover:-translate-y-0.5 active:translate-y-0"
+                  >
+                    <Search class="h-3.5 w-3.5 shrink-0" />
+                    <span>Search</span>
+                  </button>
+                </div>
+              </div>
+
               <!-- Language Filter input -->
               <div v-if="activeChannelOrUser === 'channel'" class="space-y-2.5">
                 <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Language Target</label>
@@ -9146,6 +9383,39 @@ onUnmounted(() => {
                   <span>{{ (activeChannelOrUser === 'channel' && langCode) ? 'Apply Lang Filter' : 'Fetch Next Batch' }}</span>
                 </button>
               </div>
+
+              <!-- Display Mode Toggle (Grid vs List) -->
+              <div class="space-y-2.5">
+                <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Display Mode</label>
+                <div class="flex items-center gap-1 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 p-1 rounded-2xl">
+                  <button 
+                    @click="channelViewMode = 'grid'" 
+                    :class="[
+                      'p-2 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer',
+                      channelViewMode === 'grid' 
+                        ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700' 
+                        : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
+                    ]"
+                    title="Grid View"
+                  >
+                    <LayoutGrid class="h-4 w-4" />
+                    <span class="hidden md:inline">Grid</span>
+                  </button>
+                  <button 
+                    @click="channelViewMode = 'list'" 
+                    :class="[
+                      'p-2 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer',
+                      channelViewMode === 'list' 
+                        ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700' 
+                        : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
+                    ]"
+                    title="List View"
+                  >
+                    <List class="h-4 w-4" />
+                    <span class="hidden md:inline">List</span>
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -9173,82 +9443,222 @@ onUnmounted(() => {
           </p>
         </div>
 
-        <!-- Directory Cards Grid -->
-        <div v-else class="columns-1 sm:columns-2 md:columns-3 lg:columns-4 xl:columns-5 2xl:columns-6 gap-6">
-          <div v-for="channel in channels" :key="channel.name"
-               class="break-inside-avoid bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/75 dark:border-gray-750 shadow-sm hover:shadow-xl hover:border-teal-500/20 dark:hover:border-teal-500/15 transition-all duration-300 mb-6 relative overflow-hidden group">
-            <!-- Subtle Hover Gradient Accent -->
-            <div class="absolute -right-12 -top-12 w-24 h-24 bg-teal-500/[0.03] dark:bg-teal-500/[0.04] rounded-full blur-xl group-hover:scale-150 transition-transform duration-500 pointer-events-none"></div>
+        <!-- Directory Display Area -->
+        <div v-else>
+          <!-- Grid View Mode -->
+          <div v-if="channelViewMode === 'grid'" class="columns-1 sm:columns-2 md:columns-3 lg:columns-4 xl:columns-5 2xl:columns-6 gap-6">
+            <div v-for="channel in channels" :key="channel.name || channel.id || channel.username"
+                 class="break-inside-avoid bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/75 dark:border-gray-750 shadow-sm hover:shadow-xl hover:border-teal-500/20 dark:hover:border-teal-500/15 transition-all duration-300 mb-6 relative overflow-hidden group">
+              <!-- Subtle Hover Gradient Accent -->
+              <div class="absolute -right-12 -top-12 w-24 h-24 bg-teal-500/[0.03] dark:bg-teal-500/[0.04] rounded-full blur-xl group-hover:scale-150 transition-transform duration-500 pointer-events-none"></div>
 
-            <div class="flex items-center gap-4 mb-4 relative z-10">
-              <!-- Avatar Circle Container -->
-              <div class="relative shrink-0 select-none">
-                <img 
-                  :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name)" 
-                  @error="handleImageError"
-                  class="w-12 h-12 rounded-2xl border-2 border-teal-500/10 dark:border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900 group-hover:border-teal-500/40 transition-colors duration-300" 
-                  alt="Avatar"
-                />
-                <!-- Type-specific badge indicator bottom right of avatar -->
-                <span class="absolute -bottom-1 -right-1 p-1 rounded-lg text-white bg-teal-600 border border-white dark:border-gray-800 shadow-sm flex items-center justify-center">
-                  <component :is="activeChannelOrUser === 'channel' ? (channel._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : channel._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User) : User" class="h-2.5 w-2.5 text-white" />
-                </span>
+              <div class="flex items-center gap-4 mb-4 relative z-10">
+                <!-- Avatar Circle Container -->
+                <div class="relative shrink-0 select-none">
+                  <img 
+                    :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name)" 
+                    @error="handleImageError"
+                    class="w-12 h-12 rounded-2xl border-2 border-teal-500/10 dark:border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900 group-hover:border-teal-500/40 transition-colors duration-300" 
+                    alt="Avatar"
+                  />
+                  <!-- Type-specific badge indicator bottom right of avatar -->
+                  <span class="absolute -bottom-1 -right-1 p-1 rounded-lg text-white bg-teal-600 border border-white dark:border-gray-800 shadow-sm flex items-center justify-center">
+                    <component :is="activeChannelOrUser === 'channel' ? (channel._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : channel._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User) : User" class="h-2.5 w-2.5 text-white" />
+                  </span>
+                </div>
+
+                <!-- Metadata content -->
+                <div class="flex-grow min-w-0 pr-4">
+                  <h3 class="text-xs font-black text-gray-900 truncate dark:text-white group-hover:text-teal-600 dark:group-hover:text-teal-400 transition-colors duration-300" :title="channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : '')" v-html="getHighlightedHtml(channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : ''), channelSearchQuery)">
+                  </h3>
+                  <p v-if="channel.username || channel.id" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 truncate mt-0.5 flex items-center gap-1.5">
+                    <span v-if="channel.username" v-html="'@' + getHighlightedHtml(channel.username, channelSearchQuery)"></span>
+                    <span v-if="channel.username && channel.id" class="opacity-60">•</span>
+                    <span v-if="channel.id" class="font-mono">ID: {{ channel.id }}</span>
+                  </p>
+                </div>
+
+                <!-- Right badges aligned -->
+                <div class="absolute top-0 right-0 z-15">
+                  <span v-if="channel.bot !== undefined" :class="['text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-lg border shadow-sm shrink-0', channel.bot ? 'bg-emerald-500/[0.06] text-emerald-600 dark:text-emerald-400 border-emerald-500/10' : 'bg-rose-500/[0.06] text-rose-600 dark:text-rose-400 border-rose-500/10']">
+                    {{ channel.bot ? 'Bot' : 'User' }}
+                  </span>
+                </div>
               </div>
 
-              <!-- Metadata content -->
-              <div class="flex-grow min-w-0 pr-4">
-                <h3 class="text-xs font-black text-gray-900 truncate dark:text-white group-hover:text-teal-600 dark:group-hover:text-teal-400 transition-colors duration-300" :title="channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : '')">
-                  {{ channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : '')}}
-                </h3>
-                <p v-if="channel.username || channel.id" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 truncate mt-0.5 flex items-center gap-1.5">
-                  <span v-if="channel.username">@{{ channel.username }}</span>
-                  <span v-if="channel.username && channel.id" class="opacity-60">•</span>
-                  <span v-if="channel.id" class="font-mono">ID: {{ channel.id }}</span>
+              <!-- Description with clamping -->
+              <p v-if="channel.description || channel.about" class="text-[11px] text-gray-500 dark:text-gray-400 mb-4 leading-relaxed whitespace-pre-wrap break-words overflow-hidden line-clamp-3 group-hover:text-gray-600 dark:group-hover:text-gray-300 transition-colors" v-html="getHighlightedHtml(channel.description || channel.about, channelSearchQuery)">
+              </p>
+
+              <!-- Status badges -->
+              <div class="flex flex-wrap gap-2 mb-3 z-10 relative">
+                <span v-if="channel.status && channel.status.status" class="text-[9px] font-bold text-teal-600 dark:text-teal-400 bg-teal-500/[0.05] border border-teal-500/10 px-2 py-0.5 rounded-lg max-w-full truncate">{{ channel.status.status }}</span>
+                <span v-if="channel.phone" class="text-[9px] font-bold text-rose-600 dark:text-rose-400 bg-rose-500/[0.05] border border-rose-500/10 px-2 py-0.5 rounded-lg max-w-full truncate">{{ channel.phone }}</span>
+              </div>
+              
+              <!-- Metric tags board -->
+              <div v-if="channel.members || channel.files || channel.photos || channel.videos" class="grid grid-cols-2 gap-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 mb-4 pt-3 border-t border-gray-100/50 dark:border-gray-800/30">
+                <span v-if="channel.members" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Users class="h-3 w-3 text-teal-650" /> {{ channel.members }}</span>
+                <span v-if="channel.files" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><FileText class="h-3 w-3 text-teal-650" /> {{ channel.files }}</span>
+                <span v-if="channel.photos" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><ImageIcon class="h-3 w-3 text-teal-650" /> {{ channel.photos }}</span>
+                <span v-if="channel.videos" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Video class="h-3 w-3 text-teal-650" /> {{ channel.videos }}</span>
+              </div>
+
+              <!-- DC Chip Badge -->
+              <div v-if="channel.cdnNumber" class="text-[9px] font-mono font-black uppercase tracking-wider text-teal-650 dark:text-teal-400 bg-teal-500/[0.04] dark:bg-teal-950/40 px-2 py-0.5 rounded-lg border border-teal-500/10 mb-4 inline-flex items-center gap-1">
+                <span>DC: {{ channel.cdnNumber }}</span>
+                <span v-if="channel.cdnRegion" class="opacity-70">({{ channel.cdnRegion[1] }})</span>
+              </div>
+
+              <!-- View Action button -->
+              <button 
+                v-if="activeChannelOrUser === 'channel'" 
+                @click="activeTab = 'explorer'; channelName = channel.username || channel.name; searchChannel()" 
+                class="w-full mt-2 py-2 bg-gray-50 hover:bg-teal-650 text-teal-600 hover:text-white dark:bg-gray-900/80 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black tracking-wide rounded-xl border border-gray-150 dark:border-gray-800/80 hover:border-transparent cursor-pointer transition-all duration-300 hover:shadow-md hover:shadow-teal-500/10 text-center flex items-center justify-center gap-1.5"
+              >
+                <span>View Channel Archive</span>
+                <ExternalLink class="h-3 w-3" />
+              </button>
+            </div>
+          </div>
+
+          <!-- List View Mode -->
+          <div v-else class="space-y-3 relative">
+            <div 
+              v-for="channel in channels" 
+              :key="channel.name || channel.id || channel.username"
+              class="group relative bg-white dark:bg-gray-800 p-3.5 sm:p-4 rounded-2xl border border-gray-200/80 dark:border-gray-750 shadow-sm hover:shadow-md hover:border-teal-500/30 dark:hover:border-teal-500/30 transition-all duration-200 flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4"
+            >
+              <!-- Left Section: Avatar + Title/Name + Username/ID -->
+              <div 
+                class="flex items-center gap-3 min-w-[220px] max-w-xs shrink-0 cursor-pointer rounded-xl p-1 -m-1 transition-colors hover:bg-teal-500/5 dark:hover:bg-teal-500/10"
+                @mouseenter="onChannelLeftRegionMouseEnter(channel)"
+                @mouseleave="onChannelLeftRegionMouseLeave()"
+                title="Hover for 5 seconds to view full profile card"
+              >
+                <div class="relative shrink-0 select-none">
+                  <img 
+                    :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name)" 
+                    @error="handleImageError"
+                    class="w-10 h-10 rounded-xl border border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900 group-hover:border-teal-500/50 transition-colors" 
+                    alt="Avatar"
+                  />
+                  <span class="absolute -bottom-1 -right-1 p-0.5 rounded-md text-white bg-teal-600 border border-white dark:border-gray-800 shadow-sm flex items-center justify-center">
+                    <component :is="activeChannelOrUser === 'channel' ? (channel._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : channel._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User) : User" class="h-2 w-2 text-white" />
+                  </span>
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-1.5">
+                    <h3 class="text-xs font-black text-gray-900 truncate dark:text-white group-hover:text-teal-600 dark:group-hover:text-teal-400 transition-colors" :title="channel.title || channel.name || (channel.first_name ? channel.first_name : '')" v-html="getHighlightedHtml(channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : ''), channelSearchQuery)">
+                    </h3>
+                  </div>
+                  <p v-if="channel.username || channel.id" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 truncate mt-0.5 flex items-center gap-1.5">
+                    <span v-if="channel.username" class="text-teal-650 dark:text-teal-400" v-html="'@' + getHighlightedHtml(channel.username, channelSearchQuery)"></span>
+                    <span v-if="channel.username && channel.id" class="opacity-40">•</span>
+                    <span v-if="channel.id" class="font-mono">ID: {{ channel.id }}</span>
+                  </p>
+                </div>
+              </div>
+
+              <!-- Center Section: Description -->
+              <div class="flex-1 min-w-0 px-1 sm:px-2">
+                <p v-if="channel.description || channel.about" class="text-xs text-gray-600 dark:text-gray-300 line-clamp-2 leading-relaxed" :title="channel.description || channel.about" v-html="getHighlightedHtml(channel.description || channel.about, channelSearchQuery)">
                 </p>
+                <p v-else class="text-xs italic text-gray-400 dark:text-gray-500">No description available</p>
               </div>
 
-              <!-- Right badges aligned -->
-              <div class="absolute top-0 right-0 z-15">
-                <span v-if="channel.bot !== undefined" :class="['text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-lg border shadow-sm shrink-0', channel.bot ? 'bg-emerald-500/[0.06] text-emerald-600 dark:text-emerald-400 border-emerald-500/10' : 'bg-rose-500/[0.06] text-rose-600 dark:text-rose-400 border-rose-500/10']">
+              <!-- Right Section: Badges & Action -->
+              <div class="flex flex-wrap items-center gap-2.5 shrink-0 pt-2 md:pt-0 border-t md:border-t-0 border-gray-100 dark:border-gray-700/50">
+                <!-- Members count -->
+                <span v-if="channel.members" class="text-[10px] font-bold text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 px-2.5 py-1 rounded-xl border border-gray-200/60 dark:border-gray-700 flex items-center gap-1" title="Members">
+                  <Users class="h-3 w-3 text-teal-600" />
+                  <span>{{ channel.members }}</span>
+                </span>
+
+                <!-- DC Region -->
+                <span v-if="channel.cdnNumber" class="text-[9px] font-mono font-black uppercase text-teal-650 dark:text-teal-400 bg-teal-500/5 dark:bg-teal-950/40 px-2 py-1 rounded-xl border border-teal-500/10">
+                  DC: {{ channel.cdnNumber }}
+                </span>
+
+                <!-- Bot Badge -->
+                <span v-if="channel.bot !== undefined" :class="['text-[9px] font-black uppercase px-2 py-0.5 rounded-lg border', channel.bot ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20' : 'bg-rose-500/10 text-rose-600 border-rose-500/20']">
                   {{ channel.bot ? 'Bot' : 'User' }}
                 </span>
+
+                <!-- Action Button -->
+                <button 
+                  v-if="activeChannelOrUser === 'channel'" 
+                  @click="activeTab = 'explorer'; channelName = channel.username || channel.name; searchChannel()" 
+                  class="px-3 py-1.5 bg-gray-50 hover:bg-teal-600 text-teal-600 hover:text-white dark:bg-gray-900 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black rounded-xl border border-gray-200 dark:border-gray-700 hover:border-transparent transition-all cursor-pointer flex items-center gap-1 shadow-xs"
+                >
+                  <span>Archive</span>
+                  <ExternalLink class="h-3 w-3" />
+                </button>
+              </div>
+
+              <!-- HOVER POPUP HINT: Full Channel Profile Card View -->
+              <div 
+                v-if="hoveredChannelId === String(channel.id || channel.username || channel.name || '')"
+                @mouseenter="onChannelPopupCardMouseEnter()"
+                @mouseleave="onChannelPopupCardMouseLeave()"
+                class="pointer-events-auto opacity-100 transition-all duration-300 ease-out absolute left-4 sm:left-12 top-full mt-2 z-50 w-80 sm:w-88 p-5 bg-white/95 dark:bg-gray-800/95 backdrop-blur-md rounded-3xl border border-gray-200/90 dark:border-gray-700/90 shadow-2xl ring-1 ring-black/5 dark:ring-white/10 overflow-hidden"
+              >
+                <div class="relative">
+                  <!-- Subtle Accent Circle -->
+                  <div class="absolute -right-12 -top-12 w-24 h-24 bg-teal-500/[0.04] dark:bg-teal-500/[0.06] rounded-full blur-xl pointer-events-none"></div>
+
+                  <div class="flex items-center gap-4 mb-4 relative z-10">
+                    <div class="relative shrink-0 select-none">
+                      <img 
+                        :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name)" 
+                        @error="handleImageError"
+                        class="w-12 h-12 rounded-2xl border-2 border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900" 
+                        alt="Avatar"
+                      />
+                      <span class="absolute -bottom-1 -right-1 p-1 rounded-lg text-white bg-teal-600 border border-white dark:border-gray-800 shadow-sm flex items-center justify-center">
+                        <component :is="activeChannelOrUser === 'channel' ? (channel._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : channel._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User) : User" class="h-2.5 w-2.5 text-white" />
+                      </span>
+                    </div>
+
+                    <div class="flex-grow min-w-0 pr-4">
+                      <h3 class="text-xs font-black text-gray-900 truncate dark:text-white" :title="channel.title || channel.name" v-html="getHighlightedHtml(channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : ''), channelSearchQuery)">
+                      </h3>
+                      <p v-if="channel.username || channel.id" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 truncate mt-0.5 flex items-center gap-1.5">
+                        <span v-if="channel.username" v-html="'@' + getHighlightedHtml(channel.username, channelSearchQuery)"></span>
+                        <span v-if="channel.username && channel.id" class="opacity-60">•</span>
+                        <span v-if="channel.id" class="font-mono">ID: {{ channel.id }}</span>
+                      </p>
+                    </div>
+
+                    <div v-if="channel.bot !== undefined" class="absolute top-0 right-0 z-15">
+                      <span :class="['text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-lg border shadow-sm shrink-0', channel.bot ? 'bg-emerald-500/[0.06] text-emerald-600 dark:text-emerald-400 border-emerald-500/10' : 'bg-rose-500/[0.06] text-rose-600 dark:text-rose-400 border-rose-500/10']">
+                        {{ channel.bot ? 'Bot' : 'User' }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <p v-if="channel.description || channel.about" class="text-[11px] text-gray-600 dark:text-gray-300 mb-4 leading-relaxed whitespace-pre-wrap break-words max-h-36 overflow-y-auto custom-scrollbar" v-html="getHighlightedHtml(channel.description || channel.about, channelSearchQuery)">
+                  </p>
+
+                  <div class="flex flex-wrap gap-2 mb-3 z-10 relative">
+                    <span v-if="channel.status && channel.status.status" class="text-[9px] font-bold text-teal-600 dark:text-teal-400 bg-teal-500/[0.05] border border-teal-500/10 px-2 py-0.5 rounded-lg max-w-full truncate">{{ channel.status.status }}</span>
+                    <span v-if="channel.phone" class="text-[9px] font-bold text-rose-600 dark:text-rose-400 bg-rose-500/[0.05] border border-rose-500/10 px-2 py-0.5 rounded-lg max-w-full truncate">{{ channel.phone }}</span>
+                  </div>
+
+                  <div v-if="channel.members || channel.files || channel.photos || channel.videos" class="grid grid-cols-2 gap-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 mb-4 pt-3 border-t border-gray-100 dark:border-gray-700">
+                    <span v-if="channel.members" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Users class="h-3 w-3 text-teal-650" /> {{ channel.members }}</span>
+                    <span v-if="channel.files" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><FileText class="h-3 w-3 text-teal-650" /> {{ channel.files }}</span>
+                    <span v-if="channel.photos" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><ImageIcon class="h-3 w-3 text-teal-650" /> {{ channel.photos }}</span>
+                    <span v-if="channel.videos" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Video class="h-3 w-3 text-teal-650" /> {{ channel.videos }}</span>
+                  </div>
+
+                  <div v-if="channel.cdnNumber" class="text-[9px] font-mono font-black uppercase tracking-wider text-teal-650 dark:text-teal-400 bg-teal-500/[0.04] dark:bg-teal-950/40 px-2 py-0.5 rounded-lg border border-teal-500/10 mb-1 inline-flex items-center gap-1">
+                    <span>DC: {{ channel.cdnNumber }}</span>
+                    <span v-if="channel.cdnRegion" class="opacity-70">({{ channel.cdnRegion[1] }})</span>
+                  </div>
+                </div>
               </div>
             </div>
-
-            <!-- Description with clamping -->
-            <p v-if="channel.description || channel.about" class="text-[11px] text-gray-500 dark:text-gray-400 mb-4 leading-relaxed whitespace-pre-wrap break-words overflow-hidden line-clamp-3 group-hover:text-gray-600 dark:group-hover:text-gray-300 transition-colors">
-              {{ channel.description || channel.about }}
-            </p>
-
-            <!-- Status badges -->
-            <div class="flex flex-wrap gap-2 mb-3 z-10 relative">
-              <span v-if="channel.status && channel.status.status" class="text-[9px] font-bold text-teal-600 dark:text-teal-400 bg-teal-500/[0.05] border border-teal-500/10 px-2 py-0.5 rounded-lg max-w-full truncate">{{ channel.status.status }}</span>
-              <span v-if="channel.phone" class="text-[9px] font-bold text-rose-600 dark:text-rose-400 bg-rose-500/[0.05] border border-rose-500/10 px-2 py-0.5 rounded-lg max-w-full truncate">{{ channel.phone }}</span>
-            </div>
-            
-            <!-- Metric tags board -->
-            <div v-if="channel.members || channel.files || channel.photos || channel.videos" class="grid grid-cols-2 gap-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 mb-4 pt-3 border-t border-gray-100/50 dark:border-gray-800/30">
-              <span v-if="channel.members" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Users class="h-3 w-3 text-teal-650" /> {{ channel.members }}</span>
-              <span v-if="channel.files" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><FileText class="h-3 w-3 text-teal-650" /> {{ channel.files }}</span>
-              <span v-if="channel.photos" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><ImageIcon class="h-3 w-3 text-teal-650" /> {{ channel.photos }}</span>
-              <span v-if="channel.videos" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Video class="h-3 w-3 text-teal-650" /> {{ channel.videos }}</span>
-            </div>
-
-            <!-- DC Chip Badge -->
-            <div v-if="channel.cdnNumber" class="text-[9px] font-mono font-black uppercase tracking-wider text-teal-650 dark:text-teal-400 bg-teal-500/[0.04] dark:bg-teal-950/40 px-2 py-0.5 rounded-lg border border-teal-500/10 mb-4 inline-flex items-center gap-1">
-              <span>DC: {{ channel.cdnNumber }}</span>
-              <span v-if="channel.cdnRegion" class="opacity-70">({{ channel.cdnRegion[1] }})</span>
-            </div>
-
-            <!-- View Action button -->
-            <button 
-              v-if="activeChannelOrUser === 'channel'" 
-              @click="activeTab = 'explorer'; channelName = channel.username || channel.name; searchChannel()" 
-              class="w-full mt-2 py-2 bg-gray-50 hover:bg-teal-650 text-teal-600 hover:text-white dark:bg-gray-900/80 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black tracking-wide rounded-xl border border-gray-150 dark:border-gray-800/80 hover:border-transparent cursor-pointer transition-all duration-300 hover:shadow-md hover:shadow-teal-500/10 text-center flex items-center justify-center gap-1.5"
-            >
-              <span>View Channel Archive</span>
-              <ExternalLink class="h-3 w-3" />
-            </button>
           </div>
         </div>
       </div>
