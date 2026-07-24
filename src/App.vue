@@ -1298,6 +1298,7 @@ const showBackToTop = ref(false);
 const shareCardPost = ref<any>(null);
 const isShareCardView = ref(false);
 const avatarLoadError = ref(false);
+const isNumName = ref(false);
 const activeTab = ref<"explorer" | "search" | "network" | "listen" | "monitor" | "auto-finding" | "workspace" | "profile" | "channel">("explorer");
 const channels = ref<any[]>([]);
 const activeChannelOrUser = ref<"channel" | "user">("channel");
@@ -3049,6 +3050,7 @@ const fetchNodeMetadata = async (nodeType: string, nodeId: string) => {
         if (data.description) facts.push(`Description: ${data.description || ''}`);
         if (data.subscribers) facts.push(`Subscribers: ${data.subscribers}`);
         if (data.members) facts.push(`Members: ${data.members}`);
+        if (data.participants_count) facts.push(`Members: ${data.participants_count}`);
         editingNodeData.value.facts = facts.join('\n');
         
         saveChanges();
@@ -3697,6 +3699,7 @@ const addToWorkspace = () => {
     if (m.description) facts.push(`Description: ${m.description || ''}`);
     if (m.subscribers) facts.push(`Subscribers: ${m.subscribers}`);
     if (m.members) facts.push(`Members: ${m.members}`);
+    if (m.participants_count) facts.push(`Members: ${m.participants_count}`);
     
     addNode(label, 'channel', {
       id: username, // Custom ID used by Cytoscape graph
@@ -6426,6 +6429,12 @@ const searchChannel = async () => {
   currentChannelName.value = name;
   addToLastVisited(name);
 
+  if (!isNaN(parseInt(name, 10)) && !isNaN(Number(name)) && name.trim() !== '') {
+    isNumName.value = true;
+  } else {
+    isNumName.value = false;
+  }
+
   if (name.startsWith('-100') || name.startsWith('+')) {
     isScrapingDisabled.value = true;
   } else {
@@ -6524,18 +6533,29 @@ const searchChannel = async () => {
     if (postsRes.ok) {
       let postsData = await postsRes.json();
       if (postsData.length === 0) {
-        // check resolve cache
-        const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${name}`)
-        if (resolveRes.ok) {
-          const data = await resolveRes.json()
-          if (data.state == 0 && data.gso?.result) {
-            name = data.gso.result
-            currentChannelName.value = name
-            postsRes = await fetch(
-              `https://i.gogingko.net/api/v1/last/${name}?n=25`
-            );
-            if (postsRes.ok) {
-              postsData = await postsRes.json();
+        if (isNumName.value && !name.startsWith('-100')) {
+          name = `-100${name}`
+          currentChannelName.value = name
+          postsRes = await fetch(
+            `https://i.gogingko.net/api/v1/last/${name}?n=25`
+          );
+          if (postsRes.ok) {
+           postsData = await postsRes.json();
+          }
+        } else {
+          // check resolve cache
+          const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${name}`)
+          if (resolveRes.ok) {
+            const data = await resolveRes.json()
+            if (data.state == 0 && data.gso?.result) {
+              name = data.gso.result
+              currentChannelName.value = name
+              postsRes = await fetch(
+                `https://i.gogingko.net/api/v1/last/${name}?n=25`
+              );
+              if (postsRes.ok) {
+                postsData = await postsRes.json();
+              }
             }
           }
         }
@@ -7021,6 +7041,27 @@ const openLightbox = (url: string) => {
 
 const handleImageError = (e: Event) => {
   const target = e.target as HTMLImageElement;
+  if (!target) return;
+
+  if (target.src && target.src.includes('/telegram-profile/') && !target.dataset.retried) {
+    target.dataset.retried = 'true';
+    const parts = target.src.split('/telegram-profile/');
+    if (parts.length >= 2) {
+      const channelName = parts[1];
+      const isNum = !isNaN(parseInt(channelName, 10)) && !isNaN(Number(channelName)) && channelName.trim() !== '';
+      if (isNum) {
+        let newChannelName = channelName;
+        if (channelName.startsWith('-100')) {
+          newChannelName = channelName.replace(/^-100/, '');
+        } else {
+          newChannelName = '-100' + channelName;
+        }
+        target.src = `${parts[0]}/telegram-profile/${newChannelName}`;
+        return;
+      }
+    }
+  }
+
   if (target.src !== telegramLogoUrl) {
     target.src = telegramLogoUrl;
   }
@@ -8786,7 +8827,7 @@ onUnmounted(() => {
       </Transition>
 
       <!-- Title & Counters (non-sticky) -->
-      <div class="w-full max-w-7xl mx-auto pt-8 sm:pt-4 mb-10 px-4">
+      <div class="w-full max-w-7xl mx-auto pt-8 sm:pt-4 px-4">
         <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6 pb-6 border-b border-gray-200/60 dark:border-gray-800/60">
           <div class="text-left max-w-3xl">
             <h1
@@ -8867,7 +8908,7 @@ onUnmounted(() => {
 
       <!-- Sticky Navigation Header -->
       <header
-        class="sticky top-0 z-50 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-md mb-12 relative flex items-center justify-center border-b border-gray-200 dark:border-gray-800 py-3"
+        class="sticky top-0 z-50 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-md mb-8 relative flex items-center justify-center border-b border-gray-200 dark:border-gray-800 py-3"
       >
         <div class="absolute right-4 z-50 flex items-center space-x-2">
           <button
@@ -9497,8 +9538,8 @@ onUnmounted(() => {
               </div>
               
               <!-- Metric tags board -->
-              <div v-if="channel.members || channel.files || channel.photos || channel.videos" class="grid grid-cols-2 gap-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 mb-4 pt-3 border-t border-gray-100/50 dark:border-gray-800/30">
-                <span v-if="channel.members" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Users class="h-3 w-3 text-teal-650" /> {{ channel.members }}</span>
+              <div v-if="channel.members || channel.participants_count || channel.files || channel.photos || channel.videos" class="grid grid-cols-2 gap-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 mb-4 pt-3 border-t border-gray-100/50 dark:border-gray-800/30">
+                <span v-if="channel.members || channel.participants_count" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Users class="h-3 w-3 text-teal-650" /> {{ channel.members || channel.participants_count }}</span>
                 <span v-if="channel.files" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><FileText class="h-3 w-3 text-teal-650" /> {{ channel.files }}</span>
                 <span v-if="channel.photos" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><ImageIcon class="h-3 w-3 text-teal-650" /> {{ channel.photos }}</span>
                 <span v-if="channel.videos" class="flex items-center gap-1.5 bg-gray-50/50 dark:bg-gray-900/20 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Video class="h-3 w-3 text-teal-650" /> {{ channel.videos }}</span>
@@ -9570,9 +9611,9 @@ onUnmounted(() => {
               <!-- Right Section: Badges & Action -->
               <div class="flex flex-wrap items-center gap-2.5 shrink-0 pt-2 md:pt-0 border-t md:border-t-0 border-gray-100 dark:border-gray-700/50">
                 <!-- Members count -->
-                <span v-if="channel.members" class="text-[10px] font-bold text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 px-2.5 py-1 rounded-xl border border-gray-200/60 dark:border-gray-700 flex items-center gap-1" title="Members">
+                <span v-if="channel.members || channel.participants_count" class="text-[10px] font-bold text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 px-2.5 py-1 rounded-xl border border-gray-200/60 dark:border-gray-700 flex items-center gap-1" title="Members">
                   <Users class="h-3 w-3 text-teal-600" />
-                  <span>{{ channel.members }}</span>
+                  <span>{{ channel.members || channel.participants_count }}</span>
                 </span>
 
                 <!-- DC Region -->
@@ -9645,8 +9686,8 @@ onUnmounted(() => {
                     <span v-if="channel.phone" class="text-[9px] font-bold text-rose-600 dark:text-rose-400 bg-rose-500/[0.05] border border-rose-500/10 px-2 py-0.5 rounded-lg max-w-full truncate">{{ channel.phone }}</span>
                   </div>
 
-                  <div v-if="channel.members || channel.files || channel.photos || channel.videos" class="grid grid-cols-2 gap-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 mb-4 pt-3 border-t border-gray-100 dark:border-gray-700">
-                    <span v-if="channel.members" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Users class="h-3 w-3 text-teal-650" /> {{ channel.members }}</span>
+                  <div v-if="channel.members || channel.participants_count || channel.files || channel.photos || channel.videos" class="grid grid-cols-2 gap-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 mb-4 pt-3 border-t border-gray-100 dark:border-gray-700">
+                    <span v-if="channel.members || channel.participants_count" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Users class="h-3 w-3 text-teal-650" /> {{ channel.members || channel.participants_count }}</span>
                     <span v-if="channel.files" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><FileText class="h-3 w-3 text-teal-650" /> {{ channel.files }}</span>
                     <span v-if="channel.photos" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><ImageIcon class="h-3 w-3 text-teal-650" /> {{ channel.photos }}</span>
                     <span v-if="channel.videos" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Video class="h-3 w-3 text-teal-650" /> {{ channel.videos }}</span>
