@@ -4733,6 +4733,7 @@ const toggleChannel = (channel: string) => {
 };
 
 const getVideoUrl = (post: any) => {
+  let url = "";
   if (
     post.data?.videos &&
     post.data.videos.length > 0 &&
@@ -4740,9 +4741,11 @@ const getVideoUrl = (post: any) => {
     post.data.documents.length > 0 &&
     post.data.documents[0].mime_type?.startsWith("video/")
   ) {
-    return `https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`;
+    url = `https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`;
+  } else {
+    url = `https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`;
   }
-  return `https://i.gogingko.net/api/v1/v/telegram-video/${post.key}-0`;
+  return `${url}#t=0.1`;
 };
 
 const getUsername = (post: any) => {
@@ -8639,6 +8642,8 @@ onUnmounted(() => {
           >
             <video
               controls
+              preload="metadata"
+              playsinline
               class="w-full h-auto max-h-[450px] mx-auto"
             >
               <source :src="getVideoUrl(shareCardPost)" type="video/mp4" />
@@ -9579,7 +9584,7 @@ onUnmounted(() => {
               >
                 <div class="relative shrink-0 select-none">
                   <img 
-                    :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name)" 
+                    :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name || channel.key)" 
                     @error="handleImageError"
                     class="w-10 h-10 rounded-xl border border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900 group-hover:border-teal-500/50 transition-colors" 
                     alt="Avatar"
@@ -9593,9 +9598,9 @@ onUnmounted(() => {
                     <h3 class="text-xs font-black text-gray-900 truncate dark:text-white group-hover:text-teal-600 dark:group-hover:text-teal-400 transition-colors" :title="channel.title || channel.name || (channel.first_name ? channel.first_name : '')" v-html="getHighlightedHtml(channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : ''), channelSearchQuery)">
                     </h3>
                   </div>
-                  <p v-if="channel.username || channel.id" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 truncate mt-0.5 flex items-center gap-1.5">
-                    <span v-if="channel.username" class="text-teal-650 dark:text-teal-400" v-html="'@' + getHighlightedHtml(channel.username, channelSearchQuery)"></span>
-                    <span v-if="channel.username && channel.id" class="opacity-40">•</span>
+                  <p v-if="channel.username || channel.id || channel.key" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 truncate mt-0.5 flex items-center gap-1.5">
+                    <span v-if="channel.username || channel.key" class="text-teal-650 dark:text-teal-400" v-html="'@' + getHighlightedHtml(channel.username || channel.key, channelSearchQuery)"></span>
+                    <span v-if="(channel.username || channel.key) && channel.id" class="opacity-40">•</span>
                     <span v-if="channel.id" class="font-mono">ID: {{ channel.id }}</span>
                   </p>
                 </div>
@@ -10846,6 +10851,8 @@ onUnmounted(() => {
                     >
                       <video
                         controls
+                        preload="metadata"
+                        playsinline
                         class="w-full h-auto max-h-[500px] mx-auto"
                       >
                         <source :src="getVideoUrl(post)" type="video/mp4" />
@@ -11039,7 +11046,7 @@ onUnmounted(() => {
                         class="relative bg-black flex items-center justify-center cursor-default"
                         @click.stop
                       >
-                        <video class="w-full h-auto object-cover max-h-[500px]">
+                        <video preload="metadata" playsinline class="w-full h-auto object-cover max-h-[500px]">
                           <source :src="getVideoUrl(post)" type="video/mp4" />
                         </video>
                       </div>
@@ -11301,6 +11308,8 @@ onUnmounted(() => {
                               post.data?.videos && post.data.videos.length > 0
                             "
                             controls
+                            preload="metadata"
+                            playsinline
                             class="w-full h-auto bg-black max-h-[400px] cursor-default"
                             @click.stop
                           >
@@ -12045,7 +12054,7 @@ onUnmounted(() => {
                   v-if="post.data?.videos && post.data.videos.length > 0"
                   class="mb-3 rounded-xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-black"
                 >
-                  <video controls class="w-full h-auto max-h-[500px]">
+                  <video controls preload="metadata" playsinline class="w-full h-auto max-h-[500px]">
                     <source :src="getVideoUrl(post)" type="video/mp4" />
                     Your browser does not support the video tag.
                   </video>
@@ -12354,6 +12363,8 @@ onUnmounted(() => {
                       selectedPost.data.videos.length > 0
                     "
                     controls
+                    preload="metadata"
+                    playsinline
                     class="w-full h-auto bg-black max-h-[400px]"
                   >
                     <source :src="getVideoUrl(selectedPost)" type="video/mp4" />
@@ -13857,7 +13868,7 @@ onUnmounted(() => {
                       v-if="post.data?.videos && post.data.videos.length > 0"
                       class="mb-4 rounded-2xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-black max-w-sm shadow-sm"
                     >
-                      <video controls class="w-full h-auto max-h-[300px]">
+                      <video controls preload="metadata" playsinline class="w-full h-auto max-h-[300px]">
                         <source :src="getVideoUrl(post)" type="video/mp4" />
                       </video>
                     </div>
@@ -14511,7 +14522,7 @@ onUnmounted(() => {
                 "
                 class="mb-2.5 rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-black"
               >
-                <video controls class="w-full h-32 object-cover">
+                <video controls preload="metadata" playsinline class="w-full h-32 object-cover">
                   <source :src="getVideoUrl(singlePost)" type="video/mp4" />
                 </video>
               </div>
@@ -15400,6 +15411,8 @@ onUnmounted(() => {
                         >
                           <video
                             controls
+                            preload="metadata"
+                            playsinline
                             class="w-full h-auto max-h-[220px] mx-auto"
                           >
                             <source :src="getVideoUrl(post)" type="video/mp4" />
