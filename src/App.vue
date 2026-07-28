@@ -90,24 +90,73 @@ const loginName = ref("");
 const loginToken = ref("");
 const isLoginTokenValid = ref(false);
 
-const saveLogin = () => {
+const testAccessToken = async (token: string): Promise<boolean> => {
+  if (!token) {
+    isLoginTokenValid.value = false;
+    return false;
+  }
+  try {
+    const res = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-speedupCN?_t=${Date.now()}`, {
+      cache: "no-store",
+      headers: {
+        "x-gos-token": token,
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+      },
+    });
+    if (res.status === 200) {
+      isLoginTokenValid.value = true;
+      return true;
+    } else {
+      isLoginTokenValid.value = false;
+      return false;
+    }
+  } catch (error) {
+    console.error("Access token validation check error:", error);
+    isLoginTokenValid.value = false;
+    return false;
+  }
+};
+
+const saveLogin = async () => {
   localStorage.setItem("user-login-name", loginName.value);
   localStorage.setItem("user-login-token", loginToken.value);
   showLoginModal.value = false;
-  toastMessage.value = "Access Token info saved!";
-  toastType.value = "success";
+
+  if (loginToken.value) {
+    const isValid = await testAccessToken(loginToken.value);
+    if (isValid) {
+      toastMessage.value = "Access Token saved & verified!";
+      toastType.value = "success";
+    } else {
+      toastMessage.value = "Access Token saved, but token is invalid!";
+      toastType.value = "error";
+    }
+  } else {
+    isLoginTokenValid.value = false;
+    toastMessage.value = "Access Token info cleared.";
+    toastType.value = "info";
+  }
   setTimeout(() => { toastMessage.value = ""; }, 3000);
 };
 
-const loadLogin = () => {
+const loadLogin = async () => {
   loginName.value = localStorage.getItem("user-login-name") || "";
   loginToken.value = localStorage.getItem("user-login-token") || "";
   if (loginToken.value) {
-    toastMessage.value = "Access Token info retrieved ok!";
-    toastType.value = "success";
+    const isValid = await testAccessToken(loginToken.value);
+    if (isValid) {
+      toastMessage.value = "Access Token retrieved & verified!";
+      toastType.value = "success";
+    } else {
+      toastMessage.value = "Access Token retrieved, but token is invalid!";
+      toastType.value = "error";
+    }
     setTimeout(() => { toastMessage.value = ""; }, 3000);
+  } else {
+    isLoginTokenValid.value = false;
   }
-}
+};
 
 const isAddingAll = ref(false);
 const addAllToWorkspace = async () => {
@@ -8918,10 +8967,20 @@ onUnmounted(() => {
         <div class="absolute right-4 z-50 flex items-center space-x-2">
           <button
             @click="showLoginModal = true"
-            class="h-10 w-10 rounded-full bg-blue-100 dark:bg-blue-900 border border-blue-200 dark:border-blue-800 flex items-center justify-center text-blue-600 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-800 transition shadow-sm"
+            :class="[
+              'h-10 w-10 rounded-full flex items-center justify-center transition shadow-sm border relative',
+              isLoginTokenValid
+                ? 'bg-emerald-500 hover:bg-emerald-600 text-white border-emerald-600 shadow-md shadow-emerald-500/20 dark:bg-emerald-600 dark:hover:bg-emerald-500 dark:text-emerald-50 dark:border-emerald-400 ring-2 ring-emerald-400/40 dark:ring-emerald-500/40'
+                : 'bg-blue-100 dark:bg-blue-900 border-blue-200 dark:border-blue-800 text-blue-600 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-800'
+            ]"
             aria-label="Access Tokens"
+            :title="isLoginTokenValid ? 'Access Token Validated' : 'Access Tokens'"
           >
             <User class="h-5 w-5" />
+            <span
+              v-if="isLoginTokenValid"
+              class="absolute -top-0.5 -right-0.5 w-3 h-3 bg-emerald-400 dark:bg-emerald-300 rounded-full border-2 border-white dark:border-gray-900 animate-pulse"
+            ></span>
           </button>
           <button
             @click="toggleDark"
@@ -8936,12 +8995,37 @@ onUnmounted(() => {
         <!-- Login Modal -->
         <div v-if="showLoginModal" class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
            <div class="w-full max-w-sm bg-white dark:bg-gray-800 rounded-2xl p-6 shadow-2xl border border-gray-200 dark:border-gray-700">
-               <h2 class="text-lg font-bold mb-4 text-gray-900 dark:text-gray-100">Access Tokens</h2>
-               <input v-model="loginName" placeholder="User Name" class="w-full mb-3 p-2 border border-gray-300 rounded dark:bg-gray-900" />
-               <input v-model="loginToken" type="password" placeholder="Access Token" class="w-full mb-4 p-2 border border-gray-300 rounded dark:bg-gray-900" />
+               <div class="flex items-center justify-between mb-4">
+                 <h2 class="text-lg font-bold text-gray-900 dark:text-gray-100">Access Tokens</h2>
+                 <span
+                   v-if="isLoginTokenValid"
+                   class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700"
+                 >
+                   <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-ping"></span>
+                   Valid Token
+                 </span>
+                 <span
+                   v-else-if="loginToken"
+                   class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full font-bold bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 border border-rose-300 dark:border-rose-700"
+                 >
+                   Invalid Token
+                 </span>
+               </div>
+               <input v-model="loginName" placeholder="User Name" class="w-full mb-3 p-2 border border-gray-300 rounded dark:bg-gray-900 dark:text-white" />
+               <input v-model="loginToken" type="password" placeholder="Access Token" class="w-full mb-4 p-2 border border-gray-300 rounded dark:bg-gray-900 dark:text-white" />
                <div class="flex justify-end gap-2">
-                   <button @click="showLoginModal = false" class="px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded">Cancel</button>
-                   <button @click="saveLogin" class="px-4 py-2 bg-blue-600 text-white rounded">Save</button>
+                   <button @click="showLoginModal = false" class="px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-gray-700 dark:text-gray-200">Cancel</button>
+                   <button
+                     @click="saveLogin"
+                     :class="[
+                       'px-4 py-2 rounded text-white font-medium transition-colors',
+                       isLoginTokenValid
+                         ? 'bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-600'
+                         : 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
+                     ]"
+                   >
+                     Save
+                   </button>
                </div>
            </div>
         </div>
