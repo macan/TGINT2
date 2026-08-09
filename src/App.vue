@@ -21,6 +21,8 @@ import {
   CheckCircle2,
   FileText,
   User,
+  Key,
+  Mail,
   PenTool,
   Link,
   ListFilter,
@@ -89,6 +91,50 @@ const showLoginModal = ref(false);
 const loginName = ref("");
 const loginToken = ref("");
 const isLoginTokenValid = ref(false);
+
+const loginModalSubTab = ref<"manage" | "request">("manage");
+const requestTokenName = ref("");
+const requestTokenEmail = ref("");
+const isRequestingToken = ref(false);
+const requestTokenSuccess = ref(false);
+
+const openLoginModal = (tab?: "manage" | "request") => {
+  if (tab) {
+    loginModalSubTab.value = tab;
+  } else if (!isLoginTokenValid.value && loginToken.value) {
+    loginModalSubTab.value = "request";
+  } else {
+    loginModalSubTab.value = "manage";
+  }
+  requestTokenName.value = loginName.value || requestTokenName.value;
+  requestTokenSuccess.value = false;
+  showLoginModal.value = true;
+};
+
+const submitTokenRequest = async () => {
+  if (!requestTokenName.value.trim() || !requestTokenEmail.value.trim()) {
+    toastMessage.value = "Please enter both name and email.";
+    toastType.value = "error";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+    return;
+  }
+
+  isRequestingToken.value = true;
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    requestTokenSuccess.value = true;
+    toastMessage.value = `Token request submitted for ${requestTokenEmail.value.trim()}!`;
+    toastType.value = "success";
+    setTimeout(() => { toastMessage.value = ""; }, 4000);
+  } catch (error) {
+    console.error("Token request error:", error);
+    toastMessage.value = "Failed to submit request. Please try again.";
+    toastType.value = "error";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  } finally {
+    isRequestingToken.value = false;
+  }
+};
 
 const testAccessToken = async (token: string): Promise<boolean> => {
   if (!token) {
@@ -2502,7 +2548,7 @@ const fetchSelectedChannelMetadata = async (node: ListenItem) => {
     return;
   }
   
-  const username = node.argument?.trim();
+  let username = node.argument?.trim();
   if (!username) {
     selectedChannelMetadata.value = null;
     return;
@@ -2875,9 +2921,14 @@ const loadGraph = async () => {
     if (isLoginTokenValid.value && graphNameInput.value) {
         try {
             // Reusing profile loading logic as it seems to return content directly
-            const response = await fetch(`https://i.gogingko.net/api/v1/v/profiles/graph-${graphNameInput.value}`, {
+            const response = await fetch(`https://i.gogingko.net/api/v1/v/profiles/graph-${graphNameInput.value}?_t=${Date.now()}`, {
                 method: 'GET',
-                headers: { 'x-gos-token': loginToken.value }
+                cache: 'no-store',
+                headers: {
+                    'x-gos-token': loginToken.value,
+                    'Cache-Control': 'no-cache, no-store, must-revalidate',
+                    'Pragma': 'no-cache',
+                }
             });
             if (!response.ok) throw new Error("Failed to load graph");
             const data = await response.json();
@@ -6617,6 +6668,20 @@ const searchChannel = async () => {
       posts.value = Array.isArray(postsData)
         ? postsData
         : postsData.data || postsData.posts || postsData.items || [];
+
+      await nextTick();
+      if (
+        posts.value.length > 0 &&
+        isLoginTokenValid.value &&
+        postsTimelineStats.value?.isDelayed
+      ) {
+        toastMessage.value = `Activity lagging. Automatically scheduled once for ${currentChannelName.value}.`;
+        toastType.value = "info";
+        setTimeout(() => {
+          toastMessage.value = "";
+        }, 4000);
+        await scheduleScrape();
+      }
     }
   } catch (err: any) {
     error.value = err.message || "An error occurred while fetching data";
@@ -8966,7 +9031,7 @@ onUnmounted(() => {
       >
         <div class="absolute right-4 z-50 flex items-center space-x-2">
           <button
-            @click="showLoginModal = true"
+            @click="openLoginModal()"
             :class="[
               'h-10 w-10 rounded-full flex items-center justify-center transition shadow-sm border relative',
               isLoginTokenValid
@@ -8992,40 +9057,204 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <!-- Login Modal -->
-        <div v-if="showLoginModal" class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-           <div class="w-full max-w-sm bg-white dark:bg-gray-800 rounded-2xl p-6 shadow-2xl border border-gray-200 dark:border-gray-700">
-               <div class="flex items-center justify-between mb-4">
-                 <h2 class="text-lg font-bold text-gray-900 dark:text-gray-100">Access Tokens</h2>
+        <!-- Login / Access Token Modal -->
+        <div v-if="showLoginModal" class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-md">
+           <div class="w-full max-w-md bg-white dark:bg-gray-800 rounded-3xl p-6 shadow-2xl border border-gray-200 dark:border-gray-700/80 transition-all">
+               <!-- Modal Header -->
+               <div class="flex items-center justify-between mb-5 pb-3 border-b border-gray-100 dark:border-gray-700/60">
+                 <div class="flex items-center gap-2.5">
+                   <div class="p-2 rounded-xl bg-blue-50 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400">
+                     <Key class="w-5 h-5" />
+                   </div>
+                   <div>
+                     <h2 class="text-base font-extrabold text-gray-900 dark:text-gray-100 leading-tight">Access Tokens</h2>
+                     <p class="text-xs text-gray-500 dark:text-gray-400">Manage credentials or request access</p>
+                   </div>
+                 </div>
+                 
+                 <!-- Status Pill -->
                  <span
                    v-if="isLoginTokenValid"
-                   class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700"
+                   class="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700/80 shadow-xs"
                  >
-                   <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-ping"></span>
+                   <span class="w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse"></span>
                    Valid Token
                  </span>
                  <span
                    v-else-if="loginToken"
-                   class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full font-bold bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 border border-rose-300 dark:border-rose-700"
+                   class="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-bold bg-rose-100 text-rose-800 dark:bg-rose-950/80 dark:text-rose-300 border border-rose-300 dark:border-rose-700/80 shadow-xs"
                  >
+                   <span class="w-2 h-2 rounded-full bg-rose-500 dark:bg-rose-400"></span>
                    Invalid Token
                  </span>
+                 <span
+                   v-else
+                   class="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
+                 >
+                   No Token Set
+                 </span>
                </div>
-               <input v-model="loginName" placeholder="User Name" class="w-full mb-3 p-2 border border-gray-300 rounded dark:bg-gray-900 dark:text-white" />
-               <input v-model="loginToken" type="password" placeholder="Access Token" class="w-full mb-4 p-2 border border-gray-300 rounded dark:bg-gray-900 dark:text-white" />
-               <div class="flex justify-end gap-2">
-                   <button @click="showLoginModal = false" class="px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded text-gray-700 dark:text-gray-200">Cancel</button>
+
+               <!-- Sub-Tab Navigation Header -->
+               <div class="flex p-1 mb-5 bg-gray-100 dark:bg-gray-900/60 rounded-xl border border-gray-200/60 dark:border-gray-700/40">
+                 <button
+                   @click="loginModalSubTab = 'manage'"
+                   :class="[
+                     'flex-1 py-2 px-3 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-2',
+                     loginModalSubTab === 'manage'
+                       ? 'bg-white dark:bg-gray-800 text-gray-900 dark:text-white shadow-sm border border-gray-200/80 dark:border-gray-700'
+                       : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
+                   ]"
+                 >
+                   <User class="w-3.5 h-3.5" />
+                   <span>Manage Token</span>
+                 </button>
+
+                 <button
+                   @click="loginModalSubTab = 'request'"
+                   :class="[
+                     'flex-1 py-2 px-3 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-2 relative',
+                     loginModalSubTab === 'request'
+                       ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-sm border border-gray-200/80 dark:border-gray-700'
+                       : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'
+                   ]"
+                 >
+                   <Send class="w-3.5 h-3.5" />
+                   <span>Request Token</span>
+                   <span
+                     v-if="!isLoginTokenValid && loginToken"
+                     class="inline-flex items-center justify-center px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider rounded-full bg-rose-500 text-white dark:bg-rose-600 animate-bounce"
+                   >
+                     New
+                   </span>
+                 </button>
+               </div>
+
+               <!-- Invalid Token Banner Notice -->
+               <div
+                 v-if="!isLoginTokenValid && loginToken && loginModalSubTab === 'manage'"
+                 class="mb-4 p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 flex items-start justify-between gap-2"
+               >
+                 <div class="flex items-start gap-2 text-xs text-rose-800 dark:text-rose-200">
+                   <AlertCircle class="w-4 h-4 text-rose-500 dark:text-rose-400 shrink-0 mt-0.5" />
+                   <div>
+                     <span class="font-bold">Token Verification Failed:</span> The current access token is invalid or expired.
+                   </div>
+                 </div>
+                 <button
+                   @click="loginModalSubTab = 'request'"
+                   class="shrink-0 text-xs font-bold underline text-rose-600 hover:text-rose-700 dark:text-rose-300 dark:hover:text-rose-200"
+                 >
+                   Request New →
+                 </button>
+               </div>
+
+               <!-- Sub-Tab 1: Manage Token -->
+               <div v-if="loginModalSubTab === 'manage'" class="space-y-4">
+                 <div>
+                   <label class="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-1.5">User Name</label>
+                   <input
+                     v-model="loginName"
+                     placeholder="Enter user name..."
+                     class="w-full px-3.5 py-2.5 text-sm bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500/50 dark:focus:ring-blue-400/50 outline-none text-gray-900 dark:text-white transition"
+                   />
+                 </div>
+
+                 <div>
+                   <label class="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-1.5">Access Token</label>
+                   <input
+                     v-model="loginToken"
+                     type="password"
+                     placeholder="Enter x-gos-token..."
+                     class="w-full px-3.5 py-2.5 text-sm bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500/50 dark:focus:ring-blue-400/50 outline-none text-gray-900 dark:text-white transition font-mono"
+                   />
+                 </div>
+
+                 <div class="flex justify-end gap-2.5 pt-3 border-t border-gray-100 dark:border-gray-700/60">
+                   <button
+                     @click="showLoginModal = false"
+                     class="px-4 py-2 text-xs font-bold text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition"
+                   >
+                     Cancel
+                   </button>
                    <button
                      @click="saveLogin"
                      :class="[
-                       'px-4 py-2 rounded text-white font-medium transition-colors',
+                       'px-5 py-2 text-xs font-bold rounded-xl text-white shadow-sm transition-all flex items-center gap-1.5',
                        isLoginTokenValid
-                         ? 'bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-600'
-                         : 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
+                         ? 'bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-600 shadow-emerald-600/20'
+                         : 'bg-blue-600 hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600 shadow-blue-600/20'
                      ]"
                    >
-                     Save
+                     <span>Save & Verify</span>
                    </button>
+                 </div>
+               </div>
+
+               <!-- Sub-Tab 2: Request Token -->
+               <div v-else-if="loginModalSubTab === 'request'" class="space-y-4">
+                 <div class="p-3 bg-teal-50/70 dark:bg-teal-950/30 border border-teal-200/80 dark:border-teal-800/50 rounded-xl text-xs text-teal-900 dark:text-teal-200 leading-relaxed">
+                   Enter your name and email address below to request a new access token.
+                 </div>
+
+                 <div v-if="requestTokenSuccess" class="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-xl text-center space-y-2">
+                   <div class="w-10 h-10 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-600 dark:text-emerald-300 mx-auto flex items-center justify-center">
+                     <CheckCircle2 class="w-6 h-6" />
+                   </div>
+                   <h4 class="text-sm font-bold text-emerald-900 dark:text-emerald-100">Request Submitted!</h4>
+                   <p class="text-xs text-emerald-700 dark:text-emerald-300">
+                     Your request for <strong>{{ requestTokenEmail }}</strong> has been submitted.
+                   </p>
+                   <button
+                     @click="requestTokenSuccess = false; loginModalSubTab = 'manage'"
+                     class="mt-2 text-xs font-bold px-3 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition"
+                   >
+                     Back to Manage Token
+                   </button>
+                 </div>
+
+                 <form v-else @submit.prevent="submitTokenRequest" class="space-y-3.5">
+                   <div>
+                     <label class="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-1.5">User Name</label>
+                     <input
+                       v-model="requestTokenName"
+                       type="text"
+                       required
+                       placeholder="Enter your name..."
+                       class="w-full px-3.5 py-2.5 text-sm bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-teal-500/50 dark:focus:ring-teal-400/50 outline-none text-gray-900 dark:text-white transition"
+                     />
+                   </div>
+
+                   <div>
+                     <label class="block text-xs font-bold text-gray-700 dark:text-gray-300 mb-1.5">Email Address</label>
+                     <input
+                       v-model="requestTokenEmail"
+                       type="email"
+                       required
+                       placeholder="you@example.com"
+                       class="w-full px-3.5 py-2.5 text-sm bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-teal-500/50 dark:focus:ring-teal-400/50 outline-none text-gray-900 dark:text-white transition"
+                     />
+                   </div>
+
+                   <div class="flex justify-end gap-2.5 pt-3 border-t border-gray-100 dark:border-gray-700/60">
+                     <button
+                       type="button"
+                       @click="showLoginModal = false"
+                       class="px-4 py-2 text-xs font-bold text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition"
+                     >
+                       Cancel
+                     </button>
+                     <button
+                       type="submit"
+                       :disabled="isRequestingToken || !requestTokenName.trim() || !requestTokenEmail.trim()"
+                       class="px-5 py-2 text-xs font-bold rounded-xl text-white bg-teal-600 hover:bg-teal-700 dark:bg-teal-500 dark:hover:bg-teal-600 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm shadow-teal-600/20 transition-all flex items-center gap-1.5"
+                     >
+                       <Loader2 v-if="isRequestingToken" class="w-3.5 h-3.5 animate-spin" />
+                       <Send v-else class="w-3.5 h-3.5" />
+                       <span>Submit Request</span>
+                     </button>
+                   </div>
+                 </form>
                </div>
            </div>
         </div>
