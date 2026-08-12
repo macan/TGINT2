@@ -43,6 +43,9 @@ import {
   GripHorizontal,
   GripVertical,
   Sparkles,
+  History,
+  GitCompare,
+  FileCode,
   Pin,
   Bot,
   LoaderCircle,
@@ -135,6 +138,288 @@ const submitTokenRequest = async () => {
     isRequestingToken.value = false;
   }
 };
+
+interface VersionItem {
+  versionIndex: number;
+  set: string | null;
+  pset: string | null;
+  propAll: any;
+  data: any;
+  fetchedAt: any;
+}
+
+const formatVersionTime = (time: any): string => {
+  if (!time) return "N/A";
+  try {
+    const d = new Date(time);
+    if (isNaN(d.getTime())) return String(time);
+    return d.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch (e) {
+    return String(time);
+  }
+};
+
+interface DiffLine {
+  type: "add" | "remove" | "same";
+  lineA?: number;
+  lineB?: number;
+  text: string;
+}
+
+// Old Versions State
+const showOldVersionsModal = ref(false);
+const isFetchingOldVersions = ref(false);
+const oldVersionsError = ref("");
+const oldVersionsList = ref<VersionItem[]>([]);
+const oldVersionsPostKey = ref("");
+const oldVersionsActiveTab = ref<"textDiff" | "jsonDiff" | "inspector">("textDiff");
+const selectedVersionAIndex = ref(0);
+const selectedVersionBIndex = ref(0);
+const singleVersionIndex = ref(0);
+
+const hasOldVersions = (post: any): boolean => {
+  if (!post) return false;
+  const prop = post.prop || post.data?.prop || (post.data && post.data["x-gos-prop-all"]);
+  if (!prop) return false;
+  if (typeof prop === "string") return prop.includes("x-gos-pset");
+  if (typeof prop === "object") return "x-gos-pset" in prop || JSON.stringify(prop).includes("x-gos-pset");
+  return false;
+};
+
+const parsePropAllHeader = (headerVal: string | null): any => {
+  if (!headerVal) return {};
+  try {
+    if (headerVal.startsWith("{")) return JSON.parse(headerVal);
+    return JSON.parse(decodeURIComponent(headerVal));
+  } catch (e) {
+    try {
+      return JSON.parse(headerVal);
+    } catch (e2) {
+      return { raw: headerVal };
+    }
+  }
+};
+
+const fetchOldVersions = async (
+  post: any,
+  onProgress?: (results: VersionItem[]) => void
+): Promise<VersionItem[]> => {
+  const postId = post.key || post.id || post.data?.id;
+  if (!postId) throw new Error("Post ID is missing.");
+
+  const results: VersionItem[] = [];
+  const fetchedSet = new Set<string>();
+
+  // 1. call http endpoint https://i.gogingko.net/api/v1/v/telegram-post/POST_ID with header 'x-gos-intent: 13'
+  const url = `https://i.gogingko.net/api/v1/v/telegram-post/${encodeURIComponent(postId)}?_t=${Date.now()}`;
+  const headers: Record<string, string> = {
+    "x-gos-intent": "13",
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+  };
+  if (loginToken.value) {
+    headers["x-gos-token"] = loginToken.value;
+  }
+
+  const res1 = await fetch(url, { headers });
+  if (!res1.ok) {
+    throw new Error(`Failed to fetch version history (HTTP ${res1.status})`);
+  }
+
+  // 2. parse response body which is in json format
+  const body1 = await res1.json();
+
+  // 3. parse response headers: 'x-gos-set' and 'x-gos-prop-all'
+  console.log(Object.fromEntries(res1.headers.entries()));
+  const set1 = res1.headers.get("x-gos-set");
+  const propAllHeader1 = res1.headers.get("x-gos-prop-all");
+  const propAll1 = parsePropAllHeader(propAllHeader1);
+  const pset1 = propAll1["x-gos-pset"] || propAll1["pset"] || null;
+  const lastModified = res1.headers.get('Last-Modified');
+
+  // 4. add 'x-gos-set' value to fetched set
+  if (set1) {
+    fetchedSet.add(set1);
+  }
+
+  results.push({
+    versionIndex: 1,
+    set: set1,
+    pset: pset1,
+    propAll: propAll1,
+    data: body1,
+    fetchedAt: lastModified,
+  });
+  if (onProgress) onProgress(results);
+  console.log(results);
+
+  // 5. start a loop when 'x-gos-pset' is not in fetched set
+  let currentPset = pset1;
+  let versionCounter = 2;
+
+  while (currentPset && !fetchedSet.has(currentPset)) {
+    // 5.1 call endpoint with header 'x-gos-lookup-in-set'
+    const loopHeaders: Record<string, string> = {
+      "x-gos-lookup-in-set": currentPset,
+      "Cache-Control": "no-cache, no-store, must-revalidate",
+      "Pragma": "no-cache",
+    };
+    if (loginToken.value) {
+      loopHeaders["x-gos-token"] = loginToken.value;
+    }
+
+    const loopRes = await fetch(url, { headers: loopHeaders });
+    if (!loopRes.ok) {
+      console.warn(`Version loop fetch failed for set ${currentPset} (HTTP ${loopRes.status})`);
+      break;
+    }
+
+    // 5.2 parse body
+    const loopBody = await loopRes.json();
+
+    // 5.3 parse headers
+    const loopSet = loopRes.headers.get("x-gos-set");
+    const loopPropAllHeader = loopRes.headers.get("x-gos-prop-all");
+    const loopPropAll = parsePropAllHeader(loopPropAllHeader);
+    const nextPset = loopPropAll["x-gos-pset"] || loopPropAll["pset"] || null;
+    const loopLastModified = loopRes.headers.get('Last-Modified');
+
+    // 5.4 add 'x-gos-set' value to fetched set
+    if (loopSet) {
+      fetchedSet.add(loopSet);
+    }
+
+    results.push({
+      versionIndex: versionCounter++,
+      set: loopSet,
+      pset: nextPset,
+      propAll: loopPropAll,
+      data: loopBody,
+      fetchedAt: loopLastModified,
+    });
+    if (onProgress) onProgress(results);
+
+    // 5.5 make 'x-gos-pset' the new loop check value
+    currentPset = nextPset;
+  }
+
+  // 6. return result array
+  console.log(results);
+  return results;
+};
+
+const openOldVersionsModal = async (post: any) => {
+  oldVersionsPostKey.value = post.key || post.id || post.data?.id || "Unknown";
+  showOldVersionsModal.value = true;
+  isFetchingOldVersions.value = true;
+  oldVersionsError.value = "";
+  oldVersionsList.value = [];
+  selectedVersionAIndex.value = 0;
+  selectedVersionBIndex.value = 0;
+  singleVersionIndex.value = 0;
+
+  try {
+    const list = await fetchOldVersions(post, (currentResults) => {
+      oldVersionsList.value = [...currentResults];
+    });
+    oldVersionsList.value = list;
+    if (list.length > 1) {
+      selectedVersionAIndex.value = list.length - 1;
+      selectedVersionBIndex.value = 0;
+    } else {
+      selectedVersionAIndex.value = 0;
+      selectedVersionBIndex.value = 0;
+    }
+  } catch (err: any) {
+    console.error("Failed to load old versions:", err);
+    oldVersionsError.value = err.message || "Failed to load version history.";
+  } finally {
+    isFetchingOldVersions.value = false;
+  }
+};
+
+const getPostMessageText = (data: any): string => {
+  if (!data) return "";
+  if (typeof data.message === "string") return data.message;
+  if (typeof data.text === "string") return data.text;
+  if (typeof data.caption === "string") return data.caption;
+  if (data.data?.message) return data.data.message;
+  return JSON.stringify(data, null, 2);
+};
+
+const computeDiffLines = (textA: string, textB: string): DiffLine[] => {
+  const linesA = (textA || "").split("\n");
+  const linesB = (textB || "").split("\n");
+
+  const m = linesA.length;
+  const n = linesB.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+
+  for (let i = 0; i < m; i++) {
+    for (let j = 0; j < n; j++) {
+      if (linesA[i] === linesB[j]) {
+        dp[i + 1][j + 1] = dp[i][j] + 1;
+      } else {
+        dp[i + 1][j + 1] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+  }
+
+  let i = m;
+  let j = n;
+  const result: DiffLine[] = [];
+
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && linesA[i - 1] === linesB[j - 1]) {
+      result.unshift({ type: "same", lineA: i, lineB: j, text: linesA[i - 1] });
+      i--;
+      j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      result.unshift({ type: "add", lineB: j, text: linesB[j - 1] });
+      j--;
+    } else if (i > 0 && (j === 0 || dp[i][j - 1] < dp[i - 1][j])) {
+      result.unshift({ type: "remove", lineA: i, text: linesA[i - 1] });
+      i--;
+    }
+  }
+
+  return result;
+};
+
+const activeDiffLines = computed(() => {
+  if (oldVersionsList.value.length === 0) return [];
+  const verA = oldVersionsList.value[selectedVersionAIndex.value];
+  const verB = oldVersionsList.value[selectedVersionBIndex.value];
+  if (!verA || !verB) return [];
+
+  if (oldVersionsActiveTab.value === "textDiff") {
+    const textA = getPostMessageText(verA.data);
+    const textB = getPostMessageText(verB.data);
+    return computeDiffLines(textA, textB);
+  } else {
+    const jsonA = JSON.stringify(verA.data, null, 2);
+    const jsonB = JSON.stringify(verB.data, null, 2);
+    return computeDiffLines(jsonA, jsonB);
+  }
+});
+
+const diffStats = computed(() => {
+  const lines = activeDiffLines.value;
+  let additions = 0;
+  let deletions = 0;
+  for (const l of lines) {
+    if (l.type === "add") additions++;
+    else if (l.type === "remove") deletions++;
+  }
+  return { additions, deletions, total: lines.length };
+});
 
 const testAccessToken = async (token: string): Promise<boolean> => {
   if (!token) {
@@ -9259,6 +9544,341 @@ onUnmounted(() => {
            </div>
         </div>
 
+        <!-- Old Versions Modal -->
+        <Teleport to="body">
+          <div
+            v-if="showOldVersionsModal"
+            class="fixed inset-0 z-[9999] flex items-center justify-center p-3 sm:p-5 md:p-8 bg-black/75 backdrop-blur-md transition-all animate-in fade-in duration-200"
+          >
+            <div
+              class="w-full max-w-5xl h-[90vh] max-h-[90vh] bg-white dark:bg-gray-850 rounded-3xl border border-gray-200 dark:border-gray-700/80 shadow-2xl flex flex-col overflow-hidden my-auto"
+            >
+            <!-- Modal Header -->
+            <div
+              class="flex flex-wrap items-center justify-between px-5 py-3 border-b border-gray-200/80 dark:border-gray-700/80 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-sm shrink-0 gap-3"
+            >
+              <div class="flex items-center gap-3">
+                <div
+                  class="p-2.5 rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 border border-amber-200 dark:border-amber-800/60"
+                >
+                  <History class="w-5 h-5" />
+                </div>
+                <div>
+                  <div class="flex items-center gap-2">
+                    <h2 class="text-base font-extrabold text-gray-900 dark:text-gray-100 leading-tight">
+                      Post Version History
+                    </h2>
+                    <span
+                      class="font-mono bg-gray-200/70 dark:bg-gray-700/80 text-gray-700 dark:text-gray-300 px-2 py-0.5 rounded-md text-[11px] font-bold"
+                    >
+                      ID: {{ oldVersionsPostKey }}
+                    </span>
+                    <span
+                      v-if="oldVersionsList.length > 0"
+                      class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800/50"
+                    >
+                      {{ oldVersionsList.length }} {{ oldVersionsList.length === 1 ? 'version' : 'versions' }}
+                    </span>
+                  </div>
+                  <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                    Compare changes across historical snapshots or inspect raw version data
+                  </p>
+                </div>
+              </div>
+
+              <!-- Header Controls: View Tabs & Close Button -->
+              <div class="flex items-center gap-3">
+                <!-- View Selector Tabs -->
+                <div
+                  class="flex p-1 bg-gray-200/70 dark:bg-gray-900/70 rounded-xl border border-gray-300/50 dark:border-gray-700/50"
+                >
+                  <button
+                    @click="oldVersionsActiveTab = 'textDiff'"
+                    :class="[
+                      'px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer',
+                      oldVersionsActiveTab === 'textDiff'
+                        ? 'bg-white dark:bg-gray-800 text-amber-600 dark:text-amber-400 shadow-xs'
+                        : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                    ]"
+                  >
+                    <GitCompare class="w-3.5 h-3.5" />
+                    <span>Text Diff</span>
+                  </button>
+
+                  <button
+                    @click="oldVersionsActiveTab = 'jsonDiff'"
+                    :class="[
+                      'px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer',
+                      oldVersionsActiveTab === 'jsonDiff'
+                        ? 'bg-white dark:bg-gray-800 text-amber-600 dark:text-amber-400 shadow-xs'
+                        : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                    ]"
+                  >
+                    <FileCode class="w-3.5 h-3.5" />
+                    <span>JSON Diff</span>
+                  </button>
+
+                  <button
+                    @click="oldVersionsActiveTab = 'inspector'"
+                    :class="[
+                      'px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer',
+                      oldVersionsActiveTab === 'inspector'
+                        ? 'bg-white dark:bg-gray-800 text-amber-600 dark:text-amber-400 shadow-xs'
+                        : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                    ]"
+                  >
+                    <FileText class="w-3.5 h-3.5" />
+                    <span>Version List</span>
+                  </button>
+                </div>
+
+                <button
+                  @click="showOldVersionsModal = false"
+                  class="p-2 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-200/60 dark:hover:bg-gray-700/60 rounded-xl transition cursor-pointer"
+                >
+                  <X class="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <!-- Modal Body -->
+            <div class="flex-1 overflow-hidden flex flex-col relative bg-gray-50/50 dark:bg-gray-900/50">
+              <!-- Loading State -->
+              <div
+                v-if="isFetchingOldVersions"
+                class="absolute inset-0 z-20 flex flex-col items-center justify-center bg-white/80 dark:bg-gray-800/80 backdrop-blur-xs gap-3 p-6 text-center"
+              >
+                <Loader2 class="w-8 h-8 animate-spin text-amber-500" />
+                <div class="flex flex-col items-center gap-1.5">
+                  <span class="text-sm font-bold text-gray-700 dark:text-gray-300">
+                    Traversing version tree via set lookups...
+                  </span>
+                  <span
+                    v-if="oldVersionsList.length > 0"
+                    class="text-xs font-semibold px-3 py-1 rounded-full bg-amber-50 dark:bg-amber-950/80 text-amber-600 dark:text-amber-400 border border-amber-200/80 dark:border-amber-800/60 shadow-3xs animate-pulse"
+                  >
+                    Fetched {{ oldVersionsList.length }} {{ oldVersionsList.length === 1 ? 'version' : 'versions' }}
+                  </span>
+                </div>
+              </div>
+
+              <!-- Error State -->
+              <div
+                v-else-if="oldVersionsError"
+                class="p-8 text-center flex flex-col items-center justify-center h-full gap-3"
+              >
+                <div class="p-3 bg-rose-100 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 rounded-2xl">
+                  <AlertCircle class="w-8 h-8" />
+                </div>
+                <h3 class="text-base font-bold text-gray-900 dark:text-white">Unable to Load Version History</h3>
+                <p class="text-xs text-rose-600 dark:text-rose-400 max-w-md">{{ oldVersionsError }}</p>
+                <button
+                  @click="showOldVersionsModal = false"
+                  class="mt-2 px-4 py-2 bg-gray-200 dark:bg-gray-700 text-xs font-bold rounded-xl cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+
+              <!-- Loaded Versions State -->
+              <div v-else-if="oldVersionsList.length > 0" class="flex-1 flex flex-col overflow-hidden">
+                <!-- Diff Mode Top Control Bar -->
+                <div
+                  v-if="oldVersionsActiveTab === 'textDiff' || oldVersionsActiveTab === 'jsonDiff'"
+                  class="px-6 py-3 bg-white dark:bg-gray-800/90 border-b border-gray-200/80 dark:border-gray-700/80 flex flex-wrap items-center justify-between gap-4 shrink-0 shadow-3xs"
+                >
+                  <div class="flex items-center gap-3 flex-wrap">
+                    <!-- Base Version Dropdown A -->
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs font-bold text-gray-500 dark:text-gray-400">Base (A):</span>
+                      <select
+                        v-model="selectedVersionAIndex"
+                        class="px-3 py-1.5 text-xs font-bold bg-gray-100 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-xl text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-amber-500/50"
+                      >
+                        <option
+                          v-for="(ver, idx) in oldVersionsList"
+                          :key="idx"
+                          :value="idx"
+                        >
+                          Version {{ ver.versionIndex }} • {{ formatVersionTime(ver.fetchedAt) }} ({{ ver.set ? 'set: ' + ver.set.slice(0, 8) + '...' : 'initial' }})
+                        </option>
+                      </select>
+                    </div>
+
+                    <!-- Swap Button -->
+                    <button
+                      @click="
+                        const tmp = selectedVersionAIndex;
+                        selectedVersionAIndex = selectedVersionBIndex;
+                        selectedVersionBIndex = tmp;
+                      "
+                      class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400 rounded-lg transition cursor-pointer"
+                      title="Swap compare versions"
+                    >
+                      <RefreshCw class="w-4 h-4" />
+                    </button>
+
+                    <!-- Target Version Dropdown B -->
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs font-bold text-gray-500 dark:text-gray-400">Compare (B):</span>
+                      <select
+                        v-model="selectedVersionBIndex"
+                        class="px-3 py-1.5 text-xs font-bold bg-gray-100 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-xl text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-amber-500/50"
+                      >
+                        <option
+                          v-for="(ver, idx) in oldVersionsList"
+                          :key="idx"
+                          :value="idx"
+                        >
+                          Version {{ ver.versionIndex }} • {{ formatVersionTime(ver.fetchedAt) }} ({{ ver.set ? 'set: ' + ver.set.slice(0, 8) + '...' : 'initial' }})
+                        </option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <!-- Diff Stats -->
+                  <div class="flex items-center gap-2 text-xs font-mono font-bold">
+                    <span class="px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800/80">
+                      +{{ diffStats.additions }} additions
+                    </span>
+                    <span class="px-2.5 py-1 rounded-md bg-rose-100 text-rose-800 dark:bg-rose-950/80 dark:text-rose-300 border border-rose-300 dark:border-rose-800/80">
+                      -{{ diffStats.deletions }} deletions
+                    </span>
+                  </div>
+                </div>
+
+                <!-- Diff Viewer Body -->
+                <div
+                  v-if="oldVersionsActiveTab === 'textDiff' || oldVersionsActiveTab === 'jsonDiff'"
+                  class="flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed"
+                >
+                  <div
+                    v-if="activeDiffLines.length === 0"
+                    class="text-center py-12 text-gray-400 dark:text-gray-500"
+                  >
+                    No differences found between the selected versions.
+                  </div>
+
+                  <div
+                    v-else
+                    class="bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 overflow-hidden shadow-inner"
+                  >
+                    <div
+                      v-for="(line, idx) in activeDiffLines"
+                      :key="idx"
+                      :class="[
+                        'flex items-start px-4 py-1 border-b border-gray-100/50 dark:border-gray-800/50 transition-colors',
+                        line.type === 'add'
+                          ? 'bg-emerald-50/80 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200 border-l-4 border-l-emerald-500'
+                          : line.type === 'remove'
+                          ? 'bg-rose-50/80 dark:bg-rose-950/40 text-rose-900 dark:text-rose-200 border-l-4 border-l-rose-500'
+                          : 'text-gray-800 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-850'
+                      ]"
+                    >
+                      <!-- Line Numbers -->
+                      <span class="w-8 shrink-0 text-gray-400 dark:text-gray-600 select-none text-right pr-2 font-mono text-[11px]">
+                        {{ line.lineA || '' }}
+                      </span>
+                      <span class="w-8 shrink-0 text-gray-400 dark:text-gray-600 select-none text-right pr-2 font-mono text-[11px]">
+                        {{ line.lineB || '' }}
+                      </span>
+
+                      <!-- Indicator (+ / - / blank) -->
+                      <span
+                        class="w-6 shrink-0 select-none font-bold text-center"
+                        :class="line.type === 'add' ? 'text-emerald-600 dark:text-emerald-400' : line.type === 'remove' ? 'text-rose-600 dark:text-rose-400' : 'text-gray-400'"
+                      >
+                        {{ line.type === 'add' ? '+' : line.type === 'remove' ? '-' : ' ' }}
+                      </span>
+
+                      <!-- Line Text Content -->
+                      <span class="whitespace-pre-wrap break-all flex-1">{{ line.text }}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Single Version Inspector / List View -->
+                <div v-else-if="oldVersionsActiveTab === 'inspector'" class="flex-1 flex overflow-hidden">
+                  <!-- Versions Sidebar -->
+                  <div class="w-64 border-r border-gray-200 dark:border-gray-700/80 bg-white dark:bg-gray-800/50 overflow-y-auto p-3 space-y-2 shrink-0">
+                    <h4 class="text-xs font-extrabold text-gray-400 uppercase tracking-wider px-2 py-1">
+                      Version Snapshots
+                    </h4>
+                    <button
+                      v-for="(ver, idx) in oldVersionsList"
+                      :key="idx"
+                      @click="singleVersionIndex = idx"
+                      :class="[
+                        'w-full text-left p-3 rounded-xl border transition-all flex flex-col gap-1 cursor-pointer',
+                        singleVersionIndex === idx
+                          ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-700/80 text-amber-900 dark:text-amber-100 shadow-xs'
+                          : 'bg-gray-50/60 dark:bg-gray-900/40 border-gray-200/60 dark:border-gray-700/60 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
+                      ]"
+                    >
+                      <div class="flex items-center justify-between">
+                        <span class="text-xs font-bold">Version {{ ver.versionIndex }}</span>
+                        <span v-if="idx === 0" class="text-[9px] font-black px-1.5 py-0.5 rounded bg-amber-500 text-white uppercase">Latest</span>
+                      </div>
+                      <div v-if="ver.fetchedAt" class="text-[10px] font-mono text-amber-600 dark:text-amber-400 font-semibold flex items-center gap-1 my-0.5">
+                        <Clock class="w-3 h-3 shrink-0" />
+                        <span>{{ formatVersionTime(ver.fetchedAt) }}</span>
+                      </div>
+                      <div class="text-[10px] font-mono text-gray-500 dark:text-gray-400 truncate">
+                        Set: {{ ver.set || 'N/A' }}
+                      </div>
+                      <div v-if="ver.pset" class="text-[10px] font-mono text-gray-400 dark:text-gray-500 truncate">
+                        PSet: {{ ver.pset }}
+                      </div>
+                    </button>
+                  </div>
+
+                  <!-- Selected Version Inspector Details -->
+                  <div class="flex-1 overflow-y-auto p-6 space-y-4">
+                    <div
+                      v-if="oldVersionsList[singleVersionIndex]"
+                      class="space-y-4"
+                    >
+                      <div class="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-gray-200 dark:border-gray-700">
+                        <div>
+                          <h3 class="text-sm font-extrabold text-gray-900 dark:text-white">
+                            Version {{ oldVersionsList[singleVersionIndex].versionIndex }} Details
+                          </h3>
+                          <p class="text-xs font-mono text-gray-500 dark:text-gray-400 mt-0.5">
+                            Internal Set ID: {{ oldVersionsList[singleVersionIndex].set || 'None' }}
+                          </p>
+                        </div>
+                        <div v-if="oldVersionsList[singleVersionIndex].fetchedAt" class="flex items-center gap-1.5 px-3 py-1 bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800/60 rounded-xl text-xs font-semibold">
+                          <Clock class="w-3.5 h-3.5 text-amber-500" />
+                          <span>Modified: {{ formatVersionTime(oldVersionsList[singleVersionIndex].fetchedAt) }}</span>
+                        </div>
+                      </div>
+
+                      <!-- Content Message Preview -->
+                      <div class="p-4 bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 space-y-2">
+                        <h4 class="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                          Post Content
+                        </h4>
+                        <div class="text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
+                          {{ getPostMessageText(oldVersionsList[singleVersionIndex].data) }}
+                        </div>
+                      </div>
+
+                      <!-- Raw JSON Output -->
+                      <div class="space-y-2">
+                        <h4 class="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                          Raw Version JSON
+                        </h4>
+                        <pre class="p-4 bg-gray-900 text-emerald-400 font-mono text-xs rounded-2xl overflow-x-auto max-h-96 leading-relaxed">{{ JSON.stringify(oldVersionsList[singleVersionIndex].data, null, 2) }}</pre>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        </Teleport>
+
         <!-- Glass Tabs -->
         <div
           class="flex items-center overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden max-w-[calc(100vw-7.5rem)] md:max-w-full bg-gray-200/50 dark:bg-gray-800/50 p-1.5 rounded-2xl backdrop-blur-xl border border-gray-200/50 dark:border-gray-700/50 shadow-inner whitespace-nowrap scroll-smooth mr-20 md:mr-0"
@@ -11277,11 +11897,22 @@ onUnmounted(() => {
                             </span>
                           </div>
                         </div>
-                        <span
-                          v-if="post.key"
-                          class="font-mono bg-gray-50/50 dark:bg-gray-900/50 border border-gray-200/50 dark:border-gray-700/50 px-2.5 py-1 rounded-lg text-[10px] font-medium text-gray-400 dark:text-gray-500 backdrop-blur-sm"
-                          >ID: {{ post.key }}</span
-                        >
+                        <div class="flex items-center gap-2 ml-auto">
+                          <button
+                            v-if="hasOldVersions(post)"
+                            @click="openOldVersionsModal(post)"
+                            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/80 dark:border-amber-800/60 hover:bg-amber-100 dark:hover:bg-amber-900/60 hover:border-amber-300 transition-all cursor-pointer shadow-3xs group"
+                            title="View version history and compare diffs"
+                          >
+                            <History class="w-3 h-3 text-amber-500 group-hover:rotate-[-30deg] transition-transform" />
+                            <span>old versions</span>
+                          </button>
+                          <span
+                            v-if="post.key"
+                            class="font-mono bg-gray-50/50 dark:bg-gray-900/50 border border-gray-200/50 dark:border-gray-700/50 px-2.5 py-1 rounded-lg text-[10px] font-medium text-gray-400 dark:text-gray-500 backdrop-blur-sm"
+                            >ID: {{ post.key }}</span
+                          >
+                        </div>
                       </div>
                       <!-- Raw Post Debug -->
                       <details
@@ -12462,6 +13093,15 @@ onUnmounted(() => {
                       "
                     >
                       {{ post.key.split('.')[0] }}
+                    </button>
+                    <button
+                      v-if="hasOldVersions(post)"
+                      @click="openOldVersionsModal(post)"
+                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/80 dark:border-amber-800/60 hover:bg-amber-100 dark:hover:bg-amber-900/60 transition-all cursor-pointer mr-1.5"
+                      title="View version history and compare diffs"
+                    >
+                      <History class="w-3 h-3 text-amber-500" />
+                      <span>old versions</span>
                     </button>
                     <span
                       v-if="post.key"
@@ -14278,6 +14918,15 @@ onUnmounted(() => {
                           "
                         >
                           {{ post.key.split('.')[0] }}
+                        </button>
+                        <button
+                          v-if="hasOldVersions(post)"
+                          @click="openOldVersionsModal(post)"
+                          class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/80 dark:border-amber-800/60 hover:bg-amber-100 dark:hover:bg-amber-900/60 transition-all cursor-pointer mr-1.5"
+                          title="View version history and compare diffs"
+                        >
+                          <History class="w-3 h-3 text-amber-500" />
+                          <span>old versions</span>
                         </button>
                         <span
                           v-if="post.key"
