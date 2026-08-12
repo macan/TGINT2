@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, computed, nextTick } from "vue";
+import DOMPurify from "dompurify";
 import cytoscape from "cytoscape";
 import pako from "pako";
 import {
@@ -164,6 +165,37 @@ const formatVersionTime = (time: any): string => {
   } catch (e) {
     return String(time);
   }
+};
+
+const getSafePostContent = (post: any): string => {
+  if (!post || !post.data) return "";
+  const raw = post.data.rawcontent || post.data.content || "";
+  if (!raw) return "";
+
+  // Sanitize the HTML content safely using DOMPurify while preserving <a> links
+  const cleanRaw = DOMPurify.sanitize(raw, {
+    ADD_TAGS: ["a", "b", "br", "p"],
+    ADD_ATTR: ["href", "target", "rel", "style", "class", "title"],
+  });
+
+  // Ensure outbound links open in a new tab safely
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(cleanRaw, "text/html");
+  doc.querySelectorAll("a").forEach((link) => {
+    link.setAttribute("target", "_blank");
+    link.setAttribute("rel", "noopener noreferrer");
+    link.classList.add("text-blue-500", "hover:underline", "break-all");
+  });
+  const processedRaw = doc.body.innerHTML;
+  console.log(processedRaw)
+
+  if (post.key && post.key in translatedPosts.value) {
+    const translation = translatedPosts.value[post.key];
+    const cleanTranslation = DOMPurify.sanitize(translation);
+    return `${processedRaw}<div class="my-2 border-t border-gray-200 dark:border-gray-700"></div><div class="text-gray-600 dark:text-gray-300 text-sm whitespace-pre-wrap">${cleanTranslation}</div>`;
+  }
+
+  return processedRaw;
 };
 
 interface DiffLine {
@@ -2610,7 +2642,11 @@ const fetchListenPosts = async (node: ListenItem) => {
       const MAX_ITERATIONS = 20;
 
       while (iterationCount < MAX_ITERATIONS) {
-        const response = await fetch(url);
+        const response = await fetch(url, {
+          headers: {
+            "x-gos-rawcontent": "1",
+          }
+        });
         if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
         if (!response.ok) break;
 
@@ -4256,7 +4292,8 @@ const translatePost = async (post: any) => {
   
   isTranslating.value[post.key] = true;
   try {
-     const res = await fetch(`https://i.gogingko.net/api/v1/gtr?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(post.data.content)}`, {
+     const textToTranslate = post.data?.content || post.data?.rawcontent || "";
+     const res = await fetch(`https://i.gogingko.net/api/v1/gtr?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(textToTranslate)}`, {
         method: 'GET'
     });
     if (!res.ok) throw new Error("Translation failed");
@@ -5438,40 +5475,90 @@ const getFieldIcon = (field: string) => {
   }
 };
 
+const highlightHtmlContent = (text: any, words: string[]): string => {
+  if (!text) return "";
+  const strText = String(text);
+  const validWords = words.map((w) => w.trim()).filter((w) => w.length > 0);
+  if (validWords.length === 0) return strText;
+
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(strText, "text/html");
+
+    const escapedWords = validWords.map((w) =>
+      w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    );
+    const regex = new RegExp(`(${escapedWords.join("|")})`, "gi");
+
+    const highlightClass =
+      "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-0.5 rounded";
+
+    const walkAndHighlight = (node: Node) => {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const tagName = (node as Element).tagName.toLowerCase();
+        if (tagName === "script" || tagName === "style" || tagName === "mark") {
+          return;
+        }
+        const children = Array.from(node.childNodes);
+        for (const child of children) {
+          walkAndHighlight(child);
+        }
+      } else if (node.nodeType === Node.TEXT_NODE) {
+        const val = node.nodeValue;
+        if (val && regex.test(val)) {
+          regex.lastIndex = 0;
+          const parent = node.parentNode;
+          if (!parent) return;
+
+          const fragment = document.createDocumentFragment();
+          let lastIndex = 0;
+          let match: RegExpExecArray | null;
+
+          const matchRegex = new RegExp(`(${escapedWords.join("|")})`, "gi");
+          while ((match = matchRegex.exec(val)) !== null) {
+            const matchStart = match.index;
+            const matchText = match[0];
+
+            if (matchStart > lastIndex) {
+              fragment.appendChild(
+                document.createTextNode(val.substring(lastIndex, matchStart))
+              );
+            }
+
+            const mark = document.createElement("mark");
+            mark.className = highlightClass;
+            mark.textContent = matchText;
+            fragment.appendChild(mark);
+
+            lastIndex = matchRegex.lastIndex;
+          }
+
+          if (lastIndex < val.length) {
+            fragment.appendChild(
+              document.createTextNode(val.substring(lastIndex))
+            );
+          }
+
+          parent.replaceChild(fragment, node);
+        }
+      }
+    };
+
+    walkAndHighlight(doc.body);
+    return doc.body.innerHTML;
+  } catch (e) {
+    return strText;
+  }
+};
+
 const highlightText = (text: any) => {
   if (!text || searchWords.value.length === 0) return text ? String(text) : "";
-
-  let highlighted = String(text);
-  searchWords.value.forEach((word) => {
-    if (!word.trim()) return;
-    const regex = new RegExp(
-      `(${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
-      "gi"
-    );
-    highlighted = highlighted.replace(
-      regex,
-      '<mark class="bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-0.5 rounded">$1</mark>'
-    );
-  });
-  return highlighted;
+  return highlightHtmlContent(text, searchWords.value);
 };
 
 const highlightTextByKeywords = (text: any) => {
   if (!text || !selectedListenNode.value || !selectedListenNode.value.argument) return text ? String(text) : "";
-
-  let highlighted = String(text);
-  selectedListenNode.value.argument.split(',').forEach((word) => {
-    if (!word.trim()) return;
-    const regex = new RegExp(
-      `(${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
-      "gi"
-    );
-    highlighted = highlighted.replace(
-      regex,
-      '<mark class="bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-0.5 rounded">$1</mark>'
-    );
-  });
-  return highlighted;
+  return highlightHtmlContent(text, selectedListenNode.value.argument.split(','));
 };
 
 const fetchUserProfile = async (name: string) => {
@@ -6915,7 +7002,11 @@ const searchChannel = async () => {
     }
 
     let postsRes = await fetch(
-      binit ? `https://i.gogingko.net/api/v1/last/${name}?n=25&b=${binit}` : `https://i.gogingko.net/api/v1/last/${name}?n=25`
+      binit ? `https://i.gogingko.net/api/v1/last/${name}?n=25&b=${binit}` : `https://i.gogingko.net/api/v1/last/${name}?n=25`, {
+        headers: {
+          'x-gos-rawcontent': '1',
+        }
+      }
     );
 
     if (postsRes.ok) {
@@ -6925,7 +7016,11 @@ const searchChannel = async () => {
           name = `-100${name}`
           currentChannelName.value = name
           postsRes = await fetch(
-            `https://i.gogingko.net/api/v1/last/${name}?n=25`
+            `https://i.gogingko.net/api/v1/last/${name}?n=25`, {
+              headers: {
+                'x-gos-rawcontent': '1',
+              }
+           }
           );
           if (postsRes.ok) {
            postsData = await postsRes.json();
@@ -6939,7 +7034,11 @@ const searchChannel = async () => {
               name = data.gso.result
               currentChannelName.value = name
               postsRes = await fetch(
-                `https://i.gogingko.net/api/v1/last/${name}?n=25`
+                `https://i.gogingko.net/api/v1/last/${name}?n=25`, {
+                  headers: {
+                    'x-gos-rawcontent': '1',
+                  }
+                }
               );
               if (postsRes.ok) {
                 postsData = await postsRes.json();
@@ -7083,6 +7182,7 @@ const performGlobalSearch = async () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "x-gos-rawcontent": "1",
       },
       body: JSON.stringify(mgetPayload),
     });
@@ -11655,14 +11755,13 @@ onUnmounted(() => {
                     </div>
 
                     <div
-                      v-if="post.data?.content"
+                      v-if="post.data?.content || post.data?.rawcontent"
                       class="flex items-start gap-2 mb-4 relative z-10"
                     >
                       <div
                         class="text-gray-800 dark:text-gray-200 text-[15px] leading-relaxed whitespace-pre-wrap break-words flex-1"
-                      >
-                        {{ post.key in translatedPosts ? post.data.content + '\n--------\n' + translatedPosts[post.key] : post.data.content}}
-                      </div>
+                        v-html="getSafePostContent(post)"
+                      ></div>
                       <button
                         @click="translatePost(post)"
                         class="p-1 -mt-1 text-gray-400 hover:text-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-md transition-colors flex-shrink-0"
@@ -11672,7 +11771,7 @@ onUnmounted(() => {
                         <Loader2 v-else class="h-4 w-4 animate-spin" />
                       </button>
                       <button
-                        @click="searchOnGoogle(post.data.content)"
+                        @click="searchOnGoogle(post.data?.content || post.data?.rawcontent)"
                         class="p-1 -mt-1 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors flex-shrink-0"
                         title="Search on Google"
                       >
@@ -12167,8 +12266,8 @@ onUnmounted(() => {
                         <div
                           v-if="post.data?.content"
                           class="text-gray-700 dark:text-gray-300 text-sm leading-relaxed whitespace-pre-wrap break-words mb-4 md:max-w-md bg-gray-50/50 dark:bg-gray-800/30 p-4 rounded-2xl border border-gray-100/50 dark:border-gray-700/50"
+                          v-html=getSafePostContent(post)
                         >
-                          {{ post.data.content }}
                         </div>
 
                         <!-- Link Preview Text -->
@@ -12890,12 +12989,12 @@ onUnmounted(() => {
                 </div>
 
                 <div
-                  v-if="post.data?.content"
+                  v-if="post.data?.content || post.data?.rawcontent"
                   class="flex items-start gap-2 mb-4"
                 >
                   <div
                     class="text-gray-800 dark:text-gray-200 text-sm whitespace-pre-wrap break-words flex-1 leading-relaxed"
-                    v-html="highlightText(post.key in translatedPosts ? post.data.content + '\n--------\n' + translatedPosts[post.key] : post.data.content)"
+                    v-html="highlightText(getSafePostContent(post))"
                   ></div>
                   <button
                     @click="translatePost(post)"
@@ -12906,7 +13005,7 @@ onUnmounted(() => {
                     <Loader2 v-else class="h-4 w-4 animate-spin text-teal-650" />
                   </button>
                   <button
-                    @click="searchOnGoogle(post.data.content)"
+                    @click="searchOnGoogle(post.data?.content || post.data?.rawcontent)"
                     class="p-1.5 -mt-1 text-gray-450 hover:text-teal-600 hover:bg-teal-50 dark:hover:bg-teal-900/25 rounded-md transition-colors flex-shrink-0 cursor-pointer"
                     title="Search on Google"
                   >
@@ -13344,8 +13443,8 @@ onUnmounted(() => {
                   </h2>
                   <p
                     class="text-gray-600 dark:text-gray-400 text-sm leading-relaxed"
+                    v-html=getSafePostContent(selectedPost)
                   >
-                    {{ selectedPost.data?.content }}
                   </p>
                   <div
                     class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400"
@@ -14756,9 +14855,9 @@ onUnmounted(() => {
                     </div>
 
                     <!-- Post content string messages -->
-                    <div v-if="post.data?.content" class="flex items-start gap-2 mb-4 relative z-10">
+                    <div v-if="post.data?.content || post.data?.rawcontent" class="flex items-start gap-2 mb-4 relative z-10">
                       <div 
-                        v-html="post.key in translatedPosts ? highlightTextByKeywords(post.data.content) + '\n--------\n' + translatedPosts[post.key] : highlightTextByKeywords(post.data.content)"
+                        v-html="highlightTextByKeywords(getSafePostContent(post))"
                         class="text-gray-800 dark:text-gray-100 text-[14px] leading-relaxed whitespace-pre-wrap break-words flex-1"
                       ></div>
                       <button
@@ -15492,7 +15591,7 @@ onUnmounted(() => {
               <!-- Content Body -->
               <div
                 class="text-xs leading-relaxed text-gray-700 dark:text-gray-200 whitespace-pre-wrap break-words mt-1"
-                v-html="highlightText(singlePost.data?.content || '')"
+                v-html="highlightText(getSafePostContent(singlePost))"
               ></div>
 
               <!-- Contact & Extras if needed -->
@@ -16330,8 +16429,9 @@ onUnmounted(() => {
                         </div>
 
                         <!-- Post text content -->
-                        <div v-if="post.data?.content" class="text-xs text-gray-700 dark:text-gray-200 leading-relaxed whitespace-pre-wrap break-words relative z-10 font-medium">
-                          {{ post.data.content }}
+                        <div v-if="post.data?.content" class="text-xs text-gray-700 dark:text-gray-200 leading-relaxed whitespace-pre-wrap break-words relative z-10 font-medium"
+                          v-html=getSafePostContent(post)
+                        >
                         </div>
                         <div v-else-if="!(post.data?.photos && post.data.photos.length > 0) && !(post.data?.documents && post.data.documents.length > 0 && post.data.documents[0].mime_type && post.data.documents[0].mime_type.startsWith('image/')) && !(post.data?.videos && post.data.videos.length > 0)" class="text-xs text-gray-400 italic relative z-10">
                           Media or metadata post with no text.
