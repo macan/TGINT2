@@ -187,7 +187,6 @@ const getSafePostContent = (post: any): string => {
     link.classList.add("text-blue-500", "hover:underline", "break-all");
   });
   const processedRaw = doc.body.innerHTML;
-  console.log(processedRaw)
 
   if (post.key && post.key in translatedPosts.value) {
     const translation = translatedPosts.value[post.key];
@@ -3584,7 +3583,11 @@ const fetchChannelPosts = async (nodeId: string, atMost = 100, startId = 0) => {
         if (startId > 0) {
           firstCallUrl = `https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}&b=${startId}&_t=${cacheBuster}`;
         }
-        let response = await fetch(firstCallUrl);
+        let response = await fetch(firstCallUrl, {
+          headers: {
+            "x-gos-rawcontent": "1",
+          }
+        });
         if (!response.ok) throw new Error('Failed to fetch');
         let data = await response.json();
         
@@ -3608,7 +3611,11 @@ const fetchChannelPosts = async (nodeId: string, atMost = 100, startId = 0) => {
 
         // iterate to the first post
         while (min > 1 && allPosts.length < atMost) {
-          response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}&b=${min}&_t=${cacheBuster}`);
+          response = await fetch(`https://i.gogingko.net/api/v1/last/${nodeId}?n=${firstNr}&b=${min}&_t=${cacheBuster}`, {
+            headers: {
+              "x-gos-rawcontent": "1",
+            }
+          });
           if (!response.ok) throw new Error('Failed to fetch ' + nodeId + ' b=' + min);
           data = await response.json();
           posts = data || [];
@@ -4525,7 +4532,11 @@ const pollLatestPosts = async () => {
   if (!currentChannelName.value || activeTab.value !== 'explorer') return;
   
   try {
-    const res = await fetch(`https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=25`);
+    const res = await fetch(`https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=25`, {
+      headers: {
+        "x-gos-rawcontent": "1",
+      }
+    });
     if (!res.ok) return;
 
     const latestPostsVal = await res.json();
@@ -7437,7 +7448,11 @@ const loadMorePosts = async () => {
   while (numericId > 1) {
     try {
       const response = await fetch(
-        `https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=50&b=${numericId}`
+        `https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=50&b=${numericId}`, {
+          headers: {
+            "x-gos-rawcontent": "1",
+          }
+        }
       );
       if (response.ok) {
         const morePostsData = await response.json();
