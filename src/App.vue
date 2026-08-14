@@ -9376,50 +9376,72 @@ onUnmounted(() => {
             <p
               class="text-gray-500 dark:text-gray-400 font-medium leading-relaxed text-sm sm:text-base"
             >
-              Discover profiles, posts, and search content across public Telegram channels instantly. Connected to real-time engine indexers.
+              Discover profiles, posts, and search content across public Telegram channels instantly. Connected to real-time engine indexers. 
             </p>
           </div>
           
-          <div
-            v-if="Object.keys(counters).length > 0"
-            class="flex flex-wrap lg:justify-end items-center gap-2 lg:max-w-3xl"
-          >
+          <!-- Summary Metric Cards -->
+          <div class="flex flex-wrap items-center gap-2.5 shrink-0 self-start xl:self-center">
+            <!-- Total Posts Card -->
             <div
-              v-for="(count, type) in counters"
-              :key="type"
-              class="flex flex-col items-start bg-white/70 dark:bg-gray-800/70 backdrop-blur-md border border-gray-200/60 dark:border-gray-700/60 shadow-xs hover:translate-y-[-1px] transition-all duration-300"
-              :class="Object.keys(counters).length > 12 
-                ? 'px-3 py-1.5 rounded-xl min-w-[95px]' 
-                : 'px-4 py-2.5 rounded-2xl min-w-[115px]'"
+              class="flex items-center gap-2.5 px-3 py-2 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-blue-500/40 dark:hover:border-blue-400/40 transition-colors"
             >
-              <span 
-                class="font-extrabold text-[#0d9488] dark:text-[#2dd4bf] font-mono tracking-tight tabular-nums"
-                :class="Object.keys(counters).length > 12 ? 'text-sm' : 'text-base'"
-              >
-                {{ count.toLocaleString() }}
-              </span>
-              <div class="flex items-center gap-1 mt-0.5">
-                <span class="font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider text-[8px]">
-                  {{ type }}
-                </span>
-                <span
-                  v-if="frequencies[type] !== undefined"
-                  class="text-[8px] text-gray-400 dark:text-gray-500 font-mono opacity-80"
-                >
-                  · {{ frequencies[type].toFixed(1) }}/s
-                </span>
+              <div class="p-1.5 rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 border border-blue-100/80 dark:border-blue-800/50 shrink-0">
+                <MessageSquare class="w-3.5 h-3.5" />
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Posts</span>
+                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">0.47B</span>
               </div>
             </div>
-            
+
+            <!-- Total Photos Card -->
+            <div
+              class="flex items-center gap-2.5 px-3 py-2 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-emerald-500/40 dark:hover:border-emerald-400/40 transition-colors"
+            >
+              <div class="p-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 border border-emerald-100/80 dark:border-emerald-800/50 shrink-0">
+                <ImageIcon class="w-3.5 h-3.5" />
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Photos</span>
+                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">0.27B</span>
+              </div>
+            </div>
+
+            <!-- Total Channels Card -->
+            <div
+              class="flex items-center gap-2.5 px-3 py-2 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-amber-500/40 dark:hover:border-amber-400/40 transition-colors"
+            >
+              <div class="p-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 border border-amber-100/80 dark:border-amber-800/50 shrink-0">
+                <Radio class="w-3.5 h-3.5" />
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Channels</span>
+                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">3.1M</span>
+              </div>
+            </div>
+
+            <!-- Total Videos Card -->
+            <div
+              class="flex items-center gap-2.5 px-3 py-2 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-purple-500/40 dark:hover:border-purple-400/40 transition-colors"
+            >
+              <div class="p-1.5 rounded-lg bg-purple-50 dark:bg-purple-950/60 text-purple-600 dark:text-purple-400 border border-purple-100/80 dark:border-purple-800/50 shrink-0">
+                <Video class="w-3.5 h-3.5" />
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Videos</span>
+                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">36M</span>
+              </div>
+            </div>
+
+            <!-- Link to Monitor Central -->
             <button
               @click="activeTab = 'monitor'"
-              class="inline-flex items-center gap-1.5 bg-pink-500/10 hover:bg-pink-500/20 text-pink-600 dark:text-pink-400 border border-pink-500/20 transition-all font-black uppercase tracking-wider cursor-pointer hover:scale-[1.02]"
-              :class="Object.keys(counters).length > 12 
-                ? 'px-3 py-2 rounded-xl text-[9px]' 
-                : 'px-4 py-3 rounded-2xl text-[10px]'"
+              class="flex items-center gap-2 px-3.5 py-2 bg-pink-50 hover:bg-pink-100/80 dark:bg-pink-950/40 dark:hover:bg-pink-900/60 text-pink-600 dark:text-pink-400 border border-pink-200/80 dark:border-pink-800/50 rounded-xl transition-all duration-200 font-bold text-xs uppercase tracking-wider cursor-pointer active:scale-95 shadow-xs"
+              title="Open Monitor Central for real-time live engine stats"
             >
-              <Activity class="h-3.5 w-3.5 animate-pulse text-pink-500" />
-              <span>Monitor Central</span>
+              <Activity class="h-3.5 w-3.5 text-pink-500 dark:text-pink-400" />
+              <span class="whitespace-nowrap">Last 24H</span>
             </button>
           </div>
         </div>
