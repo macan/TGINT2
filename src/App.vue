@@ -698,6 +698,49 @@ const pendingJobs = ref<number | null>(null);
 let counterTimer: any = null;
 let pendingJobsTimer: any = null;
 
+const namespaceStats = ref<Record<string, number>>({
+  'telegram-post': 470000000,
+  'telegram-photo': 270000000,
+  'telegram-channel': 3100000,
+  'telegram-video': 36000000,
+});
+let namespaceStatsTimer: any = null;
+
+const formatNamespaceBillion = (nkeys?: number) => {
+  if (typeof nkeys !== 'number' || isNaN(nkeys)) return '0.47B';
+  const val = nkeys / 1e9;
+  return `${val.toFixed(2)}B`;
+};
+
+const formatNamespaceMillion = (nkeys?: number) => {
+  if (typeof nkeys !== 'number' || isNaN(nkeys)) return '--';
+  const val = nkeys / 1e6;
+  return `${val.toFixed(2)}M`;
+};
+
+const fetchNamespaceStats = async () => {
+  const namespaces = ['telegram-post', 'telegram-photo', 'telegram-channel', 'telegram-video'];
+  try {
+    await Promise.all(
+      namespaces.map(async (ns) => {
+        try {
+          const res = await fetch(`https://i.gogingko.net/api/v1/vn/${ns}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data && typeof data.nkeys === 'number') {
+              namespaceStats.value[ns] = data.nkeys;
+            }
+          }
+        } catch (e) {
+          console.error(`Failed to fetch namespace stat for ${ns}:`, e);
+        }
+      })
+    );
+  } catch (err) {
+    console.error("Failed to fetch namespace stats:", err);
+  }
+};
+
 const fetchCounters = async () => {
   try {
     const yyyymmdd = format(new Date(), "yyyyMMdd");
@@ -4638,6 +4681,8 @@ onMounted(() => {
   if (!isShareCardView.value) {
     fetchCounters();
     counterTimer = setInterval(fetchCounters, 30000);
+    fetchNamespaceStats();
+    namespaceStatsTimer = setInterval(fetchNamespaceStats, 30000);
     fetchPendingJobs();
     pendingJobsTimer = setInterval(fetchPendingJobs, 30000);
     if (activeTab.value === 'explorer') {
@@ -4655,6 +4700,7 @@ let graphIntersectionObserver: IntersectionObserver | null = null;
 onUnmounted(() => {
   window.removeEventListener("scroll", handleScroll);
   if (counterTimer) clearInterval(counterTimer);
+  if (namespaceStatsTimer) clearInterval(namespaceStatsTimer);
   if (pendingJobsTimer) clearInterval(pendingJobsTimer);
   if (pollingTimer) clearInterval(pollingTimer);
   if (listenRefreshInterval) clearInterval(listenRefreshInterval);
@@ -9362,11 +9408,7 @@ onUnmounted(() => {
               >
                 <span class="relative flex h-2 w-2">
                   <span
-                    v-if="pendingJobs > 0"
-                    class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 dark:bg-emerald-500 opacity-75"
-                  ></span>
-                  <span
-                    class="relative inline-flex rounded-full h-2 w-2"
+                    class="inline-flex rounded-full h-2 w-2"
                     :class="pendingJobs > 0 ? 'bg-emerald-500' : 'bg-gray-400 dark:bg-gray-500'"
                   ></span>
                 </span>
@@ -9391,7 +9433,7 @@ onUnmounted(() => {
               </div>
               <div class="flex flex-col">
                 <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Posts</span>
-                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">0.47B</span>
+                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceBillion(namespaceStats['telegram-post']) }}</span>
               </div>
             </div>
 
@@ -9404,7 +9446,7 @@ onUnmounted(() => {
               </div>
               <div class="flex flex-col">
                 <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Photos</span>
-                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">0.27B</span>
+                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceBillion(namespaceStats['telegram-photo']) }}</span>
               </div>
             </div>
 
@@ -9417,7 +9459,7 @@ onUnmounted(() => {
               </div>
               <div class="flex flex-col">
                 <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Channels</span>
-                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">3.1M</span>
+                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceMillion(namespaceStats['telegram-channel']) }}</span>
               </div>
             </div>
 
@@ -9430,7 +9472,7 @@ onUnmounted(() => {
               </div>
               <div class="flex flex-col">
                 <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Videos</span>
-                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">36M</span>
+                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceMillion(namespaceStats['telegram-video']) }}</span>
               </div>
             </div>
 
@@ -9466,7 +9508,7 @@ onUnmounted(() => {
             <User class="h-5 w-5" />
             <span
               v-if="isLoginTokenValid"
-              class="absolute -top-0.5 -right-0.5 w-3 h-3 bg-emerald-400 dark:bg-emerald-300 rounded-full border-2 border-white dark:border-gray-900 animate-pulse"
+              class="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 dark:bg-emerald-400 rounded-full border-2 border-white dark:border-gray-900"
             ></span>
           </button>
           <button
@@ -9499,7 +9541,7 @@ onUnmounted(() => {
                    v-if="isLoginTokenValid"
                    class="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700/80 shadow-xs"
                  >
-                   <span class="w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse"></span>
+                   <span class="w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-400"></span>
                    Valid Token
                  </span>
                  <span
