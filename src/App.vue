@@ -4719,6 +4719,12 @@ const isProfileVisible = ref(true);
 // Explorer State
 const channelName = ref("");
 const isInputFocused = ref(false);
+const clearExplorerInput = () => {
+  channelName.value = "";
+  nextTick(() => {
+    document.getElementById("explorer-search-input")?.focus();
+  });
+};
 const currentChannelName = ref("");
 const forwardsChannels = ref<string[]>([]);
 const ftoChannels = ref<string[]>([]);
@@ -9355,7 +9361,19 @@ onUnmounted(() => {
           </div>
           <!-- Input -->
           <div class="p-4 border-t border-gray-200 dark:border-gray-700">
-              <input type="text" v-model="chatInput" @keyup.enter="handleChatSubmit" placeholder="Ask anything..." class="w-full p-2 border rounded-lg dark:bg-gray-900 dark:border-gray-700 dark:text-white" :disabled="isChatLoading" />
+              <div class="relative flex items-center">
+                <input type="text" v-model="chatInput" @keyup.enter="handleChatSubmit" placeholder="Ask anything..." class="w-full p-2 pr-8 border rounded-lg dark:bg-gray-900 dark:border-gray-700 dark:text-white text-xs" :disabled="isChatLoading" />
+                <button
+                  v-if="chatInput"
+                  type="button"
+                  @mousedown.prevent
+                  @click="chatInput = ''"
+                  class="absolute right-2 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-full transition-colors cursor-pointer"
+                  title="Clear input"
+                >
+                  <X class="w-3.5 h-3.5" />
+                </button>
+              </div>
           </div>
           <!-- Resize Handle -->
           <div @mousedown="startChatResize" class="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize bg-gray-300 dark:bg-gray-600 rounded-tl-lg"></div>
@@ -10247,8 +10265,18 @@ onUnmounted(() => {
                         @focus="isHistoryVisible = true" 
                         @blur="handleBlur"
                         placeholder="e.g. durov, telegram" 
-                        class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
+                        class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full pr-2" 
                       />
+                      <button
+                        v-if="telegramUsername"
+                        type="button"
+                        @mousedown.prevent
+                        @click="telegramUsername = ''"
+                        class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full transition-colors cursor-pointer shrink-0 ml-1"
+                        title="Clear username"
+                      >
+                        <X class="w-3.5 h-3.5" />
+                      </button>
                     </div>
                     <button 
                       @click="fetchTelegramUser" 
@@ -10486,16 +10514,18 @@ onUnmounted(() => {
                     <input 
                       v-model="channelSearchQuery" 
                       placeholder="e.g. news" 
-                      class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
+                      class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full pr-2" 
                       @keyup.enter="handleChannelSearch" 
                     />
                     <button 
                       v-if="channelSearchQuery" 
+                      type="button"
+                      @mousedown.prevent
                       @click="channelSearchQuery = ''" 
-                      class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xs ml-1 cursor-pointer"
+                      class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 p-1 rounded-full cursor-pointer shrink-0 ml-1 transition-colors"
                       title="Clear search query"
                     >
-                      ✕
+                      <X class="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
@@ -10523,10 +10553,23 @@ onUnmounted(() => {
                     class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
                     @keyup.enter="handleLangFetch" 
                   />
-                  <!-- Animated flag -->
-                  <span v-if="computedFlag" class="absolute right-3 inline-block text-sm transition-transform duration-300 hover:scale-125 select-none" :title="'Language Flag for: ' + langCode">
-                    {{ computedFlag }}
-                  </span>
+                  <!-- Trailing elements in flex container -->
+                  <div class="flex items-center gap-1.5 shrink-0 ml-1.5">
+                    <button
+                      v-if="langCode"
+                      type="button"
+                      @mousedown.prevent
+                      @click="langCode = ''"
+                      class="p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full cursor-pointer transition-colors"
+                      title="Clear language"
+                    >
+                      <X class="w-3.5 h-3.5" />
+                    </button>
+                    <!-- Animated flag -->
+                    <span v-if="computedFlag" class="inline-block text-sm transition-transform duration-300 hover:scale-125 select-none" :title="'Language Flag for: ' + langCode">
+                      {{ computedFlag }}
+                    </span>
+                  </div>
                 </div>
               </div>
 
@@ -10836,19 +10879,33 @@ onUnmounted(() => {
                   @focus="isInputFocused = true"
                   @blur="handleBlur"
                   type="text"
-                  class="block w-full pl-14 pr-[120px] py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
+                  class="block w-full pl-14 pr-44 sm:pr-56 py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
                   placeholder="Enter channel name (e.g. durov) (?b=PID)"
                 />
-                <button
-                  type="submit"
-                  @click.prevent="searchChannel"
-                  :disabled="loading || !channelName.trim()"
-                  @mousedown.prevent
-                  class="absolute right-2 top-2 bottom-2 px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer"
-                >
-                  <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
-                  {{ loading ? "Exploring..." : "Explore" }}
-                </button>
+                <!-- Right Controls: Clear + Explore Button -->
+                <div class="absolute right-2 top-2 bottom-2 flex items-center gap-1.5 z-10">
+                  <button
+                    v-if="channelName"
+                    type="button"
+                    @mousedown.prevent
+                    @click.stop="clearExplorerInput"
+                    class="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/60 rounded-xl transition-colors cursor-pointer flex items-center justify-center shrink-0"
+                    title="Clear input"
+                    aria-label="Clear input"
+                  >
+                    <X class="w-4 h-4" />
+                  </button>
+                  <button
+                    type="submit"
+                    @click.prevent="searchChannel"
+                    :disabled="loading || !channelName.trim()"
+                    @mousedown.prevent
+                    class="h-full px-5 sm:px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer shrink-0"
+                  >
+                    <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
+                    {{ loading ? "Exploring..." : "Explore" }}
+                  </button>
+                </div>
                 
                 <!-- Autocomplete Dropdown -->
                 <div
@@ -11354,12 +11411,24 @@ onUnmounted(() => {
                 </div>
 
                 <div class="mb-4 flex gap-1.5">
-                  <input
-                    v-model="xSearchInput"
-                    @keyup.enter="searchXUser(xSearchInput)"
-                    placeholder="Search X users..."
-                    class="w-full px-3.5 py-2 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all dark:text-gray-100 placeholder:text-gray-400"
-                  />
+                  <div class="relative flex items-center w-full">
+                    <input
+                      v-model="xSearchInput"
+                      @keyup.enter="searchXUser(xSearchInput)"
+                      placeholder="Search X users..."
+                      class="w-full pl-3.5 pr-8 py-2 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all dark:text-gray-100 placeholder:text-gray-400"
+                    />
+                    <button
+                      v-if="xSearchInput"
+                      type="button"
+                      @mousedown.prevent
+                      @click="xSearchInput = ''"
+                      class="absolute right-2 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full transition-colors cursor-pointer"
+                      title="Clear search"
+                    >
+                      <X class="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                   <button
                     @click="searchXUser(xSearchInput)"
                     :disabled="isSearchingX || !xSearchInput.trim()"
@@ -12549,17 +12618,31 @@ onUnmounted(() => {
               <input
                 v-model="globalSearchQuery"
                 type="text"
-                class="block w-full pl-14 pr-[120px] py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
+                class="block w-full pl-14 pr-44 sm:pr-56 py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
                 placeholder="Search across all telegram data..."
               />
-              <button
-                type="submit"
-                :disabled="isSearching || !globalSearchQuery.trim()"
-                class="absolute right-2 top-2 bottom-2 px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer"
-              >
-                <Loader2 v-if="isSearching" class="h-4 w-4 animate-spin mr-2" />
-                {{ isSearching ? "Searching..." : "Search" }}
-              </button>
+              <!-- Right Controls: Clear + Search Button -->
+              <div class="absolute right-2 top-2 bottom-2 flex items-center gap-1.5 z-10">
+                <button
+                  v-if="globalSearchQuery"
+                  type="button"
+                  @mousedown.prevent
+                  @click="globalSearchQuery = ''"
+                  class="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/60 rounded-xl transition-colors cursor-pointer flex items-center justify-center shrink-0"
+                  title="Clear search"
+                  aria-label="Clear search"
+                >
+                  <X class="w-4 h-4" />
+                </button>
+                <button
+                  type="submit"
+                  :disabled="isSearching || !globalSearchQuery.trim()"
+                  class="h-full px-5 sm:px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer shrink-0"
+                >
+                  <Loader2 v-if="isSearching" class="h-4 w-4 animate-spin mr-2" />
+                  {{ isSearching ? "Searching..." : "Search" }}
+                </button>
+              </div>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-gray-100 dark:border-gray-700/50">
@@ -13770,26 +13853,46 @@ onUnmounted(() => {
             <!-- Sleek Control Toolbar -->
             <div class="flex flex-wrap items-center gap-3">
               <!-- Search query field -->
-              <div class="relative min-w-[140px] sm:min-w-[180px] flex-grow lg:flex-grow-0">
-                <Search class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-550" />
+              <div class="relative min-w-[140px] sm:min-w-[180px] flex-grow lg:flex-grow-0 flex items-center">
+                <Search class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-550 pointer-events-none" />
                 <input 
                   type="text" 
                   v-model="nodeSearchQuery" 
                   @keyup.enter="findNode" 
                   placeholder="Find node ID..." 
-                  class="pl-9 pr-3.5 py-2 hover:bg-gray-50/50 dark:hover:bg-gray-900/35 border border-gray-200/80 dark:border-gray-700 rounded-xl bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/15 transition-all w-full" 
+                  class="pl-9 pr-7 py-2 hover:bg-gray-50/50 dark:hover:bg-gray-900/35 border border-gray-200/80 dark:border-gray-700 rounded-xl bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/15 transition-all w-full" 
                 />
+                <button
+                  v-if="nodeSearchQuery"
+                  type="button"
+                  @mousedown.prevent
+                  @click="nodeSearchQuery = ''"
+                  class="absolute right-2 p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-full cursor-pointer transition-colors"
+                  title="Clear node search"
+                >
+                  <X class="w-3 h-3" />
+                </button>
               </div>
 
               <!-- Graph name field -->
-              <div class="relative min-w-[110px] sm:min-w-[140px] flex-grow lg:flex-grow-0">
-                <FileText class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-teal-600 dark:text-teal-400" />
+              <div class="relative min-w-[110px] sm:min-w-[140px] flex-grow lg:flex-grow-0 flex items-center">
+                <FileText class="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-teal-600 dark:text-teal-400 pointer-events-none" />
                 <input 
                   type="text" 
                   v-model="graphNameInput" 
                   placeholder="Graph title..." 
-                  class="pl-9 pr-3.5 py-2 hover:bg-gray-50/50 dark:hover:bg-gray-900/35 border border-gray-200/80 dark:border-gray-700 rounded-xl bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/15 transition-all w-full" 
+                  class="pl-9 pr-7 py-2 hover:bg-gray-50/50 dark:hover:bg-gray-900/35 border border-gray-200/80 dark:border-gray-700 rounded-xl bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/15 transition-all w-full" 
                 />
+                <button
+                  v-if="graphNameInput"
+                  type="button"
+                  @mousedown.prevent
+                  @click="graphNameInput = ''"
+                  class="absolute right-2 p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-full cursor-pointer transition-colors"
+                  title="Clear graph title"
+                >
+                  <X class="w-3 h-3" />
+                </button>
               </div>
 
               <!-- Button Actions -->
@@ -15427,21 +15530,35 @@ onUnmounted(() => {
                     <input
                       v-model="autoChannelName"
                       type="text"
-                      class="block w-full pl-14 pr-[150px] py-4 border border-gray-200/90 dark:border-gray-700/90 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
+                      class="block w-full pl-14 pr-52 sm:pr-64 py-4 border border-gray-200/90 dark:border-gray-700/90 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
                       :placeholder="
                         searchMode === 'channel'
                           ? 'Enter channel name (e.g. durov)'
                           : 'Enter user name (e.g. user_id)'
                       "
                     />
-                    <button
-                      type="submit"
-                      :disabled="isAutoFinding || !autoChannelName.trim()"
-                      class="absolute right-2 top-2 bottom-2 px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer"
-                    >
-                      <Loader2 v-if="isAutoFinding" class="h-4 w-4 animate-spin mr-2" />
-                      {{ isAutoFinding ? "Finding..." : "Start Finding" }}
-                    </button>
+                    <!-- Right Controls: Clear + Action Button -->
+                    <div class="absolute right-2 top-2 bottom-2 flex items-center gap-1.5 z-10">
+                      <button
+                        v-if="autoChannelName"
+                        type="button"
+                        @mousedown.prevent
+                        @click="autoChannelName = ''"
+                        class="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/60 rounded-xl transition-colors cursor-pointer flex items-center justify-center shrink-0"
+                        title="Clear input"
+                        aria-label="Clear input"
+                      >
+                        <X class="w-4 h-4" />
+                      </button>
+                      <button
+                        type="submit"
+                        :disabled="isAutoFinding || !autoChannelName.trim()"
+                        class="h-full px-5 sm:px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer shrink-0"
+                      >
+                        <Loader2 v-if="isAutoFinding" class="h-4 w-4 animate-spin mr-2" />
+                        {{ isAutoFinding ? "Finding..." : "Start Finding" }}
+                      </button>
+                    </div>
                   </form>
 
                   <!-- Quick Guidance Info Tip -->
@@ -16768,9 +16885,19 @@ onUnmounted(() => {
                 v-model="profileChatInput" 
                 @keyup.enter="handleProfileChatSubmit(useProfileDB)" 
                 placeholder="Ask profile-related questions (e.g. Find all developers, list active admins...)" 
-                class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
+                class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full pr-2" 
                 :disabled="isProfileChatLoading"
               />
+              <button
+                v-if="profileChatInput"
+                type="button"
+                @mousedown.prevent
+                @click="profileChatInput = ''"
+                class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full transition-colors cursor-pointer shrink-0 ml-1"
+                title="Clear question"
+              >
+                <X class="w-3.5 h-3.5" />
+              </button>
             </div>
             <div class="flex gap-2 shrink-0">
               <button 
@@ -16827,8 +16954,18 @@ onUnmounted(() => {
                       v-model="profileSearchQuery" 
                       @keyup.enter="searchProfilesFullText" 
                       placeholder="e.g. bio, location, channels..." 
-                      class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full" 
+                      class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full pr-2" 
                     />
+                    <button
+                      v-if="profileSearchQuery"
+                      type="button"
+                      @mousedown.prevent
+                      @click="profileSearchQuery = ''"
+                      class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full transition-colors cursor-pointer shrink-0 ml-1"
+                      title="Clear search query"
+                    >
+                      <X class="w-3.5 h-3.5" />
+                    </button>
                   </div>
 
                   <!-- Return Limit select -->
