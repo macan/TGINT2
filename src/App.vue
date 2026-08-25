@@ -88,7 +88,47 @@ import markdownItMark from "markdown-it-mark";
 import clm from "country-locale-map";
 import { ListenItem, AutoFindingCell, GraphNode, GraphEdge } from "./types";
 import { getInitials, truncateString, getSha1HexDigest } from "./utils/helpers";
+import {
+  useI18n,
+  currentLocale,
+  setLocale,
+  availableLanguages,
+  currentLanguage,
+  t,
+  onLocaleLayoutChange
+} from "./i18n";
+import type { LocaleCode } from "./i18n/types";
+
 const md = new MarkdownIt({ html: true }).use(markdownItMark);
+
+// Language Switcher State
+const languageDropdownRef = ref<HTMLElement | null>(null);
+const isLanguageMenuOpen = ref(false);
+
+const selectAppLanguage = (code: LocaleCode) => {
+  setLocale(code);
+  isLanguageMenuOpen.value = false;
+  
+  // Recalculate dynamic layout heights and graph sizes
+  nextTick(() => {
+    if (explorerTab.value) {
+      explorerMinHeight.value = explorerTab.value.clientHeight > 0 ? `${explorerTab.value.clientHeight}px` : "0px";
+    }
+    if (workspaceGraph.value) {
+      try {
+        workspaceGraph.value.resize();
+        workspaceGraph.value.fit(undefined, 30);
+      } catch (e) {
+        // Cytoscape instance may not be loaded
+      }
+    }
+    if (typeof drawNetwork === 'function' && networkNodes.value && networkNodes.value.length > 0) {
+      try {
+        drawNetwork();
+      } catch (e) {}
+    }
+  });
+};
 
 // Login State Logic
 const showLoginModal = ref(false);
@@ -564,6 +604,9 @@ const dropdownContainer = ref<HTMLElement | null>(null);
 const handleClickOutside = (event: MouseEvent) => {
     if (dropdownContainer.value && !dropdownContainer.value.contains(event.target as Node)) {
         isHistoryVisible.value = false;
+    }
+    if (languageDropdownRef.value && !languageDropdownRef.value.contains(event.target as Node)) {
+        isLanguageMenuOpen.value = false;
     }
 };
 
@@ -9410,16 +9453,18 @@ onUnmounted(() => {
       </Transition>
 
       <!-- Title & Counters (non-sticky) -->
-      <div class="w-full max-w-7xl mx-auto pt-8 sm:pt-4 px-4">
-        <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6 pb-6 border-b border-gray-200/60 dark:border-gray-800/60">
-          <div class="text-left max-w-3xl">
-            <h1
-              class="text-4xl sm:text-5xl font-black tracking-tight text-gray-900 dark:text-white mb-3 flex flex-wrap items-center gap-x-4 gap-y-2"
-            >
-              <span>Telegram Explorer</span>
+      <div class="w-full max-w-[96rem] mx-auto pt-2.5 sm:pt-3 px-3 sm:px-6 lg:px-8">
+        <div class="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3 sm:gap-4 pb-3 border-b border-gray-200/60 dark:border-gray-800/60">
+          <div class="text-left flex-1 min-w-0">
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5 mb-1">
+              <h1
+                class="text-2xl sm:text-3xl lg:text-3xl font-black tracking-tight text-gray-900 dark:text-white flex items-center gap-2"
+              >
+                <span>{{ t('header.title') }}</span>
+              </h1>
               <span
                 v-if="pendingJobs !== null"
-                class="inline-flex items-center gap-2 text-xs font-extrabold font-mono uppercase tracking-wider tabular-nums px-2.5 py-1 rounded-lg border shadow-xs transition-all duration-300"
+                class="inline-flex items-center gap-1.5 text-[11px] font-extrabold font-mono uppercase tracking-wider tabular-nums px-2 py-0.5 rounded-md border shadow-xs transition-all duration-300"
                 :class="pendingJobs > 0
                   ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/25 border-emerald-200/60 dark:border-emerald-800/40'
                   : 'text-gray-500 dark:text-gray-400 bg-gray-100/70 dark:bg-gray-800/40 border-gray-200/50 dark:border-gray-700/40'"
@@ -9430,98 +9475,138 @@ onUnmounted(() => {
                     :class="pendingJobs > 0 ? 'bg-emerald-500' : 'bg-gray-400 dark:bg-gray-500'"
                   ></span>
                 </span>
-                <span>{{ pendingJobs }} {{ pendingJobs === 1 ? 'Job' : 'Jobs' }} Active</span>
+                <span>{{ pendingJobs === 1 ? t('header.activeJob', { count: pendingJobs }) : t('header.activeJobs', { count: pendingJobs }) }}</span>
               </span>
-            </h1>
+            </div>
             <p
-              class="text-gray-500 dark:text-gray-400 font-medium leading-relaxed text-sm sm:text-base"
+              class="text-gray-500 dark:text-gray-400 font-normal leading-snug text-xs sm:text-sm max-w-3xl"
             >
-              Discover profiles, posts, and search content across public Telegram channels instantly. Connected to real-time engine indexers. 
+              {{ t('header.description') }}
             </p>
           </div>
           
-          <!-- Summary Metric Cards -->
-          <div class="flex flex-wrap items-center gap-2.5 shrink-0 self-start xl:self-center">
+          <!-- Summary Metric Cards & Non-sticky Language Selector in Top Right -->
+          <div class="flex flex-wrap items-center gap-2 shrink-0 self-start xl:self-center">
             <!-- Total Posts Card -->
             <div
-              class="flex items-center gap-2.5 px-3 py-2 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-blue-500/40 dark:hover:border-blue-400/40 transition-colors"
+              class="flex items-center gap-2 px-2.5 py-1.5 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-blue-500/40 dark:hover:border-blue-400/40 transition-colors"
             >
-              <div class="p-1.5 rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 border border-blue-100/80 dark:border-blue-800/50 shrink-0">
+              <div class="p-1 rounded-lg bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 border border-blue-100/80 dark:border-blue-800/50 shrink-0">
                 <MessageSquare class="w-3.5 h-3.5" />
               </div>
               <div class="flex flex-col">
-                <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Posts</span>
-                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceBillion(namespaceStats['telegram-post']) }}</span>
+                <span class="text-[9px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">{{ t('metrics.posts') }}</span>
+                <span class="text-xs sm:text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceBillion(namespaceStats['telegram-post']) }}</span>
               </div>
             </div>
 
             <!-- Total Photos Card -->
             <div
-              class="flex items-center gap-2.5 px-3 py-2 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-emerald-500/40 dark:hover:border-emerald-400/40 transition-colors"
+              class="flex items-center gap-2 px-2.5 py-1.5 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-emerald-500/40 dark:hover:border-emerald-400/40 transition-colors"
             >
-              <div class="p-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 border border-emerald-100/80 dark:border-emerald-800/50 shrink-0">
+              <div class="p-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 border border-emerald-100/80 dark:border-emerald-800/50 shrink-0">
                 <ImageIcon class="w-3.5 h-3.5" />
               </div>
               <div class="flex flex-col">
-                <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Photos</span>
-                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceBillion(namespaceStats['telegram-photo']) }}</span>
+                <span class="text-[9px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">{{ t('metrics.photos') }}</span>
+                <span class="text-xs sm:text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceBillion(namespaceStats['telegram-photo']) }}</span>
               </div>
             </div>
 
             <!-- Total Channels Card -->
             <div
-              class="flex items-center gap-2.5 px-3 py-2 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-amber-500/40 dark:hover:border-amber-400/40 transition-colors"
+              class="flex items-center gap-2 px-2.5 py-1.5 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-amber-500/40 dark:hover:border-amber-400/40 transition-colors"
             >
-              <div class="p-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 border border-amber-100/80 dark:border-amber-800/50 shrink-0">
+              <div class="p-1 rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 border border-amber-100/80 dark:border-amber-800/50 shrink-0">
                 <Radio class="w-3.5 h-3.5" />
               </div>
               <div class="flex flex-col">
-                <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Channels</span>
-                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceMillion(namespaceStats['telegram-channel']) }}</span>
+                <span class="text-[9px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">{{ t('metrics.channels') }}</span>
+                <span class="text-xs sm:text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceMillion(namespaceStats['telegram-channel']) }}</span>
               </div>
             </div>
 
             <!-- Total Videos Card -->
             <div
-              class="flex items-center gap-2.5 px-3 py-2 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-purple-500/40 dark:hover:border-purple-400/40 transition-colors"
+              class="flex items-center gap-2 px-2.5 py-1.5 bg-white dark:bg-gray-800/90 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/70 rounded-xl shadow-xs hover:border-purple-500/40 dark:hover:border-purple-400/40 transition-colors"
             >
-              <div class="p-1.5 rounded-lg bg-purple-50 dark:bg-purple-950/60 text-purple-600 dark:text-purple-400 border border-purple-100/80 dark:border-purple-800/50 shrink-0">
+              <div class="p-1 rounded-lg bg-purple-50 dark:bg-purple-950/60 text-purple-600 dark:text-purple-400 border border-purple-100/80 dark:border-purple-800/50 shrink-0">
                 <Video class="w-3.5 h-3.5" />
               </div>
               <div class="flex flex-col">
-                <span class="text-[10px] font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">Videos</span>
-                <span class="text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceMillion(namespaceStats['telegram-video']) }}</span>
+                <span class="text-[9px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider leading-none">{{ t('metrics.videos') }}</span>
+                <span class="text-xs sm:text-sm font-bold font-mono text-gray-900 dark:text-gray-50 tabular-nums leading-snug mt-0.5">{{ formatNamespaceMillion(namespaceStats['telegram-video']) }}</span>
               </div>
             </div>
 
             <!-- Link to Monitor Central -->
             <button
               @click="activeTab = 'monitor'"
-              class="flex items-center gap-2 px-3.5 py-2 bg-pink-50 hover:bg-pink-100/80 dark:bg-pink-950/40 dark:hover:bg-pink-900/60 text-pink-600 dark:text-pink-400 border border-pink-200/80 dark:border-pink-800/50 rounded-xl transition-all duration-200 font-bold text-xs uppercase tracking-wider cursor-pointer active:scale-95 shadow-xs"
-              title="Open Monitor Central for real-time live engine stats"
+              class="flex items-center gap-1.5 px-3 py-1.5 bg-pink-50 hover:bg-pink-100/80 dark:bg-pink-950/40 dark:hover:bg-pink-900/60 text-pink-600 dark:text-pink-400 border border-pink-200/80 dark:border-pink-800/50 rounded-xl transition-all duration-200 font-bold text-xs uppercase tracking-wider cursor-pointer active:scale-95 shadow-xs"
+              :title="t('metrics.monitorTip')"
             >
               <Activity class="h-3.5 w-3.5 text-pink-500 dark:text-pink-400" />
-              <span class="whitespace-nowrap">Last 24H</span>
+              <span class="whitespace-nowrap">{{ t('metrics.last24h') }}</span>
             </button>
+
+            <!-- Language Selector Dropdown (Top Right of Page, Non-sticky) -->
+            <div class="relative ml-0.5" ref="languageDropdownRef">
+              <button
+                @click="isLanguageMenuOpen = !isLanguageMenuOpen"
+                class="h-[34px] px-2.5 rounded-xl bg-white/80 dark:bg-gray-800/80 backdrop-blur-md border border-gray-200/90 dark:border-gray-700/80 text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-gray-800 hover:border-teal-500/40 dark:hover:border-teal-400/40 transition-all shadow-xs flex items-center gap-1.5 text-xs font-bold focus:outline-none focus:ring-2 focus:ring-teal-500/30 hover:shadow-md cursor-pointer select-none"
+                :title="t('header.selectLanguage')"
+                aria-label="Select Language"
+              >
+                <span class="text-sm leading-none">{{ currentLanguage.flag }}</span>
+                <span class="inline-block tracking-wide font-medium text-xs">{{ currentLanguage.nativeName }}</span>
+                <ChevronDown class="w-3 h-3 text-gray-400 dark:text-gray-500 transition-transform duration-200" :class="{ 'rotate-180': isLanguageMenuOpen }" />
+              </button>
+
+              <!-- Dropdown Menu -->
+              <div
+                v-if="isLanguageMenuOpen"
+                class="absolute right-0 mt-1.5 w-44 bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-200/80 dark:border-gray-700/80 py-1.5 z-[100] animate-in fade-in zoom-in-95 duration-150 backdrop-blur-xl"
+              >
+                <div class="px-3 py-1 text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500 border-b border-gray-100 dark:border-gray-700/50 flex items-center gap-1.5">
+                  <Languages class="w-3 h-3 text-gray-400 dark:text-gray-500" />
+                  <span>{{ t('header.selectLanguage') }}</span>
+                </div>
+                <button
+                  v-for="lang in availableLanguages"
+                  :key="lang.code"
+                  @click="selectAppLanguage(lang.code)"
+                  :class="[
+                    'w-full px-3 py-1.5 text-left text-xs font-bold flex items-center justify-between hover:bg-teal-50 dark:hover:bg-teal-950/40 transition-colors cursor-pointer',
+                    currentLocale === lang.code ? 'text-teal-600 dark:text-teal-400 bg-teal-50/50 dark:bg-teal-950/20 font-extrabold' : 'text-gray-700 dark:text-gray-300'
+                  ]"
+                >
+                  <div class="flex items-center gap-2">
+                    <span class="text-sm leading-none">{{ lang.flag }}</span>
+                    <span>{{ lang.nativeName }}</span>
+                  </div>
+                  <CheckCircle2 v-if="currentLocale === lang.code" class="w-3.5 h-3.5 text-teal-600 dark:text-teal-400 shrink-0" />
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- Sticky Navigation Header -->
       <header
-        class="sticky top-0 z-50 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-md mb-8 relative flex items-center justify-center border-b border-gray-200 dark:border-gray-800 py-3"
+        class="sticky top-0 z-50 bg-gray-50/80 dark:bg-gray-900/80 backdrop-blur-md mb-4 sm:mb-6 relative flex items-center justify-center border-b border-gray-200 dark:border-gray-800 py-2 sm:py-2.5"
       >
         <div class="absolute right-4 z-50 flex items-center space-x-2">
           <button
             @click="openLoginModal()"
             :class="[
-              'h-10 w-10 rounded-full flex items-center justify-center transition shadow-sm border relative',
+              'h-10 w-10 rounded-full flex items-center justify-center transition shadow-sm border relative cursor-pointer',
               isLoginTokenValid
                 ? 'bg-emerald-500 hover:bg-emerald-600 text-white border-emerald-600 shadow-md shadow-emerald-500/20 dark:bg-emerald-600 dark:hover:bg-emerald-500 dark:text-emerald-50 dark:border-emerald-400 ring-2 ring-emerald-400/40 dark:ring-emerald-500/40'
                 : 'bg-blue-100 dark:bg-blue-900 border-blue-200 dark:border-blue-800 text-blue-600 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-800'
             ]"
-            aria-label="Access Tokens"
-            :title="isLoginTokenValid ? 'Access Token Validated' : 'Access Tokens'"
+            :aria-label="t('header.accessTokens')"
+            :title="isLoginTokenValid ? t('header.tokenValidated') : t('header.accessTokens')"
           >
             <User class="h-5 w-5" />
             <span
@@ -9531,8 +9616,9 @@ onUnmounted(() => {
           </button>
           <button
             @click="toggleDark"
-            class="p-2.5 rounded-full bg-white/50 dark:bg-gray-800/50 backdrop-blur-md border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-white dark:hover:bg-gray-800 transition-all shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 hover:shadow-md"
-            aria-label="Toggle dark mode"
+            class="p-2.5 rounded-full bg-white/50 dark:bg-gray-800/50 backdrop-blur-md border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-white dark:hover:bg-gray-800 transition-all shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 hover:shadow-md cursor-pointer"
+            :aria-label="t('header.toggleTheme')"
+            :title="t('header.toggleTheme')"
           >
             <Moon v-if="!isDark" class="h-4 w-4" />
             <Sun v-else class="h-4 w-4" />
@@ -10083,7 +10169,7 @@ onUnmounted(() => {
           <button
             @click="activeTab = 'channel'"
             :class="[
-              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0 cursor-pointer',
               activeTab === 'channel'
                 ? 'bg-white dark:bg-gray-700 text-yellow-600 dark:text-yellow-400 shadow-md shadow-yellow-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -10095,12 +10181,12 @@ onUnmounted(() => {
                 activeTab === 'channel' ? 'scale-110' : '',
               ]"
             />
-            Channels
+            {{ t('nav.channel') }}
           </button>
           <button
             @click="activeTab = 'explorer'"
             :class="[
-              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0 cursor-pointer',
               activeTab === 'explorer'
                 ? 'bg-white dark:bg-gray-700 text-blue-600 dark:text-blue-400 shadow-md shadow-blue-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -10112,12 +10198,12 @@ onUnmounted(() => {
                 activeTab === 'explorer' ? 'scale-110' : '',
               ]"
             />
-            Explorer
+            {{ t('nav.explorer') }}
           </button>
           <button
             @click="activeTab = 'search'"
             :class="[
-              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0 cursor-pointer',
               activeTab === 'search'
                 ? 'bg-white dark:bg-gray-700 text-cyan-600 dark:text-cyan-400 shadow-md shadow-cyan-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -10129,12 +10215,12 @@ onUnmounted(() => {
                 activeTab === 'search' ? 'scale-110' : '',
               ]"
             />
-            Search
+            {{ t('nav.search') }}
           </button>
           <button
             @click="activeTab = 'network'"
             :class="[
-              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0 cursor-pointer',
               activeTab === 'network'
                 ? 'bg-white dark:bg-gray-700 text-teal-600 dark:text-teal-400 shadow-md shadow-teal-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -10146,12 +10232,12 @@ onUnmounted(() => {
                 activeTab === 'network' ? 'scale-110' : '',
               ]"
             />
-            Network
+            {{ t('nav.network') }}
           </button>
           <button
             @click="activeTab = 'listen'"
             :class="[
-              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0 cursor-pointer',
               activeTab === 'listen'
                 ? 'bg-white dark:bg-gray-700 text-teal-600 dark:text-teal-400 shadow-md shadow-teal-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -10163,12 +10249,12 @@ onUnmounted(() => {
                 activeTab === 'listen' ? 'scale-110' : '',
               ]"
             />
-            Listen
+            {{ t('nav.listen') }}
           </button>
           <button
             @click="activeTab = 'auto-finding'"
             :class="[
-              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0 cursor-pointer',
               activeTab === 'auto-finding'
                 ? 'bg-white dark:bg-gray-700 text-green-600 dark:text-green-400 shadow-md shadow-green-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -10180,12 +10266,12 @@ onUnmounted(() => {
                 activeTab === 'auto-finding' ? 'scale-110' : '',
               ]"
             />
-            Auto Finding
+            {{ t('nav.autoFinding') }}
           </button>
           <button
             @click="activeTab = 'workspace'"
             :class="[
-              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0 cursor-pointer',
               activeTab === 'workspace'
                 ? 'bg-white dark:bg-gray-700 text-purple-600 dark:text-purple-400 shadow-md shadow-purple-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -10197,13 +10283,13 @@ onUnmounted(() => {
                 activeTab === 'workspace' ? 'scale-110' : '',
               ]"
             />
-            Workspace
+            {{ t('nav.workspace') }}
           </button>
           <button
             v-show="loginToken"
             @click="activeTab = 'profile'"
             :class="[
-              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0 cursor-pointer',
               activeTab === 'profile'
                 ? 'bg-white dark:bg-gray-700 text-orange-600 dark:text-orange-400 shadow-md shadow-orange-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -10215,12 +10301,12 @@ onUnmounted(() => {
                 activeTab === 'profile' ? 'scale-110' : '',
               ]"
             />
-            Profiles
+            {{ t('nav.profile') }}
           </button>
           <button
             @click="activeTab = 'monitor'"
             :class="[
-              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0',
+              'px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all duration-300 flex items-center justify-center shrink-0 cursor-pointer',
               activeTab === 'monitor'
                 ? 'bg-white dark:bg-gray-700 text-pink-600 dark:text-pink-400 shadow-md shadow-pink-500/5 ring-1 ring-gray-900/5 dark:ring-white/5'
                 : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
@@ -10232,7 +10318,7 @@ onUnmounted(() => {
                 activeTab === 'monitor' ? 'scale-110' : '',
               ]"
             />
-            Monitor
+            {{ t('nav.monitor') }}
           </button>
         </div>
       </header>
