@@ -2701,12 +2701,23 @@ const fetchListenPosts = async (node: ListenItem) => {
     let fetchedPosts: any[] = [];
 
     if (node.type === "channel") {
-      const username = node.argument?.trim();
+      let username = node.argument?.trim();
       if (!username) {
         if (selectedListenNode.value?.id === node.id) {
           isFetchingListenPosts.value = false;
         }
         return;
+      }
+
+      // try to lookup the resolve cache
+      if (true) {
+        const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${username}`)
+        if (resolveRes.ok) {
+          const data = await resolveRes.json()
+          if (data.state == 0 && data.gso?.result) {
+            username = data.gso.result
+          }
+        }
       }
 
       try {
@@ -2786,9 +2797,18 @@ const fetchListenPosts = async (node: ListenItem) => {
       const start = new Date(Date.now() - 24 * 60 * 60 * 1000);
       const end = new Date();
 
-      const fieldQueries = keywords.map(keyword => `content:"${keyword}"`);
+      const fieldQueries = keywords.map(keyword => {
+        if (keyword.startsWith('+')) {
+          return `+content:"${keyword}"`;
+        } else if (keyword.startsWith('-')) {
+          return `-content:"${keyword}"`;
+        } else {
+          return `content:"${keyword}"`;
+        }
+      })
+      .join(' ');
       const dateRange = `date:[to_date("${formatDateForSearch(start)}", "%Y-%m-%dT%H:%M:%S%z") TO to_date("${formatDateForSearch(end)}", "%Y-%m-%dT%H:%M:%S%z")]`;
-      const finalQuery = `(${fieldQueries.join(" OR ")}) AND ${dateRange}`;
+      const finalQuery = `(${fieldQueries}) AND ${dateRange}`;
 
       const response = await fetch("https://i.gogingko.net/api/v1/ft/telegram", {
         method: "GET",
@@ -7052,20 +7072,37 @@ const searchChannel = async () => {
         `https://i.gogingko.net/api/v1/z/JOB_TG/mjobs/${name}`
       );
       if (mjobsRes.ok) {
-        // this means the channel/group might exists, but the metadata is missing. we should build a dummy metaRes
-        metaRes = new Response(JSON.stringify({
-          _type: 'snscrape.modules.telegram.TelegramGroup',
-          members: 0,
-          photo: '',
-          title: 'DUMMY TITLE (need to re-scrape)',
-          username: name,
-          description: 'DUMMY Description (need to res-scrape).'
-        }), {
-          status: 200,
-          headers: {
-            'Content-Type': 'application/json'
+        const data = await mjobsRes.json()
+        if (data.state == 0 && data.gso?.result) {
+          // this means the channel/group might exists, but the metadata is missing. we should build a dummy metaRes
+          metaRes = new Response(JSON.stringify({
+            _type: 'snscrape.modules.telegram.TelegramGroup',
+            members: 0,
+            photo: '',
+            title: 'DUMMY TITLE (need to re-scrape)',
+            username: name,
+            description: 'DUMMY Description (need to res-scrape).'
+          }), {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/json'
+            }
+          });
+        } else {
+          // this means channel/group not found in mjobs, try to fetch from telegram-user?
+          const userRes = await fetch(
+            `https://i.gogingko.net/api/v1/v/telegram-user/${name}`
+          );
+          if (userRes.ok) {
+            // this means we found the name in USER, just notify user
+            toastMessage.value = `The name you input ${name} is a Telegram User!`;
+            toastType.value = "info";
+            setTimeout(() => {
+              toastMessage.value = "";
+            }, 4000);
+            return;
           }
-        });
+        }
       }
     }
     if (metaRes.status === 404) {
@@ -7077,9 +7114,15 @@ const searchChannel = async () => {
       if (fallbackRes.ok) {
         const data = await fallbackRes.json();
         suggestedChannels.value = data.keys || [];
+        toastMessage.value = `Channel ${name} not found but fetched ${suggestedChannels.value.length} suggestions`;
+        toastType.value = "info";
       } else {
-        error.value = "Channel not found and could not fetch suggestions";
+        toastMessage.value = `Channel ${name} not found and could not fetch suggestions`;
+        toastType.value = "error";
       }
+      setTimeout(() => {
+        toastMessage.value = "";
+      }, 4000);
       loading.value = false;
       return;
     }
@@ -7212,17 +7255,23 @@ const performGlobalSearch = async () => {
     const wordQueries = words
       .map((word) => {
         // Escape internal double quotes
-        const escapedWord = word.replace(/"/g, '\\"');
+        let escapedWord = word.replace(/"/g, '\\"');
+        let _prefix = ''
+
+        if (escapedWord.startsWith('-')) {
+          escapedWord = escapedWord.slice(1)
+          _prefix = '-'
+        }
 
         // Use wildcard format for 'user' field, otherwise use double quotes
         if (field === "user") {
           isUserSelected = true
-          return `${field}:*${escapedWord}*`;
+          return `${_prefix}${field}:*${escapedWord}*`;
         }
         if (field === "url") {
-          return `${field}:*${escapedWord}*`;
+          return `${_prefix}${field}:*${escapedWord}*`;
         }
-        return `${field}:"${escapedWord}"`;
+        return `${_prefix}${field}:"${escapedWord}"`;
       })
       .join(" AND ");
     return `(${wordQueries})`;
@@ -7356,7 +7405,15 @@ const channelFulltextSearch = async (query: string, topk: number = 25) => {
     const queryString = terms
       .map((t) => t.replace(/['"]/g, "").trim())
       .filter((cleanTerm) => cleanTerm.length > 0)
-      .map((cleanTerm) => `(description:"${cleanTerm}" OR title:"${cleanTerm}" OR user:"${cleanTerm}")`)
+      .map((cleanTerm) => {
+        if (cleanTerm.startsWith("-")) {
+          const keyword = cleanTerm.slice(1).trim();
+          if (!keyword) return "";
+          return `-description:"${keyword}" AND -title:"${keyword}" AND -user:"${keyword}"`;
+        } else {
+          return `(description:"${cleanTerm}" OR title:"${cleanTerm}" OR user:"${cleanTerm}")`;
+        }
+      })
       .join(" AND ");
 
     const safeQuery = encodeURIComponent(queryString);
@@ -11129,13 +11186,17 @@ onUnmounted(() => {
                     :class="currentChannelName.startsWith('-100') ? 'text-amber-600 dark:text-amber-400' : 'text-teal-600 dark:text-teal-400'"
                   >
                     <span>@{{ metadata.username || metadata.name || channelName }}</span>
-                    <button @click="addToWorkspace" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-teal-600 dark:text-teal-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all">
+                    <button @click="addToWorkspace" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-teal-600 dark:text-teal-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" title="Add to Workspace">
                       <Layout class="h-2.5 w-2.5" />
                       Workspace
                     </button>
-                    <button @click="addChannelToListenDirectory(metadata.title || channelName, metadata.username || channelName)" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-purple-600 dark:text-purple-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all">
+                    <button @click="addChannelToListenDirectory(metadata.title || channelName, metadata.username || channelName)" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-purple-600 dark:text-purple-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" title="Add to Listen">
                       <Radio class="h-2.5 w-2.5" />
                       Listen
+                    </button>
+                    <button @click="searchOnGoogle(metadata.username || metadata.name || channelName)" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-blue-600 dark:text-blue-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" title="Search on Google">
+                      <Globe class="h-2.5 w-2.5" />
+                      Google
                     </button>
                   </p>
 
