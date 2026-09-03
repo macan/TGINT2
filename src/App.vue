@@ -4393,6 +4393,7 @@ const xSearchInput = ref("");
 const channelProfile = ref("");
 const channelProfileDate = ref("");
 const loadingChannelProfile = ref(false);
+const currentProfileChannel = ref("");
 
 const translatedPosts = ref<Record<string, string>>({});
 const isTranslating = ref<Record<string, boolean>>({});
@@ -4830,13 +4831,17 @@ const selectedPost = ref<any>(null);
 const selectedUsernamesExplorer = ref<string[]>([]);
 const postsRenderLimit = ref(50);
 
-const fetchChannelProfile = async (channel: string) => {
-  if (!channel) return;
+const fetchChannelProfile = async (channel?: string) => {
+  const targetChannel = channel || currentChannelName.value;
+  if (!targetChannel) return;
   loadingChannelProfile.value = true;
-  channelProfile.value = "";
-  channelProfileDate.value = "";
+  if (targetChannel !== currentProfileChannel.value) {
+    currentProfileChannel.value = targetChannel;
+    channelProfile.value = "";
+    channelProfileDate.value = "";
+  }
   try {
-    const profileName = `profile-channel-${channel}`;
+    const profileName = `profile-channel-${targetChannel}`;
     let response = await fetch(`https://i.gogingko.net/api/v1/v/profiles/${profileName}`, {
         method: 'GET',
         headers: { 'x-gos-token': loginToken.value }
@@ -11414,7 +11419,7 @@ onUnmounted(() => {
 
             <!-- Profile Widget -->
             <div
-              v-show="isProfileVisible && channelProfile"
+              v-show="isProfileVisible && (channelProfile || loadingChannelProfile)"
               class="mt-6 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm"
             >
               <div class="flex items-center justify-between mb-4 relative">
@@ -11423,12 +11428,32 @@ onUnmounted(() => {
                 >
                   Channel Profile
                 </h3>
-                <span v-if="channelProfileDate" class="text-[9px] font-mono font-bold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/50 border border-teal-100/50 dark:border-teal-900/20 px-2 py-0.5 rounded-full">
-                    {{ channelProfileDate }}
-                </span>
+                <div class="flex items-center gap-2">
+                  <span v-if="channelProfileDate" class="text-[9px] font-mono font-bold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/50 border border-teal-100/50 dark:border-teal-900/20 px-2 py-0.5 rounded-full">
+                      {{ channelProfileDate }}
+                  </span>
+                  <button
+                    id="reload-channel-profile-btn"
+                    @click="fetchChannelProfile()"
+                    :disabled="loadingChannelProfile"
+                    title="Reload Profile"
+                    class="p-1 rounded-lg text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40 border border-transparent hover:border-teal-100 dark:hover:border-teal-900/30 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': loadingChannelProfile }" />
+                  </button>
+                </div>
               </div>
-              <div v-if="loadingChannelProfile" class="text-xs text-gray-450 animate-pulse">Loading profile...</div>
-              <div v-else class="overflow-x-auto">
+              <div v-if="loadingChannelProfile && !channelProfile" class="text-xs text-gray-450 animate-pulse">Loading profile...</div>
+              <div v-else class="overflow-x-auto relative">
+                <div
+                  v-if="loadingChannelProfile"
+                  class="absolute inset-0 bg-white/70 dark:bg-gray-800/70 backdrop-blur-[1px] flex items-center justify-center rounded-xl z-10"
+                >
+                  <div class="flex items-center gap-2 text-xs font-semibold text-teal-600 dark:text-teal-400 bg-white/95 dark:bg-gray-800/95 px-3 py-1.5 rounded-full shadow-sm border border-teal-100 dark:border-teal-900/40">
+                    <RefreshCw class="w-3 h-3 animate-spin" />
+                    <span>Updating profile...</span>
+                  </div>
+                </div>
                 <div v-html="channelProfile" class="prose prose-xs text-xs dark:prose-invert"></div>
               </div>
             </div>
