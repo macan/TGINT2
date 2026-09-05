@@ -8207,6 +8207,9 @@ const networkSearchTerm = ref("");
 const networkMode = ref<"drag" | "link" | "delete">("drag");
 const isGraphPhysicsRunning = ref(true);
 
+const isNetworkControlsOpen = ref(true);
+const isNetworkInspectorOpen = ref(true);
+
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const canvasContainerRef = ref<HTMLElement | null>(null);
 
@@ -8331,6 +8334,7 @@ const updateLayoutSpread = (newSpread: number) => {
 
 const focusOnNode = (node: GraphNode) => {
   selectedNetworkNode.value = node;
+  isNetworkInspectorOpen.value = true;
   const canvas = canvasRef.value;
   if (canvas) {
     zoom.value = Math.max(zoom.value, 0.75);
@@ -8348,6 +8352,7 @@ const focusHub = () => {
   panX.value = canvas.width / 2 - hub.x * zoom.value;
   panY.value = canvas.height / 2 - hub.y * zoom.value;
   selectedNetworkNode.value = hub;
+  isNetworkInspectorOpen.value = true;
 };
 
 let animationFrameId: number | null = null;
@@ -9565,6 +9570,7 @@ const handleCanvasMouseDown = (e: MouseEvent) => {
       mouseDownX.value = e.offsetX;
       mouseDownY.value = e.offsetY;
       selectedNetworkNode.value = clickedNode;
+      isNetworkInspectorOpen.value = true;
     }
   } else {
     isPanning.value = true;
@@ -16750,7 +16756,7 @@ onUnmounted(() => {
       </div>
 
       <!-- Network Tab -->
-      <div v-show="activeTab === 'network'" class="w-full relative px-4 md:px-6 pt-2 pb-16 flex flex-col h-full overflow-y-auto">
+      <div v-show="activeTab === 'network'" class="w-full max-w-full mx-auto px-0 pt-1 pb-16 flex flex-col h-full overflow-y-auto">
         
         <!-- Header Banner Section -->
         <div class="relative bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm overflow-hidden mb-6 shrink-0">
@@ -16799,10 +16805,28 @@ onUnmounted(() => {
         </div>
 
         <!-- Main Layout Workspace Grid -->
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 min-h-[600px] items-stretch flex-1">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 min-h-[600px] items-stretch flex-1 transition-all duration-300">
           
           <!-- LEFT SIDEBAR: Controls & Sliders -->
-          <div class="lg:col-span-2 lg:h-[1000px] overflow-y-auto pr-1 flex flex-col gap-6 min-h-0">
+          <div
+            v-show="isNetworkControlsOpen"
+            class="lg:col-span-3 xl:col-span-2 lg:h-[1000px] overflow-y-auto pr-1 flex flex-col gap-6 min-h-0 transition-all duration-300"
+          >
+            <!-- Header with collapse button -->
+            <div class="flex items-center justify-between px-1 -mb-2">
+              <span class="text-xs font-black text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                <SlidersHorizontal class="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
+                Controls
+              </span>
+              <button
+                type="button"
+                @click="isNetworkControlsOpen = false"
+                class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors cursor-pointer"
+                title="Hide controls sidebar to widen canvas"
+              >
+                <PanelLeftClose class="w-4 h-4" />
+              </button>
+            </div>
             
             <!-- Channel Input Panel -->
             <div class="bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm space-y-4">
@@ -17165,7 +17189,18 @@ onUnmounted(() => {
           </div>
 
           <!-- CENTER CANVAS GRAPH VIEWPORT -->
-          <div class="lg:col-span-6 lg:h-[1000px] h-[500px] flex flex-col relative bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 overflow-hidden shadow-sm">
+          <div
+            :class="[
+              isNetworkControlsOpen && isNetworkInspectorOpen
+                ? 'lg:col-span-5 xl:col-span-7 2xl:col-span-7'
+                : isNetworkControlsOpen && !isNetworkInspectorOpen
+                ? 'lg:col-span-9 xl:col-span-10 2xl:col-span-10'
+                : !isNetworkControlsOpen && isNetworkInspectorOpen
+                ? 'lg:col-span-8 xl:col-span-9 2xl:col-span-9'
+                : 'lg:col-span-12',
+              'lg:h-[1000px] h-[500px] flex flex-col relative bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 overflow-hidden shadow-sm transition-all duration-300'
+            ]"
+          >
             
             <!-- Canvas Container -->
             <div ref="canvasContainerRef" class="w-full flex-1 relative min-h-[400px]">
@@ -17183,12 +17218,26 @@ onUnmounted(() => {
 
               <!-- Floating Top Bar: Connection Filters, Search & Layout Actions -->
               <div class="absolute top-4 left-16 right-4 flex items-center justify-between gap-2 z-10 pointer-events-none flex-wrap">
-                <!-- Connection Filter Pills -->
-                <div 
-                  class="flex items-center gap-1 p-1 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-2xl shadow-lg border border-gray-150 dark:border-gray-800 pointer-events-auto"
-                  @mousedown.stop
-                  @click.stop
-                >
+                <!-- Left Action Group: Toggle Controls Sidebar + Connection Filter Pills -->
+                <div class="flex items-center gap-2 pointer-events-auto flex-wrap">
+                  <!-- Toggle Left Controls Sidebar -->
+                  <button
+                    type="button"
+                    @click.stop="isNetworkControlsOpen = !isNetworkControlsOpen"
+                    :class="['px-2.5 py-1.5 rounded-2xl border text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-lg backdrop-blur-md', isNetworkControlsOpen ? 'bg-white/95 dark:bg-gray-900/95 border-gray-150 dark:border-gray-800 text-gray-600 dark:text-gray-300 hover:text-teal-600' : 'bg-teal-600 text-white border-teal-600 shadow-teal-500/20 font-black']"
+                    :title="isNetworkControlsOpen ? 'Hide Controls Sidebar (widen canvas)' : 'Show Controls Sidebar'"
+                  >
+                    <PanelLeftClose v-if="isNetworkControlsOpen" class="w-3.5 h-3.5" />
+                    <PanelLeft v-else class="w-3.5 h-3.5" />
+                    <span class="hidden md:inline">{{ isNetworkControlsOpen ? 'Controls' : 'Show Controls' }}</span>
+                  </button>
+
+                  <!-- Connection Filter Pills -->
+                  <div 
+                    class="flex items-center gap-1 p-1 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-2xl shadow-lg border border-gray-150 dark:border-gray-800"
+                    @mousedown.stop
+                    @click.stop
+                  >
                   <button
                     type="button"
                     @click.stop="setConnectionFilter('all')"
@@ -17243,6 +17292,7 @@ onUnmounted(() => {
                     </button>
                   </div>
                 </div>
+              </div>
 
                 <!-- Right Action Group: Quick Search, Orbits, Focus Hub -->
                 <div class="flex items-center gap-2 pointer-events-auto">
@@ -17301,6 +17351,18 @@ onUnmounted(() => {
                   >
                     <Target class="h-3.5 w-3.5" />
                   </button>
+
+                  <!-- Toggle Inspector Sidebar button -->
+                  <button
+                    type="button"
+                    @click.stop="isNetworkInspectorOpen = !isNetworkInspectorOpen"
+                    :class="['px-2.5 py-1.5 rounded-2xl border text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-lg backdrop-blur-md', isNetworkInspectorOpen ? 'bg-white/95 dark:bg-gray-900/95 border-gray-150 dark:border-gray-800 text-gray-600 dark:text-gray-300 hover:text-teal-600' : 'bg-teal-600 text-white border-teal-600 shadow-teal-500/20 font-black']"
+                    :title="isNetworkInspectorOpen ? 'Hide Inspector Sidebar (widen canvas)' : 'Show Inspector Sidebar'"
+                  >
+                    <span class="hidden md:inline">{{ isNetworkInspectorOpen ? 'Inspector' : 'Show Inspector' }}</span>
+                    <PanelRightClose v-if="isNetworkInspectorOpen" class="w-3.5 h-3.5" />
+                    <PanelRightOpen v-else class="w-3.5 h-3.5" />
+                  </button>
                 </div>
               </div>
 
@@ -17358,7 +17420,7 @@ onUnmounted(() => {
           </div>
 
           <!-- RIGHT SIDEBAR: Entity Inspector -->
-          <div class="lg:col-span-4">
+          <div v-show="isNetworkInspectorOpen" class="lg:col-span-4 xl:col-span-3 2xl:col-span-3 transition-all duration-300">
             <div class="bg-white dark:bg-gray-800 p-6 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm lg:h-[1000px] h-full flex flex-col">
               
               <!-- Selected State -->
@@ -17438,6 +17500,15 @@ onUnmounted(() => {
                         title="Jump to Explorer & Search"
                       >
                         <Search class="h-4 w-4" />
+                      </button>
+
+                      <!-- Close / Collapse Inspector Button -->
+                      <button
+                        @click="isNetworkInspectorOpen = false"
+                        class="shrink-0 p-2.5 bg-gray-50 dark:bg-gray-700/50 hover:bg-gray-100 dark:hover:bg-gray-700 border border-gray-200 dark:border-gray-600 text-gray-500 dark:text-gray-400 rounded-xl transition-all cursor-pointer flex items-center justify-center shadow-sm hover:shadow"
+                        title="Collapse Inspector (maximize canvas width)"
+                      >
+                        <PanelRightClose class="h-4 w-4" />
                       </button>
                     </div>
                   </div>
@@ -17716,15 +17787,38 @@ onUnmounted(() => {
               </div>
 
               <!-- Unselected State -->
-              <div v-else class="flex-1 flex flex-col items-center justify-center text-center p-6 space-y-4">
-                <div class="p-4 bg-gray-50 dark:bg-gray-900 rounded-3xl border border-gray-100 dark:border-gray-750 text-gray-400 dark:text-gray-500">
-                  <Network class="h-8 w-8" />
+              <div v-else class="flex-1 flex flex-col justify-between">
+                <div class="flex items-center justify-between pb-3 border-b border-gray-100 dark:border-gray-750">
+                  <div class="flex items-center gap-2">
+                    <Info class="h-4 w-4 text-teal-600 dark:text-teal-400" />
+                    <span class="text-xs font-black uppercase tracking-wider text-gray-700 dark:text-gray-300">Entity Inspector</span>
+                  </div>
+                  <button
+                    @click="isNetworkInspectorOpen = false"
+                    class="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-750 transition-colors"
+                    title="Collapse Inspector"
+                  >
+                    <PanelRightClose class="h-4 w-4" />
+                  </button>
                 </div>
-                <div class="space-y-1">
-                  <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">No Node Selected</h4>
-                  <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold max-w-[200px] leading-relaxed">
-                    Click on a node on the canvas layout to view profile statistics, manage connections, or jump to its parsed message streams.
-                  </p>
+
+                <div class="flex-1 flex flex-col items-center justify-center text-center p-6 space-y-4">
+                  <div class="p-4 bg-gray-50 dark:bg-gray-900 rounded-3xl border border-gray-100 dark:border-gray-750 text-gray-400 dark:text-gray-500">
+                    <Network class="h-8 w-8" />
+                  </div>
+                  <div class="space-y-1">
+                    <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">No Node Selected</h4>
+                    <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold max-w-[200px] leading-relaxed">
+                      Click on a node on the canvas layout to view profile statistics, manage connections, or jump to its parsed message streams.
+                    </p>
+                  </div>
+                  <button
+                    @click="isNetworkInspectorOpen = false"
+                    class="px-3 py-1.5 bg-gray-100 dark:bg-gray-750 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <PanelRightClose class="h-3 w-3" />
+                    <span>Hide to widen canvas</span>
+                  </button>
                 </div>
               </div>
 
