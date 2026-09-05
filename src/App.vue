@@ -80,6 +80,9 @@ import {
   Upload,
   Maximize2,
   Minimize2,
+  Orbit,
+  Compass,
+  Target,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -8220,13 +8223,132 @@ const mouseDownOnNode = ref<GraphNode | null>(null);
 const mouseDownX = ref(0);
 const mouseDownY = ref(0);
 
-// Settings for layout physics
+// Settings for layout physics & display
 const repulsionStrength = ref(800);
 const springStrength = ref(0.04);
 const linkDistance = ref(120);
 const gravityStrength = ref(0.015);
 const dampingFactor = ref(0.92);
 const physicsAlpha = ref(1.0);
+const layoutSpread = ref(1.6);
+const layoutMode = ref<"force" | "orbits">("orbits");
+const connectionFilter = ref<"all" | "both" | "out" | "in">("all");
+const labelDensity = ref<"smart" | "all" | "hover">("smart");
+const networkNodeSearch = ref("");
+
+const mutualCount = computed(() => networkEdges.value.filter(e => e.type === "both").length);
+const outCount = computed(() => networkEdges.value.filter(e => e.type === "out").length);
+const inCount = computed(() => networkEdges.value.filter(e => e.type === "in").length);
+
+const filterCounts = computed(() => {
+  const active = selectedNetworkNode.value;
+  if (active) {
+    const aId = active.id.toLowerCase();
+    const activeEdges = networkEdges.value.filter(
+      e => e.source.toLowerCase() === aId || e.target.toLowerCase() === aId
+    );
+    return {
+      all: activeEdges.length,
+      both: activeEdges.filter(e => e.type === "both").length,
+      out: activeEdges.filter(e => e.type === "out").length,
+      in: activeEdges.filter(e => e.type === "in").length,
+      isNodeSelected: true,
+      nodeName: active.displayName || active.name
+    };
+  }
+  return {
+    all: networkEdges.value.length,
+    both: networkEdges.value.filter(e => e.type === "both").length,
+    out: networkEdges.value.filter(e => e.type === "out").length,
+    in: networkEdges.value.filter(e => e.type === "in").length,
+    isNodeSelected: false,
+    nodeName: ""
+  };
+});
+
+const selectedFilteredEdges = computed(() => {
+  if (!selectedNetworkNode.value) return [];
+  const sId = selectedNetworkNode.value.id.toLowerCase();
+  const edges = networkEdges.value.filter(
+    e => e.source.toLowerCase() === sId || e.target.toLowerCase() === sId
+  );
+  if (connectionFilter.value === "all") return edges;
+  return edges.filter(e => e.type === connectionFilter.value);
+});
+
+const setConnectionFilter = (filterType: "all" | "both" | "out" | "in") => {
+  if (connectionFilter.value === filterType && filterType !== "all") {
+    connectionFilter.value = "all";
+    toastMessage.value = "Showing all connections";
+  } else {
+    connectionFilter.value = filterType;
+    const labels: Record<string, string> = {
+      all: "all connections",
+      both: "mutual connections (both ways)",
+      out: "outgoing connections (forwarded to)",
+      in: "incoming connections (forwarded from)",
+    };
+    toastMessage.value = `Filtering by ${labels[filterType] || filterType}`;
+  }
+  toastType.value = "info";
+  setTimeout(() => {
+    if (toastMessage.value.startsWith("Filtering by") || toastMessage.value.startsWith("Showing all")) {
+      toastMessage.value = "";
+    }
+  }, 2500);
+};
+
+const filteredSearchNodes = computed(() => {
+  const query = networkNodeSearch.value.trim().toLowerCase();
+  if (!query) return [];
+  return networkNodes.value
+    .filter(n => n.id.toLowerCase().includes(query) || (n.displayName && n.displayName.toLowerCase().includes(query)))
+    .slice(0, 8);
+});
+
+const updateLayoutSpread = (newSpread: number) => {
+  const oldSpread = layoutSpread.value;
+  layoutSpread.value = newSpread;
+  if (networkNodes.value.length === 0) return;
+  const ratio = newSpread / (oldSpread || 1.0);
+  const hub = networkNodes.value.find(n => n.isCenter) || selectedNetworkNode.value || networkNodes.value[0];
+  const hx = hub ? hub.x : 0;
+  const hy = hub ? hub.y : 0;
+  for (let i = 0; i < networkNodes.value.length; i++) {
+    const n = networkNodes.value[i];
+    if (n === hub) continue;
+    n.x = hx + (n.x - hx) * ratio;
+    n.y = hy + (n.y - hy) * ratio;
+  }
+  for (let i = 0; i < networkEdges.value.length; i++) {
+    const e = networkEdges.value[i];
+    if (e.targetDist) {
+      e.targetDist = e.targetDist * ratio;
+    }
+  }
+  physicsAlpha.value = 0.35;
+};
+
+const focusOnNode = (node: GraphNode) => {
+  selectedNetworkNode.value = node;
+  const canvas = canvasRef.value;
+  if (canvas) {
+    zoom.value = Math.max(zoom.value, 0.75);
+    panX.value = canvas.width / 2 - node.x * zoom.value;
+    panY.value = canvas.height / 2 - node.y * zoom.value;
+  }
+  networkNodeSearch.value = "";
+};
+
+const focusHub = () => {
+  const hub = networkNodes.value.find(n => n.isCenter) || selectedNetworkNode.value || networkNodes.value[0];
+  const canvas = canvasRef.value;
+  if (!canvas || !hub) return;
+  zoom.value = networkNodes.value.length > 200 ? 0.65 : 0.85;
+  panX.value = canvas.width / 2 - hub.x * zoom.value;
+  panY.value = canvas.height / 2 - hub.y * zoom.value;
+  selectedNetworkNode.value = hub;
+};
 
 let animationFrameId: number | null = null;
 let canvasResizeObserver: ResizeObserver | null = null;
@@ -8234,14 +8356,29 @@ let canvasResizeObserver: ResizeObserver | null = null;
 const mouseX = ref(0);
 const mouseY = ref(0);
 
-// Helper to calculate node radius based on metadata member count
+// Helper to calculate node radius based on graph density and metadata
 const getNodeRadius = (isCenter: boolean, metadata?: any): number => {
-  if (isCenter) return 32;
-  const defaultRadius = 20;
-  if (!metadata) return defaultRadius;
+  const total = networkNodes.value.length;
+  if (isCenter) return total > 200 ? 28 : (total > 80 ? 30 : 34);
+
+  let baseRadius = 18;
+  let minRadius = 16;
+  let maxRadius = 34;
+
+  if (total > 200) {
+    baseRadius = 11;
+    minRadius = 9;
+    maxRadius = 22;
+  } else if (total > 80) {
+    baseRadius = 14;
+    minRadius = 12;
+    maxRadius = 26;
+  }
+
+  if (!metadata) return baseRadius;
 
   const count = Number(metadata.subscribers || metadata.members || metadata.participants_count || 0);
-  if (count <= 0) return defaultRadius;
+  if (count <= 0) return baseRadius;
 
   const minCount = 100;
   const maxCount = 5000000;
@@ -8250,10 +8387,15 @@ const getNodeRadius = (isCenter: boolean, metadata?: any): number => {
   const logMax = Math.log10(maxCount);
   const logVal = Math.log10(clampedCount);
 
-  const minRadius = 20;
-  const maxRadius = 45;
   const pct = (logVal - logMin) / (logMax - logMin);
   return Math.round(minRadius + pct * (maxRadius - minRadius));
+};
+
+const refreshAllNodeRadii = () => {
+  for (let i = 0; i < networkNodes.value.length; i++) {
+    const node = networkNodes.value[i];
+    node.r = getNodeRadius(node.isCenter, node.metadata);
+  }
 };
 
 // Helper to safely get the first unicode character (even if it's an emoji)
@@ -8285,8 +8427,16 @@ const updateNodesMetadataInBatches = async (nodeIds: string[]) => {
   const pendingIds = nodeIds.filter(id => !fetchedNetworkNodeIds.has(id));
   if (pendingIds.length === 0) return;
 
-  const batchSize = 3;
-  const delayMs = 600;
+  // Faster batch processing: 8 concurrent requests with 120ms delay between batches
+  const batchSize = 8;
+  const delayMs = 120;
+
+  // Build ID lookup map for fast node updates without repeated O(N) array traversals
+  const nodeMap = new Map<string, GraphNode>();
+  for (let i = 0; i < networkNodes.value.length; i++) {
+    const n = networkNodes.value[i];
+    nodeMap.set(n.id.toLowerCase(), n);
+  }
 
   for (let i = 0; i < pendingIds.length; i += batchSize) {
     const batch = pendingIds.slice(i, i + batchSize);
@@ -8297,12 +8447,14 @@ const updateNodesMetadataInBatches = async (nodeIds: string[]) => {
         const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${encodeURIComponent(id)}`);
         if (response.ok) {
           const data = await response.json();
-          const targetNode = networkNodes.value.find(n => n.id === id);
+          const targetNode = nodeMap.get(id.toLowerCase());
           if (targetNode && data) {
             targetNode.name = data.name || data.title || id;
             targetNode.displayName = data.title || id;
             targetNode.metadata = data;
             targetNode.r = getNodeRadius(targetNode.isCenter, data);
+            // Invalidate cached label width so it recalculates on next draw
+            targetNode._cachedLabel = undefined;
           }
         }
       } catch (err) {
@@ -8314,7 +8466,7 @@ const updateNodesMetadataInBatches = async (nodeIds: string[]) => {
       img.src = `https://i.gogingko.net/api/v1/v/telegram-profile/${id}`;
       img.referrerPolicy = "no-referrer";
       img.onload = () => {
-        const targetNode = networkNodes.value.find(n => n.id === id);
+        const targetNode = nodeMap.get(id.toLowerCase());
         if (targetNode) {
           targetNode.avatarImg = img;
           targetNode.avatarLoaded = true;
@@ -8338,84 +8490,111 @@ const fetchAndExpandConnections = async (nodeId: string, parentNode: GraphNode) 
     const ftoList: string[] = Array.isArray(cgData?.fto) ? cgData.fto : [];
 
     const newlyAddedIds: string[] = [];
+    const newNodes: GraphNode[] = [];
 
-    const addNodeShell = (id: string) => {
+    // Fast lookup map for existing nodes
+    const existingNodeMap = new Map<string, GraphNode>();
+    for (let i = 0; i < networkNodes.value.length; i++) {
+      const n = networkNodes.value[i];
+      existingNodeMap.set(n.id.toLowerCase(), n);
+    }
+
+    // Fast lookup map for existing edges to avoid O(E^2) scans
+    const edgeMap = new Map<string, GraphEdge>();
+    for (let i = 0; i < networkEdges.value.length; i++) {
+      const e = networkEdges.value[i];
+      edgeMap.set(`${e.source.toLowerCase()}->${e.target.toLowerCase()}`, e);
+    }
+
+    let nodeIndex = 0;
+
+    const addNodeShell = (id: string): GraphNode | null => {
       const cleanId = id.trim().replace(/^@/, "");
       if (!cleanId) return null;
       const normalizedId = cleanId.toLowerCase();
       
-      let existingNode = networkNodes.value.find(n => n.id.toLowerCase() === normalizedId);
+      let existingNode = existingNodeMap.get(normalizedId);
       if (!existingNode) {
-        const angle = Math.random() * Math.PI * 2;
-        const dist = 90 + Math.random() * 50;
+        // Distribute in a golden spiral (sunflower phyllotaxis) around parentNode
+        // to prevent overlapping singularities that explode the physics forces
+        const theta = nodeIndex * 2.3999632; // golden angle (~137.5 deg)
+        const spreadRadius = 90 + Math.sqrt(nodeIndex + 1) * 35;
+        nodeIndex++;
+
         const shellNode: GraphNode = {
           id: cleanId,
           name: cleanId,
           displayName: cleanId,
-          x: parentNode.x + Math.cos(angle) * dist,
-          y: parentNode.y + Math.sin(angle) * dist,
+          x: parentNode.x + Math.cos(theta) * spreadRadius,
+          y: parentNode.y + Math.sin(theta) * spreadRadius,
           vx: 0,
           vy: 0,
-          r: 20,
+          r: getNodeRadius(false),
           color: generateColorFromId(cleanId),
           isCenter: false,
           avatarLoaded: false,
         };
-        networkNodes.value.push(shellNode);
+        existingNodeMap.set(normalizedId, shellNode);
+        newNodes.push(shellNode);
         newlyAddedIds.push(cleanId);
         return shellNode;
       }
       return existingNode;
     };
 
-    // IN edges: source is forwards node, target is parentNode
-    forwardsList.forEach(fw => {
-      const sourceNode = addNodeShell(fw);
-      if (sourceNode) {
-        const existingDirect = networkEdges.value.find(
-          e => e.source === sourceNode.id && e.target === nodeId
-        );
-        const existingReverse = networkEdges.value.find(
-          e => e.source === nodeId && e.target === sourceNode.id
-        );
-
-        if (existingReverse) {
-          existingReverse.type = "both";
-        } else if (!existingDirect) {
-          networkEdges.value.push({
-            source: sourceNode.id,
-            target: nodeId,
-            type: "in",
-          });
+    const newEdges: GraphEdge[] = [];
+    const addEdgeSafely = (srcId: string, tgtId: string, type: "in" | "out" | "both") => {
+      const sLower = srcId.toLowerCase();
+      const tLower = tgtId.toLowerCase();
+      const directKey = `${sLower}->${tLower}`;
+      const reverseKey = `${tLower}->${sLower}`;
+      const revEdge = edgeMap.get(reverseKey);
+      const directEdge = edgeMap.get(directKey);
+      if (revEdge) {
+        revEdge.type = "both";
+      } else if (directEdge) {
+        if (directEdge.type !== type && directEdge.type !== "both") {
+          directEdge.type = "both";
         }
+      } else {
+        const edgeObj: GraphEdge = { source: srcId, target: tgtId, type };
+        edgeMap.set(directKey, edgeObj);
+        newEdges.push(edgeObj);
       }
-    });
+    };
+
+    // IN edges: source is forwards node, target is parentNode
+    for (let i = 0; i < forwardsList.length; i++) {
+      const sourceNode = addNodeShell(forwardsList[i]);
+      if (sourceNode) {
+        addEdgeSafely(sourceNode.id, nodeId, "in");
+      }
+    }
 
     // OUT edges: source is parentNode, target is fto node
-    ftoList.forEach(ft => {
-      const targetNode = addNodeShell(ft);
+    for (let i = 0; i < ftoList.length; i++) {
+      const targetNode = addNodeShell(ftoList[i]);
       if (targetNode) {
-        const existingDirect = networkEdges.value.find(
-          e => e.source === nodeId && e.target === targetNode.id
-        );
-        const existingReverse = networkEdges.value.find(
-          e => e.source === targetNode.id && e.target === nodeId
-        );
-
-        if (existingReverse) {
-          existingReverse.type = "both";
-        } else if (!existingDirect) {
-          networkEdges.value.push({
-            source: nodeId,
-            target: targetNode.id,
-            type: "out",
-          });
-        }
+        addEdgeSafely(nodeId, targetNode.id, "out");
       }
-    });
+    }
+
+    // Atomic updates to reactive arrays to trigger reactivity only once instead of 600+ times
+    if (newNodes.length > 0) {
+      networkNodes.value = [...networkNodes.value, ...newNodes];
+    }
+    if (newEdges.length > 0) {
+      networkEdges.value = [...networkEdges.value, ...newEdges];
+    }
 
     if (newlyAddedIds.length > 0) {
-      physicsAlpha.value = 1.0;
+      if (networkNodes.value.length >= 25) {
+        organizeConcentricOrbits();
+        focusHub();
+      } else {
+        physicsAlpha.value = 1.0;
+        resetGraphZoom();
+      }
       updateNodesMetadataInBatches(newlyAddedIds);
     }
   } catch (err) {
@@ -8616,10 +8795,179 @@ const manualConnectSelectedNode = () => {
   manualConnectTargetId.value = "";
 };
 
+const organizeConcentricOrbits = () => {
+  const nodes = networkNodes.value;
+  const edges = networkEdges.value;
+  if (nodes.length === 0) return;
+
+  // 1. Identify primary hub node (center node or highest degree)
+  const degreeMap = new Map<string, number>();
+  for (let i = 0; i < nodes.length; i++) {
+    degreeMap.set(nodes[i].id, 0);
+  }
+  for (let i = 0; i < edges.length; i++) {
+    const e = edges[i];
+    degreeMap.set(e.source, (degreeMap.get(e.source) || 0) + 1);
+    degreeMap.set(e.target, (degreeMap.get(e.target) || 0) + 1);
+  }
+
+  let hub = nodes.find(n => n.isCenter);
+  if (!hub) {
+    let maxDeg = -1;
+    for (let i = 0; i < nodes.length; i++) {
+      const d = degreeMap.get(nodes[i].id) || 0;
+      if (d > maxDeg) {
+        maxDeg = d;
+        hub = nodes[i];
+      }
+    }
+  }
+  if (!hub) hub = nodes[0];
+
+  // Center hub at (0, 0)
+  hub.x = 0;
+  hub.y = 0;
+  hub.vx = 0;
+  hub.vy = 0;
+  hub.isCenter = true;
+
+  // 2. Classify other nodes by connection type relative to hub
+  const mutualNodes: GraphNode[] = [];
+  const outNodes: GraphNode[] = [];
+  const inNodes: GraphNode[] = [];
+  const otherNodes: GraphNode[] = [];
+
+  const visited = new Set<string>([hub.id]);
+
+  for (let i = 0; i < edges.length; i++) {
+    const e = edges[i];
+    if (e.source === hub.id && e.target !== hub.id) {
+      const targetNode = nodes.find(n => n.id === e.target);
+      if (targetNode && !visited.has(targetNode.id)) {
+        visited.add(targetNode.id);
+        if (e.type === "both") mutualNodes.push(targetNode);
+        else outNodes.push(targetNode);
+      }
+    } else if (e.target === hub.id && e.source !== hub.id) {
+      const sourceNode = nodes.find(n => n.id === e.source);
+      if (sourceNode && !visited.has(sourceNode.id)) {
+        visited.add(sourceNode.id);
+        if (e.type === "both") mutualNodes.push(sourceNode);
+        else inNodes.push(sourceNode);
+      }
+    }
+  }
+
+  for (let i = 0; i < nodes.length; i++) {
+    if (!visited.has(nodes[i].id)) {
+      otherNodes.push(nodes[i]);
+    }
+  }
+
+  const spread = layoutSpread.value;
+
+  const placeOnRings = (nodeList: GraphNode[], startRadius: number, ringStep: number, maxPerRing: number, startAngleOffset: number): number => {
+    if (nodeList.length === 0) return startRadius;
+    const numRings = Math.max(1, Math.ceil(nodeList.length / maxPerRing));
+    const perRing = Math.ceil(nodeList.length / numRings);
+
+    let currentRadius = startRadius;
+    for (let r = 0; r < numRings; r++) {
+      const slice = nodeList.slice(r * perRing, (r + 1) * perRing);
+      const ringRadius = startRadius + r * ringStep * spread;
+      const ringAngleOffset = startAngleOffset + (r * 0.4);
+      const count = slice.length;
+
+      for (let i = 0; i < count; i++) {
+        const theta = ringAngleOffset + (2 * Math.PI * i) / count;
+        const stagger = (i % 2 === 0 ? 1 : -1) * (count > 25 ? 12 : 0);
+        const effectiveR = ringRadius + stagger;
+        const n = slice[i];
+        n.x = hub!.x + Math.cos(theta) * effectiveR;
+        n.y = hub!.y + Math.sin(theta) * effectiveR;
+        n.vx = 0;
+        n.vy = 0;
+        n.tier = r + 1;
+      }
+      currentRadius = ringRadius;
+    }
+    return currentRadius + ringStep * spread;
+  };
+
+  // Ring 1: Mutual connections (closest to hub)
+  let nextRadius = 180 * spread;
+  nextRadius = placeOnRings(mutualNodes, nextRadius, 90, 24, 0);
+
+  // Ring 2+: Outgoing connections (middle orbits)
+  nextRadius = Math.max(nextRadius, 290 * spread);
+  nextRadius = placeOnRings(outNodes, nextRadius, 110, 36, 0.25);
+
+  // Ring 3+: Incoming connections (outer orbits)
+  nextRadius = Math.max(nextRadius, 450 * spread);
+  nextRadius = placeOnRings(inNodes, nextRadius, 130, 48, 0.5);
+
+  // Outer: Any disconnected/other nodes
+  if (otherNodes.length > 0) {
+    placeOnRings(otherNodes, nextRadius, 120, 45, 0.75);
+  }
+
+  // Assign edge targetDistances so physics springs match the orbital layout
+  for (let i = 0; i < edges.length; i++) {
+    const e = edges[i];
+    const s = nodes.find(n => n.id === e.source);
+    const t = nodes.find(n => n.id === e.target);
+    if (s && t) {
+      e.targetDist = Math.hypot(t.x - s.x, t.y - s.y);
+    }
+  }
+
+  refreshAllNodeRadii();
+  physicsAlpha.value = 0.002;
+  toastMessage.value = `Arranged ${nodes.length} nodes in concentric orbits!`;
+  toastType.value = "success";
+  setTimeout(() => { toastMessage.value = ""; }, 2500);
+};
+
 const resetGraphZoom = () => {
-  zoom.value = 1.0;
-  panX.value = canvasRef.value ? canvasRef.value.width / 2 : 0;
-  panY.value = canvasRef.value ? canvasRef.value.height / 2 : 0;
+  const canvas = canvasRef.value;
+  if (!canvas) return;
+  const w = canvas.width;
+  const h = canvas.height;
+  if (networkNodes.value.length === 0) {
+    zoom.value = 1.0;
+    panX.value = w / 2;
+    panY.value = h / 2;
+    return;
+  }
+
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (let i = 0; i < networkNodes.value.length; i++) {
+    const n = networkNodes.value[i];
+    if (isNaN(n.x) || isNaN(n.y)) continue;
+    if (n.x - n.r < minX) minX = n.x - n.r;
+    if (n.x + n.r > maxX) maxX = n.x + n.r;
+    if (n.y - n.r < minY) minY = n.y - n.r;
+    if (n.y + n.r > maxY) maxY = n.y + n.r;
+  }
+
+  if (!isFinite(minX)) {
+    zoom.value = 1.0;
+    panX.value = w / 2;
+    panY.value = h / 2;
+    return;
+  }
+
+  const graphW = Math.max(maxX - minX + 160, 200);
+  const graphH = Math.max(maxY - minY + 160, 200);
+  const graphCenterX = (minX + maxX) / 2;
+  const graphCenterY = (minY + maxY) / 2;
+
+  // Don't shrink down to microscopic unreadable dots on large graphs
+  const minAllowedZoom = networkNodes.value.length > 200 ? 0.22 : 0.35;
+  const targetZoom = Math.min(Math.max(Math.min((w - 120) / graphW, (h - 120) / graphH), minAllowedZoom), 1.2);
+  zoom.value = targetZoom;
+  panX.value = w / 2 - graphCenterX * targetZoom;
+  panY.value = h / 2 - graphCenterY * targetZoom;
 };
 
 const clearNetworkGraph = () => {
@@ -8637,22 +8985,39 @@ const updateNetworkPhysics = () => {
     return;
   }
 
-  const len = networkNodes.value.length;
+  const nodes = networkNodes.value;
+  const len = nodes.length;
   if (len === 0) return;
 
-  // 1. Create lookup Map and pre-assign fast indexes
-  const nodeMap = new Map<string, any>();
+  // 1. Create lookup Map and pre-assign fast indexes and degree counts
+  const nodeMap = new Map<string, GraphNode>();
+  const degreeMap = new Map<string, number>();
   for (let i = 0; i < len; i++) {
-    const node = networkNodes.value[i];
+    const node = nodes[i];
     node._index = i;
     nodeMap.set(node.id, node);
+    degreeMap.set(node.id, 0);
+  }
+
+  const edges = networkEdges.value;
+  const edgesLen = edges.length;
+  for (let i = 0; i < edgesLen; i++) {
+    const edge = edges[i];
+    degreeMap.set(edge.source, (degreeMap.get(edge.source) || 0) + 1);
+    degreeMap.set(edge.target, (degreeMap.get(edge.target) || 0) + 1);
+  }
+
+  for (let i = 0; i < len; i++) {
+    const node = nodes[i];
+    node.degree = degreeMap.get(node.id) || 0;
   }
 
   // 2. Spatial hashing grid for Repulsion Force to reduce O(N^2) to near O(N)
-  const cellSize = 150;
-  const grid = new Map<string, any[]>();
+  const spread = layoutSpread.value;
+  const cellSize = Math.max(160, Math.floor(180 * spread));
+  const grid = new Map<string, GraphNode[]>();
   for (let i = 0; i < len; i++) {
-    const node = networkNodes.value[i];
+    const node = nodes[i];
     const gx = Math.floor(node.x / cellSize);
     const gy = Math.floor(node.y / cellSize);
     const key = `${gx},${gy}`;
@@ -8664,8 +9029,11 @@ const updateNetworkPhysics = () => {
     cell.push(node);
   }
 
+  const alpha = physicsAlpha.value;
+  const repulsion = repulsionStrength.value;
+
   for (let i = 0; i < len; i++) {
-    const n1 = networkNodes.value[i];
+    const n1 = nodes[i];
     const gx = Math.floor(n1.x / cellSize);
     const gy = Math.floor(n1.y / cellSize);
 
@@ -8678,16 +9046,18 @@ const updateNetworkPhysics = () => {
         const cellLen = cell.length;
         for (let k = 0; k < cellLen; k++) {
           const n2 = cell[k];
-          if (n1._index >= n2._index) continue;
+          if (n1._index! >= n2._index!) continue;
 
           const dx = n2.x - n1.x;
           const dy = n2.y - n1.y;
           const distSq = dx * dx + dy * dy;
-          if (distSq < 160000 && distSq > 0.01) {
+          if (distSq < 250000 * spread) {
             const dist = Math.sqrt(distSq);
-            const force = (repulsionStrength.value * (n1.r + n2.r)) / (distSq * dist);
-            const fx = dx * force * physicsAlpha.value;
-            const fy = dy * force * physicsAlpha.value;
+            // Softening minimum distance prevents division by near-zero and singularity explosion
+            const effectiveDist = Math.max(dist, 16);
+            const force = Math.min(((repulsion * spread) * (n1.r + n2.r)) / (effectiveDist * effectiveDist * effectiveDist), 15);
+            const fx = (dx / effectiveDist) * force * alpha;
+            const fy = (dy / effectiveDist) * force * alpha;
             n1.vx -= fx;
             n1.vy -= fy;
             n2.vx += fx;
@@ -8698,9 +9068,9 @@ const updateNetworkPhysics = () => {
     }
   }
 
-  // 3. Edge attraction spring forces with Map-lookup O(E) complexity
-  const edges = networkEdges.value;
-  const edgesLen = edges.length;
+  // 3. Edge attraction spring forces with Degree-normalized weighting
+  const linkDist = linkDistance.value;
+  const springK = springStrength.value;
   for (let i = 0; i < edgesLen; i++) {
     const edge = edges[i];
     const n1 = nodeMap.get(edge.source);
@@ -8709,38 +9079,86 @@ const updateNetworkPhysics = () => {
       const dx = n2.x - n1.x;
       const dy = n2.y - n1.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 0.1;
-      const displacement = dist - linkDistance.value;
-      const force = displacement * springStrength.value * physicsAlpha.value / dist;
-      const fx = dx * force;
-      const fy = dy * force;
-      n1.vx += fx;
-      n1.vy += fy;
-      n2.vx -= fx;
-      n2.vy -= fy;
+
+      // Stratified distance so nodes do not collapse onto a single crowded radius
+      let targetD = edge.targetDist;
+      if (!targetD) {
+        if (edge.type === "both") {
+          targetD = (linkDist + 60) * spread;
+        } else if (edge.type === "out") {
+          targetD = (linkDist + 170 + ((i % 3) * 60)) * spread;
+        } else {
+          targetD = (linkDist + 310 + ((i % 4) * 80)) * spread;
+        }
+      }
+
+      const displacement = dist - targetD;
+      const springF = displacement * springK * alpha;
+      const fx = (dx / dist) * springF;
+      const fy = (dy / dist) * springF;
+
+      // Degree weighting: distribute displacement inversely proportional to degree
+      // This prevents hub nodes with 300+ connections from accumulating unstable impulse
+      const d1 = degreeMap.get(n1.id) || 1;
+      const d2 = degreeMap.get(n2.id) || 1;
+      const w1 = d2 / (d1 + d2);
+      const w2 = d1 / (d1 + d2);
+
+      n1.vx += fx * w1 * 2;
+      n1.vy += fy * w1 * 2;
+      n2.vx -= fx * w2 * 2;
+      n2.vy -= fy * w2 * 2;
     }
   }
 
-  // 4. Gravity towards center (0,0) and applying updates
+  // 4. Gravity towards center (0,0), velocity clamp, and integration
+  const gravity = gravityStrength.value;
+  const damping = dampingFactor.value;
+  const MAX_VELOCITY = 20;
+  let maxSpeedSeen = 0;
+
   for (let i = 0; i < len; i++) {
-    const node = networkNodes.value[i];
+    const node = nodes[i];
+    // Protection against invalid coordinates or NaN
+    if (isNaN(node.x) || isNaN(node.y)) {
+      node.x = 0;
+      node.y = 0;
+      node.vx = 0;
+      node.vy = 0;
+    }
+
     if (node.fx !== null && node.fx !== undefined) {
       node.x = node.fx;
       node.y = node.fy;
       node.vx = 0;
       node.vy = 0;
     } else {
-      node.vx -= node.x * gravityStrength.value * physicsAlpha.value;
-      node.vy -= node.y * gravityStrength.value * physicsAlpha.value;
+      node.vx -= node.x * gravity * alpha;
+      node.vy -= node.y * gravity * alpha;
+
+      const speed = Math.hypot(node.vx, node.vy);
+      if (speed > MAX_VELOCITY) {
+        node.vx = (node.vx / speed) * MAX_VELOCITY;
+        node.vy = (node.vy / speed) * MAX_VELOCITY;
+      }
+      if (speed > maxSpeedSeen) maxSpeedSeen = speed;
 
       node.x += node.vx;
       node.y += node.vy;
 
-      node.vx *= dampingFactor.value;
-      node.vy *= dampingFactor.value;
+      node.vx *= damping;
+      node.vy *= damping;
     }
   }
 
-  physicsAlpha.value *= 0.985;
+  // Adaptive settling: faster decay when movement has calmed down
+  if (maxSpeedSeen < 1.0) {
+    physicsAlpha.value *= 0.94;
+  } else if (maxSpeedSeen < 2.5) {
+    physicsAlpha.value *= 0.97;
+  } else {
+    physicsAlpha.value *= 0.985;
+  }
 };
 
 const drawNetworkGraph = () => {
@@ -8759,105 +9177,187 @@ const drawNetworkGraph = () => {
   ctx.translate(panX.value, panY.value);
   ctx.scale(zoom.value, zoom.value);
 
-  // Background dots grid
+  // Viewport bounds in world coordinates for Frustum Culling
+  const viewMinX = -panX.value / zoom.value - 60;
+  const viewMaxX = (w - panX.value) / zoom.value + 60;
+  const viewMinY = -panY.value / zoom.value - 60;
+  const viewMaxY = (h - panY.value) / zoom.value + 60;
+
+  // Fast Background dots grid using fillRect (much faster than 800+ arc() path operations)
   const gridSize = 40;
-  const gridColor = isDark.value ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.03)";
-  ctx.fillStyle = gridColor;
+  ctx.fillStyle = isDark.value ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.03)";
+  const startGridX = Math.floor(viewMinX / gridSize) * gridSize;
+  const startGridY = Math.floor(viewMinY / gridSize) * gridSize;
 
-  const left = -panX.value / zoom.value - 100;
-  const top = -panY.value / zoom.value - 100;
-  const right = (w - panX.value) / zoom.value + 100;
-  const bottom = (h - panY.value) / zoom.value + 100;
-
-  const startGridX = Math.floor(left / gridSize) * gridSize;
-  const startGridY = Math.floor(top / gridSize) * gridSize;
-
-  for (let gx = startGridX; gx < right; gx += gridSize) {
-    for (let gy = startGridY; gy < bottom; gy += gridSize) {
-      ctx.beginPath();
-      ctx.arc(gx, gy, 1, 0, Math.PI * 2);
-      ctx.fill();
+  for (let gx = startGridX; gx < viewMaxX; gx += gridSize) {
+    for (let gy = startGridY; gy < viewMaxY; gy += gridSize) {
+      ctx.fillRect(gx - 0.75, gy - 0.75, 1.5, 1.5);
     }
   }
 
-  // Draw Edges
-  networkEdges.value.forEach(edge => {
-    const sourceNode = networkNodes.value.find(n => n.id === edge.source);
-    const targetNode = networkNodes.value.find(n => n.id === edge.target);
-    if (!sourceNode || !targetNode) return;
+  // Build O(1) node lookup map once per frame to eliminate O(N*E) array scans
+  const nodeMap = new Map<string, GraphNode>();
+  const nodes = networkNodes.value;
+  const nodesLen = nodes.length;
+  for (let i = 0; i < nodesLen; i++) {
+    const n = nodes[i];
+    nodeMap.set(n.id, n);
+    nodeMap.set(n.id.toLowerCase(), n);
+  }
 
-    const isHighlighted = (selectedNetworkNode.value && (selectedNetworkNode.value.id === edge.source || selectedNetworkNode.value.id === edge.target)) ||
-                          (hoveredNode.value && (hoveredNode.value.id === edge.source || hoveredNode.value.id === edge.target));
+  const edges = networkEdges.value;
+  const edgesLen = edges.length;
+  const selectedId = selectedNetworkNode.value?.id;
+  const hoveredId = hoveredNode.value?.id;
 
-    // Resolve edge color based on edge.type and highlighted state
+  // Draw directional arrows helper
+  const drawArrow = (fromX: number, fromY: number, toX: number, toY: number, tRadius: number, arrowColor: string, arrowSize: number) => {
+    const angle = Math.atan2(toY - fromY, toX - fromX);
+    const arrowX = toX - (tRadius + 2) * Math.cos(angle);
+    const arrowY = toY - (tRadius + 2) * Math.sin(angle);
+    
+    ctx.beginPath();
+    ctx.moveTo(arrowX, arrowY);
+    ctx.lineTo(
+      arrowX - arrowSize * Math.cos(angle - Math.PI / 6),
+      arrowY - arrowSize * Math.sin(angle - Math.PI / 6)
+    );
+    ctx.lineTo(
+      arrowX - arrowSize * Math.cos(angle + Math.PI / 6),
+      arrowY - arrowSize * Math.sin(angle + Math.PI / 6)
+    );
+    ctx.closePath();
+    ctx.fillStyle = arrowColor;
+    ctx.fill();
+  };
+
+  // Delicate orbital guides if hub exists and we have a sizable graph
+  const hub = nodes.find(n => n.isCenter);
+  if (hub && nodesLen >= 15) {
+    const spread = layoutSpread.value;
+    const orbits = [
+      { r: 180 * spread, color: isDark.value ? "rgba(244, 114, 182, 0.10)" : "rgba(219, 39, 119, 0.08)" },
+      { r: 290 * spread, color: isDark.value ? "rgba(45, 212, 191, 0.08)" : "rgba(13, 148, 136, 0.06)" },
+      { r: 450 * spread, color: isDark.value ? "rgba(129, 140, 248, 0.06)" : "rgba(79, 70, 229, 0.05)" },
+    ];
+    for (let i = 0; i < orbits.length; i++) {
+      const orb = orbits[i];
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(hub.x, hub.y, orb.r, 0, Math.PI * 2);
+      ctx.strokeStyle = orb.color;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([5, 8]);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // Draw Edges with viewport culling, connection filtering, and focus isolation
+  const filter = connectionFilter.value;
+  const activeNode = hoveredNode.value || selectedNetworkNode.value;
+  const activeNodeIdLower = activeNode ? activeNode.id.toLowerCase() : null;
+
+  // Track nodes matching filter and active filtered neighbors
+  const filterConnectedNodeIds = new Set<string>();
+  const activeFilteredNeighborIds = new Set<string>();
+
+  for (let i = 0; i < edgesLen; i++) {
+    const e = edges[i];
+    const edgeMatches = filter === "all" || e.type === filter;
+    if (edgeMatches) {
+      const sLower = e.source.toLowerCase();
+      const tLower = e.target.toLowerCase();
+      filterConnectedNodeIds.add(sLower);
+      filterConnectedNodeIds.add(tLower);
+
+      if (activeNodeIdLower) {
+        if (sLower === activeNodeIdLower) activeFilteredNeighborIds.add(tLower);
+        if (tLower === activeNodeIdLower) activeFilteredNeighborIds.add(sLower);
+      }
+    }
+  }
+
+  for (let i = 0; i < edgesLen; i++) {
+    const edge = edges[i];
+    const sourceNode = nodeMap.get(edge.source.toLowerCase()) || nodeMap.get(edge.source);
+    const targetNode = nodeMap.get(edge.target.toLowerCase()) || nodeMap.get(edge.target);
+    if (!sourceNode || !targetNode) continue;
+
+    // Quick bounding box culling: skip if both ends are outside on the same side
+    if ((sourceNode.x < viewMinX && targetNode.x < viewMinX) ||
+        (sourceNode.x > viewMaxX && targetNode.x > viewMaxX) ||
+        (sourceNode.y < viewMinY && targetNode.y < viewMinY) ||
+        (sourceNode.y > viewMaxY && targetNode.y > viewMaxY)) {
+      continue;
+    }
+
+    // STRICT CONNECTION FILTER:
+    // If a connection filter ('both' | 'out' | 'in') is active, strictly render matching edges only!
+    const matchesFilter = filter === "all" || edge.type === filter;
+    if (!matchesFilter) {
+      continue;
+    }
+
+    const sLower = edge.source.toLowerCase();
+    const tLower = edge.target.toLowerCase();
+    const isHighlighted = !!(
+      (selectedId && (selectedId.toLowerCase() === sLower || selectedId.toLowerCase() === tLower)) ||
+      (hoveredId && (hoveredId.toLowerCase() === sLower || hoveredId.toLowerCase() === tLower))
+    );
+
+    ctx.save();
+    if (activeNode) {
+      if (isHighlighted) {
+        ctx.globalAlpha = 1.0;
+      } else {
+        ctx.globalAlpha = filter !== "all" ? 0.35 : 0.04;
+      }
+    } else {
+      ctx.globalAlpha = filter !== "all" ? 0.85 : (nodesLen > 100 ? 0.35 : 0.65);
+    }
+
     let edgeColor = "";
     if (isDark.value) {
       if (edge.type === "in") {
-        edgeColor = isHighlighted ? "#818cf8" : "rgba(129, 140, 248, 0.2)"; // Indigo
+        edgeColor = isHighlighted ? "#818cf8" : "rgba(129, 140, 248, 0.4)";
       } else if (edge.type === "out") {
-        edgeColor = isHighlighted ? "#2dd4bf" : "rgba(45, 212, 191, 0.2)";  // Teal
+        edgeColor = isHighlighted ? "#2dd4bf" : "rgba(45, 212, 191, 0.4)";
       } else if (edge.type === "both") {
-        edgeColor = isHighlighted ? "#f472b6" : "rgba(244, 114, 182, 0.22)"; // Pink/Rose
+        edgeColor = isHighlighted ? "#f472b6" : "rgba(244, 114, 182, 0.55)";
       } else {
-        edgeColor = isHighlighted ? "#94a3b8" : "rgba(148, 163, 184, 0.12)"; // Normal Slate
+        edgeColor = isHighlighted ? "#94a3b8" : "rgba(148, 163, 184, 0.25)";
       }
     } else {
       if (edge.type === "in") {
-        edgeColor = isHighlighted ? "#4f46e5" : "rgba(79, 70, 229, 0.16)"; // Indigo
+        edgeColor = isHighlighted ? "#4f46e5" : "rgba(79, 70, 229, 0.4)";
       } else if (edge.type === "out") {
-        edgeColor = isHighlighted ? "#0d9488" : "rgba(13, 148, 136, 0.16)";  // Teal
+        edgeColor = isHighlighted ? "#0d9488" : "rgba(13, 148, 136, 0.4)";
       } else if (edge.type === "both") {
-        edgeColor = isHighlighted ? "#db2777" : "rgba(219, 39, 119, 0.18)"; // Pink/Rose
+        edgeColor = isHighlighted ? "#db2777" : "rgba(219, 39, 119, 0.55)";
       } else {
-        edgeColor = isHighlighted ? "#64748b" : "rgba(100, 116, 139, 0.12)"; // Normal Slate
+        edgeColor = isHighlighted ? "#64748b" : "rgba(100, 116, 139, 0.25)";
       }
     }
 
     ctx.beginPath();
     ctx.moveTo(sourceNode.x, sourceNode.y);
     ctx.lineTo(targetNode.x, targetNode.y);
-
     ctx.strokeStyle = edgeColor;
-    ctx.lineWidth = isHighlighted ? 2.5 : 1.2;
+    ctx.lineWidth = isHighlighted ? 2.8 : (filter !== "all" ? 1.8 : (nodesLen > 100 ? 0.9 : 1.3));
     ctx.stroke();
 
-    // Draw directional arrows
-    const drawArrow = (fromX: number, fromY: number, toX: number, toY: number, tRadius: number) => {
-      const angle = Math.atan2(toY - fromY, toX - fromX);
-      const arrowX = toX - (tRadius + 2) * Math.cos(angle);
-      const arrowY = toY - (tRadius + 2) * Math.sin(angle);
-      
-      const arrowSize = isHighlighted ? 7 : 5;
-      ctx.beginPath();
-      ctx.moveTo(arrowX, arrowY);
-      ctx.lineTo(
-        arrowX - arrowSize * Math.cos(angle - Math.PI / 6),
-        arrowY - arrowSize * Math.sin(angle - Math.PI / 6)
-      );
-      ctx.lineTo(
-        arrowX - arrowSize * Math.cos(angle + Math.PI / 6),
-        arrowY - arrowSize * Math.sin(angle + Math.PI / 6)
-      );
-      ctx.closePath();
-      ctx.fillStyle = edgeColor;
-      ctx.fill();
-    };
-
+    const arrowSize = isHighlighted ? 7 : (filter !== "all" ? 6 : 5);
     if (edge.type === "both") {
-      // Draw two arrowheads: one at target node boundary, one at source node boundary
-      drawArrow(sourceNode.x, sourceNode.y, targetNode.x, targetNode.y, targetNode.r);
-      drawArrow(targetNode.x, targetNode.y, sourceNode.x, sourceNode.y, sourceNode.r);
+      drawArrow(sourceNode.x, sourceNode.y, targetNode.x, targetNode.y, targetNode.r, edgeColor, arrowSize);
+      drawArrow(targetNode.x, targetNode.y, sourceNode.x, sourceNode.y, sourceNode.r, edgeColor, arrowSize);
     } else {
-      // Direct arrow from source to target
-      drawArrow(sourceNode.x, sourceNode.y, targetNode.x, targetNode.y, targetNode.r);
+      drawArrow(sourceNode.x, sourceNode.y, targetNode.x, targetNode.y, targetNode.r, edgeColor, arrowSize);
     }
 
-    // Interactive animated signal dot
-    if (isHighlighted) {
-      const time = Date.now() / 1500;
-      const progress = time % 1.0;
-      
-      // Forward direction signal dot (source to target)
+    // Animated signal dot for highlighted edge or active filter
+    if (isHighlighted || (filter !== "all" && !activeNode)) {
+      const progress = (Date.now() / 1500) % 1.0;
       const px1 = sourceNode.x + (targetNode.x - sourceNode.x) * progress;
       const py1 = sourceNode.y + (targetNode.y - sourceNode.y) * progress;
       ctx.beginPath();
@@ -8865,7 +9365,6 @@ const drawNetworkGraph = () => {
       ctx.fillStyle = edgeColor;
       ctx.fill();
 
-      // Reverse direction signal dot (target to source) if type is both
       if (edge.type === "both") {
         const px2 = targetNode.x + (sourceNode.x - targetNode.x) * progress;
         const py2 = targetNode.y + (sourceNode.y - targetNode.y) * progress;
@@ -8875,36 +9374,65 @@ const drawNetworkGraph = () => {
         ctx.fill();
       }
     }
-  });
+    ctx.restore();
+  }
 
-  // Draw Nodes
-  networkNodes.value.forEach(node => {
-    const isSelected = selectedNetworkNode.value?.id === node.id;
-    const isHovered = hoveredNode.value?.id === node.id;
+  // Draw Nodes with viewport culling, focus isolation & cached measurements
+  const currentZoom = zoom.value;
+
+  for (let i = 0; i < nodesLen; i++) {
+    const node = nodes[i];
+    // Frustum culling: skip nodes off-screen
+    if (node.x + node.r < viewMinX || node.x - node.r > viewMaxX ||
+        node.y + node.r < viewMinY || node.y - node.r > viewMaxY) {
+      continue;
+    }
+
+    const nIdLower = node.id.toLowerCase();
+    const isSelected = selectedId ? selectedId.toLowerCase() === nIdLower : false;
+    const isHovered = hoveredId ? hoveredId.toLowerCase() === nIdLower : false;
+    const isNeighborOfActive = activeFilteredNeighborIds.has(nIdLower);
+    const hasFilteredEdge = filterConnectedNodeIds.has(nIdLower);
 
     ctx.save();
-    ctx.translate(node.x, node.y);
+    if (activeNode) {
+      if (isSelected || isHovered) {
+        ctx.globalAlpha = 1.0;
+      } else if (isNeighborOfActive) {
+        ctx.globalAlpha = 1.0;
+      } else if (filter !== "all" && hasFilteredEdge) {
+        ctx.globalAlpha = 0.35;
+      } else {
+        ctx.globalAlpha = 0.10;
+      }
+    } else if (filter !== "all") {
+      ctx.globalAlpha = (hasFilteredEdge || node.isCenter) ? 1.0 : 0.12;
+    } else {
+      ctx.globalAlpha = 1.0;
+    }
 
+    // Selection / Hover halo
     if (isSelected || isHovered) {
       ctx.beginPath();
-      ctx.arc(0, 0, node.r + 5, 0, Math.PI * 2);
+      ctx.arc(node.x, node.y, node.r + 5, 0, Math.PI * 2);
       ctx.fillStyle = isSelected 
         ? (isDark.value ? "rgba(45, 212, 191, 0.15)" : "rgba(13, 148, 136, 0.12)")
         : (isDark.value ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.05)");
       ctx.fill();
     }
 
+    // Node body circle
     ctx.beginPath();
-    ctx.arc(0, 0, node.r, 0, Math.PI * 2);
+    ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
     ctx.fillStyle = node.color;
     ctx.fill();
 
     if (node.avatarImg && node.avatarLoaded) {
       ctx.save();
       ctx.beginPath();
-      ctx.arc(0, 0, node.r, 0, Math.PI * 2);
+      ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
       ctx.clip();
-      ctx.drawImage(node.avatarImg, -node.r, -node.r, node.r * 2, node.r * 2);
+      ctx.drawImage(node.avatarImg, node.x - node.r, node.y - node.r, node.r * 2, node.r * 2);
       ctx.restore();
     } else {
       ctx.fillStyle = "#ffffff";
@@ -8912,11 +9440,12 @@ const drawNetworkGraph = () => {
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       const char = getSafeInitial(node.displayName || node.name);
-      ctx.fillText(char, 0, 0);
+      ctx.fillText(char, node.x, node.y);
     }
 
+    // Node border ring
     ctx.beginPath();
-    ctx.arc(0, 0, node.r, 0, Math.PI * 2);
+    ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
     if (isSelected) {
       ctx.strokeStyle = isDark.value ? "#2dd4bf" : "#0d9488";
       ctx.lineWidth = 3;
@@ -8932,22 +9461,48 @@ const drawNetworkGraph = () => {
     }
     ctx.stroke();
 
-    ctx.fillStyle = isDark.value ? "#f3f4f6" : "#1f2937";
-    ctx.font = `${isSelected ? 'bold' : '600'} 11px sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "top";
-    
-    const label = (node.isPinned ? "📌 " : "") + (node.displayName || node.name);
-    const textWidth = ctx.measureText(label).width;
-    ctx.fillStyle = isDark.value ? "rgba(17, 24, 39, 0.85)" : "rgba(255, 255, 255, 0.85)";
-    ctx.fillRect(-textWidth/2 - 4, node.r + 5, textWidth + 8, 16);
-    
-    ctx.fillStyle = isDark.value ? "#f3f4f6" : "#1f2937";
-    ctx.fillText(label, 0, node.r + 7);
+    // Text label with smart LOD & cached measureText to maintain 60fps
+    const shouldDrawLabel = (() => {
+      if (labelDensity.value === "all") return currentZoom >= 0.25;
+      if (labelDensity.value === "hover") return isHovered || isSelected || isNeighborOfActive;
+      // "smart" mode:
+      if (isSelected || isHovered) return true;
+      if (filter !== "all") {
+        if (isNeighborOfActive) return true;
+        if (hasFilteredEdge && (currentZoom >= 0.4 || (node.degree || 0) >= 2)) return true;
+        return false;
+      }
+      if (node.isCenter || node.isPinned) return true;
+      if (isNeighborOfActive) return true;
+      if (currentZoom >= 1.0) return true;
+      if (currentZoom >= 0.45 && (node.degree || 0) >= 4) return true;
+      return false;
+    })();
+
+    if (shouldDrawLabel) {
+      const label = (node.isPinned ? "📌 " : "") + (node.displayName || node.name);
+      if (node._cachedLabel !== label || node._labelWidth === undefined) {
+        ctx.font = `${isSelected ? 'bold' : '600'} 11px sans-serif`;
+        node._labelWidth = ctx.measureText(label).width;
+        node._cachedLabel = label;
+      } else {
+        ctx.font = `${isSelected ? 'bold' : '600'} 11px sans-serif`;
+      }
+
+      const textWidth = node._labelWidth;
+      ctx.fillStyle = isDark.value ? "rgba(17, 24, 39, 0.85)" : "rgba(255, 255, 255, 0.85)";
+      ctx.fillRect(node.x - textWidth / 2 - 4, node.y + node.r + 5, textWidth + 8, 16);
+
+      ctx.fillStyle = isDark.value ? "#f3f4f6" : "#1f2937";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillText(label, node.x, node.y + node.r + 7);
+    }
 
     ctx.restore();
-  });
+  }
 
+  // Linking line during manual link mode
   if (networkMode.value === "link" && linkingSourceNode.value) {
     ctx.beginPath();
     ctx.moveTo(linkingSourceNode.value.x, linkingSourceNode.value.y);
@@ -8964,8 +9519,9 @@ const drawNetworkGraph = () => {
 
 const physicsTick = () => {
   if (isGraphPhysicsRunning.value) {
-    // Run multiple sub-ticks per frame to settle the layout significantly faster
-    for (let i = 0; i < 3; i++) {
+    // Adaptive sub-ticks: 2 sub-ticks when graph is large (>200 nodes) to keep 60fps smooth, 3 when smaller
+    const subTicks = networkNodes.value.length > 200 ? 2 : 3;
+    for (let i = 0; i < subTicks; i++) {
       updateNetworkPhysics();
     }
   }
@@ -16448,6 +17004,71 @@ onUnmounted(() => {
                     @input="physicsAlpha = 1.0"
                   />
                 </div>
+
+                <!-- Layout Spread for 300+ nodes -->
+                <div class="space-y-1.5 pt-1 border-t border-gray-100 dark:border-gray-700/60">
+                  <div class="flex justify-between text-[10px] font-bold">
+                    <span class="text-gray-500 dark:text-gray-400">Layout Spread</span>
+                    <span class="font-mono text-teal-600 dark:text-teal-400">{{ layoutSpread.toFixed(1) }}x</span>
+                  </div>
+                  <input
+                    :value="layoutSpread"
+                    @input="updateLayoutSpread(Number(($event.target as HTMLInputElement).value))"
+                    type="range"
+                    min="0.6"
+                    max="3.2"
+                    step="0.1"
+                    class="w-full h-1 bg-gray-100 dark:bg-gray-900 rounded-lg appearance-none cursor-pointer accent-teal-500"
+                  />
+                  <div class="grid grid-cols-3 gap-1 pt-0.5">
+                    <button
+                      @click="updateLayoutSpread(0.9)"
+                      :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', layoutSpread === 0.9 ? 'bg-teal-500 text-white shadow-xs' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200']"
+                    >
+                      Compact
+                    </button>
+                    <button
+                      @click="updateLayoutSpread(1.6)"
+                      :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', layoutSpread === 1.6 ? 'bg-teal-500 text-white shadow-xs' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200']"
+                    >
+                      Balanced
+                    </button>
+                    <button
+                      @click="updateLayoutSpread(2.4)"
+                      :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', layoutSpread === 2.4 ? 'bg-teal-500 text-white shadow-xs' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200']"
+                    >
+                      Spacious
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Label Density -->
+                <div class="space-y-1.5 pt-1 border-t border-gray-100 dark:border-gray-700/60">
+                  <div class="flex justify-between text-[10px] font-bold">
+                    <span class="text-gray-500 dark:text-gray-400">Label Visibility</span>
+                    <span class="font-mono text-gray-900 dark:text-white capitalize">{{ labelDensity }}</span>
+                  </div>
+                  <div class="grid grid-cols-3 gap-1 p-0.5 bg-gray-100 dark:bg-gray-900 rounded-xl">
+                    <button
+                      @click="labelDensity = 'smart'"
+                      :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', labelDensity === 'smart' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs' : 'text-gray-500 hover:text-gray-700']"
+                    >
+                      Smart
+                    </button>
+                    <button
+                      @click="labelDensity = 'hover'"
+                      :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', labelDensity === 'hover' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs' : 'text-gray-500 hover:text-gray-700']"
+                    >
+                      Hover
+                    </button>
+                    <button
+                      @click="labelDensity = 'all'"
+                      :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', labelDensity === 'all' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs' : 'text-gray-500 hover:text-gray-700']"
+                    >
+                      All
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -16493,19 +17114,32 @@ onUnmounted(() => {
               </h3>
 
               <div v-if="selectedNetworkNode" class="space-y-3">
-                <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">
-                  Active ({{ networkEdges.filter(e => e.source === selectedNetworkNode?.id || e.target === selectedNetworkNode?.id).length }})
+                <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest flex items-center justify-between">
+                  <span>Connections ({{ selectedFilteredEdges.length }})</span>
+                  <span v-if="connectionFilter !== 'all'" class="text-[9px] font-bold px-1.5 py-0.5 rounded-full capitalize"
+                    :class="connectionFilter === 'both' ? 'bg-pink-100 dark:bg-pink-900/40 text-pink-600 dark:text-pink-400' :
+                            connectionFilter === 'out' ? 'bg-teal-100 dark:bg-teal-900/40 text-teal-600 dark:text-teal-400' :
+                            'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400'">
+                    {{ connectionFilter === 'both' ? 'Mutual only' : connectionFilter + ' only' }}
+                  </span>
                 </h5>
 
                 <div class="max-h-[140px] overflow-y-auto space-y-1.5 pr-1 border border-transparent">
                   <div 
-                    v-for="edge in networkEdges.filter(e => e.source === selectedNetworkNode?.id || e.target === selectedNetworkNode?.id)" 
+                    v-for="edge in selectedFilteredEdges" 
                     :key="edge.source + '-' + edge.target"
                     class="p-2 bg-gray-50/70 dark:bg-gray-900/40 rounded-xl border border-gray-100 dark:border-gray-750 flex items-center justify-between text-xs font-semibold"
                   >
-                    <span class="text-gray-600 dark:text-gray-400 truncate max-w-[120px]" :title="edge.source === selectedNetworkNode?.id ? edge.target : edge.source">
-                      {{ edge.source === selectedNetworkNode?.id ? edge.target : edge.source }}
-                    </span>
+                    <div class="flex items-center gap-1.5 min-w-0">
+                      <span 
+                        class="w-2 h-2 rounded-full shrink-0" 
+                        :class="edge.type === 'both' ? 'bg-pink-500' : edge.type === 'out' ? 'bg-teal-500' : 'bg-indigo-500'"
+                        :title="edge.type === 'both' ? 'Mutual connection (both ways)' : edge.type === 'out' ? 'Outgoing connection (forwarded to)' : 'Incoming connection (forwarded from)'"
+                      ></span>
+                      <span class="text-gray-600 dark:text-gray-400 truncate max-w-[120px]" :title="edge.source === selectedNetworkNode?.id ? edge.target : edge.source">
+                        {{ edge.source === selectedNetworkNode?.id ? edge.target : edge.source }}
+                      </span>
+                    </div>
                     <button
                       @click="removeNetworkEdge(edge.source, edge.target)"
                       class="p-1 text-gray-400 hover:text-red-500 transition-colors cursor-pointer"
@@ -16516,10 +17150,10 @@ onUnmounted(() => {
                   </div>
                   
                   <div 
-                    v-if="networkEdges.filter(e => e.source === selectedNetworkNode?.id || e.target === selectedNetworkNode?.id).length === 0"
+                    v-if="selectedFilteredEdges.length === 0"
                     class="text-[10px] text-gray-400 dark:text-gray-500 italic p-4 text-center border border-dashed border-gray-200 dark:border-gray-750 rounded-2xl"
                   >
-                    No active connections.
+                    {{ connectionFilter !== 'all' ? `No ${connectionFilter === 'both' ? 'mutual' : connectionFilter} connections found.` : 'No active connections.' }}
                   </div>
                 </div>
               </div>
@@ -16546,6 +17180,129 @@ onUnmounted(() => {
                 @dblclick="handleCanvasDblClick"
                 @contextmenu.prevent
               ></canvas>
+
+              <!-- Floating Top Bar: Connection Filters, Search & Layout Actions -->
+              <div class="absolute top-4 left-16 right-4 flex items-center justify-between gap-2 z-10 pointer-events-none flex-wrap">
+                <!-- Connection Filter Pills -->
+                <div 
+                  class="flex items-center gap-1 p-1 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-2xl shadow-lg border border-gray-150 dark:border-gray-800 pointer-events-auto"
+                  @mousedown.stop
+                  @click.stop
+                >
+                  <button
+                    type="button"
+                    @click.stop="setConnectionFilter('all')"
+                    :class="['px-2.5 py-1 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer', connectionFilter === 'all' ? 'bg-gray-900 text-white dark:bg-white dark:text-gray-900 shadow-xs' : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300']"
+                    title="Show all connections"
+                  >
+                    <span>All</span>
+                    <span class="text-[9px] opacity-75 font-mono">({{ filterCounts.all }})</span>
+                  </button>
+                  <button
+                    type="button"
+                    @click.stop="setConnectionFilter('both')"
+                    :class="['px-2.5 py-1 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer', connectionFilter === 'both' ? 'bg-pink-500 text-white shadow-xs font-black' : 'text-pink-600 dark:text-pink-400 hover:bg-pink-50 dark:hover:bg-pink-950/40']"
+                    title="Filter mutual two-way connections (both directions)"
+                  >
+                    <span class="w-1.5 h-1.5 rounded-full bg-pink-400"></span>
+                    <span>Mutual</span>
+                    <span class="text-[9px] opacity-80 font-mono">({{ filterCounts.both }})</span>
+                  </button>
+                  <button
+                    type="button"
+                    @click.stop="setConnectionFilter('out')"
+                    :class="['px-2.5 py-1 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer', connectionFilter === 'out' ? 'bg-teal-500 text-white shadow-xs font-black' : 'text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40']"
+                    title="Filter outgoing connections (forwarded to)"
+                  >
+                    <span class="w-1.5 h-1.5 rounded-full bg-teal-400"></span>
+                    <span>Out</span>
+                    <span class="text-[9px] opacity-80 font-mono">({{ filterCounts.out }})</span>
+                  </button>
+                  <button
+                    type="button"
+                    @click.stop="setConnectionFilter('in')"
+                    :class="['px-2.5 py-1 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer', connectionFilter === 'in' ? 'bg-indigo-500 text-white shadow-xs font-black' : 'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40']"
+                    title="Filter incoming connections (forwarded from)"
+                  >
+                    <span class="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
+                    <span>In</span>
+                    <span class="text-[9px] opacity-80 font-mono">({{ filterCounts.in }})</span>
+                  </button>
+
+                  <div v-if="selectedNetworkNode" class="flex items-center pl-1.5 border-l border-gray-200 dark:border-gray-750">
+                    <span class="text-[9px] font-mono text-gray-400 dark:text-gray-500 px-1 truncate max-w-[80px]" :title="'Active: @' + selectedNetworkNode.id">
+                      @{{ selectedNetworkNode.id }}
+                    </span>
+                    <button
+                      type="button"
+                      @click.stop="selectedNetworkNode = null"
+                      class="text-gray-400 hover:text-red-500 text-xs px-1 cursor-pointer font-bold"
+                      title="Clear node focus (view whole network)"
+                    >
+                      ×
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Right Action Group: Quick Search, Orbits, Focus Hub -->
+                <div class="flex items-center gap-2 pointer-events-auto">
+                  <!-- Quick Channel Search Dropdown -->
+                  <div class="relative">
+                    <div class="flex items-center px-2.5 py-1 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-2xl shadow-lg border border-gray-150 dark:border-gray-800">
+                      <Search class="h-3.5 w-3.5 text-gray-400 mr-1.5 shrink-0" />
+                      <input
+                        v-model="networkNodeSearch"
+                        type="text"
+                        placeholder="Jump to node..."
+                        class="w-24 sm:w-32 text-[10px] bg-transparent focus:outline-hidden text-gray-800 dark:text-gray-200 placeholder-gray-400"
+                      />
+                      <button
+                        v-if="networkNodeSearch"
+                        @click="networkNodeSearch = ''"
+                        class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 ml-1 text-xs"
+                      >
+                        ×
+                      </button>
+                    </div>
+
+                    <!-- Search dropdown results -->
+                    <div
+                      v-if="filteredSearchNodes.length > 0"
+                      class="absolute top-full mt-1.5 right-0 w-52 bg-white dark:bg-gray-900 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-800 overflow-hidden z-30 py-1"
+                    >
+                      <button
+                        v-for="n in filteredSearchNodes"
+                        :key="n.id"
+                        @click="focusOnNode(n)"
+                        class="w-full text-left px-3 py-1.5 hover:bg-teal-50 dark:hover:bg-teal-950/40 text-[11px] flex items-center gap-2 transition-colors"
+                      >
+                        <span class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: n.color }"></span>
+                        <span class="font-bold truncate text-gray-800 dark:text-gray-200">{{ n.displayName || n.name }}</span>
+                        <span v-if="n.degree" class="text-[9px] font-mono text-gray-400 ml-auto">{{ n.degree }} links</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <!-- Organize Concentric Orbits button -->
+                  <button
+                    @click="organizeConcentricOrbits"
+                    class="px-2.5 py-1.5 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-2xl shadow-lg border border-gray-150 dark:border-gray-800 text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40 text-[10px] font-bold transition-all flex items-center gap-1.5"
+                    title="Organize into clean concentric orbits by connection type"
+                  >
+                    <Orbit class="h-3.5 w-3.5" />
+                    <span class="hidden sm:inline">Orbits</span>
+                  </button>
+
+                  <!-- Focus Center Hub button -->
+                  <button
+                    @click="focusHub"
+                    class="p-2 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-2xl shadow-lg border border-gray-150 dark:border-gray-800 text-gray-600 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 transition-all"
+                    title="Center & focus view on main hub"
+                  >
+                    <Target class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
 
               <!-- Floating Control HUD Overlay -->
               <div class="absolute top-4 left-4 flex flex-col gap-2 z-10">

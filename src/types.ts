@@ -31,10 +31,20 @@ export interface GraphNode {
   avatarLoaded?: boolean;
   displayName: string;
   isPinned?: boolean;
+  fx?: number | null;
+  fy?: number | null;
+  metadata?: any;
+  _index?: number;
+  _cachedLabel?: string;
+  _labelWidth?: number;
+  tier?: number;
+  degree?: number;
 }
 
 export interface GraphEdge {
   source: string;
   target: string;
   type?: "in" | "out" | "both";
+  targetDist?: number;
+  _index?: number;
 }
