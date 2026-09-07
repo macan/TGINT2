@@ -102,6 +102,9 @@ import {
 } from "./i18n";
 import type { LocaleCode } from "./i18n/types";
 
+// Expose $t to template context
+const $t = t;
+
 const md = new MarkdownIt({ html: true }).use(markdownItMark);
 
 // Language Switcher State
@@ -574,7 +577,7 @@ const addAllToWorkspace = async () => {
         await new Promise(resolve => setTimeout(resolve, 50));
     }
     isAddingAll.value = false;
-    toastMessage.value = `Added ${filteredSearchResults.value.length} posts to workspace!`;
+    toastMessage.value = t('workspace.addedPostsToWorkspace', { count: filteredSearchResults.value.length });
     toastType.value = 'success';
     setTimeout(() => { toastMessage.value = ""; }, 5000);
 };
@@ -2052,14 +2055,14 @@ const exportListenDirectoryToClipboard = () => {
       textArea.select();
       document.execCommand("copy");
       document.body.removeChild(textArea);
-      toastMessage.value = "Directory exported to clipboard!";
+      toastMessage.value = t("listen.toastExportSuccess");
       toastType.value = "success";
       setTimeout(() => { toastMessage.value = ""; }, 3000);
       return;
     }
     navigator.clipboard.writeText(dataStr)
       .then(() => {
-        toastMessage.value = "Directory exported to clipboard!";
+        toastMessage.value = t("listen.toastExportSuccess");
         toastType.value = "success";
         setTimeout(() => { toastMessage.value = ""; }, 3000);
       })
@@ -2071,17 +2074,17 @@ const exportListenDirectoryToClipboard = () => {
         textArea.select();
         try {
           document.execCommand("copy");
-          toastMessage.value = "Directory exported to clipboard!";
+          toastMessage.value = t("listen.toastExportSuccess");
           toastType.value = "success";
         } catch (e) {
-          toastMessage.value = "Failed to copy directory content";
+          toastMessage.value = t("listen.toastExportCopyFailed");
           toastType.value = "error";
         }
         document.body.removeChild(textArea);
         setTimeout(() => { toastMessage.value = ""; }, 3000);
       });
   } catch (err: any) {
-    toastMessage.value = `Export failed: ${err.message || err}`;
+    toastMessage.value = t("listen.toastExportFailed", { error: err.message || err });
     toastType.value = "error";
     setTimeout(() => { toastMessage.value = ""; }, 3000);
   }
@@ -2107,7 +2110,7 @@ const importListenDirectoryFromClipboard = () => {
 
 const confirmListenDirectoryImport = () => {
   if (!importJsonInput.value.trim()) {
-    importErrorMessage.value = "Please insert or paste JSON config contents first.";
+    importErrorMessage.value = t("listen.errorEmptyJson");
     return;
   }
   try {
@@ -2127,16 +2130,16 @@ const confirmListenDirectoryImport = () => {
     if (Array.isArray(treeData)) {
       listenDirectory.value = treeData;
       saveListenDirectory(tStamp);
-      toastMessage.value = "Directory tree imported successfully!";
+      toastMessage.value = t("listen.toastImportSuccess");
       toastType.value = "success";
       isImportModalOpen.value = false;
       importJsonInput.value = "";
       importErrorMessage.value = "";
     } else {
-      importErrorMessage.value = "Invalid configuration structure. Top-level element must be a folder/channel array or valid directory object.";
+      importErrorMessage.value = t("listen.errorInvalidStructure");
     }
   } catch (err: any) {
-    importErrorMessage.value = `JSON Parsing Error: ${err.message || 'Malformed structure'}`;
+    importErrorMessage.value = t("listen.errorJsonParsing", { error: err.message || "Malformed structure" });
   }
   setTimeout(() => { toastMessage.value = ""; }, 3000);
 };
@@ -2145,7 +2148,7 @@ const isSyncingListen = ref(false);
 
 const syncListenDirectory = async () => {
   if (!loginName.value || !loginToken.value || !isLoginTokenValid.value) {
-    toastMessage.value = "Credentials or Access Token is invalid!";
+    toastMessage.value = t("auth.invalidCredentials");
     toastType.value = "error";
     setTimeout(() => { toastMessage.value = ""; }, 3000);
     return;
@@ -2168,7 +2171,7 @@ const syncListenDirectory = async () => {
         tree: listenDirectory.value,
         timestamp: listenDirectoryTimestamp.value
       });
-      toastMessage.value = "Synced local directory to remote!";
+      toastMessage.value = t("listen.toastSyncLocalToRemote");
       toastType.value = "success";
       setTimeout(() => { toastMessage.value = ""; }, 3000);
       return;
@@ -2207,20 +2210,20 @@ const syncListenDirectory = async () => {
         tree: listenDirectory.value,
         timestamp: listenDirectoryTimestamp.value
       });
-      toastMessage.value = "Synced local directory to remote!";
+      toastMessage.value = t("listen.toastSyncLocalToRemote");
       toastType.value = "success";
     } else if (remoteTimestamp === listenDirectoryTimestamp.value) {
-      toastMessage.value = "Local directory is up to date!";
+      toastMessage.value = t("listen.toastDirectoryUpToDate");
       toastType.value = "info";
     } else {
       listenDirectory.value = remoteTree;
       saveListenDirectory(remoteTimestamp);
-      toastMessage.value = "Directory tree synced from remote!";
+      toastMessage.value = t("listen.toastSyncRemoteToLocal");
       toastType.value = "success";
     }
   } catch (error: any) {
     console.error("Failed to sync listen directory:", error);
-    toastMessage.value = `Sync error: ${error.message || error}`;
+    toastMessage.value = t("listen.toastSyncError", { error: error.message || error });
     toastType.value = "error";
   } finally {
     isSyncingListen.value = false;
@@ -2242,7 +2245,7 @@ const addChannelToListenDirectory = (name: string, username: string) => {
   listenDirectory.value.push(newItem);
   saveListenDirectory();
   
-  toastMessage.value = `Added ${name} to Listen Directory`;
+  toastMessage.value = t("listen.toastAddedToDirectory", { name });
   toastType.value = 'info';
   setTimeout(() => { toastMessage.value = ""; }, 3000);
 };
@@ -2936,7 +2939,9 @@ const scheduleScrapeForListen = async (channelName) => {
       throw new Error(`Failed to schedule scrape: ${res.statusText}`);
   } catch (err: any) {
     console.error(err);
-    alert("Failed to schedule scrape: " + err.message);
+    toastMessage.value = t("listen.failedScheduleScrape", { error: err.message || err });
+    toastType.value = "error";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
   }
 };
 
@@ -3263,7 +3268,7 @@ const findNode = () => {
         zoom: 2
     });
     selectedNode.value = node;
-    toastMessage.value = `Node ${nodeSearchQuery.value} found.`;
+    toastMessage.value = t('workspace.nodeFound', { id: nodeSearchQuery.value });
     toastType.value = 'success';
     
     // Highlight logic
@@ -3283,7 +3288,7 @@ const findNode = () => {
 
     setTimeout(() => { toastMessage.value = ""; }, 3000);
   } else {
-    toastMessage.value = `Node ${nodeSearchQuery.value} not found.`;
+    toastMessage.value = t('workspace.nodeNotFound', { id: nodeSearchQuery.value });
     toastType.value = 'error';
     setTimeout(() => { toastMessage.value = ""; }, 3000);
   }
@@ -3291,7 +3296,7 @@ const findNode = () => {
 
 const saveGraph = async () => {
     if (!graphNameInput.value) {
-        toastMessage.value = "Please enter a graph name.";
+        toastMessage.value = t('workspace.pleaseEnterGraphName');
         toastType.value = "error";
         setTimeout(() => { toastMessage.value = ""; }, 3000);
         return;
@@ -3302,11 +3307,11 @@ const saveGraph = async () => {
         const data = JSON.stringify(workspaceGraph.value.json());
         try {
             await saveProfileRemotely(`graph-${name}`, loginToken.value, data);
-            toastMessage.value = 'Graph saved remotely.';
+            toastMessage.value = t('workspace.graphSavedRemotely');
             toastType.value = 'success';
             setTimeout(() => { toastMessage.value = ""; }, 3000);
         } catch (e: any) {
-            toastMessage.value = 'Failed to save remotely.';
+            toastMessage.value = t('workspace.failedToSaveRemotely');
             toastType.value = 'error';
             console.error(e);
             setTimeout(() => { toastMessage.value = ""; }, 3000);
@@ -3315,7 +3320,7 @@ const saveGraph = async () => {
         if (!workspaceGraph.value) return;
         const data = JSON.stringify(workspaceGraph.value.json());
         localStorage.setItem('graphData', data);
-        toastMessage.value = 'Graph saved.';
+        toastMessage.value = t('workspace.graphSaved');
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 3000);
     }
@@ -3337,7 +3342,7 @@ function applyGraphStyle() {
 
 const loadGraph = async () => {
     if (!graphNameInput.value && isLoginTokenValid.value) {
-        toastMessage.value = "Please enter a graph name.";
+        toastMessage.value = t('workspace.pleaseEnterGraphName');
         toastType.value = "error";
         setTimeout(() => { toastMessage.value = ""; }, 3000);
         return;
@@ -3368,12 +3373,12 @@ const loadGraph = async () => {
                 workspaceGraph.value.elements().remove();
                 workspaceGraph.value.json(parsedData);
                 applyGraphStyle(); // Apply styles to newly loaded graph
-                toastMessage.value = 'Graph loaded remotely.';
+                toastMessage.value = t('workspace.graphLoadedRemotely');
                 toastType.value = 'success';
                 setTimeout(() => { toastMessage.value = ""; }, 3000);
             }
         } catch (e: any) {
-             toastMessage.value = 'Failed to load graph remotely.';
+             toastMessage.value = t('workspace.failedToLoadGraphRemotely');
              toastType.value = 'error';
              console.error(e);
              setTimeout(() => { toastMessage.value = ""; }, 3000);
@@ -3384,11 +3389,11 @@ const loadGraph = async () => {
             // Clear existing elements in cytoscape before loading the new graph structure
             workspaceGraph.value.elements().remove();
             workspaceGraph.value.json(JSON.parse(data));
-            toastMessage.value = 'Graph loaded.';
+            toastMessage.value = t('workspace.graphLoaded');
             toastType.value = 'success';
             setTimeout(() => { toastMessage.value = ""; }, 3000);
         } else {
-            toastMessage.value = 'No saved graph found.';
+            toastMessage.value = t('workspace.noSavedGraphFound');
             toastType.value = 'error';
             setTimeout(() => { toastMessage.value = ""; }, 3000);
         }
@@ -3433,7 +3438,7 @@ const shareGraph = () => {
     const encoded = btoa(binary);
     const url = `${window.location.origin}${window.location.pathname}?graph=${encodeURIComponent(encoded)}`;
     navigator.clipboard.writeText(url).then(() => {
-        toastMessage.value = 'Link copied to clipboard!';
+        toastMessage.value = t('workspace.linkCopied');
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 3000);
     });
@@ -3445,7 +3450,7 @@ const analyzeGraph = async () => {
     try {
         const postInEdges = workspaceGraph.value.edges('[label="post in"]');
         
-        toastMessage.value = `Filtered ${postInEdges.length} "post in" edges.`;
+        toastMessage.value = t('workspace.filteredEdges', { count: postInEdges.length });
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 5000);
 
@@ -3549,7 +3554,7 @@ const analyzeGraph = async () => {
           }
         }
     } catch (error) {
-        toastMessage.value = "Analysis failed: " + error;
+        toastMessage.value = t('workspace.analysisFailed', { error });
         toastType.value = "error";
         setTimeout(() => { toastMessage.value = ""; }, 5000);
         console.error(error);
@@ -3584,11 +3589,11 @@ const fetchNodeMetadata = async (nodeType: string, nodeId: string) => {
         
         saveChanges();
         
-        toastMessage.value = 'Metadata fetched!';
+        toastMessage.value = t('workspace.metadataFetched');
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 3000);
     } catch (e) {
-        toastMessage.value = 'Fetch failed.';
+        toastMessage.value = t('workspace.fetchFailed');
         toastType.value = 'error';
         setTimeout(() => { toastMessage.value = ""; }, 3000);
     }
@@ -3603,7 +3608,7 @@ const fetchChannelDates = async (nodeId: string) => {
         // Assuming posts are returned in data.posts
         let posts = data || [];
         if (posts.length === 0) {
-           toastMessage.value = 'No posts found in channel.';
+           toastMessage.value = t('workspace.noPostsFound');
            toastType.value = 'error';
            setTimeout(() => { toastMessage.value = ""; }, 3000);
            return;
@@ -3670,15 +3675,15 @@ const fetchChannelDates = async (nodeId: string) => {
             saveChanges();
           }
           
-          toastMessage.value = 'Dates detected and updated!';
+          toastMessage.value = t('workspace.datesUpdated');
           toastType.value = 'success';
         } else {
-          toastMessage.value = 'Dates detected! Already up to date.';
+          toastMessage.value = t('workspace.datesUpToDate');
           toastType.value = 'success';
         }
         setTimeout(() => { toastMessage.value = ""; }, 3000);
     } catch (e) {
-        toastMessage.value = 'Fetch failed.';
+        toastMessage.value = t('workspace.fetchFailed');
         toastType.value = 'error';
         setTimeout(() => { toastMessage.value = ""; }, 3000);
     }
@@ -3706,7 +3711,7 @@ const fetchChannelPosts = async (nodeId: string, atMost = 100, startId = 0) => {
         let min = 1;
 
         if (posts.length === 0) {
-           toastMessage.value = 'No posts found in channel.';
+           toastMessage.value = t('workspace.noPostsFound');
            toastType.value = 'error';
            setTimeout(() => { toastMessage.value = ""; }, 3000);
            return [];
@@ -3714,7 +3719,7 @@ const fetchChannelPosts = async (nodeId: string, atMost = 100, startId = 0) => {
           min = parseInt(posts[posts.length - 1].key.split('.')[1]);
         }
         allPosts.push(...posts);
-        toastMessage.value = `Fetched ${allPosts.length} posts from ${nodeId}! Continue...`;
+        toastMessage.value = t('workspace.fetchedChannelPostsContinue', { count: allPosts.length, nodeId });
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 3000);
 
@@ -3738,13 +3743,13 @@ const fetchChannelPosts = async (nodeId: string, atMost = 100, startId = 0) => {
             break;
           }
         }
-        toastMessage.value = `Fetched ${allPosts.length} posts from ${nodeId}!`;
+        toastMessage.value = t('workspace.fetchedChannelPosts', { count: allPosts.length, nodeId });
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 3000);
 
         return allPosts;
     } catch (e) {
-        toastMessage.value = 'Fetch failed.';
+        toastMessage.value = t('workspace.fetchFailed');
         toastType.value = 'error';
         setTimeout(() => { toastMessage.value = ""; }, 3000);
     }
@@ -3767,7 +3772,7 @@ const generateHash5 = (seed) => {
 
 const addToWorkspaceFromPost = (post: any) => {
     if (!workspaceGraph.value) {
-        toastMessage.value = 'Workspace not initiated, try to switch to it.';
+        toastMessage.value = t('workspace.workspaceNotInitiated');
         toastType.value = 'error';
         setTimeout(() => { toastMessage.value = ""; }, 5000);
         return;
@@ -3861,7 +3866,7 @@ const addToWorkspaceFromPost = (post: any) => {
           }
       }
       
-      toastMessage.value = `Added ${userUsername} to workspace with edge!`;
+      toastMessage.value = t('workspace.addedToWorkspaceWithEdge', { user: userUsername });
       toastType.value = 'success';
       setTimeout(() => { toastMessage.value = ""; }, 5000);
     } else {
@@ -3874,7 +3879,7 @@ const addToWorkspaceFromPost = (post: any) => {
           }
       }
 
-      toastMessage.value = `Added ${channelUsername} to workspace without edge!`;
+      toastMessage.value = t('workspace.addedToWorkspaceWithoutEdge', { user: channelUsername });
       toastType.value = 'success';
       setTimeout(() => { toastMessage.value = ""; }, 5000);
     }
@@ -3885,7 +3890,7 @@ const startAddEdge = () => {
         addingEdge.value = true;
         sourceNode.value = contextMenu.value.node;
         contextMenu.value.visible = false;
-        toastMessage.value = 'Select target node to add edge.';
+        toastMessage.value = t('workspace.selectTargetNodeToAddEdge');
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 5000);
     }
@@ -3923,7 +3928,7 @@ const addForwardFrom = async () => {
           addEdge(item, nodeId, { label: 'forward to' });
         });
 
-        toastMessage.value = `Expanded forwards (${forwards.length}) and fto (${fto.length}) for @${nodeId}`;
+        toastMessage.value = t('workspace.expandedForwardsAndFto', { forwards: forwards.length, fto: fto.length, id: nodeId });
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 4000);
       }
@@ -3939,7 +3944,7 @@ const deleteNode = () => {
         workspaceGraph.value.remove(contextMenu.value.node);
         contextMenu.value.visible = false;
         graphState.value = workspaceGraph.value.json();
-        toastMessage.value = 'Node deleted.';
+        toastMessage.value = t('workspace.nodeDeleted');
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 5000);
     }
@@ -3949,7 +3954,7 @@ const deleteEdge = (edge: any) => {
     if (workspaceGraph.value) {
         workspaceGraph.value.remove(edge);
         graphState.value = workspaceGraph.value.json();
-        toastMessage.value = 'Edge deleted.';
+        toastMessage.value = t('workspace.edgeDeleted');
         toastType.value = 'success';
         setTimeout(() => { toastMessage.value = ""; }, 5000);
     }
@@ -4166,7 +4171,7 @@ watch(isDark, () => {
         if (addingEdge.value) {
             addingEdge.value = false;
             sourceNode.value = null;
-            toastMessage.value = 'Cancelled adding edge.';
+            toastMessage.value = t('workspace.cancelledAddingEdge');
             toastType.value = 'error';
             setTimeout(() => { toastMessage.value = ""; }, 3000);
         }
@@ -4382,7 +4387,7 @@ const generateFinalTable = async () => {
   } catch (err) {
     console.error(err);
     finalTableHtml.value =
-      '<p class="text-red-500">Failed to generate table.</p>';
+      `<p class="text-red-500">${t('autoFinding.failedToGenerateTable')}</p>`;
   } finally {
     isGeneratingFinalTable.value = false;
   }
@@ -4605,7 +4610,7 @@ const fetchSinglePost = async () => {
       data: await res.json(),
     };
   } catch (err: any) {
-    alert("Failed to fetch post: " + err.message);
+    alert(t("autoFinding.failedToFetchPost", { error: err.message }));
   } finally {
     isFetchingPost.value = false;
   }
@@ -10960,8 +10965,8 @@ onUnmounted(() => {
             ]">
               <div class="space-y-6 flex-grow">
                 <div class="space-y-1">
-                  <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">User Identity Node</h3>
-                  <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">Provide an exact Telegram username to extract remote server descriptors.</p>
+                  <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">{{ t('channels.userIdentityNode') }}</h3>
+                  <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">{{ t('channels.userIdentitySubtitle') }}</p>
                 </div>
 
                 <!-- Input dropdown wrap -->
@@ -10983,7 +10988,7 @@ onUnmounted(() => {
                         @mousedown.prevent
                         @click="telegramUsername = ''"
                         class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full transition-colors cursor-pointer shrink-0 ml-1"
-                        title="Clear username"
+                        :title="t('channels.clearUsername')"
                       >
                         <X class="w-3.5 h-3.5" />
                       </button>
@@ -10993,7 +10998,7 @@ onUnmounted(() => {
                       class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-teal-500/20 hover:shadow-teal-500/30 cursor-pointer transition-all duration-300 hover:-translate-y-0.5 active:translate-y-0 shrink-0"
                     >
                       <Search class="h-3.5 w-3.5" />
-                      <span>Search</span>
+                      <span>{{ t('common.search') }}</span>
                     </button>
                   </div>
                   
@@ -11001,7 +11006,7 @@ onUnmounted(() => {
                   <transition enter-active-class="transition duration-150 ease-out" enter-from-class="transform scale-95 opacity-0" enter-to-class="transform scale-100 opacity-100" leave-active-class="transition duration-100 ease-in" leave-from-class="transform scale-100 opacity-100" leave-to-class="transform scale-95 opacity-0">
                     <div v-if="isHistoryVisible && lookupUserHistory.length > 0" class="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-750 rounded-2xl shadow-xl max-h-48 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
                       <div class="px-3.5 py-2 bg-gray-50/50 dark:bg-gray-900/30 text-[10px] font-black uppercase tracking-widest text-gray-400">
-                        Recent Queries
+                        {{ t('channels.recentQueries') }}
                       </div>
                       <div 
                         v-for="user in lookupUserHistory" 
@@ -11025,13 +11030,13 @@ onUnmounted(() => {
                   <div class="relative h-10 w-10 animate-spin rounded-full border-[3px] border-teal-500 border-t-transparent flex items-center justify-center shadow-md mb-2">
                     <Bot class="h-4.5 w-4.5 text-teal-600 dark:text-teal-400 animate-pulse" />
                   </div>
-                  <p class="text-[10px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 animate-pulse">Syncing User profile...</p>
+                  <p class="text-[10px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 animate-pulse">{{ t('channels.syncingUserProfile') }}</p>
                 </div>
 
                 <div v-if="telegramError" class="rounded-2xl bg-rose-500/[0.04] p-4 border border-rose-500/10 flex items-start gap-3">
                   <AlertCircle class="h-4 w-4 text-rose-500 shrink-0 mt-0.5" />
                   <div class="space-y-0.5">
-                    <p class="text-xs font-black uppercase tracking-wide text-rose-600 dark:text-rose-400">Query Dispatch Failure</p>
+                    <p class="text-xs font-black uppercase tracking-wide text-rose-600 dark:text-rose-400">{{ t('channels.queryFailure') }}</p>
                     <p class="text-xs text-rose-500/90 dark:text-gray-400 font-semibold leading-relaxed">{{ telegramError }}</p>
                   </div>
                 </div>
@@ -11044,10 +11049,10 @@ onUnmounted(() => {
                     <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-teal-400 opacity-75"></span>
                     <span class="relative inline-flex rounded-full h-2 w-2 bg-teal-500"></span>
                   </span>
-                  <span>Active Descriptor Session</span>
+                  <span>{{ t('channels.activeDescriptorSession') }}</span>
                 </div>
                 <div class="flex items-center gap-1.5 text-teal-600 dark:text-teal-400 font-bold uppercase tracking-wider text-[9px] bg-teal-50 dark:bg-teal-950/30 px-2 py-0.5 rounded-md">
-                  <span>Sync Complete</span>
+                  <span>{{ t('channels.syncComplete') }}</span>
                 </div>
               </div>
             </div>
@@ -11067,7 +11072,7 @@ onUnmounted(() => {
                           @error="handleImageError" 
                           class="w-16 h-16 rounded-2xl object-cover border-2 border-teal-500/10 shadow-sm" 
                           referrerPolicy="no-referrer"
-                          alt="Profile photo" 
+                          :alt="t('channels.profilePhoto')" 
                         />
                         <span class="absolute -bottom-1 -right-1 p-1 bg-teal-600 rounded-lg text-white border border-white dark:border-gray-800 shadow-md">
                           <User class="h-3 w-3" />
@@ -11079,7 +11084,7 @@ onUnmounted(() => {
                           <button 
                             @click="telegramUser = null" 
                             class="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
-                            title="Close dossier"
+                            :title="t('channels.closeDossier')"
                           >
                             <X class="h-4 w-4" />
                           </button>
@@ -11103,7 +11108,7 @@ onUnmounted(() => {
 
                   <!-- Description / Bio -->
                   <div v-if="telegramUser.description" class="space-y-2">
-                    <h4 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Biography Desk</h4>
+                    <h4 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">{{ t('channels.biographyDesk') }}</h4>
                     <p class="text-xs text-gray-600 dark:text-gray-300 leading-relaxed font-semibold bg-gray-50/50 dark:bg-gray-900/35 p-4 rounded-2xl border border-gray-200/40 dark:border-gray-700/50 whitespace-pre-wrap break-words">
                       {{ telegramUser.description }}
                     </p>
@@ -11117,7 +11122,7 @@ onUnmounted(() => {
                         <Hash class="h-4 w-4" />
                       </div>
                       <div class="space-y-0.5">
-                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Unique Node ID</p>
+                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">{{ t('channels.uniqueNodeId') }}</p>
                         <p class="text-xs font-bold font-mono text-gray-900 dark:text-white">{{ telegramUser.id || 'N/A' }}</p>
                       </div>
                     </div>
@@ -11128,8 +11133,8 @@ onUnmounted(() => {
                         <Globe class="h-4 w-4" />
                       </div>
                       <div class="space-y-0.5">
-                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Locale Profile</p>
-                        <p class="text-xs font-bold text-gray-900 dark:text-white">{{ telegramUser.lang || 'Global (Default)' }}</p>
+                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">{{ t('channels.localeProfile') }}</p>
+                        <p class="text-xs font-bold text-gray-900 dark:text-white">{{ telegramUser.lang || t('channels.globalDefault') }}</p>
                       </div>
                     </div>
 
@@ -11139,7 +11144,7 @@ onUnmounted(() => {
                         <Phone class="h-4 w-4" />
                       </div>
                       <div class="space-y-0.5">
-                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Linked Phone</p>
+                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">{{ t('channels.linkedPhone') }}</p>
                         <p class="text-xs font-bold text-gray-900 dark:text-white">{{ telegramUser.phone }}</p>
                       </div>
                     </div>
@@ -11150,7 +11155,7 @@ onUnmounted(() => {
                         <Activity class="h-4 w-4" />
                       </div>
                       <div class="space-y-0.5">
-                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">Remote Status</p>
+                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">{{ t('channels.remoteStatus') }}</p>
                         <p class="text-xs font-bold text-gray-900 dark:text-white">{{ telegramUser.status }}</p>
                       </div>
                     </div>
@@ -11162,7 +11167,7 @@ onUnmounted(() => {
                   <summary class="flex items-center justify-between p-4 cursor-pointer outline-none select-none">
                     <span class="text-xs font-black text-gray-700 dark:text-gray-300 uppercase tracking-widest flex items-center gap-2">
                       <Database class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
-                      <span>Schema Inspector</span>
+                      <span>{{ t('channels.schemaInspector') }}</span>
                     </span>
                     <ChevronDown class="h-4 w-4 text-gray-400 group-open:rotate-180 duration-200 transition-transform" />
                   </summary>
@@ -11184,7 +11189,7 @@ onUnmounted(() => {
           <div class="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-6">
             <!-- Left: Beautiful Tab Switches -->
             <div class="space-y-2.5">
-              <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Metadata Directory</label>
+              <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">{{ t('channels.metadataDirectory') }}</label>
               <div class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900 border border-gray-200/80 dark:border-gray-700 p-1 rounded-2xl w-full sm:w-80">
                 <button 
                   @click="activeChannelOrUser = 'channel'; fetchChannels(false)"
@@ -11196,7 +11201,7 @@ onUnmounted(() => {
                   ]"
                 >
                   <Hash class="h-3.5 w-3.5" />
-                  Channels
+                  {{ t('channels.channels') }}
                 </button>
                 <button 
                   @click="activeChannelOrUser = 'user'; fetchChannels(false)"
@@ -11208,7 +11213,7 @@ onUnmounted(() => {
                   ]"
                 >
                   <User class="h-3.5 w-3.5" />
-                  Users
+                  {{ t('channels.users') }}
                 </button>
               </div>
             </div>
@@ -11218,12 +11223,12 @@ onUnmounted(() => {
               <!-- Channel Fulltext Search input & button -->
               <div v-if="activeChannelOrUser === 'channel'" class="flex flex-wrap items-end gap-3">
                 <div class="space-y-2.5">
-                  <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Channel Search</label>
+                  <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">{{ t('nav.channel') }} {{ t('common.search') }}</label>
                   <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl px-4 py-2 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all w-full sm:w-64">
                     <Search class="h-4 w-4 text-teal-600 dark:text-teal-400 mr-2 shrink-0" />
                     <input 
                       v-model="channelSearchQuery" 
-                      placeholder="e.g. news" 
+                      :placeholder="t('channels.channelSearchPlaceholder')" 
                       class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full pr-2" 
                       @keyup.enter="handleChannelSearch" 
                     />
@@ -11233,7 +11238,7 @@ onUnmounted(() => {
                       @mousedown.prevent
                       @click="channelSearchQuery = ''" 
                       class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 p-1 rounded-full cursor-pointer shrink-0 ml-1 transition-colors"
-                      title="Clear search query"
+                      :title="t('channels.clearSearch')"
                     >
                       <X class="w-3.5 h-3.5" />
                     </button>
@@ -11241,20 +11246,20 @@ onUnmounted(() => {
                 </div>
 
                 <div class="space-y-2.5">
-                  <label class="hidden sm:block text-[10px] font-black text-transparent select-none uppercase tracking-widest">Search</label>
+                  <label class="hidden sm:block text-[10px] font-black text-transparent select-none uppercase tracking-widest">{{ t('common.search') }}</label>
                   <button 
                     @click="handleChannelSearch"
                     class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl text-xs font-black tracking-wide flex items-center justify-center gap-2 shadow-md shadow-teal-500/25 hover:shadow-teal-500/40 cursor-pointer transition-all duration-300 hover:-translate-y-0.5 active:translate-y-0"
                   >
                     <Search class="h-3.5 w-3.5 shrink-0" />
-                    <span>Search</span>
+                    <span>{{ t('common.search') }}</span>
                   </button>
                 </div>
               </div>
 
               <!-- Language Filter input -->
               <div v-if="activeChannelOrUser === 'channel'" class="space-y-2.5">
-                <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Language Target</label>
+                <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">{{ t('channels.localeProfile') }}</label>
                 <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl px-4 py-2 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all w-full sm:w-56">
                   <Globe class="h-4 w-4 text-teal-600 dark:text-teal-400 mr-2 shrink-0" />
                   <input 
@@ -11271,7 +11276,7 @@ onUnmounted(() => {
                       @mousedown.prevent
                       @click="langCode = ''"
                       class="p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full cursor-pointer transition-colors"
-                      title="Clear language"
+                      :title="t('channels.clearLang')"
                     >
                       <X class="w-3.5 h-3.5" />
                     </button>
@@ -11285,19 +11290,19 @@ onUnmounted(() => {
 
               <!-- Refetch / Next Batch Button -->
               <div class="space-y-2.5 w-full sm:w-auto">
-                <label class="hidden sm:block text-[10px] font-black text-transparent select-none uppercase tracking-widest">Action</label>
+                <label class="hidden sm:block text-[10px] font-black text-transparent select-none uppercase tracking-widest">{{ t('channels.fetchNextBatch') }}</label>
                 <button 
                   @click="(activeChannelOrUser === 'channel' && langCode) ? handleLangFetch() : fetchChannels(true)"
                   class="w-full sm:w-auto px-5 py-2.5 bg-teal-600 hover:bg-teal-700 text-white rounded-2xl text-xs font-black tracking-wide flex items-center justify-center gap-2 shadow-md shadow-teal-500/25 hover:shadow-teal-500/40 cursor-pointer transition-all duration-300 hover:-translate-y-0.5 active:translate-y-0"
                 >
                   <RefreshCw class="h-3.5 w-3.5 shrink-0" :class="[isLoadingChannels ? 'animate-spin' : '']" />
-                  <span>{{ (activeChannelOrUser === 'channel' && langCode) ? 'Apply Lang Filter' : 'Fetch Next Batch' }}</span>
+                  <span>{{ (activeChannelOrUser === 'channel' && langCode) ? t('channels.applyLangFilter') : t('channels.fetchNextBatch') }}</span>
                 </button>
               </div>
 
               <!-- Display Mode Toggle (Grid vs List) -->
               <div class="space-y-2.5">
-                <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Display Mode</label>
+                <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">{{ t('channels.displayMode') }}</label>
                 <div class="flex items-center gap-1 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 p-1 rounded-2xl">
                   <button 
                     @click="channelViewMode = 'grid'" 
@@ -11307,10 +11312,10 @@ onUnmounted(() => {
                         ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700' 
                         : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
                     ]"
-                    title="Grid View"
+                    :title="t('channels.gridView')"
                   >
                     <LayoutGrid class="h-4 w-4" />
-                    <span class="hidden md:inline">Grid</span>
+                    <span class="hidden md:inline">{{ t('channels.grid') }}</span>
                   </button>
                   <button 
                     @click="channelViewMode = 'list'" 
@@ -11320,10 +11325,10 @@ onUnmounted(() => {
                         ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700' 
                         : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
                     ]"
-                    title="List View"
+                    :title="t('channels.listView')"
                   >
                     <List class="h-4 w-4" />
-                    <span class="hidden md:inline">List</span>
+                    <span class="hidden md:inline">{{ t('channels.list') }}</span>
                   </button>
                 </div>
               </div>
@@ -11339,8 +11344,8 @@ onUnmounted(() => {
               <Bot class="h-5 w-5 text-teal-650 dark:text-teal-400 animate-pulse" />
             </div>
           </div>
-          <p class="text-xs font-black uppercase tracking-widest text-teal-600 dark:text-teal-400">Synthesizing Archive Registry...</p>
-          <p class="text-[11px] text-gray-400 dark:text-gray-500 mt-2 font-semibold">Downloading profiles and parsing CDN routing metadata...</p>
+          <p class="text-xs font-black uppercase tracking-widest text-teal-600 dark:text-teal-400">{{ t('channels.loadingRegistry') }}</p>
+          <p class="text-[11px] text-gray-400 dark:text-gray-500 mt-2 font-semibold">{{ t('channels.loadingRegistrySubtitle') }}</p>
         </div>
 
         <!-- Empty Directory State -->
@@ -11348,9 +11353,9 @@ onUnmounted(() => {
           <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-teal-50 dark:bg-teal-950/40 mb-4 shadow-inner border border-teal-100/20">
             <Bot class="h-8 w-8 text-teal-500" />
           </div>
-          <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider mb-2">No Profiles Available</h3>
+          <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider mb-2">{{ t('channels.noProfilesTitle') }}</h3>
           <p class="text-xs text-gray-400 dark:text-gray-500 font-semibold leading-relaxed">
-            We couldn't retrieve any profiles for this selection. Try updating your language code or fetch a new random batch.
+            {{ t('channels.noProfilesSubtitle') }}
           </p>
         </div>
 
@@ -11370,7 +11375,7 @@ onUnmounted(() => {
                     :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name || channel.key)" 
                     @error="handleImageError"
                     class="w-12 h-12 rounded-2xl border-2 border-teal-500/10 dark:border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900 group-hover:border-teal-500/40 transition-colors duration-300" 
-                    alt="Avatar"
+                    :alt="t('channels.avatar')"
                   />
                   <!-- Type-specific badge indicator bottom right of avatar -->
                   <span class="absolute -bottom-1 -right-1 p-1 rounded-lg text-white bg-teal-600 border border-white dark:border-gray-800 shadow-sm flex items-center justify-center">
@@ -11392,7 +11397,7 @@ onUnmounted(() => {
                 <!-- Right badges aligned -->
                 <div class="absolute top-0 right-0 z-15">
                   <span v-if="channel.bot !== undefined" :class="['text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-lg border shadow-sm shrink-0', channel.bot ? 'bg-emerald-500/[0.06] text-emerald-600 dark:text-emerald-400 border-emerald-500/10' : 'bg-rose-500/[0.06] text-rose-600 dark:text-rose-400 border-rose-500/10']">
-                    {{ channel.bot ? 'Bot' : 'User' }}
+                    {{ channel.bot ? t('channels.bot') : t('channels.user') }}
                   </span>
                 </div>
               </div>
@@ -11427,7 +11432,7 @@ onUnmounted(() => {
                 @click="activeTab = 'explorer'; channelName = channel.username || channel.name || channel.key; searchChannel()" 
                 class="w-full mt-2 py-2 bg-gray-50 hover:bg-teal-650 text-teal-600 hover:text-white dark:bg-gray-900/80 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black tracking-wide rounded-xl border border-gray-150 dark:border-gray-800/80 hover:border-transparent cursor-pointer transition-all duration-300 hover:shadow-md hover:shadow-teal-500/10 text-center flex items-center justify-center gap-1.5"
               >
-                <span>View Channel Archive</span>
+                <span>{{ t('channels.viewChannelArchive') }}</span>
                 <ExternalLink class="h-3 w-3" />
               </button>
             </div>
@@ -11445,14 +11450,14 @@ onUnmounted(() => {
                 class="flex items-center gap-3 min-w-[220px] max-w-xs shrink-0 cursor-pointer rounded-xl p-1 -m-1 transition-colors hover:bg-teal-500/5 dark:hover:bg-teal-500/10"
                 @mouseenter="onChannelLeftRegionMouseEnter(channel)"
                 @mouseleave="onChannelLeftRegionMouseLeave()"
-                title="Hover for 5 seconds to view full profile card"
+                :title="t('channels.hoverHint')"
               >
                 <div class="relative shrink-0 select-none">
                   <img 
                     :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name || channel.key)" 
                     @error="handleImageError"
                     class="w-10 h-10 rounded-xl border border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900 group-hover:border-teal-500/50 transition-colors" 
-                    alt="Avatar"
+                    :alt="t('channels.avatar')"
                   />
                   <span class="absolute -bottom-1 -right-1 p-0.5 rounded-md text-white bg-teal-600 border border-white dark:border-gray-800 shadow-sm flex items-center justify-center">
                     <component :is="activeChannelOrUser === 'channel' ? (channel._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : channel._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User) : User" class="h-2 w-2 text-white" />
@@ -11475,13 +11480,13 @@ onUnmounted(() => {
               <div class="flex-1 min-w-0 px-1 sm:px-2">
                 <p v-if="channel.description || channel.about" class="text-xs text-gray-600 dark:text-gray-300 line-clamp-2 leading-relaxed" :title="channel.description || channel.about" v-html="getHighlightedHtml(channel.description || channel.about, channelSearchQuery)">
                 </p>
-                <p v-else class="text-xs italic text-gray-400 dark:text-gray-500">No description available</p>
+                <p v-else class="text-xs italic text-gray-400 dark:text-gray-500">{{ t('channels.noDescription') }}</p>
               </div>
 
               <!-- Right Section: Badges & Action -->
               <div class="flex flex-wrap items-center gap-2.5 shrink-0 pt-2 md:pt-0 border-t md:border-t-0 border-gray-100 dark:border-gray-700/50">
                 <!-- Members count -->
-                <span v-if="channel.members || channel.participants_count" class="text-[10px] font-bold text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 px-2.5 py-1 rounded-xl border border-gray-200/60 dark:border-gray-700 flex items-center gap-1" title="Members">
+                <span v-if="channel.members || channel.participants_count" class="text-[10px] font-bold text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900 px-2.5 py-1 rounded-xl border border-gray-200/60 dark:border-gray-700 flex items-center gap-1" :title="t('channels.members')">
                   <Users class="h-3 w-3 text-teal-600" />
                   <span>{{ channel.members || channel.participants_count }}</span>
                 </span>
@@ -11493,7 +11498,7 @@ onUnmounted(() => {
 
                 <!-- Bot Badge -->
                 <span v-if="channel.bot !== undefined" :class="['text-[9px] font-black uppercase px-2 py-0.5 rounded-lg border', channel.bot ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20' : 'bg-rose-500/10 text-rose-600 border-rose-500/20']">
-                  {{ channel.bot ? 'Bot' : 'User' }}
+                  {{ channel.bot ? t('channels.bot') : t('channels.user') }}
                 </span>
 
                 <!-- Action Button -->
@@ -11502,7 +11507,7 @@ onUnmounted(() => {
                   @click="activeTab = 'explorer'; channelName = channel.username || channel.name; searchChannel()" 
                   class="px-3 py-1.5 bg-gray-50 hover:bg-teal-600 text-teal-600 hover:text-white dark:bg-gray-900 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black rounded-xl border border-gray-200 dark:border-gray-700 hover:border-transparent transition-all cursor-pointer flex items-center gap-1 shadow-xs"
                 >
-                  <span>Archive</span>
+                  <span>{{ t('channels.archive') }}</span>
                   <ExternalLink class="h-3 w-3" />
                 </button>
               </div>
@@ -11524,7 +11529,7 @@ onUnmounted(() => {
                         :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name)" 
                         @error="handleImageError"
                         class="w-12 h-12 rounded-2xl border-2 border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900" 
-                        alt="Avatar"
+                        :alt="t('channels.avatar')"
                       />
                       <span class="absolute -bottom-1 -right-1 p-1 rounded-lg text-white bg-teal-600 border border-white dark:border-gray-800 shadow-sm flex items-center justify-center">
                         <component :is="activeChannelOrUser === 'channel' ? (channel._type === 'snscrape.modules.telegram.TelegramChannel' ? Hash : channel._type === 'snscrape.modules.telegram.TelegramGroup' ? Users : User) : User" class="h-2.5 w-2.5 text-white" />
@@ -11543,7 +11548,7 @@ onUnmounted(() => {
 
                     <div v-if="channel.bot !== undefined" class="absolute top-0 right-0 z-15">
                       <span :class="['text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-lg border shadow-sm shrink-0', channel.bot ? 'bg-emerald-500/[0.06] text-emerald-600 dark:text-emerald-400 border-emerald-500/10' : 'bg-rose-500/[0.06] text-rose-600 dark:text-rose-400 border-rose-500/10']">
-                        {{ channel.bot ? 'Bot' : 'User' }}
+                        {{ channel.bot ? t('channels.bot') : t('channels.user') }}
                       </span>
                     </div>
                   </div>
@@ -11590,7 +11595,7 @@ onUnmounted(() => {
                   @blur="handleBlur"
                   type="text"
                   class="block w-full pl-14 pr-44 sm:pr-56 py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
-                  placeholder="Enter channel name (e.g. durov) (?b=PID)"
+                  :placeholder="t('explorer.placeholder')"
                 />
                 <!-- Right Controls: Clear + Explore Button -->
                 <div class="absolute right-2 top-2 bottom-2 flex items-center gap-1.5 z-10">
@@ -11600,8 +11605,8 @@ onUnmounted(() => {
                     @mousedown.prevent
                     @click.stop="clearExplorerInput"
                     class="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/60 rounded-xl transition-colors cursor-pointer flex items-center justify-center shrink-0"
-                    title="Clear input"
-                    aria-label="Clear input"
+                    :title="t('channels.clearSearch')"
+                    :aria-label="t('channels.clearSearch')"
                   >
                     <X class="w-4 h-4" />
                   </button>
@@ -11613,7 +11618,7 @@ onUnmounted(() => {
                     class="h-full px-5 sm:px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer shrink-0"
                   >
                     <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
-                    {{ loading ? "Exploring..." : "Explore" }}
+                    {{ loading ? t('common.exploring') : t('common.explore') }}
                   </button>
                 </div>
                 
@@ -11623,7 +11628,7 @@ onUnmounted(() => {
                   class="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-250/60 dark:border-gray-700/60 overflow-hidden"
                 >
                    <div v-show="isLoginTokenValid && suggestedChannels.length > 0" class="px-4 py-2 text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
-                     Auto completed
+                     {{ t('explorer.autoCompleted') }}
                    </div>
                    <div v-if="isLoginTokenValid && suggestedChannels.length > 0" class="max-h-60 overflow-y-auto">
                      <button
@@ -11645,7 +11650,7 @@ onUnmounted(() => {
                    </div>
 
                    <div class="px-5 py-2.5 text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
-                     Last Visited
+                     {{ t('explorer.lastVisited') }}
                    </div>
                    <div class="max-h-60 overflow-y-auto">
                      <div
@@ -11666,7 +11671,7 @@ onUnmounted(() => {
                        <button
                          @click.stop.prevent="removeVisitedChannel(channel.name)"
                          class="ml-2 text-gray-400 hover:text-red-550 cursor-pointer"
-                         title="Remove"
+                         :title="t('common.delete')"
                        >
                          <X class="h-3.5 w-3.5" />
                        </button>
@@ -11686,7 +11691,7 @@ onUnmounted(() => {
           />
           <div class="text-sm text-red-700 dark:text-red-400">
             <h3 class="font-medium text-red-800 dark:text-red-300 mb-1">
-              Error fetching channel
+              {{ t('explorer.errorFetching') }}
             </h3>
             <p>{{ error }}</p>
           </div>
@@ -11727,7 +11732,7 @@ onUnmounted(() => {
                   <img
                     :src="(metadata.photo && metadata.photo.startsWith('data:')) ? metadata.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${currentChannelName}`"
                     @error="handleImageError"
-                    alt="Avatar"
+                    :alt="t('channels.avatar')"
                     class="w-full h-full object-cover rounded-2xl"
                   />
                   <!-- Beautiful Badge indicating Private Group/Channel -->
@@ -11736,7 +11741,7 @@ onUnmounted(() => {
                     class="absolute -bottom-1 w-full bg-gradient-to-r from-amber-500 to-orange-600 text-white text-[8px] font-black uppercase tracking-widest py-0.5 rounded-b-xl flex items-center justify-center gap-1 shadow-sm border-t border-white/20 select-none"
                   >
                     <Lock class="h-2.5 w-2.5 animate-pulse" />
-                    <span>Private</span>
+                    <span>{{ t('explorer.private') }}</span>
                   </div>
                 </div>
 
@@ -11753,15 +11758,15 @@ onUnmounted(() => {
                     :class="currentChannelName.startsWith('-100') ? 'text-amber-600 dark:text-amber-400' : 'text-teal-600 dark:text-teal-400'"
                   >
                     <span>@{{ metadata.username || metadata.name || channelName }}</span>
-                    <button @click="addToWorkspace" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-teal-600 dark:text-teal-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" title="Add to Workspace">
+                    <button @click="addToWorkspace" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-teal-600 dark:text-teal-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" :title="t('explorer.workspace')">
                       <Layout class="h-2.5 w-2.5" />
-                      Workspace
+                      {{ t('explorer.workspace') }}
                     </button>
-                    <button @click="addChannelToListenDirectory(metadata.title || channelName, metadata.username || channelName)" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-purple-600 dark:text-purple-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" title="Add to Listen">
+                    <button @click="addChannelToListenDirectory(metadata.title || channelName, metadata.username || channelName)" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-purple-600 dark:text-purple-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" :title="t('nav.listen')">
                       <Radio class="h-2.5 w-2.5" />
-                      Listen
+                      {{ t('nav.listen') }}
                     </button>
-                    <button @click="searchOnGoogle(metadata.username || metadata.name || channelName)" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-blue-600 dark:text-blue-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" title="Search on Google">
+                    <button @click="searchOnGoogle(metadata.username || metadata.name || channelName)" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-blue-600 dark:text-blue-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" title="Google">
                       <Globe class="h-2.5 w-2.5" />
                       Google
                     </button>
@@ -11796,7 +11801,7 @@ onUnmounted(() => {
                       >
                       <span
                         class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
-                        >Subscribers</span
+                        >{{ t('explorer.subscribers') }}</span
                       >
                     </div>
 
@@ -11815,7 +11820,7 @@ onUnmounted(() => {
                       >
                       <span
                         class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
-                        >Created</span
+                        >{{ t('explorer.created') }}</span
                       >
                     </div>
 
@@ -11832,7 +11837,7 @@ onUnmounted(() => {
                       >
                       <span
                         class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
-                        >Files</span
+                        >{{ t('explorer.files') }}</span
                       >
                     </div>
 
@@ -11849,7 +11854,7 @@ onUnmounted(() => {
                       >
                       <span
                         class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
-                        >Photos</span
+                        >{{ t('explorer.photos') }}</span
                       >
                     </div>
 
@@ -11866,7 +11871,7 @@ onUnmounted(() => {
                       >
                       <span
                         class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
-                        >Videos</span
+                        >{{ t('explorer.videos') }}</span
                       >
                     </div>
 
@@ -11883,7 +11888,7 @@ onUnmounted(() => {
                       >
                       <span
                         class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
-                        >Links</span
+                        >{{ t('explorer.links') }}</span
                       >
                     </div>
                   </div>
@@ -11907,7 +11912,7 @@ onUnmounted(() => {
               <summary
                 class="font-medium text-gray-700 dark:text-gray-300 cursor-pointer outline-none"
               >
-                View Raw Metadata
+                {{ t('explorer.viewRawMetadata') }}
               </summary>
               <pre
                 class="mt-2 overflow-x-auto text-gray-600 dark:text-gray-400"
@@ -11925,9 +11930,9 @@ onUnmounted(() => {
               >
                 <div class="flex justify-between items-center mb-4">
                   <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-                    Usernames
+                    {{ t('explorer.usernames') }}
                   </h3>
-                  <button @click="copyUsernamesToClipboard(allUsernamesExplorer)" class="text-gray-400 hover:text-teal-500 transition-colors">
+                  <button @click="copyUsernamesToClipboard(allUsernamesExplorer)" class="text-gray-400 hover:text-teal-500 transition-colors" :title="t('common.copy')">
                     <Copy class="w-4 h-4" />
                   </button>
                 </div>
@@ -11961,7 +11966,7 @@ onUnmounted(() => {
                 <h3
                   class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
                 >
-                  Forwards From
+                  {{ t('explorer.forwardsFrom') }}
                 </h3>
               </div>
               <div class="space-y-1.5 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
@@ -11988,7 +11993,7 @@ onUnmounted(() => {
                 <h3
                   class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
                 >
-                  Channel Profile
+                  {{ t('explorer.channelProfile') }}
                 </h3>
                 <div class="flex items-center gap-2">
                   <span v-if="channelProfileDate" class="text-[9px] font-mono font-bold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/50 border border-teal-100/50 dark:border-teal-900/20 px-2 py-0.5 rounded-full">
@@ -11998,14 +12003,14 @@ onUnmounted(() => {
                     id="reload-channel-profile-btn"
                     @click="fetchChannelProfile()"
                     :disabled="loadingChannelProfile"
-                    title="Reload Profile"
+                    :title="t('explorer.reloadProfile')"
                     class="p-1 rounded-lg text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40 border border-transparent hover:border-teal-100 dark:hover:border-teal-900/30 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': loadingChannelProfile }" />
                   </button>
                 </div>
               </div>
-              <div v-if="loadingChannelProfile && !channelProfile" class="text-xs text-gray-450 animate-pulse">Loading profile...</div>
+              <div v-if="loadingChannelProfile && !channelProfile" class="text-xs text-gray-450 animate-pulse">{{ t('explorer.loadingProfile') }}</div>
               <div v-else class="overflow-x-auto relative">
                 <div
                   v-if="loadingChannelProfile"
@@ -12013,7 +12018,7 @@ onUnmounted(() => {
                 >
                   <div class="flex items-center gap-2 text-xs font-semibold text-teal-600 dark:text-teal-400 bg-white/95 dark:bg-gray-800/95 px-3 py-1.5 rounded-full shadow-sm border border-teal-100 dark:border-teal-900/40">
                     <RefreshCw class="w-3 h-3 animate-spin" />
-                    <span>Updating profile...</span>
+                    <span>{{ t('explorer.updatingProfile') }}</span>
                   </div>
                 </div>
                 <div v-html="channelProfile" class="prose prose-xs text-xs dark:prose-invert"></div>
@@ -12036,18 +12041,18 @@ onUnmounted(() => {
                     </div>
                     <div class="flex flex-col">
                       <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-                        Relations Graph
+                        {{ t('explorer.relationsGraph') }}
                       </h3>
                       <!-- Filter Count Badge -->
                       <div class="flex items-center gap-1 mt-0.5">
                         <span v-if="totalNeighborsCount > 12" class="text-[9px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-1.5 py-0.5 rounded-full cursor-help whitespace-nowrap" title="Filtered to top 12 connections inside compact view. Click Enlarge to see all.">
-                          Showing 12 of {{ totalNeighborsCount }}
+                          {{ t('explorer.showingConnections', { current: 12, total: totalNeighborsCount }) }}
                         </span>
                         <span v-else-if="totalNeighborsCount > 0" class="text-[9px] font-semibold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-1.5 py-0.5 rounded-full whitespace-nowrap">
-                          {{ totalNeighborsCount }} nodes
+                          {{ t('explorer.nodesCount', { count: totalNeighborsCount }) }}
                         </span>
                         <span v-else class="text-[9px] font-semibold text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-950/40 px-1.5 py-0.5 rounded-full whitespace-nowrap">
-                          0 nodes
+                          {{ t('explorer.nodesCount', { count: 0 }) }}
                         </span>
                       </div>
                     </div>
@@ -12129,7 +12134,7 @@ onUnmounted(() => {
                     <h3
                       class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
                     >
-                      X Similar Users
+                      {{ t('explorer.similarXUsers') }}
                     </h3>
                     <div class="group relative inline-block">
                       <Info class="h-4 w-4 text-gray-400 cursor-help" />
@@ -12149,7 +12154,7 @@ onUnmounted(() => {
                     <input
                       v-model="xSearchInput"
                       @keyup.enter="searchXUser(xSearchInput)"
-                      placeholder="Search X users..."
+                      :placeholder="t('explorer.searchXUsersPlaceholder')"
                       class="w-full pl-3.5 pr-8 py-2 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all dark:text-gray-100 placeholder:text-gray-400"
                     />
                     <button
@@ -12158,7 +12163,7 @@ onUnmounted(() => {
                       @mousedown.prevent
                       @click="xSearchInput = ''"
                       class="absolute right-2 p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full transition-colors cursor-pointer"
-                      title="Clear search"
+                      :title="t('channels.clearSearch')"
                     >
                       <X class="w-3.5 h-3.5" />
                     </button>
@@ -12186,7 +12191,7 @@ onUnmounted(() => {
                         v-if="user.profile_image_url"
                         :src="user.profile_image_url"
                         class="w-8 h-8 rounded-lg object-cover border border-gray-150 dark:border-gray-800 shrink-0"
-                        alt="Profile"
+                        :alt="t('channels.avatar')"
                       />
                       <div class="min-w-0">
                         <p
@@ -12213,12 +12218,12 @@ onUnmounted(() => {
                       :href="`https://x.com/${user.screen_name}`"
                       target="_blank"
                       class="inline-flex items-center gap-1 text-[10px] text-teal-600 dark:text-teal-400 font-extrabold hover:underline"
-                      >View X Profile <ExternalLink class="h-2.5 w-2.5" /></a
+                      >{{ t('explorer.viewXProfile') }} <ExternalLink class="h-2.5 w-2.5" /></a
                     >
                   </div>
                 </div>
                 <p v-else-if="!isSearchingX" class="text-[11px] text-gray-400 dark:text-gray-500 italic text-center py-2">
-                  No results. Click an author name to search on X.
+                  {{ t('explorer.noXResults') }}
                 </p>
               </div>
             </div>
@@ -12243,7 +12248,7 @@ onUnmounted(() => {
                   <button
                     @click="isProfileVisible = !isProfileVisible"
                     class="hidden lg:flex mr-4 p-2 -ml-2 rounded-xl text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                    :title="isProfileVisible ? 'Hide Sidebar' : 'Show Sidebar'"
+                    :title="isProfileVisible ? t('explorer.hideSidebar') : t('explorer.showSidebar')"
                   >
                     <PanelLeftClose v-if="isProfileVisible" class="h-5 w-5" />
                     <PanelLeft v-else class="h-5 w-5" />
@@ -12252,14 +12257,14 @@ onUnmounted(() => {
                     <MessageSquare
                       class="h-6 w-6 mr-3 text-blue-600 dark:text-blue-400"
                     />
-                    {{ viewMode === "list" ? "Feed" : "Medias" }}
+                    {{ viewMode === "list" ? t('explorer.feed') : t('explorer.medias') }}
                   </div>
                   <span
                     v-if="latestPostTimeDelta"
                     class="ml-2 sm:ml-4 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 border border-emerald-200/50 dark:border-emerald-800/50 text-[10px] uppercase tracking-widest font-black flex items-center shadow-sm"
                   >
                     <Clock class="h-3 w-3 mr-1.5" />
-                    Latest Post {{ latestPostTimeDelta }}
+                    {{ t('explorer.latestPost', { time: latestPostTimeDelta }) }}
                   </span>
                 </h3>
 
@@ -12274,7 +12279,7 @@ onUnmounted(() => {
                         ? 'bg-white dark:bg-gray-800 text-blue-600 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700'
                         : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
                     ]"
-                    title="List View"
+                    :title="t('explorer.listView')"
                   >
                     <List class="h-4 w-4" />
                   </button>
@@ -12286,7 +12291,7 @@ onUnmounted(() => {
                         ? 'bg-white dark:bg-gray-800 text-blue-600 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700'
                         : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
                     ]"
-                    title="Masonry Grid"
+                    :title="t('explorer.masonryGrid')"
                   >
                     <LayoutGrid class="h-4 w-4" />
                   </button>
@@ -12298,7 +12303,7 @@ onUnmounted(() => {
                         ? 'bg-white dark:bg-gray-800 text-blue-600 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700'
                         : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
                     ]"
-                    title="Timeline View"
+                    :title="t('explorer.timelineView')"
                   >
                     <Clock class="h-4 w-4" />
                   </button>
@@ -12311,11 +12316,11 @@ onUnmounted(() => {
                     @click="handleScrapeClick"
                     :disabled="isScrapingDisabled"
                     class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-                    :title="isRepeatScheduleMode ? 'Schedule repeatly' : 'Schedule this channel for scraping'"
+                    :title="isRepeatScheduleMode ? t('explorer.scheduleRepeatly') : t('explorer.scheduleOnce')"
                   >
                     <ListFilter class="h-3 w-3" />
                     {{
-                      isRepeatScheduleMode ? "Schedule Repeatly" : (isScrapingDisabled ? "Scheduled" : "Schedule Once")
+                      isRepeatScheduleMode ? t('explorer.scheduleRepeatly') : (isScrapingDisabled ? t('explorer.scheduled') : t('explorer.scheduleOnce'))
                     }}
                   </button>
                 </div>
@@ -12325,7 +12330,7 @@ onUnmounted(() => {
                 v-if="posts.length === 0"
                 class="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-200 dark:border-gray-700 p-8 text-center text-gray-500 dark:text-gray-400"
               >
-                No posts found for this channel.
+                {{ t('explorer.noPostsFound') }}
               </div>
 
               <div v-else>
@@ -12336,14 +12341,14 @@ onUnmounted(() => {
                     class="flex items-center gap-2 mb-4 text-gray-900 dark:text-gray-100 font-semibold"
                   >
                     <Filter class="h-4 w-4 text-blue-500" />
-                    <h4 class="text-sm">Filter Posts</h4>
+                    <h4 class="text-sm">{{ t('explorer.filterPosts') }}</h4>
                   </div>
                   <div
                     class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"
                   >
                     <input
                       v-model="filterAuthor"
-                      placeholder="Filter by author..."
+                      :placeholder="t('explorer.filterAuthorPlaceholder')"
                       class="w-full px-4 py-2.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 transition-all outline-none"
                     />
                     <input
@@ -12365,7 +12370,7 @@ onUnmounted(() => {
                           v-model="filterMedia.photos"
                           class="rounded text-blue-600"
                         />
-                        Photos</label
+                        {{ t('explorer.photos') }}</label
                       >
                       <label class="flex items-center gap-2 cursor-pointer"
                         ><input
@@ -12373,7 +12378,7 @@ onUnmounted(() => {
                           v-model="filterMedia.videos"
                           class="rounded text-blue-600"
                         />
-                        Videos</label
+                        {{ t('explorer.videos') }}</label
                       >
                       <label class="flex items-center gap-2 cursor-pointer"
                         ><input
@@ -12381,7 +12386,7 @@ onUnmounted(() => {
                           v-model="filterMedia.links"
                           class="rounded text-blue-600"
                         />
-                        Links</label
+                        {{ t('explorer.links') }}</label
                       >
                     </div>
                   </div>
@@ -12397,9 +12402,9 @@ onUnmounted(() => {
                       :class="postsTimelineStats.isDelayed ? 'text-amber-600 dark:text-amber-400' : 'text-gray-900 dark:text-white'"
                     >
                       <Calendar class="h-4 w-4 mr-2 transition-colors duration-300" :class="postsTimelineStats.isDelayed ? 'text-amber-500 animate-pulse' : 'text-blue-500'" />
-                      Feed Activity Timeline
+                      {{ t('explorer.feedActivityTimeline') }}
                       <span v-if="postsTimelineStats.isDelayed" class="ml-2 px-1.5 py-0.5 text-[9px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 rounded-md border border-amber-200 dark:border-amber-900/30 animate-pulse">
-                        Activity Lagging
+                        {{ t('explorer.activityLagging') }}
                       </span>
                     </h4>
                     <div class="flex items-center gap-4">
@@ -12411,15 +12416,15 @@ onUnmounted(() => {
                         </div>
                       </div>
                       <div class="text-[10px] bg-gray-100 dark:bg-gray-700 p-2 rounded-lg text-gray-600 dark:text-gray-300">
-                        <span class="font-bold">Avg Gap:</span> {{ postsTimelineStats.avgGap }}
+                        <span class="font-bold">{{ t('explorer.avgGap') }}</span> {{ postsTimelineStats.avgGap }}
                       </div>
                       <div class="text-[10px] bg-gray-100 dark:bg-gray-700 p-2 rounded-lg text-gray-600 dark:text-gray-300">
-                        <span class="font-bold">Max Sleep:</span> {{ postsTimelineStats.maxGap }}
+                        <span class="font-bold">{{ t('explorer.maxSleep') }}</span> {{ postsTimelineStats.maxGap }}
                       </div>
                       <span
                         class="text-xs font-medium text-gray-500 dark:text-gray-400"
                       >
-                        {{ postsTimelineStats.count }} dates
+                        {{ t('explorer.datesCount', { count: postsTimelineStats.count }) }}
                       </span>
                     </div>
                   </div>
@@ -12455,7 +12460,7 @@ onUnmounted(() => {
                     <span>{{ postsTimelineStats.start }}</span>
                     <span
                       class="px-2 py-1 bg-gray-50 dark:bg-gray-900 rounded-md"
-                      >Span: Starts {{ postsTimelineStats.spanText }}</span
+                      >{{ t('explorer.spanStarts', { span: postsTimelineStats.spanText }) }}</span
                     >
                     <span>{{ postsTimelineStats.end }}</span>
                   </div>
@@ -12492,7 +12497,7 @@ onUnmounted(() => {
                           <img
                             :src="getPostAvatarUrl(post)"
                             @error="handleImageError"
-                            alt="Avatar"
+                            :alt="t('channels.avatar')"
                             class="w-full h-full object-cover"
                           />
                         </div>
@@ -12523,7 +12528,7 @@ onUnmounted(() => {
                           >
                             <span>{{ formatDate(post.data?.date) }}</span>
                             <span v-if="post.mtime" class="text-[9px] text-teal-600 dark:text-teal-400">
-                              (Scraped {{ formatScrapedDate(post.mtime) }})
+                              ({{ t('explorer.scraped', { date: formatScrapedDate(post.mtime) }) }})
                             </span>
                           </p>
                         </div>
@@ -12534,18 +12539,18 @@ onUnmounted(() => {
                         <button
                           @click.stop="addToWorkspaceFromPost(post)"
                           class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
-                          title="Add to Workspace"
+                          :title="t('explorer.addToWorkspace')"
                         >
                           <Layout class="h-3 w-3 text-teal-500" />
-                          <span>Workspace</span>
+                          <span>{{ t('explorer.workspace') }}</span>
                         </button>
                         <button
                           @click.stop="sharePost(post)"
                           class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
-                          title="Share"
+                          :title="t('channels.share')"
                         >
                           <Share2 class="h-3 w-3 text-teal-500" />
-                          <span>Share</span>
+                          <span>{{ t('channels.share') }}</span>
                         </button>
                         <a
                           v-if="post.url || post.link"
@@ -12553,7 +12558,7 @@ onUnmounted(() => {
                           target="_blank"
                           class="inline-flex items-center gap-1 px-2.5 py-1 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/50 dark:hover:bg-teal-900/40 text-teal-600 dark:text-teal-450 rounded-lg border border-teal-100 dark:border-teal-900/30 text-[10px] font-extrabold transition-all cursor-pointer"
                         >
-                          <span>View</span>
+                          <span>{{ t('explorer.view') }}</span>
                           <ExternalLink class="h-3 w-3" />
                         </a>
                       </div>
@@ -12568,7 +12573,7 @@ onUnmounted(() => {
                       ]"
                     >
                       <Layers class="h-3 w-3 mr-1" />
-                      Group: {{ post.data.grouped.root }}
+                      {{ t('explorer.group') }}: {{ post.data.grouped.root }}
                     </div>
 
                     <!-- Quoted Reply -->
@@ -12581,7 +12586,7 @@ onUnmounted(() => {
                       >
                         <div class="flex items-center">
                           <Reply class="h-3.5 w-3.5 mr-1" />
-                          Reply to message
+                          {{ t('explorer.replyToMessage') }}
                         </div>
                         <span
                           v-if="
@@ -12614,7 +12619,7 @@ onUnmounted(() => {
                       >
                         <div class="flex items-center">
                           <Forward class="h-3.5 w-3.5 mr-1" />
-                          Forwarded Message
+                          {{ t('explorer.forwardedMessage') }}
                         </div>
                         <span v-if="getForwardInfo(post)?.date" class="font-mono bg-indigo-50 dark:bg-indigo-950/40 px-2 py-0.5 rounded border border-indigo-100/50 dark:border-indigo-900/10 tracking-normal text-[9px] normal-case">
                           {{ getForwardInfo(post)?.date }}
@@ -12628,7 +12633,7 @@ onUnmounted(() => {
                           v-if="getForwardInfo(post)?.target"
                           @click="activeTab = 'explorer'; channelName = getForwardInfo(post).target; searchChannel()"
                           class="inline-flex items-center gap-1 px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/40 dark:hover:bg-indigo-900/70 text-indigo-600 dark:text-indigo-400 rounded-xl border border-indigo-200/50 dark:border-indigo-850 text-[10px] font-bold transition-all shrink-0 cursor-pointer self-start"
-                          title="View Channel"
+                          :title="t('explorer.viewChannel')"
                         >
                           <span>@{{ getForwardInfo(post).target }}</span>
                           <ChevronRight class="h-3.5 w-3.5" />
@@ -12647,7 +12652,7 @@ onUnmounted(() => {
                       <button
                         @click="translatePost(post)"
                         class="p-1 -mt-1 text-gray-400 hover:text-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-md transition-colors flex-shrink-0"
-                        title="Translate to Chinese"
+                        :title="t('explorer.translate')"
                       >
                         <Languages v-if="!isTranslating[post.key]" class="h-4 w-4" />
                         <Loader2 v-else class="h-4 w-4 animate-spin" />
@@ -12655,7 +12660,7 @@ onUnmounted(() => {
                       <button
                         @click="searchOnGoogle(post.data?.content || post.data?.rawcontent)"
                         class="p-1 -mt-1 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors flex-shrink-0"
-                        title="Search on Google"
+                        :title="t('explorer.searchOnGoogle')"
                       >
                         <Search class="h-4 w-4" />
                       </button>
@@ -12678,7 +12683,7 @@ onUnmounted(() => {
                         <div
                           class="text-[10px] font-black tracking-widest text-blue-500 uppercase"
                         >
-                          Contact Shared
+                          {{ t('explorer.contactShared') }}
                         </div>
                       </div>
                       <div
@@ -12842,7 +12847,7 @@ onUnmounted(() => {
                           target="_blank"
                           class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-semibold"
                         >
-                          View Document
+                          {{ t('explorer.viewDocument') }}
                         </a>
                       </div>
                     </div>
@@ -12883,10 +12888,10 @@ onUnmounted(() => {
                             v-if="hasOldVersions(post)"
                             @click="openOldVersionsModal(post)"
                             class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/80 dark:border-amber-800/60 hover:bg-amber-100 dark:hover:bg-amber-900/60 hover:border-amber-300 transition-all cursor-pointer shadow-3xs group"
-                            title="View version history and compare diffs"
+                            :title="t('explorer.viewVersionHistory')"
                           >
                             <History class="w-3 h-3 text-amber-500 group-hover:rotate-[-30deg] transition-transform" />
-                            <span>old versions</span>
+                            <span>{{ t('explorer.oldVersions') }}</span>
                           </button>
                           <span
                             v-if="post.key"
@@ -12902,7 +12907,7 @@ onUnmounted(() => {
                         <summary
                           class="font-medium text-gray-700 dark:text-gray-400 cursor-pointer outline-none hover:text-gray-900 dark:hover:text-gray-300"
                         >
-                          View Raw Post Data
+                          {{ t('explorer.viewRawPostData') }}
                         </summary>
                         <pre
                           class="mt-3 overflow-x-auto text-gray-600 dark:text-gray-400 custom-scrollbar"
@@ -13046,7 +13051,7 @@ onUnmounted(() => {
                   >
                     <ImageIcon class="h-12 w-12 mx-auto text-gray-300 mb-4" />
                     <p class="text-gray-500 dark:text-gray-400">
-                      No media posts found in this channel.
+                      {{ t('explorer.noMediaPosts') }}
                     </p>
                   </div>
                 </div>
@@ -13133,7 +13138,7 @@ onUnmounted(() => {
                             ]"
                           >
                             <Layers class="h-2.5 w-2.5 mr-1" />
-                            Group: {{ post.data.grouped.root }}
+                            {{ t('explorer.group') }}: {{ post.data.grouped.root }}
                           </div>
                         </div>
                         <div class="flex flex-col flex-start space-y-1 mb-4">
@@ -13260,14 +13265,14 @@ onUnmounted(() => {
                             target="_blank"
                             class="text-[10px] font-bold text-blue-600 dark:text-blue-400 hover:underline flex items-center"
                           >
-                            OPEN IN TELEGRAM
+                            {{ t('explorer.openInTelegram') }}
                             <ExternalLink class="h-2.5 w-2.5 ml-1" />
                           </a>
                           <button
                             @click.stop="sharePost(post)"
                             class="text-[10px] font-bold text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:underline flex items-center ml-4"
                           >
-                            SHARE
+                            {{ t('channels.share') }}
                             <Share2 class="h-2.5 w-2.5 ml-1" />
                           </button>
                         </div>
@@ -13277,7 +13282,7 @@ onUnmounted(() => {
                   <div v-if="mediaPosts.length === 0" class="py-20 text-center">
                     <Clock class="h-12 w-12 mx-auto text-gray-300 mb-4" />
                     <p class="text-gray-500 dark:text-gray-400">
-                      No media posts found in this channel.
+                      {{ t('explorer.noMediaPosts') }}
                     </p>
                   </div>
                 </div>
@@ -13292,13 +13297,13 @@ onUnmounted(() => {
                     class="flex items-center space-x-2 text-blue-500"
                   >
                     <Loader2 class="h-5 w-5 animate-spin" />
-                    <span class="text-sm font-medium">Loading more...</span>
+                    <span class="text-sm font-medium">{{ t('explorer.loadingMore') }}</span>
                   </div>
                   <div
                     v-else-if="!hasMorePosts && posts.length > 0"
                     class="text-xs text-gray-400 uppercase tracking-widest font-bold opacity-50"
                   >
-                    End of feed
+                    {{ t('explorer.endOfFeed') }}
                   </div>
                 </div>
               </div>
@@ -13315,13 +13320,12 @@ onUnmounted(() => {
           <h2
             class="text-2xl font-black tracking-tight text-gray-900 dark:text-white mb-3"
           >
-            Explore Channels
+            {{ t('explorer.exploreChannels') }}
           </h2>
           <p
             class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium"
           >
-            Enter a Telegram channel username above to view its detailed profile
-            and latest media posts.
+            {{ t('explorer.exploreChannelsPrompt') }}
           </p>
         </div>
       </div>
@@ -13353,7 +13357,7 @@ onUnmounted(() => {
                 v-model="globalSearchQuery"
                 type="text"
                 class="block w-full pl-14 pr-44 sm:pr-56 py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
-                placeholder="Search across all telegram data..."
+                :placeholder="t('search.placeholder')"
               />
               <!-- Right Controls: Clear + Search Button -->
               <div class="absolute right-2 top-2 bottom-2 flex items-center gap-1.5 z-10">
@@ -13363,8 +13367,8 @@ onUnmounted(() => {
                   @mousedown.prevent
                   @click="globalSearchQuery = ''"
                   class="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/60 rounded-xl transition-colors cursor-pointer flex items-center justify-center shrink-0"
-                  title="Clear search"
-                  aria-label="Clear search"
+                  :title="t('search.clearSearch')"
+                  :aria-label="t('search.clearSearch')"
                 >
                   <X class="w-4 h-4" />
                 </button>
@@ -13374,7 +13378,7 @@ onUnmounted(() => {
                   class="h-full px-5 sm:px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer shrink-0"
                 >
                   <Loader2 v-if="isSearching" class="h-4 w-4 animate-spin mr-2" />
-                  {{ isSearching ? "Searching..." : "Search" }}
+                  {{ isSearching ? t('search.searching') : t('search.searchButton') }}
                 </button>
               </div>
             </div>
@@ -13383,7 +13387,7 @@ onUnmounted(() => {
               <!-- Target Fields -->
               <div class="space-y-2.5">
                 <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">
-                  Search In Fields
+                  {{ t('search.searchInFields') }}
                 </label>
                 <div class="flex flex-wrap gap-1.5">
                   <button
@@ -13399,7 +13403,7 @@ onUnmounted(() => {
                     ]"
                   >
                     <component :is="getFieldIcon(field)" class="h-3.5 w-3.5 mr-1.5" />
-                    <span class="capitalize">{{ field === 'content' ? 'Post' : field }}</span>
+                    <span class="capitalize">{{ field === 'content' ? t('search.fieldPost') : field }}</span>
                   </button>
                 </div>
               </div>
@@ -13407,7 +13411,7 @@ onUnmounted(() => {
               <!-- Time Horizon -->
               <div class="space-y-2.5">
                 <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">
-                  Time Horizon
+                  {{ t('search.timeHorizon') }}
                 </label>
                 <div class="flex items-center bg-gray-50 dark:bg-gray-900 px-3 py-2 rounded-2xl border border-gray-200 dark:border-gray-700 gap-2">
                   <input
@@ -13427,7 +13431,7 @@ onUnmounted(() => {
               <!-- Results Cap -->
               <div class="space-y-2.5">
                 <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">
-                  Results Cap Limit
+                  {{ t('search.resultsCapLimit') }}
                 </label>
                 <div class="flex items-center bg-gray-50 dark:bg-gray-900 p-1 rounded-2xl border border-gray-200 dark:border-gray-700 w-fit">
                   <div class="px-2 text-gray-450 dark:text-gray-550">
@@ -13464,7 +13468,7 @@ onUnmounted(() => {
           />
           <div class="text-sm text-red-700 dark:text-red-400">
             <h3 class="font-medium text-red-800 dark:text-red-300 mb-1">
-              Search Error
+              {{ t('search.searchError') }}
             </h3>
             <p>{{ searchError }}</p>
           </div>
@@ -13484,18 +13488,18 @@ onUnmounted(() => {
           <h3
             class="text-xl font-black tracking-tight text-gray-900 dark:text-white mb-2"
           >
-            Searching Telegram...
+            {{ t('search.searchingTelegram') }}
           </h3>
           <p
             class="text-xs text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium"
           >
-            Querying internal dataset, this may take a few seconds.
+            {{ t('search.searchingTelegramDesc') }}
           </p>
         </div>
 
         <div v-if="filteredSearchResults.length > 0" class="flex items-center justify-between mb-4">
               <h3 class="text-sm font-bold text-gray-900 dark:text-white">
-                Search Results ({{ filteredSearchResults.length }})
+                {{ t('search.searchResultsCount', { count: filteredSearchResults.length }) }}
               </h3>
               <button
                 @click="addAllToWorkspace"
@@ -13504,7 +13508,7 @@ onUnmounted(() => {
               >
                 <Loader2 v-if="isAddingAll" class="h-3.5 w-3.5 animate-spin mr-2" />
                 <Layers v-else class="h-3.5 w-3.5 mr-2" />
-                {{ isAddingAll ? 'Adding...' : 'Add All to Workspace' }}
+                {{ isAddingAll ? t('search.adding') : t('search.addAllToWorkspace') }}
               </button>
             </div>
           
@@ -13522,11 +13526,11 @@ onUnmounted(() => {
               class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm"
             >
                 <div class="flex justify-between items-center mb-4">
-                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">User Profile</h3>
+                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">{{ t('search.userProfile') }}</h3>
                 </div>
                 
                 <div v-if="loadingUserProfile" class="text-xs text-gray-400 py-4 flex items-center gap-2 animate-pulse">
-                    <Loader2 class="w-3.5 h-3.5 animate-spin text-teal-500" /> Loading profile...
+                    <Loader2 class="w-3.5 h-3.5 animate-spin text-teal-500" /> {{ t('search.loadingProfile') }}
                 </div>
 
                 <div v-else-if="userProfile" class="flex flex-col gap-3">
@@ -13547,7 +13551,7 @@ onUnmounted(() => {
                     <div class="text-xs text-gray-700 dark:text-gray-300">
                         <p class="font-black">{{ userProfile.firstName }} {{ userProfile.lastName }}</p>
                         <div v-if="userProfile.cdnNumber || userProfile.cdnRegion" class="text-[10px] text-gray-400 dark:text-gray-500 mt-1 font-mono">
-                            <span v-if="userProfile.cdnNumber" class="font-medium">IDC Center DC: {{ userProfile.cdnNumber }}</span>
+                            <span v-if="userProfile.cdnNumber" class="font-medium">{{ t('search.idcCenterDc') }}: {{ userProfile.cdnNumber }}</span>
                             <span v-if="userProfile.cdnRegion" class="ml-2 text-teal-600 dark:text-teal-400">({{ userProfile.cdnRegion[1] }})</span>
                         </div>
                     </div>
@@ -13566,7 +13570,7 @@ onUnmounted(() => {
                 <h3                
                   class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
                 >
-                  Usernames
+                  {{ t('search.usernames') }}
                 </h3>
                 <button @click="copyUsernamesToClipboard(allUsernames)" class="text-gray-400 hover:text-teal-500 transition-colors cursor-pointer">
                   <Copy class="w-4 h-4" />
@@ -13606,7 +13610,7 @@ onUnmounted(() => {
               <h3
                 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-4"
               >
-                Channels
+                {{ t('search.channels') }}
               </h3>
               <div
                 class="max-h-[300px] overflow-y-auto space-y-1.5 pr-2 custom-scrollbar"
@@ -13646,12 +13650,12 @@ onUnmounted(() => {
                   class="text-sm font-bold text-gray-900 dark:text-white flex items-center"
                 >
                   <Calendar class="h-4 w-4 mr-2 text-teal-600 dark:text-teal-450" />
-                  Activity Timeline
+                  {{ t('search.activityTimeline') }}
                 </h4>
                 <span
                   class="text-xs font-semibold text-gray-400 dark:text-gray-500 font-mono"
                 >
-                  {{ searchTimelineStats.count }} dates mapped
+                  {{ t('search.datesMapped', { count: searchTimelineStats.count }) }}
                 </span>
               </div>
 
@@ -13683,7 +13687,7 @@ onUnmounted(() => {
               >
                 <span>{{ searchTimelineStats.start }}</span>
                 <span class="px-2.5 py-1 bg-gray-50 dark:bg-gray-900 rounded-md text-[9px] font-mono normal-case"
-                  >Span: Starts {{ searchTimelineStats.spanText }}</span
+                  >{{ t('explorer.spanStarts') }} {{ searchTimelineStats.spanText }}</span
                 >
                 <span>{{ searchTimelineStats.end }}</span>
               </div>
@@ -13696,10 +13700,10 @@ onUnmounted(() => {
                 <MessageSquare
                   class="h-5 w-5 mr-2 text-teal-600 dark:text-teal-400"
                 />
-                Search Results
+                {{ t('search.searchResults') }}
               </h3>
               <span class="text-xs text-gray-500 dark:text-gray-400"
-                >{{ filteredSearchResults.length }} results found</span
+                >{{ t('search.resultsFound', { count: filteredSearchResults.length }) }}</span
               >
             </div>
 
@@ -13741,7 +13745,7 @@ onUnmounted(() => {
                           class="text-xs font-extrabold text-gray-900 dark:text-white hover:text-teal-600 dark:hover:text-teal-400 transition-colors text-left"
                           @click="searchXUser(post.data?.author || post.data?.user || 'Telegram User')"
                         >
-                          {{ post.data?.author || post.data?.user || "Telegram User" }}
+                          {{ post.data?.author || post.data?.user || t('search.telegramUser') }}
                         </button>
                         <span
                           class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full"
@@ -13762,7 +13766,7 @@ onUnmounted(() => {
                       >
                         <span>{{ formatDate(post.data?.date) }}</span>
                         <span v-if="post.mtime" class="text-[9px] text-teal-600 dark:text-teal-400">
-                          (Scraped {{ formatScrapedDate(post.mtime) }})
+                          ({{ t('explorer.scraped') }} {{ formatScrapedDate(post.mtime) }})
                         </span>
                       </p>
                     </div>
@@ -13773,26 +13777,26 @@ onUnmounted(() => {
                     <button
                       @click.stop="addChannelToListenDirectory(post.data?.owner || (post.key ? post.key.split('.')[0] : 'Channel'), post.key ? post.key.split('.')[0] : '')"
                       class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-purple-600 dark:text-purple-400 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
-                      title="Add to Listen Directory"
+                      :title="t('search.addToListenDirectory')"
                     >
                       <Radio class="h-3 w-3 text-purple-500" />
-                      <span>Listen</span>
+                      <span>{{ t('search.listen') }}</span>
                     </button>
                     <button
                       @click.stop="addToWorkspaceFromPost(post)"
                       class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
-                      title="Add to Workspace"
+                      :title="t('explorer.addToWorkspace')"
                     >
                       <Layout class="h-3 w-3 text-teal-500" />
-                      <span>Workspace</span>
+                      <span>{{ t('explorer.addToWorkspace') }}</span>
                     </button>
                     <button
                       @click.stop="sharePost(post)"
                       class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
-                      title="Share"
+                      :title="t('explorer.share')"
                     >
                       <Share2 class="h-3 w-3 text-teal-500" />
-                      <span>Share</span>
+                      <span>{{ t('explorer.share') }}</span>
                     </button>
                     <a
                       v-if="post.url || post.link"
@@ -13800,7 +13804,7 @@ onUnmounted(() => {
                       target="_blank"
                       class="inline-flex items-center gap-1 px-2.5 py-1 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/50 dark:hover:bg-teal-900/40 text-teal-600 dark:text-teal-450 rounded-lg border border-teal-100 dark:border-teal-900/30 text-[10px] font-extrabold transition-all cursor-pointer"
                     >
-                      <span>View</span>
+                      <span>{{ t('explorer.view') }}</span>
                       <ExternalLink class="h-3 w-3" />
                     </a>
                   </div>
@@ -13815,7 +13819,7 @@ onUnmounted(() => {
                   ]"
                 >
                   <Layers class="h-3 w-3 mr-1" />
-                  Group: {{ post.data.grouped.root }}
+                  {{ t('explorer.group') }}: {{ post.data.grouped.root }}
                 </div>
 
                 <!-- Quoted Reply -->
@@ -13828,7 +13832,7 @@ onUnmounted(() => {
                   >
                     <div class="flex items-center">
                       <Reply class="h-3.5 w-3.5 mr-1" />
-                      Reply to message
+                      {{ t('explorer.replyToMessage') }}
                     </div>
                     <span
                       v-if="
@@ -13860,7 +13864,7 @@ onUnmounted(() => {
                   >
                     <div class="flex items-center">
                       <Forward class="h-3.5 w-3.5 mr-1" />
-                      Forwarded Message
+                      {{ t('explorer.forwardedMessage') }}
                     </div>
                     <span v-if="getForwardInfo(post)?.date" class="font-mono bg-indigo-55 dark:bg-indigo-950/45 px-2 py-0.5 rounded border border-indigo-100/50 dark:border-indigo-900/10 tracking-normal text-[9px] normal-case">
                       {{ getForwardInfo(post)?.date }}
@@ -13876,7 +13880,7 @@ onUnmounted(() => {
                       v-if="getForwardInfo(post)?.target"
                       @click="activeTab = 'explorer'; channelName = getForwardInfo(post).target; searchChannel()"
                       class="inline-flex items-center gap-1 px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/40 dark:hover:bg-indigo-900/70 text-indigo-600 dark:text-indigo-400 rounded-xl border border-indigo-200/50 dark:border-indigo-850 text-[10px] font-bold transition-all shrink-0 cursor-pointer self-start"
-                      title="View Channel"
+                      :title="t('explorer.viewChannel')"
                     >
                       <span>@{{ getForwardInfo(post).target }}</span>
                       <ChevronRight class="h-3.5 w-3.5" />
@@ -13895,7 +13899,7 @@ onUnmounted(() => {
                   <button
                     @click="translatePost(post)"
                     class="p-1.5 -mt-1 text-gray-450 hover:text-teal-600 hover:bg-teal-50 dark:hover:bg-teal-900/25 rounded-md transition-colors flex-shrink-0 cursor-pointer"
-                    title="Translate to Chinese"
+                    :title="t('explorer.translate')"
                   >
                     <Languages v-if="!isTranslating[post.key]" class="h-4 w-4" />
                     <Loader2 v-else class="h-4 w-4 animate-spin text-teal-650" />
@@ -13903,7 +13907,7 @@ onUnmounted(() => {
                   <button
                     @click="searchOnGoogle(post.data?.content || post.data?.rawcontent)"
                     class="p-1.5 -mt-1 text-gray-450 hover:text-teal-600 hover:bg-teal-50 dark:hover:bg-teal-900/25 rounded-md transition-colors flex-shrink-0 cursor-pointer"
-                    title="Search on Google"
+                    :title="t('explorer.searchOnGoogle')"
                   >
                     <Search class="h-4 w-4" />
                   </button>
@@ -13926,7 +13930,7 @@ onUnmounted(() => {
                     <div
                       class="text-[9px] font-black tracking-wider text-teal-600 dark:text-teal-400 uppercase"
                     >
-                      Contact Shared
+                      {{ t('explorer.contactShared') }}
                     </div>
                   </div>
                   <div
@@ -13985,7 +13989,7 @@ onUnmounted(() => {
                   <img
                     :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`"
                     class="w-full h-auto max-h-[500px] object-contain transition-transform duration-700 group-hover:scale-105"
-                    alt="Post photo"
+                    :alt="t('search.postPhoto')"
                   />
                 </div>
 
@@ -13995,7 +13999,7 @@ onUnmounted(() => {
                 >
                   <video controls preload="metadata" playsinline class="w-full h-auto max-h-[500px]">
                     <source :src="getVideoUrl(post)" type="video/mp4" />
-                    Your browser does not support the video tag.
+                    {{ t('search.browserNoVideo') }}
                   </video>
                 </div>
 
@@ -14016,7 +14020,7 @@ onUnmounted(() => {
                     <img
                       :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`"
                       class="w-full h-full object-cover transition-transform duration-700 hover:scale-105"
-                      alt="Link preview image"
+                      :alt="t('search.linkPreviewImage')"
                     />
                   </div>
                   <div
@@ -14060,7 +14064,7 @@ onUnmounted(() => {
                 >
                   <div class="flex items-center space-x-4 flex-wrap gap-y-1">
                     <span v-if="post.data?.views != null"
-                      >{{ formatViews(post.data.views) }} views</span
+                      >{{ formatViews(post.data.views) }} {{ t('search.views') }}</span
                     >
 
                     <!-- Post Reactions (Search Results) -->
@@ -14093,10 +14097,10 @@ onUnmounted(() => {
                       v-if="hasOldVersions(post)"
                       @click="openOldVersionsModal(post)"
                       class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/80 dark:border-amber-800/60 hover:bg-amber-100 dark:hover:bg-amber-900/60 transition-all cursor-pointer mr-1.5"
-                      title="View version history and compare diffs"
+                      :title="t('explorer.viewVersionHistory')"
                     >
                       <History class="w-3 h-3 text-amber-500" />
-                      <span>old versions</span>
+                      <span>{{ t('explorer.oldVersions') }}</span>
                     </button>
                     <span
                       v-if="post.key"
@@ -14111,7 +14115,7 @@ onUnmounted(() => {
                   <summary
                     class="text-gray-400 dark:text-gray-500 cursor-pointer hover:text-gray-600 dark:hover:text-gray-300"
                   >
-                    Raw Data
+                    {{ t('search.rawData') }}
                   </summary>
                   <pre
                     class="mt-2 p-2 bg-gray-50 dark:bg-gray-900 rounded overflow-x-auto text-gray-500 dark:text-gray-400"
@@ -14135,13 +14139,12 @@ onUnmounted(() => {
           <h3
             class="text-2xl font-black tracking-tight text-gray-900 dark:text-white mb-3"
           >
-            No results found
+            {{ t('search.noResultsFound') }}
           </h3>
           <p
             class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium"
           >
-            We couldn't find any Telegram posts matching your search criteria.
-            Try adjusting your keywords or filters.
+            {{ t('search.noResultsFoundDesc') }}
           </p>
         </div>
 
@@ -14157,13 +14160,12 @@ onUnmounted(() => {
           <h2
             class="text-2xl font-black tracking-tight text-gray-900 dark:text-white mb-3"
           >
-            Global Content Search
+            {{ t('search.globalContentSearch') }}
           </h2>
           <p
             class="text-gray-500 dark:text-gray-400 max-w-sm mx-auto font-medium"
           >
-            Search for keywords, users, or authors across all public Telegram
-            data.
+            {{ t('search.globalContentSearchDesc') }}
           </p>
         </div>
       </div>
@@ -14191,7 +14193,7 @@ onUnmounted(() => {
               <button
                 @click="isGraphEnlarged = false"
                 class="absolute top-4 right-4 p-2 bg-gray-150 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-full text-gray-500 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer z-10"
-                title="Close Full Screen"
+                :title="t('search.closeFullScreen')"
               >
                 <Minimize2 class="h-5 w-5" />
               </button>
@@ -14203,10 +14205,10 @@ onUnmounted(() => {
                   </div>
                   <div>
                     <h3 class="text-base font-black text-gray-800 dark:text-white">
-                      Relations Graph
+                      {{ t('explorer.relationsGraph') }}
                     </h3>
                     <p class="text-xs text-gray-400 dark:text-gray-500">
-                      Showing {{ Math.min(60, totalNeighborsCount) }} connections out of {{ totalNeighborsCount }} detected.
+                      {{ t('search.showingConnectionsModal', { shown: Math.min(60, totalNeighborsCount), total: totalNeighborsCount }) }}
                     </p>
                   </div>
                 </div>
@@ -14215,21 +14217,21 @@ onUnmounted(() => {
                   <button
                     @click="onGraphZoomIn"
                     class="p-2 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-350 rounded-lg transition-colors cursor-pointer"
-                    title="Zoom In"
+                    :title="t('explorer.zoomIn')"
                   >
                     <ZoomIn class="h-4 w-4 animate-pulse" />
                   </button>
                   <button
                     @click="onGraphZoomOut"
                     class="p-2 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-350 rounded-lg transition-colors cursor-pointer"
-                    title="Zoom Out"
+                    :title="t('explorer.zoomOut')"
                   >
                     <ZoomOut class="h-4 w-4" />
                   </button>
                   <button
                     @click="resetGraphView"
                     class="p-2 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-600 dark:text-gray-350 rounded-lg transition-colors cursor-pointer"
-                    title="Reset View"
+                    :title="t('explorer.resetView')"
                   >
                     <RotateCcw class="h-4 w-4" />
                   </button>
@@ -14252,11 +14254,11 @@ onUnmounted(() => {
                 ></canvas>
 
                 <div class="absolute bottom-3 left-4 right-4 flex flex-wrap items-center justify-between gap-1.5 text-[10px] font-medium text-gray-400 dark:text-gray-500 pointer-events-none select-none">
-                  <div>Drag nodes to rearrange • Scroll / Drag backgrounds to Zoom & Pan</div>
+                  <div>{{ t('search.dragNodesHint') }}</div>
                   <div class="flex items-center gap-2">
-                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-indigo-500"></span>Inbound</span>
-                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-pink-500"></span>Outbound</span>
-                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-violet-500"></span>Mutual</span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-indigo-500"></span>{{ t('search.inbound') }}</span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-pink-500"></span>{{ t('search.outbound') }}</span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-violet-500"></span>{{ t('search.mutual') }}</span>
                   </div>
                 </div>
               </div>
@@ -14334,7 +14336,7 @@ onUnmounted(() => {
                       selectedPost.data?.author ||
                       selectedPost.data?.user ||
                       metadata.title ||
-                      "Post details"
+                      t('search.postDetails')
                     }}
                   </h2>
                   <p
@@ -14347,7 +14349,7 @@ onUnmounted(() => {
                   >
                     <span>{{ formatDate(selectedPost.data?.date) }}</span>
                     <span v-if="selectedPost.data?.views != null"
-                      >{{ formatViews(selectedPost.data.views) }} views</span
+                      >{{ formatViews(selectedPost.data.views) }} {{ t('search.views') }}</span
                     >
                   </div>
                 </div>
@@ -14363,7 +14365,7 @@ onUnmounted(() => {
             <button
               @click="closeLightbox"
               class="absolute top-6 right-6 p-3 text-white/70 hover:text-white bg-white/10 hover:bg-white/20 rounded-full transition-all z-[110]"
-              aria-label="Close lightbox"
+              :aria-label="t('common.close')"
             >
               <X class="h-6 w-6" />
             </button>
@@ -14380,7 +14382,7 @@ onUnmounted(() => {
                 }"
                 class="max-w-full max-h-full object-contain shadow-2xl rounded-lg cursor-grab active:cursor-grabbing origin-center"
                 referrerpolicy="no-referrer"
-                alt="Enlarged view"
+                :alt="t('search.linkPreviewImage')"
                 @click.stop
               />
             </div>
@@ -14405,7 +14407,7 @@ onUnmounted(() => {
           <div class="flex items-center gap-2">
             <GripHorizontal class="h-4 w-4 text-blue-500" />
             <h2 class="text-sm font-black text-gray-900 dark:text-white">
-              Analysis Result ({{ analyzedCount }})
+              {{ t('explorer.analysisResult') }} ({{ analyzedCount }})
             </h2>
           </div>
           <button
@@ -14433,12 +14435,12 @@ onUnmounted(() => {
         class="fixed bottom-4 right-4 z-[300] p-6 bg-gray-900 text-white rounded-2xl shadow-2xl w-96 max-h-[80vh] overflow-y-auto border border-red-500"
       >
         <div class="flex justify-between items-center mb-4">
-          <h3 class="font-black text-red-500">Debug Api Error</h3>
+          <h3 class="font-black text-red-500">{{ t('common.debugApiError') }}</h3>
           <button
             @click="showDebugPanel = false"
             class="text-white hover:text-gray-400"
           >
-            Close
+            {{ t('common.close') }}
           </button>
         </div>
         <div class="text-xs space-y-2">
@@ -14447,10 +14449,10 @@ onUnmounted(() => {
         </div>
       </div>
       <!-- Workspace Tab -->
-      <div v-show="activeTab === 'workspace'" class="w-full relative pt-2 pb-6 flex flex-col h-full overflow-y-auto">
+      <div v-show="activeTab === 'workspace'" class="w-full max-w-full mx-auto px-0 pt-1 pb-16 flex flex-col h-full overflow-y-auto">
         
         <!-- Header Banner Section -->
-        <div class="relative bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm overflow-hidden mb-6 mx-4 md:mx-6 shrink-0">
+        <div class="relative bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm overflow-hidden mb-6 shrink-0">
           <div class="absolute -right-20 -top-20 w-44 h-44 bg-purple-500/[0.04] dark:bg-purple-500/[0.08] rounded-full blur-3xl pointer-events-none"></div>
           <div class="absolute -left-20 -bottom-20 w-44 h-44 bg-indigo-500/[0.04] dark:bg-indigo-500/[0.08] rounded-full blur-3xl pointer-events-none"></div>
 
@@ -14460,38 +14462,38 @@ onUnmounted(() => {
                 <span class="p-1.5 rounded-xl bg-purple-500/10 text-purple-600 dark:text-purple-450">
                   <Layers class="h-5 w-5" />
                 </span>
-                <span class="text-[10px] font-black text-purple-600 dark:text-purple-400 uppercase tracking-widest leading-none">Network Studio</span>
+                <span class="text-[10px] font-black text-purple-600 dark:text-purple-400 uppercase tracking-widest leading-none">{{ $t('workspace.networkStudio') }}</span>
               </div>
-              <h2 class="text-xl md:text-2xl font-black text-gray-900 dark:text-white tracking-tight">Interactive Graph Workspace</h2>
+              <h2 class="text-xl md:text-2xl font-black text-gray-900 dark:text-white tracking-tight">{{ $t('workspace.title') }}</h2>
               <p class="text-xs text-gray-400 dark:text-gray-500 font-semibold max-w-xl">
-                Map channels and entities, establish forward flows, analyze relationship linkages, and view dynamic chronologies.
+                {{ $t('workspace.subtitle') }}
               </p>
             </div>
 
             <!-- Dashboard micro-indicator -->
             <div class="flex items-center gap-6 text-[11px] font-semibold text-gray-400 dark:text-gray-500 shrink-0 self-start md:self-center border-t md:border-t-0 md:border-l border-gray-200/60 dark:border-gray-750 pt-4 md:pt-0 md:pl-6">
               <div v-if="savedProfiles.person.length > 0" class="space-y-1">
-                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500 leading-none">Local Persons</p>
-                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ savedProfiles.person.length }} entities</p>
+                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500 leading-none">{{ $t('workspace.localPersons') }}</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ $t('workspace.entitiesCount', { count: savedProfiles.person.length }) }}</p>
               </div>
               <div v-if="savedGraphRemotely.length > 0" class="space-y-1">
-                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500 leading-none">Remote Graphs</p>
-                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ savedGraphRemotely.length }} charts</p>
+                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500 leading-none">{{ $t('workspace.remoteGraphs') }}</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ $t('workspace.chartsCount', { count: savedGraphRemotely.length }) }}</p>
               </div>
             </div>
           </div>
         </div>
 
         <!-- Saved Libraries Sub-grid -->
-        <div v-if="savedProfiles.person.length > 0 || savedGraphRemotely.length > 0" class="grid grid-cols-1 md:grid-cols-2 gap-6 mx-4 md:mx-6 mb-6 shrink-0">
+        <div v-if="savedProfiles.person.length > 0 || savedGraphRemotely.length > 0" class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6 shrink-0">
           <!-- Saved Persons Local Cabinet -->
           <div v-if="savedProfiles.person.length > 0" class="bg-gradient-to-br from-white to-gray-50/50 dark:from-gray-800 dark:to-gray-900/40 p-5 rounded-3xl border border-gray-200/75 dark:border-gray-750 space-y-4 shadow-sm">
             <div class="flex items-center gap-2">
               <User class="h-4.5 w-4.5 text-purple-600 dark:text-purple-400" />
-              <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Saved Local Persons</h4>
+              <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">{{ $t('workspace.savedLocalPersons') }}</h4>
             </div>
             <p class="text-[11px] text-gray-450 dark:text-gray-500 font-semibold leading-relaxed">
-              Dossier saved in your offline storage pool:
+              {{ $t('workspace.dossierOfflineStorageDesc') }}
             </p>
             <div class="flex flex-wrap gap-2 pt-1">
               <button 
@@ -14509,10 +14511,10 @@ onUnmounted(() => {
           <div v-if="savedGraphRemotely.length > 0" class="bg-gradient-to-br from-white to-gray-50/50 dark:from-gray-800 dark:to-gray-900/40 p-5 rounded-3xl border border-gray-200/75 dark:border-gray-750 space-y-4 shadow-sm">
             <div class="flex items-center gap-2">
               <Layers class="h-4.5 w-4.5 text-indigo-600 dark:text-indigo-400" />
-              <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Remote Saved Graphs</h4>
+              <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">{{ $t('workspace.remoteSavedGraphs') }}</h4>
             </div>
-            <p class="text-[11px] text-gray-450 dark:text-gray-500 font-semibold leading-relaxed">
-              Interactive structural topologies synchronized with cloud catalogs:
+            <p class="text-[11px] text-gray-450 dark:text-gray-550 font-semibold leading-relaxed">
+              {{ $t('workspace.topologiesSyncDesc') }}
             </p>
             <div class="flex flex-wrap gap-2 pt-1">
               <button 
@@ -14531,7 +14533,7 @@ onUnmounted(() => {
         <transition enter-active-class="transition duration-300 ease-out" enter-from-class="transform scale-98 opacity-0" enter-to-class="transform scale-100 opacity-100">
           <div
             v-if="savedPersonProfileHtml"
-            class="mx-4 md:mx-6 mb-6 bg-white dark:bg-gray-800 p-6 md:p-8 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm relative overflow-hidden space-y-6 shrink-0"
+            class="mb-6 bg-white dark:bg-gray-800 p-6 md:p-8 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm relative overflow-hidden space-y-6 shrink-0"
           >
             <div class="flex items-center justify-between pb-4 border-b border-gray-150 dark:border-gray-750">
               <div class="flex items-center gap-2.5">
@@ -14539,7 +14541,7 @@ onUnmounted(() => {
                   <Sparkles class="h-4.5 w-4.5" />
                 </span>
                 <div>
-                  <h3 class="text-xs font-black text-gray-400 dark:text-gray-550 uppercase tracking-widest leading-none">Inspecting Local Target</h3>
+                  <h3 class="text-xs font-black text-gray-400 dark:text-gray-550 uppercase tracking-widest leading-none">{{ $t('workspace.inspectingLocalTarget') }}</h3>
                   <h4 class="text-base font-black text-gray-900 dark:text-white mt-1">{{ savedProfileName }}</h4>
                 </div>
               </div>
@@ -14550,7 +14552,7 @@ onUnmounted(() => {
                   class="px-3.5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-purple-500/15 cursor-pointer transition-all duration-300 hover:-translate-y-0.5 active:translate-y-0"
                 >
                   <Database class="h-3.5 w-3.5" />
-                  <span>Save Remotely</span>
+                  <span>{{ $t('workspace.saveRemotely') }}</span>
                 </button>
                 <button 
                   @click="savedPersonProfileHtml = null; savedProfileName = ''" 
@@ -14568,7 +14570,7 @@ onUnmounted(() => {
         </transition>
 
         <!-- Main Graph Studio Card -->
-        <div class="mx-4 md:mx-6 h-[960px] flex-none bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 flex flex-col relative overflow-hidden shadow-sm">
+        <div class="h-[960px] flex-none bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 flex flex-col relative overflow-hidden shadow-sm">
           
           <!-- Modern Control Hub Header -->
           <div class="px-6 py-5 border-b border-gray-150 dark:border-gray-750 flex flex-col lg:flex-row justify-between items-stretch lg:items-center gap-4 bg-white/50 dark:bg-gray-800/50 backdrop-blur-md z-10">
@@ -14578,9 +14580,9 @@ onUnmounted(() => {
               </span>
               <div>
                 <h2 class="text-sm font-black text-gray-900 dark:text-white tracking-widest uppercase mb-0.5">
-                  {{ isLoginTokenValid ? 'Graph Remote Studio' : 'Graph Local Studio' }}
+                  {{ isLoginTokenValid ? $t('workspace.graphRemoteStudio') : $t('workspace.graphLocalStudio') }}
                 </h2>
-                <span class="text-[10px] font-bold text-gray-400 dark:text-gray-500">Workspace Graph Sandbox</span>
+                <span class="text-[10px] font-bold text-gray-400 dark:text-gray-500">{{ $t('workspace.workspaceGraphSandbox') }}</span>
               </div>
             </div>
 
@@ -14593,7 +14595,7 @@ onUnmounted(() => {
                   type="text" 
                   v-model="nodeSearchQuery" 
                   @keyup.enter="findNode" 
-                  placeholder="Find node ID..." 
+                  :placeholder="$t('workspace.findNodePlaceholder')" 
                   class="pl-9 pr-7 py-2 hover:bg-gray-50/50 dark:hover:bg-gray-900/35 border border-gray-200/80 dark:border-gray-700 rounded-xl bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/15 transition-all w-full" 
                 />
                 <button
@@ -14602,7 +14604,7 @@ onUnmounted(() => {
                   @mousedown.prevent
                   @click="nodeSearchQuery = ''"
                   class="absolute right-2 p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-full cursor-pointer transition-colors"
-                  title="Clear node search"
+                  :title="$t('workspace.clearNodeSearch')"
                 >
                   <X class="w-3 h-3" />
                 </button>
@@ -14614,7 +14616,7 @@ onUnmounted(() => {
                 <input 
                   type="text" 
                   v-model="graphNameInput" 
-                  placeholder="Graph title..." 
+                  :placeholder="$t('workspace.graphTitlePlaceholder')" 
                   class="pl-9 pr-7 py-2 hover:bg-gray-50/50 dark:hover:bg-gray-900/35 border border-gray-200/80 dark:border-gray-700 rounded-xl bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/15 transition-all w-full" 
                 />
                 <button
@@ -14623,7 +14625,7 @@ onUnmounted(() => {
                   @mousedown.prevent
                   @click="graphNameInput = ''"
                   class="absolute right-2 p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-full cursor-pointer transition-colors"
-                  title="Clear graph title"
+                  :title="$t('workspace.clearGraphTitle')"
                 >
                   <X class="w-3 h-3" />
                 </button>
@@ -14636,7 +14638,7 @@ onUnmounted(() => {
                   class="px-3.5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-purple-500/10 cursor-pointer transition-all hover:-translate-y-0.5 active:translate-y-0"
                 >
                   <Plus class="h-3.5 w-3.5" />
-                  <span>Save</span>
+                  <span>{{ $t('workspace.save') }}</span>
                 </button>
 
                 <button 
@@ -14644,7 +14646,7 @@ onUnmounted(() => {
                   class="px-3.5 py-2 border border-gray-200/80 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-200 rounded-xl text-xs font-bold tracking-wide flex items-center justify-center gap-1.5 bg-white dark:bg-gray-800 transition-all cursor-pointer"
                 >
                   <FolderOpen class="h-3.5 w-3.5" />
-                  <span>Load</span>
+                  <span>{{ $t('workspace.load') }}</span>
                 </button>
 
                 <button 
@@ -14652,7 +14654,7 @@ onUnmounted(() => {
                   class="px-3.5 py-2 border border-gray-200/80 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-200 rounded-xl text-xs font-bold tracking-wide flex items-center justify-center gap-1.5 bg-white dark:bg-gray-800 transition-all cursor-pointer"
                 >
                   <RefreshCw class="h-3.5 w-3.5" />
-                  <span>Re-layout</span>
+                  <span>{{ $t('workspace.reLayout') }}</span>
                 </button>
 
                 <button 
@@ -14660,7 +14662,7 @@ onUnmounted(() => {
                   class="px-3.5 py-2 border border-rose-500/20 text-rose-500 dark:text-rose-455 hover:bg-rose-500/10 rounded-xl text-xs font-bold tracking-wide flex items-center justify-center gap-1.5 bg-rose-500/[0.02] transition-all cursor-pointer"
                 >
                   <Trash2 class="h-3.5 w-3.5" />
-                  <span>Clear</span>
+                  <span>{{ $t('workspace.clear') }}</span>
                 </button>
 
                 <button 
@@ -14668,7 +14670,7 @@ onUnmounted(() => {
                   class="px-3.5 py-2 border border-emerald-500/20 text-emerald-600 dark:text-emerald-450 hover:bg-emerald-500/10 rounded-xl text-xs font-bold tracking-wide flex items-center justify-center gap-1.5 bg-emerald-500/[0.02] transition-all cursor-pointer"
                 >
                   <Share2 class="h-3.5 w-3.5" />
-                  <span>Share</span>
+                  <span>{{ $t('workspace.share') }}</span>
                 </button>
 
                 <button 
@@ -14677,7 +14679,7 @@ onUnmounted(() => {
                   class="px-3.5 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-xs font-black tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-orange-500/15 cursor-pointer disabled:opacity-50 transition-all hover:-translate-y-0.5 active:translate-y-0"
                 >
                   <Sparkles class="h-3.5 w-3.5 animate-pulse" />
-                  <span>{{ isAnalyzingGraph ? 'Analyzing...' : 'Deep Analysis' }}</span>
+                  <span>{{ isAnalyzingGraph ? $t('workspace.analyzing') : $t('workspace.deepAnalysis') }}</span>
                 </button>
               </div>
             </div>
@@ -14687,8 +14689,8 @@ onUnmounted(() => {
              <!-- Hint Message -->
              <transition enter-active-class="transition duration-150 ease-out" enter-from-class="transform -translate-y-2 opacity-0" enter-to-class="transform translate-y-0 opacity-100">
                <div v-if="addingEdge" class="absolute top-4 left-4 z-[100] px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 text-white bg-purple-600 font-semibold text-xs border border-purple-500/20 select-none">
-                  <span class="font-black bg-white/20 px-1.5 py-0.5 rounded-lg uppercase tracking-wider text-[10px]">Add Link</span> 
-                  <span>Select any target node on the canvas to add an edge.</span>
+                  <span class="font-black bg-white/20 px-1.5 py-0.5 rounded-lg uppercase tracking-wider text-[10px]">{{ $t('workspace.addLink') }}</span> 
+                  <span>{{ $t('workspace.addLinkInstruction') }}</span>
                </div>
              </transition>
 
@@ -14697,22 +14699,22 @@ onUnmounted(() => {
                  <div class="py-1">
                    <button @click="startAddEdge" class="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-750 rounded-xl text-xs font-semibold text-gray-900 dark:text-white flex items-center gap-2 cursor-pointer">
                      <Plus class="w-3.5 h-3.5 text-purple-500" />
-                     <span>Add Edge</span>
+                     <span>{{ $t('workspace.addEdge') }}</span>
                    </button>
                    <button v-if="contextMenu.node.data('type') === 'channel'" @click="addForwardFrom" class="w-full text-left px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-750 rounded-xl text-xs font-semibold text-gray-900 dark:text-white flex items-center gap-2 cursor-pointer">
                      <Forward class="w-3.5 h-3.5 text-teal-500" />
-                     <span>Expand Forwards & FTO</span>
+                     <span>{{ $t('workspace.expandForwards') }}</span>
                    </button>
                  </div>
                  <div class="py-1">
                    <button @click="deleteNode" class="w-full text-left px-3 py-2 hover:bg-rose-500/[0.05] rounded-xl text-xs font-semibold text-rose-600 dark:text-rose-455 flex items-center gap-2 cursor-pointer">
                      <Trash2 class="w-3.5 h-3.5 text-rose-500" />
-                     <span>Delete Node</span>
+                     <span>{{ $t('workspace.deleteNode') }}</span>
                    </button>
                  </div>
                  <div class="py-1">
                    <button @click="contextMenu.visible = false" class="w-full text-left px-3 py-1.5 hover:bg-gray-50 dark:hover:bg-gray-750 rounded-lg text-[11px] font-bold text-gray-400 dark:text-gray-550 text-center cursor-pointer">
-                     Close
+                     {{ $t('workspace.close') }}
                    </button>
                  </div>
              </div>
@@ -14726,7 +14728,7 @@ onUnmounted(() => {
             <div class="flex items-center justify-between pb-2 border-b border-gray-150 dark:border-gray-750">
               <h3 class="text-[10px] font-black uppercase tracking-widest text-purple-600 dark:text-purple-400 flex items-center gap-1.5 leading-none">
                 <Database class="w-3.5 h-3.5" />
-                <span>Sandbox Inspector</span>
+                <span>{{ $t('workspace.sandboxInspector') }}</span>
               </h3>
               <button @click="selectedNode = null; selectedEdge = null" class="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg text-gray-400 hover:text-gray-655 transition-colors cursor-pointer">
                 <X class="w-3.5 h-3.5" />
@@ -14743,31 +14745,31 @@ onUnmounted(() => {
                 <div class="flex flex-col items-end gap-1.5 shrink-0">
                   <span class="text-[9px] bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/10 px-2 py-0.5 rounded-lg font-black uppercase tracking-wider leading-none">{{ editingNodeData.type }}</span>
                   <button v-if="editingNodeData.type === 'channel' || editingNodeData.type === 'user'" @click="fetchNodeMetadata(editingNodeData.type, editingNodeData.id)" class="text-[9px] bg-teal-500/10 hover:bg-teal-500/20 text-teal-600 dark:text-teal-400 border border-teal-500/10 px-2 py-0.5 rounded-lg font-black uppercase cursor-pointer transition-colors">
-                    Fetch Metadata
+                    {{ $t('workspace.fetchMetadata') }}
                   </button>
                 </div>
               </div>
               
               <div class="space-y-2.5">
                   <div>
-                    <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Custom Display Name</label>
-                    <input v-model="editingNodeData.label" @input="saveChanges" placeholder="Enter Label" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-2 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
+                    <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">{{ $t('workspace.customDisplayName') }}</label>
+                    <input v-model="editingNodeData.label" @input="saveChanges" :placeholder="$t('workspace.enterLabel')" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-2 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
                   </div>
               
                   <div v-if="editingNodeData.type !== 'person'" class="grid grid-cols-2 gap-2">
                     <div>
-                      <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Handle</label>
-                      <input v-model="editingNodeData.username" @input="saveChanges" placeholder="@User" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
+                      <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">{{ $t('workspace.handle') }}</label>
+                      <input v-model="editingNodeData.username" @input="saveChanges" :placeholder="$t('workspace.userPlaceholder')" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
                     </div>
                     <div>
-                      <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Link</label>
-                      <input v-model="editingNodeData.link" @input="saveChanges" placeholder="URL Link" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
+                      <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">{{ $t('workspace.link') }}</label>
+                      <input v-model="editingNodeData.link" @input="saveChanges" :placeholder="$t('workspace.urlLinkPlaceholder')" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
                     </div>
                   </div>
 
                   <div>
-                    <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Facts & Bio Notes</label>
-                    <textarea v-model="editingNodeData.facts" @input="saveChanges" placeholder="Dossier analytical bio notes..." class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl p-3 text-xs font-semibold outline-none text-gray-900 dark:text-white h-20 focus:border-purple-500 transition-colors resize-none" />
+                    <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">{{ $t('workspace.factsBioNotes') }}</label>
+                    <textarea v-model="editingNodeData.facts" @input="saveChanges" :placeholder="$t('workspace.factsPlaceholder')" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl p-3 text-xs font-semibold outline-none text-gray-900 dark:text-white h-20 focus:border-purple-500 transition-colors resize-none" />
                   </div>
               </div>
 
@@ -14776,7 +14778,7 @@ onUnmounted(() => {
                   <div>
                     <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-1.5 flex items-center gap-1">
                       <ChevronRight class="w-3 h-3 text-gray-400" />
-                      <span>Incoming Links ({{ getEdges.incoming.length }})</span>
+                      <span>{{ $t('workspace.incomingLinks', { count: getEdges.incoming.length }) }}</span>
                     </p>
                     <div class="max-h-24 overflow-y-auto space-y-1">
                       <div v-for="edge in getEdges.incoming" :key="edge.id()" class="w-full bg-gray-50 dark:bg-gray-900/35 p-2 rounded-xl text-[10px] border border-gray-200/50 dark:border-gray-750 truncate text-left flex justify-between items-center pr-2">
@@ -14791,7 +14793,7 @@ onUnmounted(() => {
                   <div>
                     <p class="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-1.5 flex items-center gap-1">
                       <ChevronRight class="w-3 h-3 text-gray-400" />
-                      <span>Outgoing Links ({{ getEdges.outgoing.length }})</span>
+                      <span>{{ $t('workspace.outgoingLinks', { count: getEdges.outgoing.length }) }}</span>
                     </p>
                     <div class="max-h-24 overflow-y-auto space-y-1">
                       <div v-for="edge in getEdges.outgoing" :key="edge.id()" class="w-full bg-gray-50 dark:bg-gray-900/35 p-2 rounded-xl text-[10px] border border-gray-200/50 dark:border-gray-750 truncate text-left flex justify-between items-center pr-2">
@@ -14809,50 +14811,50 @@ onUnmounted(() => {
             <div v-else-if="selectedEdge" class="space-y-4">
               <div class="flex justify-between items-center pb-2 border-b border-gray-150 dark:border-gray-750">
                 <div>
-                  <p class="text-xs font-black text-gray-900 dark:text-white">Edge Relationship</p>
+                  <p class="text-xs font-black text-gray-900 dark:text-white">{{ $t('workspace.edgeRelationship') }}</p>
                   <p class="text-[9px] text-gray-400 dark:text-gray-550 font-mono mt-0.5">ID: {{ editingEdgeData.id }}</p>
                 </div>
                 <button v-if="editingEdgeData.label === 'channel'" @click="fetchChannelDates(editingEdgeData.target)" class="text-[9px] bg-teal-500/10 hover:bg-teal-500/20 text-teal-650 dark:text-teal-400 border border-teal-500/10 px-2.5 py-0.5 rounded-lg font-black uppercase cursor-pointer transition-colors">
-                  Sync Target
+                  {{ $t('workspace.syncTarget') }}
                 </button>
               </div>
               
               <div class="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Source Node ID</label>
-                  <input v-model="editingEdgeData.source" @input="saveChanges" placeholder="Source" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
+                  <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">{{ $t('workspace.sourceNodeId') }}</label>
+                  <input v-model="editingEdgeData.source" @input="saveChanges" :placeholder="$t('workspace.sourcePlaceholder')" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
                 </div>
                 <div>
-                  <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Target Node ID</label>
-                  <input v-model="editingEdgeData.target" @input="saveChanges" placeholder="Target" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
+                  <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">{{ $t('workspace.targetNodeId') }}</label>
+                  <input v-model="editingEdgeData.target" @input="saveChanges" :placeholder="$t('workspace.targetPlaceholder')" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-1.5 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
                 </div>
               </div>
 
               <div>
-                <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Relationship Type</label>
-                <input v-model="editingEdgeData.label" @input="saveChanges" placeholder="e.g. forward, mentions" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-2 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
+                <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">{{ $t('workspace.relationshipType') }}</label>
+                <input v-model="editingEdgeData.label" @input="saveChanges" :placeholder="$t('workspace.relationshipPlaceholder')" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl px-3 py-2 text-xs font-semibold outline-none text-gray-900 dark:text-white focus:border-purple-500 transition-colors" />
               </div>
 
               <div>
-                <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">Facts Context</label>
-                <textarea v-model="editingEdgeData.facts" @input="saveChanges" placeholder="Enter association facts..." class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl p-3 text-xs font-semibold outline-none text-gray-900 dark:text-white h-20 focus:border-purple-500 transition-colors resize-none" />
+                <label class="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">{{ $t('workspace.factsContext') }}</label>
+                <textarea v-model="editingEdgeData.facts" @input="saveChanges" :placeholder="$t('workspace.factsContextPlaceholder')" class="w-full bg-gray-50 dark:bg-gray-900/50 border border-gray-150 dark:border-gray-750 rounded-xl p-3 text-xs font-semibold outline-none text-gray-900 dark:text-white h-20 focus:border-purple-500 transition-colors resize-none" />
               </div>
 
               <div class="text-[9px] font-bold text-gray-400 dark:text-gray-500 flex items-center gap-1 bg-gray-50 dark:bg-gray-900/55 p-2 rounded-xl">
-                <span>Created context:</span>
+                <span>{{ $t('workspace.createdContext') }}</span>
                 <span class="font-mono text-gray-600 dark:text-gray-400">{{ editingEdgeData.createdAt || 'N/A' }}</span>
               </div>
             </div>
             </div>
             
             <div v-else class="text-center py-6 text-gray-400">
-              <p class="text-xs font-medium">Select a node or relationship link on the graph</p>
+              <p class="text-xs font-medium">{{ $t('workspace.selectNodeOrEdgeHint') }}</p>
             </div>
           </div>
         </div>
         
         <!-- Timeline Viewer Card -->
-        <div class="mx-4 md:mx-6 min-h-[300px] border border-gray-200/80 dark:border-gray-750 bg-white dark:bg-gray-800 rounded-3xl mt-6 p-6 md:p-8 overflow-hidden relative shadow-sm" :style="{ height: `${Math.max(300, timelineRows.length * 56 + 180)}px` }">
+        <div class="min-h-[300px] border border-gray-200/80 dark:border-gray-750 bg-white dark:bg-gray-800 rounded-3xl mt-6 p-6 md:p-8 overflow-hidden relative shadow-sm" :style="{ height: `${Math.max(300, timelineRows.length * 56 + 180)}px` }">
            
            <!-- Timeline Header -->
            <div class="flex items-center justify-between mb-6 sticky left-0 right-0 z-10 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm pb-3 border-b border-gray-150 dark:border-gray-750">
@@ -14861,15 +14863,15 @@ onUnmounted(() => {
                     <Clock class="w-4 h-4" />
                   </span>
                   <div>
-                    <h3 class="text-xs font-black uppercase tracking-wider text-gray-900 dark:text-white">Dossier Event Timeline</h3>
-                    <p class="text-[10px] font-bold text-gray-400 dark:text-gray-500">Chronological analysis of registered interactions</p>
+                    <h3 class="text-xs font-black uppercase tracking-wider text-gray-900 dark:text-white">{{ $t('workspace.dossierEventTimeline') }}</h3>
+                    <p class="text-[10px] font-bold text-gray-400 dark:text-gray-500">{{ $t('workspace.chronologicalAnalysisDesc') }}</p>
                   </div>
                 </div>
 
                 <!-- Zoom controls -->
                 <div class="flex items-center gap-3">
-                    <span class="text-[10px] font-mono font-black uppercase tracking-wide text-gray-500 bg-gray-50 dark:bg-gray-900 px-2.5 py-1 rounded-lg border border-gray-200/50 dark:border-gray-750 rounded-xl">Zoom: {{ zoomLevel.toFixed(1) }}x</span>
-                    <button @click="resetZoom" class="text-[10px] font-black uppercase tracking-wide px-3 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-650 rounded-xl text-gray-750 dark:text-gray-300 transition-colors border border-gray-205 dark:border-gray-750 cursor-pointer">Reset</button>
+                    <span class="text-[10px] font-mono font-black uppercase tracking-wide text-gray-500 bg-gray-50 dark:bg-gray-900 px-2.5 py-1 rounded-lg border border-gray-200/50 dark:border-gray-750 rounded-xl">{{ $t('workspace.zoomDisplay', { zoom: zoomLevel.toFixed(1) }) }}</span>
+                    <button @click="resetZoom" class="text-[10px] font-black uppercase tracking-wide px-3 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-650 rounded-xl text-gray-750 dark:text-gray-300 transition-colors border border-gray-205 dark:border-gray-750 cursor-pointer">{{ $t('workspace.reset') }}</button>
                 </div>
            </div>
            
@@ -14928,7 +14930,7 @@ onUnmounted(() => {
         
         <!-- Analysis Result Section -->
         <transition enter-active-class="transition duration-300 ease-out" enter-from-class="transform scale-98 opacity-0" enter-to-class="transform scale-100 opacity-100">
-          <div v-if="analysisResultOfGraph" class="mx-4 md:mx-6 mt-6 p-6 md:p-8 bg-gradient-to-br from-white to-amber-50/[0.12] dark:from-gray-800 dark:to-orange-950/20 rounded-3xl border border-amber-500/15 shadow-sm relative overflow-hidden space-y-4">
+          <div v-if="analysisResultOfGraph" class="mt-6 p-6 md:p-8 bg-gradient-to-br from-white to-amber-50/[0.12] dark:from-gray-800 dark:to-orange-950/20 rounded-3xl border border-amber-500/15 shadow-sm relative overflow-hidden space-y-4">
              <div class="absolute -right-24 -bottom-24 w-48 h-48 bg-amber-500/[0.03] rounded-full blur-3xl pointer-events-none"></div>
              
              <div class="flex items-center gap-2.5 pb-3 border-b border-gray-150 dark:border-gray-750">
@@ -14936,8 +14938,8 @@ onUnmounted(() => {
                  <Sparkles class="h-4.5 w-4.5" />
                </span>
                <div>
-                 <h2 class="text-xs font-black uppercase tracking-wider text-gray-900 dark:text-white">AI Studio Network Diagnosis</h2>
-                 <p class="text-[10px] font-bold text-gray-400 dark:text-gray-500">Heuristic structural relationship findings</p>
+                 <h2 class="text-xs font-black uppercase tracking-wider text-gray-900 dark:text-white">{{ $t('workspace.aiNetworkDiagnosis') }}</h2>
+                 <p class="text-[10px] font-bold text-gray-400 dark:text-gray-500">{{ $t('workspace.heuristicFindingsDesc') }}</p>
                </div>
              </div>
 
@@ -14952,16 +14954,16 @@ onUnmounted(() => {
       </div>
 
       <!-- Monitor Tab -->
-      <div v-show="activeTab === 'monitor'" class="space-y-6 max-w-[95%] mx-auto px-4 py-6">
+      <div v-show="activeTab === 'monitor'" class="w-full max-w-full mx-auto px-0 pt-1 pb-16 space-y-6">
         <!-- Overview Banner -->
         <div class="bg-white dark:bg-gray-800 p-6 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
           <div>
             <h2 class="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
               <Activity class="h-5 w-5 text-pink-500 animate-pulse" />
-              <span>Real-Time Engine Monitor</span>
+              <span>{{ $t('monitor.title') }}</span>
             </h2>
             <p class="text-sm text-gray-400 mt-1">
-              Live statistics and object ingestion frequencies for public Telegram channel networks
+              {{ $t('monitor.subtitle') }}
             </p>
           </div>
           
@@ -14971,11 +14973,11 @@ onUnmounted(() => {
               class="px-4 py-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-xl text-sm font-semibold text-gray-700 dark:text-gray-300 transition-colors flex items-center gap-2"
             >
               <RefreshCw class="h-4 w-4" />
-              <span>Sync Metrics</span>
+              <span>{{ $t('monitor.syncMetrics') }}</span>
             </button>
             <div class="flex items-center gap-2 px-3 py-1.5 bg-green-50 dark:bg-green-950/30 border border-green-200/50 dark:border-green-900/30 rounded-xl">
               <span class="h-2.5 w-2.5 rounded-full bg-green-500 animate-ping"></span>
-              <span class="text-xs font-semibold text-green-700 dark:text-green-400">Live Connection</span>
+              <span class="text-xs font-semibold text-green-700 dark:text-green-400">{{ $t('monitor.liveConnection') }}</span>
             </div>
           </div>
         </div>
@@ -14986,7 +14988,7 @@ onUnmounted(() => {
           <div class="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20 p-6 rounded-3xl border border-blue-100 dark:border-blue-900/30 shadow-sm flex flex-col justify-between">
             <div>
               <div class="flex items-center justify-between">
-                <span class="text-xs font-bold font-mono uppercase tracking-wider text-blue-600 dark:text-blue-400">Pending Jobs</span>
+                <span class="text-xs font-bold font-mono uppercase tracking-wider text-blue-600 dark:text-blue-400">{{ $t('monitor.pendingJobs') }}</span>
                 <span class="p-1.5 bg-blue-100 dark:bg-blue-900/40 rounded-lg text-blue-600 dark:text-blue-400">
                   <Activity class="h-4 w-4" />
                 </span>
@@ -14996,16 +14998,16 @@ onUnmounted(() => {
                   {{ pendingJobs !== null ? pendingJobs : '0' }}
                 </p>
                 <p class="text-xs text-gray-400 mt-1">
-                  Jobs queued in GSO executor waiting to be evaluated
+                  {{ $t('monitor.pendingJobsDesc') }}
                 </p>
               </div>
             </div>
             
             <div class="mt-6 pt-4 border-t border-blue-100 dark:border-blue-900/20 flex items-center justify-between text-xs">
-              <span class="text-gray-500">Status</span>
+              <span class="text-gray-500">{{ $t('monitor.status') }}</span>
               <span class="font-bold text-blue-600 dark:text-blue-400 flex items-center gap-1">
                 <CheckCircle2 class="h-3.5 w-3.5" />
-                <span>Executor Idle</span>
+                <span>{{ $t('monitor.executorIdle') }}</span>
               </span>
             </div>
           </div>
@@ -15014,7 +15016,7 @@ onUnmounted(() => {
           <div class="bg-gradient-to-br from-pink-50 to-rose-50 dark:from-pink-950/20 dark:to-rose-950/20 p-6 rounded-3xl border border-pink-100 dark:border-pink-900/30 shadow-sm flex flex-col justify-between">
             <div>
               <div class="flex items-center justify-between">
-                <span class="text-xs font-bold font-mono uppercase tracking-wider text-pink-600 dark:text-pink-400">Captured Objects Today</span>
+                <span class="text-xs font-bold font-mono uppercase tracking-wider text-pink-600 dark:text-pink-400">{{ $t('monitor.capturedObjectsToday') }}</span>
                 <span class="p-1.5 bg-pink-100 dark:bg-pink-900/40 rounded-lg text-pink-600 dark:text-pink-400">
                   <Layers class="h-4 w-4" />
                 </span>
@@ -15024,14 +15026,14 @@ onUnmounted(() => {
                   {{ Object.values(counters).reduce((a, b) => a + b, 0).toLocaleString() }}
                 </p>
                 <p class="text-xs text-gray-400 mt-1">
-                  Combined telemetric events processed in past 24 hours
+                  {{ $t('monitor.capturedObjectsDesc') }}
                 </p>
               </div>
             </div>
             
             <div class="mt-6 pt-4 border-t border-pink-100 dark:border-pink-900/20 flex items-center justify-between text-xs">
-              <span class="text-gray-500">Sync Interval</span>
-              <span class="font-bold text-pink-600 dark:text-pink-400">30s Refreshed</span>
+              <span class="text-gray-500">{{ $t('monitor.syncInterval') }}</span>
+              <span class="font-bold text-pink-600 dark:text-pink-400">{{ $t('monitor.refreshed30s') }}</span>
             </div>
           </div>
 
@@ -15039,7 +15041,7 @@ onUnmounted(() => {
           <div class="bg-white dark:bg-gray-800 p-6 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col justify-between">
             <div>
               <div class="flex items-center justify-between">
-                <span class="text-xs font-bold font-mono uppercase tracking-wider text-gray-500 dark:text-gray-400">System Clock (UTC)</span>
+                <span class="text-xs font-bold font-mono uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ $t('monitor.systemClock') }}</span>
                 <span class="p-1.5 bg-gray-100 dark:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 font-mono">
                   <Clock class="h-4 w-4" />
                 </span>
@@ -15055,8 +15057,8 @@ onUnmounted(() => {
             </div>
             
             <div class="mt-6 pt-4 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs">
-              <span class="text-gray-500">Region</span>
-              <span class="font-bold text-gray-700 dark:text-gray-300">Global Cluster</span>
+              <span class="text-gray-500">{{ $t('monitor.region') }}</span>
+              <span class="font-bold text-gray-700 dark:text-gray-300">{{ $t('monitor.globalCluster') }}</span>
             </div>
           </div>
         </div>
@@ -15064,15 +15066,15 @@ onUnmounted(() => {
         <!-- In-Depth Object Ingestion Status -->
         <div class="bg-white dark:bg-gray-800 p-6 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm">
           <div class="flex items-center justify-between mb-6">
-            <h3 class="text-sm font-black uppercase tracking-widest text-gray-500 dark:text-gray-400">Inbound Event Stream Channels</h3>
+            <h3 class="text-sm font-black uppercase tracking-widest text-gray-500 dark:text-gray-400">{{ $t('monitor.inboundStreamChannels') }}</h3>
             <span class="text-xs bg-gray-100 dark:bg-gray-700 px-3 py-1 rounded-full text-gray-700 dark:text-gray-300 font-mono">
-              {{ Object.keys(counters).length }} active event types
+              {{ $t('monitor.activeEventTypes', { count: Object.keys(counters).length }) }}
             </span>
           </div>
           
           <div v-if="Object.keys(counters).length === 0" class="flex flex-col items-center justify-center py-12 text-gray-400">
             <LoaderCircle class="h-8 w-8 animate-spin mb-3 text-pink-500" />
-            <p class="text-sm">Retrieving diagnostic data stream...</p>
+            <p class="text-sm">{{ $t('monitor.retrievingStream') }}</p>
           </div>
 
           <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -15099,9 +15101,9 @@ onUnmounted(() => {
                   ]"
                 >
                   <span v-if="frequencies[type] > 0" class="inline-block h-1.5 w-1.5 rounded-full bg-green-500 animate-ping mr-1"></span>
-                  {{ frequencies[type] !== undefined ? frequencies[type].toFixed(2) : '0.00' }} obj/s
+                  {{ $t('monitor.objPerSec', { count: frequencies[type] !== undefined ? frequencies[type].toFixed(2) : '0.00' }) }}
                 </span>
-                <span class="text-[10px] text-gray-400">Ingress Rate</span>
+                <span class="text-[10px] text-gray-400">{{ $t('monitor.ingressRate') }}</span>
               </div>
             </div>
           </div>
@@ -15122,26 +15124,26 @@ onUnmounted(() => {
               <div>
                 <h3 class="text-sm font-black uppercase tracking-wider text-gray-700 dark:text-gray-300 flex items-center gap-2">
                   <Radio class="h-4 w-4 text-teal-500 animate-pulse" />
-                  <span>Listen Directory</span>
+                  <span>{{ t('listen.listenDirectory') }}</span>
                 </h3>
-                <p class="text-[11px] text-gray-400 mt-0.5">Hierarchical live watchlists</p>
+                <p class="text-[11px] text-gray-400 mt-0.5">{{ t('listen.hierarchicalWatchlists') }}</p>
               </div>
               <div class="flex items-center gap-1.5 self-end sm:self-auto">
                 <button
                   @click="openAddModal('', true)"
                   class="px-2 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 rounded-lg text-xs font-bold text-gray-600 dark:text-gray-300 flex items-center gap-1 transition-colors"
-                  title="Add Root Folder"
+                  :title="t('listen.addRootFolder')"
                 >
                   <FolderPlus class="h-3 w-3 text-yellow-500" />
-                  <span>Folder</span>
+                  <span>{{ t('listen.folder') }}</span>
                 </button>
                 <button
                   @click="openAddModal('', false)"
                   class="px-2 py-1 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/30 dark:hover:bg-teal-900/30 rounded-lg text-xs font-bold text-teal-600 dark:text-teal-400 flex items-center gap-1 transition-colors"
-                  title="Add Root Listen"
+                  :title="t('listen.addRootListen')"
                 >
                   <Plus class="h-3 w-3" />
-                  <span>Listen</span>
+                  <span>{{ t('listen.listen') }}</span>
                 </button>
               </div>
             </div>
@@ -15153,14 +15155,14 @@ onUnmounted(() => {
                 <input
                   type="text"
                   v-model="listenSearchQuery"
-                  placeholder="Search label, channel, keyword..."
+                  :placeholder="t('listen.searchDirectory')"
                   class="w-full pl-10 pr-8 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-teal-500/50 focus:border-teal-500 text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500 transition-all shadow-sm"
                 />
                 <button
                   v-if="listenSearchQuery"
                   @click="listenSearchQuery = ''"
                   class="absolute right-2.5 p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors cursor-pointer"
-                  title="Clear search"
+                  :title="t('listen.clearSearch')"
                 >
                   <X class="h-3.5 w-3.5" />
                 </button>
@@ -15171,8 +15173,8 @@ onUnmounted(() => {
             <div class="p-3 overflow-y-auto flex-1 space-y-1 select-none max-h-[820px]">
               <div v-if="visibleDirectoryNodes.length === 0" class="flex flex-col items-center justify-center py-16 text-center text-gray-400 dark:text-gray-500">
                 <Inbox class="h-10 w-10 mb-2 opacity-50" />
-                <p class="text-xs">No watchlists configured.</p>
-                <p class="text-[10px] opacity-75 mt-1">Click the action buttons above to get started.</p>
+                <p class="text-xs">{{ t('listen.noWatchlists') }}</p>
+                <p class="text-[10px] opacity-75 mt-1">{{ t('listen.clickActionsToStart') }}</p>
               </div>
 
               <div
@@ -15213,7 +15215,7 @@ onUnmounted(() => {
                 ></div>
 
                 <!-- Drag handle/grip -->
-                <div class="cursor-grab text-gray-300 dark:text-gray-600 hover:text-gray-500 dark:hover:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 shrink-0 relative z-30 mr-1" title="Drag node to move or reorder">
+                <div class="cursor-grab text-gray-300 dark:text-gray-600 hover:text-gray-500 dark:hover:text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 shrink-0 relative z-30 mr-1" :title="t('listen.dragToReorder')">
                   <GripVertical class="h-3 w-3" />
                 </div>
 
@@ -15260,7 +15262,7 @@ onUnmounted(() => {
                   <span 
                     v-if="node.item.isFolder"
                     class="ml-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-extrabold tracking-normal bg-gray-100 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400 border border-gray-200/50 dark:border-gray-700/40 flex items-center justify-center shrink-0"
-                    title="Total items inside this folder and subfolders"
+                    :title="t('listen.totalItemsFolder')"
                   >
                     {{ getFolderItemsCount(node.item) }}
                   </span>
@@ -15273,7 +15275,7 @@ onUnmounted(() => {
                     v-if="node.item.isFolder"
                     @click.stop="openAddModal(node.item.id, false)"
                     class="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md text-gray-400 hover:text-teal-500 transition-colors"
-                    title="Add Listen Item here"
+                    :title="t('listen.addListenItemHere')"
                   >
                     <Plus class="h-3 w-3" />
                   </button>
@@ -15281,7 +15283,7 @@ onUnmounted(() => {
                     v-if="node.item.isFolder"
                     @click.stop="openAddModal(node.item.id, true)"
                     class="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md text-gray-400 hover:text-yellow-500 transition-colors"
-                    title="Add Subfolder here"
+                    :title="t('listen.addSubfolderHere')"
                   >
                     <FolderPlus class="h-3 w-3" />
                   </button>
@@ -15290,7 +15292,7 @@ onUnmounted(() => {
                   <button
                     @click.stop="openEditModal(node.item)"
                     class="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md text-gray-400 hover:text-blue-500 transition-colors"
-                    title="Edit Configs"
+                    :title="t('listen.editConfigs')"
                   >
                     <Edit class="h-3 w-3" />
                   </button>
@@ -15299,7 +15301,7 @@ onUnmounted(() => {
                   <button
                     @click.stop="deleteListenItem(node.item.id, node.item.name)"
                     class="p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md text-gray-400 hover:text-red-500 transition-colors"
-                    title="Delete item"
+                    :title="t('listen.deleteItem')"
                   >
                     <Trash2 class="h-3 w-3" />
                   </button>
@@ -15313,31 +15315,31 @@ onUnmounted(() => {
                 <button
                   @click="exportListenDirectoryToClipboard"
                   class="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer"
-                  title="Export entire directory tree config as JSON to clipboard"
+                  :title="t('listen.exportTreeClipboard')"
                 >
                   <Download class="h-3 w-3" />
-                  <span>Export</span>
+                  <span>{{ t('common.export') }}</span>
                 </button>
                 <button
                   @click="importListenDirectoryFromClipboard"
                   class="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer"
-                  title="Import directory tree config from JSON in clipboard"
+                  :title="t('listen.importTreeClipboard')"
                 >
                   <Upload class="h-3 w-3" />
-                  <span>Import</span>
+                  <span>{{ t('common.import') }}</span>
                 </button>
                 <button
                   @click="syncListenDirectory"
                   :disabled="!(loginName && loginToken && isLoginTokenValid) || isSyncingListen"
                   class="px-2.5 py-1.5 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/30 dark:hover:bg-teal-900/40 text-teal-600 dark:text-teal-400 disabled:opacity-40 disabled:bg-gray-100 dark:disabled:bg-gray-800 disabled:text-gray-400 dark:disabled:text-gray-600 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer disabled:cursor-not-allowed"
-                  title="Sync directory with remote server"
+                  :title="t('listen.syncDirectoryRemote')"
                 >
                   <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': isSyncingListen }" />
-                  <span>{{ isSyncingListen ? 'Syncing...' : 'Sync' }}</span>
+                  <span>{{ isSyncingListen ? t('listen.syncing') : t('listen.sync') }}</span>
                 </button>
               </div>
               <span class="text-[9px] font-semibold text-gray-400 uppercase tracking-widest select-none">
-                Local Config
+                {{ t('listen.localConfig') }}
               </span>
             </div>
           </div>
@@ -15353,18 +15355,18 @@ onUnmounted(() => {
                   </div>
                   <div class="flex flex-col">
                     <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-                      Relations Graph
+                      {{ t('explorer.relationsGraph') }}
                     </h3>
                     <!-- Filter Count Badge -->
                     <div class="flex items-center gap-1 mt-0.5">
-                      <span v-if="totalNeighborsCount > 12" class="text-[9px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-1.5 py-0.5 rounded-full cursor-help whitespace-nowrap" title="Filtered to top 12 connections inside compact view. Click Enlarge to see all.">
-                        Showing 12 of {{ totalNeighborsCount }}
+                      <span v-if="totalNeighborsCount > 12" class="text-[9px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-1.5 py-0.5 rounded-full cursor-help whitespace-nowrap" :title="t('listen.filteredTop12')">
+                        {{ t('listen.showing12Of', { total: totalNeighborsCount }) }}
                       </span>
                       <span v-else-if="totalNeighborsCount > 0" class="text-[9px] font-semibold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-1.5 py-0.5 rounded-full whitespace-nowrap">
-                        {{ totalNeighborsCount }} nodes
+                        {{ t('explorer.nodesCount', { count: totalNeighborsCount }) }}
                       </span>
                       <span v-else class="text-[9px] font-semibold text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-950/40 px-1.5 py-0.5 rounded-full whitespace-nowrap">
-                        0 nodes
+                        {{ t('explorer.nodesCount', { count: 0 }) }}
                       </span>
                     </div>
                   </div>
@@ -15374,28 +15376,28 @@ onUnmounted(() => {
                   <button
                     @click="onGraphZoomIn"
                     class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
-                    title="Zoom In"
+                    :title="t('explorer.zoomIn')"
                   >
                     <ZoomIn class="h-3.5 w-3.5 animate-pulse" />
                   </button>
                   <button
                     @click="onGraphZoomOut"
                     class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
-                    title="Zoom Out"
+                    :title="t('explorer.zoomOut')"
                   >
                     <ZoomOut class="h-3.5 w-3.5" />
                   </button>
                   <button
                     @click="resetGraphView"
                     class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
-                    title="Reset View"
+                    :title="t('explorer.resetView')"
                   >
                     <RotateCcw class="h-3.5 w-3.5" />
                   </button>
                   <button
                     @click="isGraphEnlarged = true"
                     class="p-1.5 hover:bg-teal-50 dark:hover:bg-teal-950/35 text-teal-650 dark:text-teal-400 rounded-lg transition-colors cursor-pointer"
-                    title="Enlarge Interactive View"
+                    :title="t('search.enlargeInteractiveView')"
                   >
                     <Maximize2 class="h-3.5 w-3.5" />
                   </button>
@@ -15417,11 +15419,11 @@ onUnmounted(() => {
                 ></canvas>
                 
                 <div class="absolute bottom-2.5 left-3 right-3 flex flex-wrap items-center justify-between gap-1.5 text-[9px] font-medium text-gray-400 dark:text-gray-500 pointer-events-none select-none">
-                  <div>Drag nodes • Scroll / Drag to Zoom & Pan</div>
+                  <div>{{ t('search.dragNodesHint') }}</div>
                   <div class="flex items-center gap-2">
-                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>Inbound</span>
-                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-pink-500"></span>Outbound</span>
-                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>Mutual</span>
+                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>{{ t('search.inbound') }}</span>
+                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-pink-500"></span>{{ t('search.outbound') }}</span>
+                    <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>{{ t('search.mutual') }}</span>
                   </div>
                 </div>
               </div>
@@ -15432,7 +15434,7 @@ onUnmounted(() => {
                   @click="isGraphEnlarged = true" 
                   class="text-[10px] font-semibold text-teal-600 dark:text-teal-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
                 >
-                  View remaining {{ totalNeighborsCount - 12 }} connections in Enlarge View <Maximize2 class="h-2.5 w-2.5" />
+                  {{ t('listen.viewRemainingConnections', { count: totalNeighborsCount - 12 }) }} <Maximize2 class="h-2.5 w-2.5" />
                 </button>
               </div>
             </div>
@@ -15448,17 +15450,17 @@ onUnmounted(() => {
                   <Radio class="h-8 w-8 text-teal-600 dark:text-teal-400 animate-pulse" />
                 </div>
                 <h3 class="text-lg font-black text-gray-900 dark:text-white uppercase tracking-wider">
-                  Live Real-Time Listen Feed
+                  {{ t('listen.liveRealtimeFeed') }}
                 </h3>
                 <p class="text-sm text-gray-400 mt-2 leading-relaxed">
-                  Configure your listeners in the tree workspace on the left. Click on any public Telegram channel or Keyword tracker to wiretap inbound real-time feed alerts.
+                  {{ t('listen.emptyFeedDesc') }}
                 </p>
                 <div class="mt-6 flex flex-wrap gap-2 justify-center">
-                  <span class="text-xs px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-full font-mono font-medium">Channel Listening</span>
-                  <span class="text-xs px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-full font-mono font-medium">Keyword Filtering</span>
+                  <span class="text-xs px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-full font-mono font-medium">{{ t('listen.channelListening') }}</span>
+                  <span class="text-xs px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-full font-mono font-medium">{{ t('listen.keywordFiltering') }}</span>
                   <span class="text-xs px-3 py-1 bg-green-50 dark:bg-green-950/20 text-green-700 dark:text-green-400 rounded-full font-mono font-bold flex items-center gap-1">
                     <span class="h-1.5 w-1.5 rounded-full bg-green-500 animate-ping"></span>
-                    Polling engine ready
+                    {{ t('listen.pollingEngineReady') }}
                   </span>
                 </div>
               </div>
@@ -15478,21 +15480,21 @@ onUnmounted(() => {
                           : 'bg-cyan-50 dark:bg-cyan-950/30 text-cyan-600 dark:text-cyan-400 border border-cyan-100 dark:border-cyan-900/30'
                       ]"
                     >
-                      Telegram {{ selectedListenNode.type }}
+                      {{ t('listen.telegramType', { type: selectedListenNode.type }) }}
                     </span>
                     <span v-if="listenAutoRefreshActive" class="text-[10px] bg-green-500/10 text-green-500 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider animate-pulse flex items-center gap-1">
                       <span class="h-1.5 w-1.5 bg-green-500 rounded-full"></span>
-                      Listening Live
+                      {{ t('listen.listeningLive') }}
                     </span>
                   </div>
                   <h2 class="text-xl font-black text-gray-900 dark:text-white tracking-tight">
                     {{ selectedListenNode.name }}
                   </h2>
                   <div class="text-xs font-mono text-gray-400 flex flex-wrap gap-x-4 gap-y-1">
-                    <span>Target: <strong class="text-gray-700 dark:text-gray-200">{{ selectedListenNode.argument }}</strong></span>
-                    <span>Created: <strong>{{ new Date(selectedListenNode.create_time).toLocaleDateString() }}</strong></span>
+                    <span>{{ t('listen.target') }}: <strong class="text-gray-700 dark:text-gray-200">{{ selectedListenNode.argument }}</strong></span>
+                    <span>{{ t('listen.created') }}: <strong>{{ new Date(selectedListenNode.create_time).toLocaleDateString() }}</strong></span>
                     <span v-if="listenPosts && listenPosts.length > 0">
-                      Newest: <strong class="text-teal-600 dark:text-teal-400">{{ formatDate(listenPosts[0]?.data?.date) }}</strong>
+                      {{ t('listen.newest') }}: <strong class="text-teal-600 dark:text-teal-400">{{ formatDate(listenPosts[0]?.data?.date) }}</strong>
                     </span>
                   </div>
                   <p v-if="selectedListenNode.description" class="text-xs text-gray-550 dark:text-gray-400 italic max-w-xl">
@@ -15505,12 +15507,12 @@ onUnmounted(() => {
                   <!-- Local Saved Post Counter Badge with Clear Button -->
                   <div class="flex items-center bg-gray-100 dark:bg-gray-800/80 px-3 py-1.5 rounded-xl border border-gray-200/50 dark:border-gray-700/50 text-xs font-semibold text-gray-600 dark:text-gray-300 gap-1.5">
                     <Database class="h-3.5 w-3.5 text-teal-500" />
-                    <span>{{ listenPosts.length }} cached</span>
+                    <span>{{ t('listen.cachedPosts', { count: listenPosts.length }) }}</span>
                     <button
                       v-if="listenPosts.length > 0"
                       @click="clearCachedListenPosts"
                       class="ml-1 p-0.5 text-gray-400 hover:text-red-500 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors"
-                      title="Clear Cached Posts"
+                      :title="t('listen.clearCachedPosts')"
                     >
                       <X class="h-3.5 w-3.5" />
                     </button>
@@ -15529,13 +15531,13 @@ onUnmounted(() => {
                       class="h-2 w-2 rounded-full bg-white block" 
                       :class="[listenAutoRefreshActive ? 'animate-ping' : '']"
                     ></span>
-                    <span>{{ selectedListenNode?.type === 'keyword' ? '60s' : '30s' }} Live Polling: {{ listenAutoRefreshActive ? 'ON' : 'OFF' }}</span>
+                    <span>{{ t('listen.livePolling', { interval: selectedListenNode?.type === 'keyword' ? '60s' : '30s', status: listenAutoRefreshActive ? t('common.on') : t('common.off') }) }}</span>
                   </button>
 
                   <button
                     @click="fetchListenPosts(selectedListenNode)"
                     class="p-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-xl text-gray-500 dark:text-gray-300 transition-colors"
-                    title="Manual Sync"
+                    :title="t('listen.manualSync')"
                     :disabled="isFetchingListenPosts"
                   >
                     <RefreshCw class="h-4 w-4" :class="[isFetchingListenPosts ? 'animate-spin' : '']" />
@@ -15548,7 +15550,7 @@ onUnmounted(() => {
                 <!-- Loading Metadata state -->
                 <div v-if="isFetchingChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm p-6 flex items-center justify-center gap-3 text-gray-500 text-xs">
                   <LoaderCircle class="h-4 w-4 animate-spin text-teal-500" />
-                  <span>Fetching channel profile...</span>
+                  <span>{{ t('listen.fetchingChannelProfile') }}</span>
                 </div>
                 
                 <!-- Display Metadata state -->
@@ -15575,7 +15577,7 @@ onUnmounted(() => {
                         class="absolute -bottom-1 w-full bg-gradient-to-r from-amber-500 to-orange-600 text-white text-[7px] font-black uppercase tracking-widest py-0.5 rounded-b-xl flex items-center justify-center gap-0.5 shadow-sm border-t border-white/20 select-none"
                       >
                         <Lock class="h-1.5 w-1.5" />
-                        <span>Private</span>
+                        <span>{{ t('listen.private') }}</span>
                       </div>
                     </div>
                     <div class="text-center md:text-center flex-1">
@@ -15604,19 +15606,19 @@ onUnmounted(() => {
                           class="inline-flex items-center gap-1.5 px-3 py-1 bg-teal-500 hover:bg-teal-600 text-white dark:bg-teal-600 dark:hover:bg-teal-700 text-[11px] font-bold rounded-xl shadow-sm transition-all shadow-teal-500/10 hover:-translate-y-0.5 shrink-0"
                         >
                           <ExternalLink class="h-3 w-3" />
-                          <span>Join Channel</span>
+                          <span>{{ t('listen.joinChannel') }}</span>
                         </a>
                       </div>
                       <p v-if="selectedChannelMetadata.description || selectedChannelMetadata.about" class="text-xs text-gray-650 dark:text-gray-300 leading-relaxed whitespace-pre-wrap break-words bg-gray-50/50 dark:bg-gray-800/50 p-3 rounded-2xl border border-gray-100/50 dark:border-gray-700/50">
                         {{ selectedChannelMetadata.description || selectedChannelMetadata.about }}
                       </p>
-                      <p v-else class="text-xs text-gray-400 italic">No description provided for this channel.</p>
+                      <p v-else class="text-xs text-gray-400 italic">{{ t('listen.noChannelDescription') }}</p>
                     </div>
 
                     <!-- Additional mini details tags grid -->
                     <div class="flex flex-wrap gap-2 text-[10px] font-mono text-gray-400 border-t border-gray-100 dark:border-gray-700/60 pt-3">
-                      <span v-if="selectedChannelMetadata.date || selectedChannelMetadata.createdAt">First Seen: <strong class="text-gray-600 dark:text-gray-300">{{ formatDate(selectedChannelMetadata.date || selectedChannelMetadata.createdAt) }}</strong></span>
-                      <span v-if="selectedChannelMetadata._type">Type: <strong class="text-gray-600 dark:text-gray-300">{{ selectedChannelMetadata._type.split('.').pop() }}</strong></span>
+                      <span v-if="selectedChannelMetadata.date || selectedChannelMetadata.createdAt">{{ t('listen.firstSeen') }}: <strong class="text-gray-600 dark:text-gray-300">{{ formatDate(selectedChannelMetadata.date || selectedChannelMetadata.createdAt) }}</strong></span>
+                      <span v-if="selectedChannelMetadata._type">{{ t('listen.type') }}: <strong class="text-gray-600 dark:text-gray-300">{{ selectedChannelMetadata._type.split('.').pop() }}</strong></span>
                     </div>
                   </div>
                 </div>
@@ -15628,14 +15630,14 @@ onUnmounted(() => {
                 <!-- Loading State -->
                 <div v-if="isFetchingListenPosts && listenPosts.length === 0" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center py-20 text-gray-400">
                   <LoaderCircle class="h-10 w-10 animate-spin text-teal-500 mb-4" />
-                  <p class="text-sm font-semibold text-gray-500">Connecting internal pipeline...</p>
+                  <p class="text-sm font-semibold text-gray-500">{{ t('listen.connectingPipeline') }}</p>
                 </div>
 
                 <!-- Empty Feed alert -->
                 <div v-else-if="listenPosts.length === 0" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center py-24 text-center max-w-sm mx-auto text-gray-400">
                   <Inbox class="h-12 w-12 mb-4 opacity-40 text-teal-400" />
-                  <p class="text-sm font-bold text-gray-700 dark:text-gray-300">No intercepted logs found</p>
-                  <p class="text-xs mt-1">This query didn't trigger any historical records, or the public service is currently offline.</p>
+                  <p class="text-sm font-bold text-gray-700 dark:text-gray-300">{{ t('listen.noLogsFound') }}</p>
+                  <p class="text-xs mt-1">{{ t('listen.noLogsDesc') }}</p>
                 </div>
 
                 <!-- Active post list feeds cascade -->
@@ -15657,16 +15659,16 @@ onUnmounted(() => {
                       <button
                         @click.stop="addToWorkspaceFromPost(post)"
                         class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-700 px-2.5 py-1 rounded-full"
-                        title="Add to Workspace Analysis"
+                        :title="t('listen.addToWorkspaceAnalysis')"
                       >
-                        <Layers class="h-3 w-3 mr-1" /> Workspace
+                        <Layers class="h-3 w-3 mr-1" /> {{ t('listen.workspace') }}
                       </button>
                       <button
                         @click.stop="sharePost(post)"
                         class="text-[10px] font-bold text-gray-400 hover:text-blue-650 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-700 px-2.5 py-1 rounded-full"
-                        title="Share Links"
+                        :title="t('listen.shareLinks')"
                       >
-                        <Share2 class="h-3 w-3 mr-1" /> Share
+                        <Share2 class="h-3 w-3 mr-1" /> {{ t('listen.share') }}
                       </button>
                     </div>
 
@@ -15706,13 +15708,13 @@ onUnmounted(() => {
                           <div class="flex items-center gap-x-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5">
                             <span>{{ formatDate(post.data?.date) }}</span>
                             <span v-if="post.mtime" class="text-[9px] text-teal-500 lowercase normal-case tracking-normal">
-                              (Scraped {{ formatScrapedDate(post.mtime) }})
+                              ({{ t('listen.scrapedAt', { time: formatScrapedDate(post.mtime) }) }})
                             </span>
                             <span 
                               v-if="newlyFetchedListenKeys.has(post.key) || (post.id && newlyFetchedListenKeys.has(post.id))"
                               class="text-[9px] bg-amber-550 dark:bg-amber-500 text-white dark:text-white font-extrabold px-1.5 py-0.5 rounded-md tracking-wider animate-pulse inline-flex items-center"
                             >
-                              NEW
+                              {{ t('listen.newBadge') }}
                             </span>
                           </div>
                         </div>
@@ -15723,7 +15725,7 @@ onUnmounted(() => {
                         target="_blank"
                         class="text-[10px] font-bold text-teal-600 dark:text-teal-400 hover:text-teal-700 dark:hover:text-teal-350 transition-colors flex items-center bg-teal-50 dark:bg-teal-900/30 px-2 py-0.5 rounded-full shrink-0"
                       >
-                        View TG <ExternalLink class="h-2.5 w-2.5 ml-0.5" />
+                        {{ t('listen.viewTg') }} <ExternalLink class="h-2.5 w-2.5 ml-0.5" />
                       </a>
                     </div>
 
@@ -15735,7 +15737,7 @@ onUnmounted(() => {
                       <div class="flex items-center justify-between text-[9px] font-black uppercase tracking-widest text-teal-600 dark:text-teal-400 mb-1">
                         <div class="flex items-center gap-1">
                           <Reply class="h-3 w-3" />
-                          <span>Reply to Message</span>
+                          <span>{{ t('listen.replyToMessage') }}</span>
                         </div>
                       </div>
                       <div class="text-gray-600 dark:text-gray-350 text-xs sm:text-sm whitespace-pre-wrap break-words italic line-clamp-2">
@@ -15751,7 +15753,7 @@ onUnmounted(() => {
                       <div class="flex items-center justify-between text-[9px] font-black uppercase tracking-widest text-purple-600 dark:text-purple-400 mb-1">
                         <div class="flex items-center gap-1">
                           <Forward class="h-3 w-3" />
-                          <span>Forward</span>
+                          <span>{{ t('listen.forward') }}</span>
                         </div>
                       </div>
                       <div class="flex items-start justify-between gap-4">
@@ -15762,7 +15764,7 @@ onUnmounted(() => {
                           v-if="getForwardInfo(post)?.target"
                           @click="activeTab = 'explorer'; channelName = getForwardInfo(post).target; searchChannel()"
                           class="inline-flex items-center gap-1 px-2.5 py-1.5 bg-purple-50 hover:bg-purple-100 dark:bg-purple-900/40 dark:hover:bg-purple-900/70 text-purple-600 dark:text-purple-400 rounded-xl border border-purple-200/50 dark:border-purple-850 text-[10px] font-bold transition-all shrink-0 cursor-pointer self-start"
-                          title="View Channel"
+                          :title="t('listen.viewChannel')"
                         >
                           <span>@{{ getForwardInfo(post).target }}</span>
                           <ChevronRight class="h-3.5 w-3.5" />
@@ -15779,7 +15781,7 @@ onUnmounted(() => {
                       <button
                         @click="translatePost(post)"
                         class="p-1 -mt-1 text-gray-400 hover:text-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-md transition-colors flex-shrink-0"
-                        title="Translate contents"
+                        :title="t('listen.translateContents')"
                       >
                         <Languages v-if="!isTranslating[post.key]" class="h-4 w-4" />
                         <Loader2 v-else class="h-4 w-4 animate-spin" />
@@ -15792,7 +15794,7 @@ onUnmounted(() => {
                       class="mb-4 rounded-xl border border-blue-250 dark:border-blue-900/50 bg-blue-50/30 dark:bg-blue-950/20 p-4 relative z-10"
                     >
                       <div class="flex items-center text-[10px] font-black tracking-widest text-blue-500 uppercase mb-2">
-                        <User class="h-3.5 w-3.5 mr-1" /> Contact Shared
+                        <User class="h-3.5 w-3.5 mr-1" /> {{ t('listen.contactShared') }}
                       </div>
                       <div class="text-xs text-gray-800 dark:text-gray-300 font-mono">
                         {{ post.data.contact.first_name }} {{ post.data.contact.last_name }} 
@@ -15859,7 +15861,7 @@ onUnmounted(() => {
                       </div>
                       <div class="p-4 flex-1 min-w-0">
                         <div class="text-[10px] font-black uppercase tracking-widest text-teal-500 truncate mb-1">
-                          {{ post.data.linkPreview.siteName || 'Embed Webpage' }}
+                          {{ post.data.linkPreview.siteName || t('listen.embedWebpage') }}
                         </div>
                         <a
                           v-if="post.data.linkPreview.href"
@@ -15867,7 +15869,7 @@ onUnmounted(() => {
                           target="_blank"
                           class="text-xs sm:text-sm font-bold text-gray-950 dark:text-gray-100 hover:text-blue-500 hover:underline transition-colors block line-clamp-1 mb-1"
                         >
-                          {{ post.data.linkPreview.title || 'Embed Link URL' }}
+                          {{ post.data.linkPreview.title || t('listen.embedLinkUrl') }}
                         </a>
                         <p v-if="post.data.linkPreview.description" class="text-xs text-gray-400 dark:text-gray-500 line-clamp-2">
                           {{ post.data.linkPreview.description }}
@@ -15894,7 +15896,7 @@ onUnmounted(() => {
                           target="_blank"
                           class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-semibold"
                         >
-                          View Document
+                          {{ t('listen.viewDocument') }}
                         </a>
                       </div>
                     </div>
@@ -15905,7 +15907,7 @@ onUnmounted(() => {
                     >
                       <div class="flex items-center space-x-4 flex-wrap gap-y-1">
                         <span v-if="post.data?.views != null"
-                          >{{ formatViews(post.data.views) }} views</span
+                          >{{ t('listen.viewsCount', { views: formatViews(post.data.views) }) }}</span
                         >
 
                         <!-- Post Reactions (Listen stream) -->
@@ -15938,10 +15940,10 @@ onUnmounted(() => {
                           v-if="hasOldVersions(post)"
                           @click="openOldVersionsModal(post)"
                           class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/80 dark:border-amber-800/60 hover:bg-amber-100 dark:hover:bg-amber-900/60 transition-all cursor-pointer mr-1.5"
-                          title="View version history and compare diffs"
+                          :title="t('listen.viewVersionHistory')"
                         >
                           <History class="w-3 h-3 text-amber-500" />
-                          <span>old versions</span>
+                          <span>{{ t('listen.oldVersions') }}</span>
                         </button>
                         <span
                           v-if="post.key"
@@ -15957,7 +15959,7 @@ onUnmounted(() => {
                       <summary
                         class="text-gray-400 dark:text-gray-500 cursor-pointer hover:text-gray-600 dark:hover:text-gray-300"
                       >
-                        Raw Data
+                        {{ t('listen.rawData') }}
                       </summary>
                       <pre
                         class="mt-2 p-2 bg-gray-50 dark:bg-gray-900 rounded overflow-x-auto text-gray-500 dark:text-gray-400"
@@ -15986,7 +15988,7 @@ onUnmounted(() => {
             <div class="flex items-center justify-between mb-4 border-b border-gray-150 dark:border-gray-700 pb-3">
               <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
                 <component :is="listenItemForm.isFolder ? FolderOpen : Radio" class="h-5 w-5 text-teal-500" />
-                <span>{{ isEditingListenItem ? 'Modify Configurations' : listenItemForm.isFolder ? 'Add Watch Directory' : 'Add Telemetry Monitor' }}</span>
+                <span>{{ isEditingListenItem ? t('listen.modifyConfigurations') : listenItemForm.isFolder ? t('listen.addWatchDirectory') : t('listen.addTelemetryMonitor') }}</span>
               </h3>
               <button @click="isListenModalOpen = false" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg p-1">
                 <X class="h-5 w-5" />
@@ -15996,11 +15998,11 @@ onUnmounted(() => {
             <div class="space-y-4">
               <!-- Name inputs -->
               <div>
-                <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">Node Name Label</label>
+                <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">{{ t('listen.nodeNameLabel') }}</label>
                 <input
                   v-model="listenItemForm.name"
                   type="text"
-                  placeholder="e.g. Durov Crypto Chat, Web3 Alerts"
+                  :placeholder="t('listen.nodeNamePlaceholder')"
                   class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-750 bg-transparent text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
                 />
               </div>
@@ -16010,25 +16012,25 @@ onUnmounted(() => {
                 <div class="grid grid-cols-2 gap-4">
                   <!-- Type select options -->
                   <div>
-                    <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">Stream Type</label>
+                    <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">{{ t('listen.streamType') }}</label>
                     <select
                       v-model="listenItemForm.type"
                       class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800 text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
                     >
-                      <option value="channel">Telegram Channel</option>
-                      <option value="keyword">Search Keywords</option>
+                      <option value="channel">{{ t('listen.telegramChannel') }}</option>
+                      <option value="keyword">{{ t('listen.searchKeywords') }}</option>
                     </select>
                   </div>
 
                   <!-- Argument inputs -->
                   <div>
                     <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">
-                      {{ listenItemForm.type === 'channel' ? 'Channel Username' : 'Filter Keyword Terms' }}
+                      {{ listenItemForm.type === 'channel' ? t('listen.channelUsername') : t('listen.filterKeywords') }}
                     </label>
                     <input
                       v-model="listenItemForm.argument"
                       type="text"
-                      :placeholder="listenItemForm.type === 'channel' ? 'e.g. durov' : 'e.g. solana, block'"
+                      :placeholder="listenItemForm.type === 'channel' ? t('listen.channelPlaceholder') : t('listen.keywordsPlaceholder')"
                       class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-750 bg-transparent text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
                     />
                   </div>
@@ -16037,11 +16039,11 @@ onUnmounted(() => {
 
               <!-- Description comments -->
               <div>
-                <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">Description Context (Optional)</label>
+                <label class="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">{{ t('listen.descriptionContext') }}</label>
                 <textarea
                   v-model="listenItemForm.description"
                   rows="3"
-                  placeholder="Brief annotations explaining what this stream monitors..."
+                  :placeholder="t('listen.descriptionPlaceholder')"
                   class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-750 bg-transparent text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
                 ></textarea>
               </div>
@@ -16053,14 +16055,14 @@ onUnmounted(() => {
                 @click="isListenModalOpen = false"
                 class="px-4 py-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-xl text-sm font-semibold text-gray-750 dark:text-gray-300 transition-colors"
                 >
-                Cancel
+                {{ t('common.cancel') }}
               </button>
               <button
                 @click="saveListenItemForm"
                 :disabled="!listenItemForm.name.trim()"
                 class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl text-sm font-bold shadow-md shadow-teal-500/10 transition-colors"
               >
-                Confirm Save
+                {{ t('listen.confirmSave') }}
               </button>
             </div>
           </div>
@@ -16080,26 +16082,27 @@ onUnmounted(() => {
                 <Trash2 class="h-6 w-6" />
               </div>
               <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white">
-                Delete Item?
+                {{ t('listen.deleteItemTitle') }}
               </h3>
             </div>
             
-            <p class="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mb-6 leading-relaxed">
-              Are you sure you want to delete <span class="font-extrabold text-gray-900 dark:text-white">"{{ itemToDeleteName }}"</span>? This action is permanent and cannot be undone.
-            </p>
+            <p
+              class="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mb-6 leading-relaxed"
+              v-html="t('listen.deleteConfirmMessage', { name: itemToDeleteName })"
+            ></p>
 
             <div class="flex items-center justify-end gap-2.5">
               <button
                 @click="isDeleteConfirmOpen = false"
                 class="px-4 py-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-xl text-sm font-semibold text-gray-750 dark:text-gray-300 transition-colors"
               >
-                Cancel
+                {{ t('common.cancel') }}
               </button>
               <button
                 @click="confirmDeleteListenItem"
                 class="px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-xl text-sm font-bold shadow-md shadow-red-500/10 transition-colors"
               >
-                Delete
+                {{ t('common.delete') }}
               </button>
             </div>
           </div>
@@ -16117,7 +16120,7 @@ onUnmounted(() => {
             <div class="flex items-center justify-between mb-4 border-b border-gray-150 dark:border-gray-700 pb-3">
               <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
                 <Upload class="h-5 w-5 text-teal-500" />
-                <span>Import Directory Tree</span>
+                <span>{{ t('listen.importDirectoryTree') }}</span>
               </h3>
               <button @click="isImportModalOpen = false" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg p-1">
                 <X class="h-5 w-5" />
@@ -16125,12 +16128,12 @@ onUnmounted(() => {
             </div>
 
             <p class="text-[11px] text-gray-500 dark:text-gray-400 mb-4 leading-normal">
-              Paste the exported directory tree JSON configuration into the input box below. This will replace your current Directory Config.
+              {{ t('listen.importDesc') }}
             </p>
 
             <div class="space-y-4">
               <div>
-                <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 font-sans">JSON Raw Content</label>
+                <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 font-sans">{{ t('listen.jsonRawContent') }}</label>
                 <textarea
                   v-model="importJsonInput"
                   rows="8"
@@ -16151,14 +16154,14 @@ onUnmounted(() => {
                 @click="isImportModalOpen = false"
                 class="px-4 py-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-xl text-sm font-semibold text-gray-750 dark:text-gray-300 transition-colors"
               >
-                Cancel
+                {{ t('common.cancel') }}
               </button>
               <button
                 @click="confirmListenDirectoryImport"
                 class="px-5 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold shadow-md shadow-teal-500/10 transition-colors flex items-center gap-1.5"
               >
                 <Upload class="h-3.5 w-3.5" />
-                <span>Import Directory</span>
+                <span>{{ t('listen.importDirectory') }}</span>
               </button>
             </div>
           </div>
@@ -16166,11 +16169,10 @@ onUnmounted(() => {
       </div>
 
        <!-- Auto Finding Tab -->
-      <div v-show="activeTab === 'auto-finding'" class="space-y-6">
-        <div class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10">
-          <div
-            class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 sm:p-8 mb-8 shadow-sm relative overflow-hidden"
-          >
+      <div v-show="activeTab === 'auto-finding'" class="w-full max-w-full mx-auto px-0 pt-1 pb-16 space-y-6">
+        <div
+          class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 sm:p-8 mb-8 shadow-sm relative overflow-hidden"
+        >
             <!-- Background Decoration -->
             <div
               class="absolute -top-20 -right-20 w-40 h-40 bg-teal-500/5 dark:bg-teal-500/10 rounded-full blur-3xl pointer-events-none"
@@ -16187,12 +16189,12 @@ onUnmounted(() => {
                 <div class="lg:col-span-5 bg-gray-50/50 dark:bg-gray-900/40 border border-gray-150/45 dark:border-gray-850/40 p-5 rounded-2xl space-y-5">
                   <div class="flex items-center gap-2 pb-2 border-b border-gray-100 dark:border-gray-800">
                     <SlidersHorizontal class="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">Params Setup</h3>
+                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">{{ $t('autoFinding.paramsSetup') }}</h3>
                   </div>
 
                   <!-- Select Mode -->
                   <div class="space-y-2">
-                    <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">Search Target Mode</label>
+                    <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">{{ $t('autoFinding.searchTargetMode') }}</label>
                     <div
                       class="flex items-center gap-2 bg-white dark:bg-gray-800 border border-gray-150 dark:border-gray-850 p-1 rounded-xl"
                     >
@@ -16207,7 +16209,7 @@ onUnmounted(() => {
                             : 'text-gray-450 hover:text-gray-600 dark:hover:text-gray-300',
                         ]"
                       >
-                        Channel
+                        {{ $t('autoFinding.channel') }}
                       </button>
                       <button
                         @click="searchMode = 'user'"
@@ -16220,7 +16222,7 @@ onUnmounted(() => {
                             : 'text-gray-450 hover:text-gray-600 dark:hover:text-gray-300',
                         ]"
                       >
-                        User
+                        {{ $t('autoFinding.user') }}
                       </button>
                     </div>
                   </div>
@@ -16230,11 +16232,11 @@ onUnmounted(() => {
                     <div class="flex justify-between items-center">
                       <label
                         class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider"
-                        >Iterations Limit</label
+                        >{{ $t('autoFinding.iterationsLimit') }}</label
                       >
                       <span
                         class="text-[10px] font-mono font-bold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-2 py-0.5 rounded border border-teal-100/50 dark:border-teal-900/10"
-                        >Run Count: {{ numIterations }}</span
+                        >{{ $t('autoFinding.runCount', { count: numIterations }) }}</span
                       >
                     </div>
                     <input
@@ -16251,7 +16253,7 @@ onUnmounted(() => {
                 <div class="lg:col-span-7 space-y-5">
                   <div class="flex items-center gap-2">
                     <BotMessageSquare class="h-4 w-4 text-teal-650 dark:text-teal-400" />
-                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">Execute Search</h3>
+                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">{{ $t('autoFinding.executeSearch') }}</h3>
                   </div>
 
                   <!-- Input Form -->
@@ -16267,8 +16269,8 @@ onUnmounted(() => {
                       class="block w-full pl-14 pr-52 sm:pr-64 py-4 border border-gray-200/90 dark:border-gray-700/90 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
                       :placeholder="
                         searchMode === 'channel'
-                          ? 'Enter channel name (e.g. durov)'
-                          : 'Enter user name (e.g. user_id)'
+                          ? $t('autoFinding.enterChannelPlaceholder')
+                          : $t('autoFinding.enterUserPlaceholder')
                       "
                     />
                     <!-- Right Controls: Clear + Action Button -->
@@ -16279,8 +16281,8 @@ onUnmounted(() => {
                         @mousedown.prevent
                         @click="autoChannelName = ''"
                         class="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/60 rounded-xl transition-colors cursor-pointer flex items-center justify-center shrink-0"
-                        title="Clear input"
-                        aria-label="Clear input"
+                        :title="$t('autoFinding.clearInput')"
+                        :aria-label="$t('autoFinding.clearInput')"
                       >
                         <X class="w-4 h-4" />
                       </button>
@@ -16290,7 +16292,7 @@ onUnmounted(() => {
                         class="h-full px-5 sm:px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer shrink-0"
                       >
                         <Loader2 v-if="isAutoFinding" class="h-4 w-4 animate-spin mr-2" />
-                        {{ isAutoFinding ? "Finding..." : "Start Finding" }}
+                        {{ isAutoFinding ? $t('autoFinding.findingInProgress') : $t('autoFinding.startFinding') }}
                       </button>
                     </div>
                   </form>
@@ -16299,7 +16301,7 @@ onUnmounted(() => {
                   <div class="bg-teal-50/[0.18] dark:bg-teal-950/[0.08] p-4 rounded-2xl border border-teal-100/30 dark:border-teal-900/20 text-xs text-gray-500 dark:text-gray-450 flex items-start gap-3">
                     <Info class="h-4 w-4 text-teal-600 shrink-0 mt-0.5" />
                     <p class="leading-relaxed">
-                      Auto Sequence Finding automatically traces consecutive indices back-to-back to extract, translate, and synthesize an intelligence grid from available channels or individual users.
+                      {{ $t('autoFinding.guidanceDesc') }}
                     </p>
                   </div>
                 </div>
@@ -16310,7 +16312,7 @@ onUnmounted(() => {
               <div v-if="savedProfiles.channel.length > 0 || savedProfiles.user.length > 0" class="pt-6 border-t border-gray-100 dark:border-gray-700/50 space-y-4">
                 <div class="flex items-center gap-2">
                   <Database class="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                  <h4 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">Local Archives Directory</h4>
+                  <h4 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">{{ $t('autoFinding.localArchivesDirectory') }}</h4>
                 </div>
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -16318,7 +16320,7 @@ onUnmounted(() => {
                   <div v-if="savedProfiles.channel.length > 0" class="bg-gray-50/50 dark:bg-gray-900/30 p-4 rounded-2xl border border-gray-150/40 dark:border-gray-850/40 space-y-2.5">
                     <h5 class="text-[10px] font-black text-teal-650 dark:text-teal-400 uppercase tracking-wider flex items-center gap-1.5">
                       <span class="w-1.5 h-1.5 rounded-full bg-teal-500"></span>
-                      <span>Saved Channel Scrapes</span>
+                      <span>{{ $t('autoFinding.savedChannelScrapes') }}</span>
                     </h5>
                     <div class="flex flex-wrap gap-2">
                       <button 
@@ -16336,7 +16338,7 @@ onUnmounted(() => {
                   <div v-if="savedProfiles.user.length > 0" class="bg-gray-50/50 dark:bg-gray-900/30 p-4 rounded-2xl border border-gray-150/40 dark:border-gray-850/40 space-y-2.5">
                     <h5 class="text-[10px] font-black text-indigo-650 dark:text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
                       <span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
-                      <span>Saved User Scrapes</span>
+                      <span>{{ $t('autoFinding.savedUserScrapes') }}</span>
                     </h5>
                     <div class="flex flex-wrap gap-2">
                       <button 
@@ -16369,17 +16371,18 @@ onUnmounted(() => {
                   <h5
                     class="text-xs font-black text-teal-800 dark:text-teal-100 uppercase tracking-wider"
                   >
-                    Saved Final Analysis Insights
+                    {{ $t('autoFinding.savedFinalAnalysisInsights') }}
                   </h5>
                 </div>
               
                 <div class="flex items-center justify-between gap-4 mb-4 pb-2 border-b border-gray-100 dark:border-gray-800">
                     <h3 class="text-base font-extrabold text-gray-900 dark:text-gray-100">@{{ savedProfileName }}</h3>
-                    <button @click="handleSaveRemote(savedProfileName)" class="text-[10px] font-black bg-teal-600 text-white px-3.5 py-1.5 rounded-lg hover:bg-teal-700 shadow-sm cursor-pointer transition-colors">Save Remotely</button>
+                    <button @click="handleSaveRemote(savedProfileName)" class="text-[10px] font-black bg-teal-600 text-white px-3.5 py-1.5 rounded-lg hover:bg-teal-700 shadow-sm cursor-pointer transition-colors">{{ $t('autoFinding.saveRemotely') }}</button>
                 </div>
                 <div v-html="savedFinalTableHtml" class="prose-sm overflow-x-auto"></div>
               </div>
             </div>
+          </div>
            <!-- Floating Post Tool Widget -->
         <div
           v-show="activeTab === 'auto-finding' && isPostFetcherVisible"
@@ -16398,7 +16401,7 @@ onUnmounted(() => {
             @mousedown.prevent="startDrag($event, 'post')"
           >
             <h2 class="text-xs font-black uppercase tracking-wider text-teal-600 dark:text-teal-400">
-              Post Fetcher
+              {{ $t('autoFinding.postFetcher') }}
             </h2>
             <GripHorizontal class="h-3.5 w-3.5 text-teal-500 animate-pulse" />
           </div>
@@ -16408,14 +16411,14 @@ onUnmounted(() => {
               v-model="singlePostId"
               type="text"
               class="block w-full pl-3 pr-20 py-2 border border-gray-200 dark:border-gray-700 rounded-xl text-xs font-semibold bg-white dark:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
-              placeholder="Enter unique Post ID..."
+              :placeholder="$t('autoFinding.enterPostIdPlaceholder')"
             />
             <button
               type="submit"
               :disabled="isFetchingPost"
               class="absolute right-1 top-1 bottom-1 px-3.5 bg-teal-600 text-white rounded-lg text-[10px] font-extrabold hover:bg-teal-700 cursor-pointer disabled:opacity-50 transition-colors"
             >
-              {{ isFetchingPost ? "..." : "Fetch" }}
+              {{ isFetchingPost ? "..." : $t('autoFinding.fetch') }}
             </button>
           </form>
           <div
@@ -16438,7 +16441,7 @@ onUnmounted(() => {
                       {{
                         singlePost.data?.author ||
                         singlePost.data?.user ||
-                        "Anonymous"
+                        $t('autoFinding.anonymous')
                       }}
                     </h4>
                     <p
@@ -16468,7 +16471,7 @@ onUnmounted(() => {
                 >
                   <div class="flex items-center">
                     <Reply class="h-3 w-3 mr-1" />
-                    Reply to
+                    {{ $t('autoFinding.replyTo') }}
                   </div>
                   <span
                     v-if="
@@ -16529,7 +16532,7 @@ onUnmounted(() => {
                 v-if="singlePost.data?.contact"
                 class="mt-2 text-[10px] font-semibold p-2.5 bg-teal-500/[0.02] dark:bg-teal-950/[0.10] border border-teal-150/40 dark:border-teal-900/10 rounded-xl flex items-center text-teal-600 dark:text-teal-400"
               >
-                <Phone class="h-3.5 w-3.5 mr-1.5 text-teal-500" /> Contact Card Attached
+                <Phone class="h-3.5 w-3.5 mr-1.5 text-teal-500" /> {{ $t('autoFinding.contactCardAttached') }}
               </div>
 
               <!-- Post Reactions (Popup detail) -->
@@ -16553,16 +16556,16 @@ onUnmounted(() => {
               >
                 <span>{{
                   singlePost.data?.views != null
-                    ? formatViews(singlePost.data.views) + " views"
+                    ? $t('autoFinding.viewsCount', { count: formatViews(singlePost.data.views) })
                     : ""
                 }}</span>
                 <a
                   v-if="singlePost.url || singlePost.link"
                   :href="singlePost.url || singlePost.link"
                   target="_blank"
-                  class="text-teal-6s0 dark:text-teal-400 hover:underline flex items-center hover:text-teal-600 transition-colors"
+                  class="text-teal-600 dark:text-teal-400 hover:underline flex items-center hover:text-teal-600 transition-colors"
                 >
-                  View original <ExternalLink class="h-2.5 w-2.5 ml-1" />
+                  {{ $t('autoFinding.viewOriginal') }} <ExternalLink class="h-2.5 w-2.5 ml-1" />
                 </a>
               </div>
             </div>
@@ -16587,15 +16590,14 @@ onUnmounted(() => {
             </svg>
           </div>
         </div>
-      </div>
-    </div>
 
+        <!-- Empty State (Only shown in Auto Finding tab when no search/finding has executed) -->
         <div
           v-if="autoCells.length === 0 && !isAutoFinding"
-          class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10"
+          class="w-full"
         >
           <div
-            class="text-center py-20 sm:py-24 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-8 shadow-sm mb-8"
+            class="text-center py-20 sm:py-24 bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-8 shadow-sm mb-8"
           >
             <div
               class="inline-flex items-center justify-center w-20 h-20 rounded-3xl bg-teal-50 dark:bg-teal-950/40 mb-6 shadow-inner ring-4 ring-teal-500/10 border-2 border-teal-100 dark:border-teal-850"
@@ -16607,19 +16609,19 @@ onUnmounted(() => {
             <h2
               class="text-xl font-extrabold tracking-tight text-gray-900 dark:text-white mb-2"
             >
-              Auto Sequence Finding
+              {{ $t('autoFinding.emptyTitle') }}
             </h2>
             <p
               class="text-gray-400 dark:text-gray-500 text-xs font-semibold leading-relaxed max-w-lg mx-auto"
             >
-              Enter a channel or user handle above to automatically trace, analyze, and verify continuous posts consecutively.
+              {{ $t('autoFinding.emptyDesc') }}
             </p>
           </div>
         </div>
 
         <div
           v-else
-          class="max-w-[96rem] mx-auto px-4 sm:px-6 lg:px-8 xl:px-10 space-y-6 pb-20"
+          class="w-full space-y-6 pb-20"
         >
           <!-- Final Result Area -->
           <div
@@ -16635,13 +16637,13 @@ onUnmounted(() => {
               class="text-sm font-black text-gray-900 dark:text-white uppercase tracking-wider mb-4 flex items-center"
             >
               <CheckCircle2 class="h-4.5 w-4.5 mr-2 text-teal-600 dark:text-teal-400" />
-              Final Analysis Summary
+              {{ $t('autoFinding.finalAnalysisSummary') }}
             </h3>
             <div class="text-xs text-gray-500 dark:text-gray-400">
               <p class="font-semibold flex items-center gap-2">
-                <span>Iterations processed:</span>
+                <span>{{ $t('autoFinding.iterationsProcessed') }}</span>
                 <span class="font-mono text-xs font-black px-2 py-0.5 rounded-full bg-teal-50 dark:bg-teal-950/50 text-teal-600 dark:text-teal-400 border border-teal-100/30 dark:border-teal-900/30">
-                  {{ autoCells.filter((c) => c.status === "completed").length }} / {{ autoCells.length }} completed
+                  {{ $t('autoFinding.completedCount', { completed: autoCells.filter((c) => c.status === "completed").length, total: autoCells.length }) }}
                 </span>
               </p>
 
@@ -16650,7 +16652,7 @@ onUnmounted(() => {
                 class="mt-4 flex items-center text-teal-600 font-bold animate-pulse text-xs"
               >
                 <Loader2 class="h-3.5 w-3.5 mr-2 animate-spin text-teal-500" />
-                Synthesizing global timeline matrix...
+                {{ $t('autoFinding.synthesizingMatrix') }}
               </div>
 
               <div
@@ -16666,7 +16668,7 @@ onUnmounted(() => {
                   <h5
                     class="text-[10px] font-black text-teal-800 dark:text-teal-100 uppercase tracking-widest"
                   >
-                    Final Analysis Insights
+                    {{ $t('autoFinding.finalAnalysisInsights') }}
                   </h5>
                 </div>
                 <div v-html="finalTableHtml" class="prose-sm overflow-x-auto"></div>
@@ -16675,7 +16677,7 @@ onUnmounted(() => {
           </div>
 
           <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider pt-2">
-            Sequence Finding Cells & Logs
+            {{ $t('autoFinding.cellsAndLogs') }}
           </h3>
           <div
             v-for="cell in autoCells"
@@ -16687,7 +16689,7 @@ onUnmounted(() => {
               <span
                 class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-gray-50 dark:bg-gray-900/60 text-gray-550 dark:text-gray-400 border border-gray-150/40 dark:border-gray-800"
               >
-                Cell ID: {{ cell.id }}
+                {{ $t('autoFinding.cellId', { id: cell.id }) }}
                 <Loader2
                   v-if="cell.status === 'running'"
                   class="h-3 w-3 ml-1 animate-spin text-teal-500"
@@ -16695,12 +16697,12 @@ onUnmounted(() => {
                 <span
                   v-if="cell.status === 'error'"
                   class="ml-1 text-red-500 font-mono font-bold"
-                  >● Offline Error</span
+                  >{{ $t('autoFinding.offlineError') }}</span
                 >
                 <span
                   v-else-if="cell.status === 'completed'"
                   class="ml-1 text-emerald-500 font-mono font-bold"
-                  >● Verified</span
+                  >{{ $t('autoFinding.verified') }}</span
                 >
               </span>
             </div>
@@ -16726,7 +16728,7 @@ onUnmounted(() => {
                   class="text-[10px] font-black text-teal-700 dark:text-teal-400 uppercase tracking-widest mb-2 flex items-center gap-1"
                 >
                   <Bot class="h-3.5 w-3.5" />
-                  <span>Cognitive Intelligence Analysis</span>
+                  <span>{{ $t('autoFinding.cognitiveAnalysis') }}</span>
                 </h5>
                 <div
                   class="prose dark:prose-invert prose-xs text-xs text-gray-700 dark:text-gray-300 leading-relaxed max-w-none"
@@ -16743,7 +16745,7 @@ onUnmounted(() => {
                   class="text-[10px] font-black text-indigo-700 dark:text-indigo-400 uppercase tracking-widest mb-2 flex items-center gap-1"
                 >
                   <CheckCircle2 class="h-3.5 w-3.5" />
-                  <span>Sequence Verification Result</span>
+                  <span>{{ $t('autoFinding.sequenceVerificationResult') }}</span>
                 </h5>
                 <div
                   class="prose dark:prose-invert prose-xs text-xs text-gray-700 dark:text-gray-300 leading-relaxed max-w-none"
@@ -16769,35 +16771,35 @@ onUnmounted(() => {
                 <span class="p-1.5 rounded-xl bg-teal-500/10 text-teal-600 dark:text-teal-400">
                   <Network class="h-5 w-5" />
                 </span>
-                <span class="text-[10px] font-black text-teal-600 dark:text-teal-400 uppercase tracking-widest leading-none">Topology Mapping</span>
+                <span class="text-[10px] font-black text-teal-600 dark:text-teal-400 uppercase tracking-widest leading-none">{{ $t('network.topologyMapping') }}</span>
               </div>
-              <h2 class="text-xl md:text-2xl font-black text-gray-900 dark:text-white tracking-tight">Channel Connection Network</h2>
+              <h2 class="text-xl md:text-2xl font-black text-gray-900 dark:text-white tracking-tight">{{ $t('network.channelConnectionNetwork') }}</h2>
               <p class="text-xs text-gray-400 dark:text-gray-500 font-semibold max-w-xl">
-                Explore, map, and link Telegram channels and groups. Leverage force-directed layouts to analyze influence propagation and connection pathways.
+                {{ $t('network.networkDesc') }}
               </p>
             </div>
 
             <!-- Stats indicator -->
             <div class="flex items-center gap-6 text-[11px] font-semibold text-gray-400 dark:text-gray-500 shrink-0 self-start md:self-center border-t md:border-t-0 md:border-l border-gray-200/60 dark:border-gray-750 pt-4 md:pt-0 md:pl-6">
               <div class="space-y-1">
-                <p class="text-[10px] uppercase font-black tracking-wider text-teal-600 dark:text-teal-400 leading-none">Nodes Count</p>
+                <p class="text-[10px] uppercase font-black tracking-wider text-teal-600 dark:text-teal-400 leading-none">{{ $t('network.nodesCount') }}</p>
                 <p class="font-mono text-gray-900 dark:text-white font-bold text-base">{{ networkNodes.length }}</p>
               </div>
               <div class="space-y-1">
-                <p class="text-[10px] uppercase font-black tracking-wider text-teal-600 dark:text-teal-400 leading-none">Connections</p>
+                <p class="text-[10px] uppercase font-black tracking-wider text-teal-600 dark:text-teal-400 leading-none">{{ $t('network.connections') }}</p>
                 <p class="font-mono text-gray-900 dark:text-white font-bold text-base">{{ networkEdges.length }}</p>
               </div>
               <div class="space-y-1">
-                <p class="text-[10px] uppercase font-black tracking-wider text-teal-600 dark:text-teal-400 leading-none">Layout State</p>
+                <p class="text-[10px] uppercase font-black tracking-wider text-teal-600 dark:text-teal-400 leading-none">{{ $t('network.layoutState') }}</p>
                 <p class="font-mono text-gray-900 dark:text-white font-bold text-base">
                   <span v-if="physicsAlpha > 0.005" class="text-green-500 flex items-center gap-1">
                     <span class="relative flex h-2 w-2">
                       <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
                       <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
                     </span>
-                    Settling...
+                    {{ $t('network.settling') }}
                   </span>
-                  <span v-else class="text-gray-400 dark:text-gray-500">Stable</span>
+                  <span v-else class="text-gray-400 dark:text-gray-500">{{ $t('network.stable') }}</span>
                 </p>
               </div>
             </div>
@@ -16816,13 +16818,13 @@ onUnmounted(() => {
             <div class="flex items-center justify-between px-1 -mb-2">
               <span class="text-xs font-black text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
                 <SlidersHorizontal class="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
-                Controls
+                {{ $t('network.controls') }}
               </span>
               <button
                 type="button"
                 @click="isNetworkControlsOpen = false"
                 class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors cursor-pointer"
-                title="Hide controls sidebar to widen canvas"
+                :title="$t('network.hideControlsTitle')"
               >
                 <PanelLeftClose class="w-4 h-4" />
               </button>
@@ -16832,7 +16834,7 @@ onUnmounted(() => {
             <div class="bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm space-y-4">
               <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider flex items-center gap-1.5">
                 <Plus class="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                <span>Add Channel / Group</span>
+                <span>{{ $t('network.addChannelGroup') }}</span>
               </h3>
               
               <div class="space-y-2">
@@ -16840,7 +16842,7 @@ onUnmounted(() => {
                   <input
                     v-model="networkSearchTerm"
                     type="text"
-                    placeholder="Enter username (e.g. @durov)"
+                    :placeholder="$t('network.enterUsernamePlaceholder')"
                     class="w-full pl-3 pr-10 py-2 text-xs font-semibold bg-gray-50 dark:bg-gray-900/60 border border-gray-200 dark:border-gray-750 rounded-xl focus:outline-none focus:ring-1 focus:ring-teal-500 placeholder-gray-400 dark:placeholder-gray-600"
                     @keydown.enter="addNetworkNode(networkSearchTerm)"
                   />
@@ -16852,7 +16854,7 @@ onUnmounted(() => {
                   </button>
                 </div>
                 <p class="text-[10px] text-gray-400 dark:text-gray-500 font-semibold leading-relaxed">
-                  Tip: Adding a node when an existing node is selected will connect them automatically!
+                  {{ $t('network.addNodeTip') }}
                 </p>
               </div>
             </div>
@@ -16861,7 +16863,7 @@ onUnmounted(() => {
             <div class="bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm space-y-4">
               <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider flex items-center gap-1.5">
                 <SlidersHorizontal class="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                <span>Interaction Tool</span>
+                <span>{{ $t('network.interactionTool') }}</span>
               </h3>
 
               <div class="grid grid-cols-3 gap-2">
@@ -16875,7 +16877,7 @@ onUnmounted(() => {
                   ]"
                 >
                   <Maximize2 class="h-4 w-4" />
-                  Drag / Select
+                  {{ $t('network.dragSelect') }}
                 </button>
                 <button
                   @click="networkMode = 'link'"
@@ -16887,7 +16889,7 @@ onUnmounted(() => {
                   ]"
                 >
                   <Link class="h-4 w-4" />
-                  Link Nodes
+                  {{ $t('network.linkNodes') }}
                 </button>
                 <button
                   @click="networkMode = 'delete'"
@@ -16899,25 +16901,25 @@ onUnmounted(() => {
                   ]"
                 >
                   <Trash2 class="h-4 w-4" />
-                  Delete Node
+                  {{ $t('network.deleteNode') }}
                 </button>
               </div>
 
               <div class="text-[10px] text-gray-400 dark:text-gray-500 leading-relaxed font-semibold">
-                <span v-if="networkMode === 'drag'">• Click & Drag nodes to reposition them. Scroll mouse wheel to Zoom. Drag background to Pan.</span>
-                <span v-if="networkMode === 'link'">• Click a source node, then click a target node to establish a new direct network edge.</span>
-                <span v-if="networkMode === 'delete'">• Click any node to instantly prune it and all its connections from the network.</span>
+                <span v-if="networkMode === 'drag'">{{ $t('network.modeDragHint') }}</span>
+                <span v-if="networkMode === 'link'">{{ $t('network.modeLinkHint') }}</span>
+                <span v-if="networkMode === 'delete'">{{ $t('network.modeDeleteHint') }}</span>
               </div>
 
               <!-- Manual Link Editor inside Interaction Tool -->
               <div class="space-y-2.5 pt-3 border-t border-gray-150/50 dark:border-gray-750/50">
-                <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Connect Selected Node</h5>
+                <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">{{ $t('network.connectSelectedNode') }}</h5>
                 <div v-if="selectedNetworkNode" class="flex gap-2 w-full min-w-0">
                   <select
                     v-model="manualConnectTargetId"
                     class="flex-1 min-w-0 w-full max-w-full px-2.5 py-1.5 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-750 rounded-xl text-[11px] font-semibold focus:outline-none focus:ring-1 focus:ring-teal-500 text-gray-700 dark:text-gray-300 truncate"
                   >
-                    <option value="" disabled>Select target node...</option>
+                    <option value="" disabled>{{ $t('network.selectTargetNode') }}</option>
                     <option 
                       v-for="node in networkNodes.filter(n => n.id !== selectedNetworkNode?.id)" 
                       :key="node.id" 
@@ -16931,11 +16933,11 @@ onUnmounted(() => {
                     class="px-2.5 py-1.5 bg-teal-500 hover:bg-teal-600 text-white rounded-xl text-[11px] font-bold transition-colors shrink-0 cursor-pointer"
                     :disabled="!manualConnectTargetId"
                   >
-                    Link
+                    {{ $t('network.link') }}
                   </button>
                 </div>
                 <div v-else class="text-[10px] text-gray-400 dark:text-gray-500 italic leading-snug">
-                  Select a node on the canvas to link it to another node manually.
+                  {{ $t('network.selectNodeToLinkHint') }}
                 </div>
               </div>
             </div>
@@ -16945,7 +16947,7 @@ onUnmounted(() => {
               <div class="flex items-center justify-between">
                 <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider flex items-center gap-1.5">
                   <SlidersHorizontal class="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                  <span>Physics Layout</span>
+                  <span>{{ $t('network.physicsLayout') }}</span>
                 </h3>
                 <button 
                   @click="isGraphPhysicsRunning = !isGraphPhysicsRunning"
@@ -16956,7 +16958,7 @@ onUnmounted(() => {
                       : 'bg-gray-100 dark:bg-gray-900 text-gray-400 dark:text-gray-500'
                   ]"
                 >
-                  {{ isGraphPhysicsRunning ? 'Running' : 'Paused' }}
+                  {{ isGraphPhysicsRunning ? $t('network.running') : $t('network.paused') }}
                 </button>
               </div>
 
@@ -16964,7 +16966,7 @@ onUnmounted(() => {
                 <!-- Repulsion -->
                 <div class="space-y-1">
                   <div class="flex justify-between text-[10px] font-bold">
-                    <span class="text-gray-500 dark:text-gray-400">Node Repulsion</span>
+                    <span class="text-gray-500 dark:text-gray-400">{{ $t('network.nodeRepulsion') }}</span>
                     <span class="font-mono text-gray-900 dark:text-white">{{ repulsionStrength }}</span>
                   </div>
                   <input
@@ -16981,7 +16983,7 @@ onUnmounted(() => {
                 <!-- Link Distance -->
                 <div class="space-y-1">
                   <div class="flex justify-between text-[10px] font-bold">
-                    <span class="text-gray-500 dark:text-gray-400">Link Distance</span>
+                    <span class="text-gray-500 dark:text-gray-400">{{ $t('network.linkDistance') }}</span>
                     <span class="font-mono text-gray-900 dark:text-white">{{ linkDistance }}px</span>
                   </div>
                   <input
@@ -16998,7 +17000,7 @@ onUnmounted(() => {
                 <!-- Gravity -->
                 <div class="space-y-1">
                   <div class="flex justify-between text-[10px] font-bold">
-                    <span class="text-gray-500 dark:text-gray-400">Center Gravity</span>
+                    <span class="text-gray-500 dark:text-gray-400">{{ $t('network.centerGravity') }}</span>
                     <span class="font-mono text-gray-900 dark:text-white">{{ gravityStrength.toFixed(3) }}</span>
                   </div>
                   <input
@@ -17015,7 +17017,7 @@ onUnmounted(() => {
                 <!-- Spring Stiffness -->
                 <div class="space-y-1">
                   <div class="flex justify-between text-[10px] font-bold">
-                    <span class="text-gray-500 dark:text-gray-400">Spring Stiffness</span>
+                    <span class="text-gray-500 dark:text-gray-400">{{ $t('network.springStiffness') }}</span>
                     <span class="font-mono text-gray-900 dark:text-white">{{ springStrength.toFixed(3) }}</span>
                   </div>
                   <input
@@ -17032,7 +17034,7 @@ onUnmounted(() => {
                 <!-- Layout Spread for 300+ nodes -->
                 <div class="space-y-1.5 pt-1 border-t border-gray-100 dark:border-gray-700/60">
                   <div class="flex justify-between text-[10px] font-bold">
-                    <span class="text-gray-500 dark:text-gray-400">Layout Spread</span>
+                    <span class="text-gray-500 dark:text-gray-400">{{ $t('network.layoutSpread') }}</span>
                     <span class="font-mono text-teal-600 dark:text-teal-400">{{ layoutSpread.toFixed(1) }}x</span>
                   </div>
                   <input
@@ -17049,19 +17051,19 @@ onUnmounted(() => {
                       @click="updateLayoutSpread(0.9)"
                       :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', layoutSpread === 0.9 ? 'bg-teal-500 text-white shadow-xs' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200']"
                     >
-                      Compact
+                      {{ $t('network.compact') }}
                     </button>
                     <button
                       @click="updateLayoutSpread(1.6)"
                       :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', layoutSpread === 1.6 ? 'bg-teal-500 text-white shadow-xs' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200']"
                     >
-                      Balanced
+                      {{ $t('network.balanced') }}
                     </button>
                     <button
                       @click="updateLayoutSpread(2.4)"
                       :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', layoutSpread === 2.4 ? 'bg-teal-500 text-white shadow-xs' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200']"
                     >
-                      Spacious
+                      {{ $t('network.spacious') }}
                     </button>
                   </div>
                 </div>
@@ -17069,7 +17071,7 @@ onUnmounted(() => {
                 <!-- Label Density -->
                 <div class="space-y-1.5 pt-1 border-t border-gray-100 dark:border-gray-700/60">
                   <div class="flex justify-between text-[10px] font-bold">
-                    <span class="text-gray-500 dark:text-gray-400">Label Visibility</span>
+                    <span class="text-gray-500 dark:text-gray-400">{{ $t('network.labelVisibility') }}</span>
                     <span class="font-mono text-gray-900 dark:text-white capitalize">{{ labelDensity }}</span>
                   </div>
                   <div class="grid grid-cols-3 gap-1 p-0.5 bg-gray-100 dark:bg-gray-900 rounded-xl">
@@ -17077,19 +17079,19 @@ onUnmounted(() => {
                       @click="labelDensity = 'smart'"
                       :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', labelDensity === 'smart' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs' : 'text-gray-500 hover:text-gray-700']"
                     >
-                      Smart
+                      {{ $t('network.smart') }}
                     </button>
                     <button
                       @click="labelDensity = 'hover'"
                       :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', labelDensity === 'hover' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs' : 'text-gray-500 hover:text-gray-700']"
                     >
-                      Hover
+                      {{ $t('network.hover') }}
                     </button>
                     <button
                       @click="labelDensity = 'all'"
                       :class="['py-1 text-[9px] font-bold rounded-lg transition-colors text-center', labelDensity === 'all' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs' : 'text-gray-500 hover:text-gray-700']"
                     >
-                      All
+                      {{ $t('network.all') }}
                     </button>
                   </div>
                 </div>
@@ -17100,32 +17102,32 @@ onUnmounted(() => {
             <div class="bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm space-y-3 shrink-0">
               <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider flex items-center gap-1.5">
                 <Network class="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                <span>Connection Colors</span>
+                <span>{{ $t('network.connectionColors') }}</span>
               </h3>
               
               <div class="space-y-2.5 pt-1">
                 <div class="flex items-center justify-between text-[11px] font-bold">
                   <div class="flex items-center gap-2">
                     <span class="w-2.5 h-2.5 rounded bg-indigo-500 dark:bg-indigo-400"></span>
-                    <span class="text-gray-700 dark:text-gray-300">Incoming (IN)</span>
+                    <span class="text-gray-700 dark:text-gray-300">{{ $t('network.incomingIn') }}</span>
                   </div>
-                  <span class="text-[9px] font-mono font-semibold text-gray-400 dark:text-gray-500">From</span>
+                  <span class="text-[9px] font-mono font-semibold text-gray-400 dark:text-gray-500">{{ $t('network.from') }}</span>
                 </div>
                 
                 <div class="flex items-center justify-between text-[11px] font-bold">
                   <div class="flex items-center gap-2">
                     <span class="w-2.5 h-2.5 rounded bg-teal-500 dark:bg-teal-400"></span>
-                    <span class="text-gray-700 dark:text-gray-300">Outgoing (OUT)</span>
+                    <span class="text-gray-700 dark:text-gray-300">{{ $t('network.outgoingOut') }}</span>
                   </div>
-                  <span class="text-[9px] font-mono font-semibold text-gray-400 dark:text-gray-500">TO</span>
+                  <span class="text-[9px] font-mono font-semibold text-gray-400 dark:text-gray-500">{{ $t('network.to') }}</span>
                 </div>
 
                 <div class="flex items-center justify-between text-[11px] font-bold">
                   <div class="flex items-center gap-2">
-                    <span class="w-2.5 h-2.5 rounded bg-pink-500 dark:bg-pink-400"></span>
-                    <span class="text-gray-700 dark:text-gray-300">Two-way (BOTH)</span>
+                    <span class="w-2.5 h-2.5 rounded bg-pink-500 dark:pink-400"></span>
+                    <span class="text-gray-700 dark:text-gray-300">{{ $t('network.twoWayBoth') }}</span>
                   </div>
-                  <span class="text-[9px] font-mono font-semibold text-gray-400 dark:text-gray-500">Bid</span>
+                  <span class="text-[9px] font-mono font-semibold text-gray-400 dark:text-gray-500">{{ $t('network.bid') }}</span>
                 </div>
               </div>
             </div>
@@ -17134,17 +17136,17 @@ onUnmounted(() => {
             <div class="bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/80 dark:border-gray-750 shadow-sm space-y-3 shrink-0">
               <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider flex items-center gap-1.5">
                 <Network class="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                <span>Connections List</span>
+                <span>{{ $t('network.connectionsList') }}</span>
               </h3>
 
               <div v-if="selectedNetworkNode" class="space-y-3">
                 <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest flex items-center justify-between">
-                  <span>Connections ({{ selectedFilteredEdges.length }})</span>
+                  <span>{{ $t('network.connectionsWithCount', { count: selectedFilteredEdges.length }) }}</span>
                   <span v-if="connectionFilter !== 'all'" class="text-[9px] font-bold px-1.5 py-0.5 rounded-full capitalize"
                     :class="connectionFilter === 'both' ? 'bg-pink-100 dark:bg-pink-900/40 text-pink-600 dark:text-pink-400' :
                             connectionFilter === 'out' ? 'bg-teal-100 dark:bg-teal-900/40 text-teal-600 dark:text-teal-400' :
                             'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400'">
-                    {{ connectionFilter === 'both' ? 'Mutual only' : connectionFilter + ' only' }}
+                    {{ connectionFilter === 'both' ? $t('network.mutualOnly') : $t('network.typeOnly', { type: connectionFilter }) }}
                   </span>
                 </h5>
 
@@ -17158,7 +17160,7 @@ onUnmounted(() => {
                       <span 
                         class="w-2 h-2 rounded-full shrink-0" 
                         :class="edge.type === 'both' ? 'bg-pink-500' : edge.type === 'out' ? 'bg-teal-500' : 'bg-indigo-500'"
-                        :title="edge.type === 'both' ? 'Mutual connection (both ways)' : edge.type === 'out' ? 'Outgoing connection (forwarded to)' : 'Incoming connection (forwarded from)'"
+                        :title="edge.type === 'both' ? $t('network.mutualConnTooltip') : edge.type === 'out' ? $t('network.outgoingConnTooltip') : $t('network.incomingConnTooltip')"
                       ></span>
                       <span class="text-gray-600 dark:text-gray-400 truncate max-w-[120px]" :title="edge.source === selectedNetworkNode?.id ? edge.target : edge.source">
                         {{ edge.source === selectedNetworkNode?.id ? edge.target : edge.source }}
@@ -17167,7 +17169,7 @@ onUnmounted(() => {
                     <button
                       @click="removeNetworkEdge(edge.source, edge.target)"
                       class="p-1 text-gray-400 hover:text-red-500 transition-colors cursor-pointer"
-                      title="Remove link"
+                      :title="$t('network.removeLink')"
                     >
                       <Trash2 class="h-3.5 w-3.5" />
                     </button>
@@ -17177,12 +17179,12 @@ onUnmounted(() => {
                     v-if="selectedFilteredEdges.length === 0"
                     class="text-[10px] text-gray-400 dark:text-gray-500 italic p-4 text-center border border-dashed border-gray-200 dark:border-gray-750 rounded-2xl"
                   >
-                    {{ connectionFilter !== 'all' ? `No ${connectionFilter === 'both' ? 'mutual' : connectionFilter} connections found.` : 'No active connections.' }}
+                    {{ connectionFilter !== 'all' ? $t('network.noTypeConnections', { type: connectionFilter === 'both' ? $t('network.mutualOnly') : connectionFilter }) : $t('network.noActiveConnections') }}
                   </div>
                 </div>
               </div>
               <div v-else class="text-[10px] text-gray-400 dark:text-gray-500 italic p-4 text-center border border-dashed border-gray-200 dark:border-gray-750 rounded-2xl">
-                Select a node to view its active connections.
+                {{ $t('network.selectNodeViewConnections') }}
               </div>
             </div>
 
@@ -17225,11 +17227,11 @@ onUnmounted(() => {
                     type="button"
                     @click.stop="isNetworkControlsOpen = !isNetworkControlsOpen"
                     :class="['px-2.5 py-1.5 rounded-2xl border text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-lg backdrop-blur-md', isNetworkControlsOpen ? 'bg-white/95 dark:bg-gray-900/95 border-gray-150 dark:border-gray-800 text-gray-600 dark:text-gray-300 hover:text-teal-600' : 'bg-teal-600 text-white border-teal-600 shadow-teal-500/20 font-black']"
-                    :title="isNetworkControlsOpen ? 'Hide Controls Sidebar (widen canvas)' : 'Show Controls Sidebar'"
+                    :title="isNetworkControlsOpen ? $t('network.hideControlsTitle') : $t('network.showControlsTitle')"
                   >
                     <PanelLeftClose v-if="isNetworkControlsOpen" class="w-3.5 h-3.5" />
                     <PanelLeft v-else class="w-3.5 h-3.5" />
-                    <span class="hidden md:inline">{{ isNetworkControlsOpen ? 'Controls' : 'Show Controls' }}</span>
+                    <span class="hidden md:inline">{{ isNetworkControlsOpen ? $t('network.controls') : $t('network.showControls') }}</span>
                   </button>
 
                   <!-- Connection Filter Pills -->
@@ -17242,39 +17244,39 @@ onUnmounted(() => {
                     type="button"
                     @click.stop="setConnectionFilter('all')"
                     :class="['px-2.5 py-1 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer', connectionFilter === 'all' ? 'bg-gray-900 text-white dark:bg-white dark:text-gray-900 shadow-xs' : 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300']"
-                    title="Show all connections"
+                    :title="$t('network.showAllConnections')"
                   >
-                    <span>All</span>
+                    <span>{{ $t('common.all') }}</span>
                     <span class="text-[9px] opacity-75 font-mono">({{ filterCounts.all }})</span>
                   </button>
                   <button
                     type="button"
                     @click.stop="setConnectionFilter('both')"
                     :class="['px-2.5 py-1 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer', connectionFilter === 'both' ? 'bg-pink-500 text-white shadow-xs font-black' : 'text-pink-600 dark:text-pink-400 hover:bg-pink-50 dark:hover:bg-pink-950/40']"
-                    title="Filter mutual two-way connections (both directions)"
+                    :title="$t('network.filterMutualDesc')"
                   >
                     <span class="w-1.5 h-1.5 rounded-full bg-pink-400"></span>
-                    <span>Mutual</span>
+                    <span>{{ $t('network.mutual') }}</span>
                     <span class="text-[9px] opacity-80 font-mono">({{ filterCounts.both }})</span>
                   </button>
                   <button
                     type="button"
                     @click.stop="setConnectionFilter('out')"
                     :class="['px-2.5 py-1 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer', connectionFilter === 'out' ? 'bg-teal-500 text-white shadow-xs font-black' : 'text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40']"
-                    title="Filter outgoing connections (forwarded to)"
+                    :title="$t('network.filterOutDesc')"
                   >
                     <span class="w-1.5 h-1.5 rounded-full bg-teal-400"></span>
-                    <span>Out</span>
+                    <span>{{ $t('network.out') }}</span>
                     <span class="text-[9px] opacity-80 font-mono">({{ filterCounts.out }})</span>
                   </button>
                   <button
                     type="button"
                     @click.stop="setConnectionFilter('in')"
                     :class="['px-2.5 py-1 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer', connectionFilter === 'in' ? 'bg-indigo-500 text-white shadow-xs font-black' : 'text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40']"
-                    title="Filter incoming connections (forwarded from)"
+                    :title="$t('network.filterInDesc')"
                   >
                     <span class="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
-                    <span>In</span>
+                    <span>{{ $t('network.in') }}</span>
                     <span class="text-[9px] opacity-80 font-mono">({{ filterCounts.in }})</span>
                   </button>
 
@@ -17286,7 +17288,7 @@ onUnmounted(() => {
                       type="button"
                       @click.stop="selectedNetworkNode = null"
                       class="text-gray-400 hover:text-red-500 text-xs px-1 cursor-pointer font-bold"
-                      title="Clear node focus (view whole network)"
+                      :title="$t('network.clearNodeFocus')"
                     >
                       ×
                     </button>
@@ -17303,7 +17305,7 @@ onUnmounted(() => {
                       <input
                         v-model="networkNodeSearch"
                         type="text"
-                        placeholder="Jump to node..."
+                        :placeholder="$t('network.jumpToNodePlaceholder')"
                         class="w-24 sm:w-32 text-[10px] bg-transparent focus:outline-hidden text-gray-800 dark:text-gray-200 placeholder-gray-400"
                       />
                       <button
@@ -17328,7 +17330,7 @@ onUnmounted(() => {
                       >
                         <span class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: n.color }"></span>
                         <span class="font-bold truncate text-gray-800 dark:text-gray-200">{{ n.displayName || n.name }}</span>
-                        <span v-if="n.degree" class="text-[9px] font-mono text-gray-400 ml-auto">{{ n.degree }} links</span>
+                        <span v-if="n.degree" class="text-[9px] font-mono text-gray-400 ml-auto">{{ $t('network.linksCount', { count: n.degree }) }}</span>
                       </button>
                     </div>
                   </div>
@@ -17337,17 +17339,17 @@ onUnmounted(() => {
                   <button
                     @click="organizeConcentricOrbits"
                     class="px-2.5 py-1.5 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-2xl shadow-lg border border-gray-150 dark:border-gray-800 text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40 text-[10px] font-bold transition-all flex items-center gap-1.5"
-                    title="Organize into clean concentric orbits by connection type"
+                    :title="$t('network.orbitsTitle')"
                   >
                     <Orbit class="h-3.5 w-3.5" />
-                    <span class="hidden sm:inline">Orbits</span>
+                    <span class="hidden sm:inline">{{ $t('network.orbits') }}</span>
                   </button>
 
                   <!-- Focus Center Hub button -->
                   <button
                     @click="focusHub"
                     class="p-2 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-2xl shadow-lg border border-gray-150 dark:border-gray-800 text-gray-600 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 transition-all"
-                    title="Center & focus view on main hub"
+                    :title="$t('network.focusHubTitle')"
                   >
                     <Target class="h-3.5 w-3.5" />
                   </button>
@@ -17357,9 +17359,9 @@ onUnmounted(() => {
                     type="button"
                     @click.stop="isNetworkInspectorOpen = !isNetworkInspectorOpen"
                     :class="['px-2.5 py-1.5 rounded-2xl border text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-lg backdrop-blur-md', isNetworkInspectorOpen ? 'bg-white/95 dark:bg-gray-900/95 border-gray-150 dark:border-gray-800 text-gray-600 dark:text-gray-300 hover:text-teal-600' : 'bg-teal-600 text-white border-teal-600 shadow-teal-500/20 font-black']"
-                    :title="isNetworkInspectorOpen ? 'Hide Inspector Sidebar (widen canvas)' : 'Show Inspector Sidebar'"
+                    :title="isNetworkInspectorOpen ? $t('network.hideInspectorTitle') : $t('network.showInspectorTitle')"
                   >
-                    <span class="hidden md:inline">{{ isNetworkInspectorOpen ? 'Inspector' : 'Show Inspector' }}</span>
+                    <span class="hidden md:inline">{{ isNetworkInspectorOpen ? $t('network.inspector') : $t('network.showInspector') }}</span>
                     <PanelRightClose v-if="isNetworkInspectorOpen" class="w-3.5 h-3.5" />
                     <PanelRightOpen v-else class="w-3.5 h-3.5" />
                   </button>
@@ -17371,21 +17373,21 @@ onUnmounted(() => {
                 <button
                   @click="zoom = Math.min(zoom * 1.2, 5.0)"
                   class="p-2.5 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-lg border border-gray-150 dark:border-gray-800 text-gray-600 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 transition-all"
-                  title="Zoom In"
+                  :title="$t('network.zoomIn')"
                 >
                   <ZoomIn class="h-4 w-4" />
                 </button>
                 <button
                   @click="zoom = Math.max(zoom * 0.8, 0.05)"
                   class="p-2.5 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-lg border border-gray-150 dark:border-gray-800 text-gray-600 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 transition-all"
-                  title="Zoom Out"
+                  :title="$t('network.zoomOut')"
                 >
                   <ZoomOut class="h-4 w-4" />
                 </button>
                 <button
                   @click="resetGraphZoom"
                   class="p-2.5 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-lg border border-gray-150 dark:border-gray-800 text-gray-600 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 transition-all"
-                  title="Reset Zoom & Center"
+                  :title="$t('network.resetZoomCenter')"
                 >
                   <Maximize2 class="h-4 w-4" />
                 </button>
@@ -17393,14 +17395,14 @@ onUnmounted(() => {
                   v-if="networkNodes.some(n => n.isPinned)"
                   @click="unpinAllNodes"
                   class="p-2.5 bg-amber-50/95 dark:bg-amber-950/95 backdrop-blur-md rounded-xl shadow-lg border border-amber-200 dark:border-amber-800 text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 transition-all"
-                  title="Unpin All Nodes (release fixed layout positions)"
+                  :title="$t('network.unpinAllNodes')"
                 >
                   <Pin class="h-4 w-4 fill-amber-500" />
                 </button>
                 <button
                   @click="clearNetworkGraph"
                   class="p-2.5 bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-lg border border-gray-150 dark:border-gray-800 text-red-500 hover:bg-red-50/20 transition-all"
-                  title="Clear Graph"
+                  :title="$t('network.clearGraph')"
                 >
                   <Trash2 class="h-4 w-4" />
                 </button>
@@ -17409,10 +17411,10 @@ onUnmounted(() => {
               <!-- HUD Bottom Info -->
               <div class="absolute bottom-4 left-4 right-4 flex items-center justify-between pointer-events-none z-10">
                 <div class="px-3 py-1.5 bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm rounded-xl text-[9px] text-gray-400 dark:text-gray-500 font-bold border border-gray-150 dark:border-gray-800 uppercase tracking-wider">
-                  Zoom: {{ (zoom * 100).toFixed(0) }}% | Pan: ({{ panX.toFixed(0) }}, {{ panY.toFixed(0) }})
+                  {{ $t('network.zoom') }}: {{ (zoom * 100).toFixed(0) }}% | {{ $t('network.pan') }}: ({{ panX.toFixed(0) }}, {{ panY.toFixed(0) }})
                 </div>
                 <div class="px-3 py-1.5 bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm rounded-xl text-[9px] text-gray-400 dark:text-gray-500 font-bold border border-gray-150 dark:border-gray-800 uppercase tracking-wider">
-                  Mouse: ({{ mouseX.toFixed(0) }}, {{ mouseY.toFixed(0) }})
+                  {{ $t('network.mouse') }}: ({{ mouseX.toFixed(0) }}, {{ mouseY.toFixed(0) }})
                 </div>
               </div>
             </div>
@@ -17445,7 +17447,7 @@ onUnmounted(() => {
                           <span v-else>{{ getSafeInitial(selectedNetworkNode.displayName) }}</span>
                         </div>
                         <span class="absolute -bottom-1.5 -right-1.5 px-2 py-0.5 bg-teal-500 text-white rounded-lg text-[8px] font-black uppercase tracking-wider">
-                          Active
+                          {{ $t('network.activeBadge') }}
                         </span>
                       </div>
 
@@ -17470,7 +17472,7 @@ onUnmounted(() => {
                             ? 'bg-amber-50/75 dark:bg-amber-950/40 border-amber-200 dark:border-amber-900/30 text-amber-600 dark:text-amber-400'
                             : 'bg-gray-50/75 dark:bg-gray-850/40 border-gray-200 dark:border-gray-750/30 text-gray-600 dark:text-gray-400'
                         ]"
-                        :title="selectedNetworkNode.isPinned ? 'Unpin node layout position' : 'Pin node layout position'"
+                        :title="selectedNetworkNode.isPinned ? $t('network.unpinNodeTitle') : $t('network.pinNodeTitle')"
                       >
                         <Pin class="h-4 w-4" :class="[selectedNetworkNode.isPinned ? 'fill-amber-500 text-amber-500' : '']" />
                       </button>
@@ -17479,7 +17481,7 @@ onUnmounted(() => {
                       <button
                         @click="searchOnGoogle(`site:t.me ${selectedNetworkNode.id}`)"
                         class="shrink-0 p-2.5 bg-blue-50/75 dark:bg-blue-950/40 hover:bg-blue-100 dark:hover:bg-blue-900/60 border border-blue-100 dark:border-blue-900/30 text-blue-600 dark:text-blue-400 rounded-xl transition-all cursor-pointer flex items-center justify-center shadow-sm hover:shadow"
-                        title="Search channel on Google"
+                        :title="$t('network.searchChannelGoogle')"
                       >
                         <Globe class="h-4 w-4" />
                       </button>
@@ -17488,7 +17490,7 @@ onUnmounted(() => {
                       <button
                         @click="addChannelToListenDirectory(selectedNetworkNode.displayName, selectedNetworkNode.id)"
                         class="shrink-0 p-2.5 bg-purple-50/75 dark:bg-purple-950/40 hover:bg-purple-100 dark:hover:bg-purple-900/60 border border-purple-100 dark:border-purple-900/30 text-purple-600 dark:text-purple-400 rounded-xl transition-all cursor-pointer flex items-center justify-center shadow-sm hover:shadow"
-                        title="Add to Listen Directory"
+                        :title="$t('network.addToListenDirectory')"
                       >
                         <Radio class="h-4 w-4" />
                       </button>
@@ -17497,7 +17499,7 @@ onUnmounted(() => {
                       <button
                         @click="activeTab = 'explorer'; channelName = selectedNetworkNode.id; searchChannel()"
                         class="shrink-0 p-2.5 bg-teal-50/75 dark:bg-teal-950/40 hover:bg-teal-100 dark:hover:bg-teal-900/60 border border-teal-100 dark:border-teal-900/30 text-teal-600 dark:text-teal-400 rounded-xl transition-all cursor-pointer flex items-center justify-center shadow-sm hover:shadow"
-                        title="Jump to Explorer & Search"
+                        :title="$t('network.jumpToExplorer')"
                       >
                         <Search class="h-4 w-4" />
                       </button>
@@ -17506,7 +17508,7 @@ onUnmounted(() => {
                       <button
                         @click="isNetworkInspectorOpen = false"
                         class="shrink-0 p-2.5 bg-gray-50 dark:bg-gray-700/50 hover:bg-gray-100 dark:hover:bg-gray-700 border border-gray-200 dark:border-gray-600 text-gray-500 dark:text-gray-400 rounded-xl transition-all cursor-pointer flex items-center justify-center shadow-sm hover:shadow"
-                        title="Collapse Inspector (maximize canvas width)"
+                        :title="$t('network.collapseInspectorTitle')"
                       >
                         <PanelRightClose class="h-4 w-4" />
                       </button>
@@ -17515,11 +17517,11 @@ onUnmounted(() => {
 
                   <!-- Channel Metadata Display Area -->
                   <div class="space-y-2">
-                    <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">Channel Metadata</h5>
+                    <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">{{ $t('network.channelMetadata') }}</h5>
                     
                     <div v-if="isFetchingSelectedNodeMetadata" class="bg-teal-500/5 border border-teal-500/10 rounded-2xl p-4 flex items-center justify-center gap-2 text-[11px] text-teal-600 dark:text-teal-400 font-bold">
                       <LoaderCircle class="h-4 w-4 animate-spin text-teal-500" />
-                      <span>Loading channel metadata...</span>
+                      <span>{{ $t('network.loadingMetadata') }}</span>
                     </div>
 
                     <div v-else-if="selectedNetworkNode.metadata" class="space-y-2.5">
@@ -17527,19 +17529,19 @@ onUnmounted(() => {
                         {{ selectedNetworkNode.metadata.description || selectedNetworkNode.metadata.about }}
                       </div>
                       <div v-else class="text-[11px] text-gray-400 dark:text-gray-500 italic px-1">
-                        No description available for this channel.
+                        {{ $t('network.noDescription') }}
                       </div>
                       
                       <div class="grid grid-cols-2 gap-2 text-[10px] font-mono">
                         <div v-if="selectedNetworkNode.metadata.subscribers || selectedNetworkNode.metadata.members || selectedNetworkNode.metadata.participants_count" class="bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-750/30 p-2.5 rounded-2xl flex flex-col justify-center">
-                          <span class="text-gray-400 dark:text-gray-500 font-bold uppercase text-[8px] tracking-wider">Members</span>
+                          <span class="text-gray-400 dark:text-gray-500 font-bold uppercase text-[8px] tracking-wider">{{ $t('network.members') }}</span>
                           <span class="text-gray-800 dark:text-gray-200 font-black text-xs mt-0.5">
                             {{ (selectedNetworkNode.metadata.subscribers || selectedNetworkNode.metadata.members || selectedNetworkNode.metadata.participants_count).toLocaleString() }}
                           </span>
                         </div>
                         
                         <div class="bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-750/30 p-2.5 rounded-2xl flex flex-col justify-center">
-                          <span class="text-gray-400 dark:text-gray-500 font-bold uppercase text-[8px] tracking-wider">CDN Server</span>
+                          <span class="text-gray-400 dark:text-gray-500 font-bold uppercase text-[8px] tracking-wider">{{ $t('network.cdnServer') }}</span>
                           <span class="text-gray-800 dark:text-gray-200 font-black text-xs mt-0.5 truncate">
                             {{ String(selectedNetworkNode.metadata.photo || '').match(/cdn(\d+)/) ? 'CDN ' + String(selectedNetworkNode.metadata.photo || '').match(/cdn(\d+)/)[1] : (selectedNetworkNode.metadata.photo ? 'Asset CDN' : 'None') }}
                           </span>
@@ -17548,7 +17550,7 @@ onUnmounted(() => {
                     </div>
                     
                     <div v-else class="bg-gray-50/50 dark:bg-gray-900/40 border border-gray-150/50 dark:border-gray-750/20 rounded-2xl p-4 text-[10px] text-gray-400 dark:text-gray-500 italic text-center">
-                      No additional metadata loaded for this node.
+                      {{ $t('network.noMetadata') }}
                     </div>
                   </div>
 
@@ -17557,12 +17559,12 @@ onUnmounted(() => {
                     <div class="flex items-center justify-between">
                       <h5 class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest flex items-center gap-1.5">
                         <Layers class="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                        <span>Recent Posts ({{ selectedNodePosts.length }})</span>
+                        <span>{{ $t('network.recentPosts', { count: selectedNodePosts.length }) }}</span>
                       </h5>
                       <button 
                         @click="reloadSelectedNodeFeed"
                         class="p-1 rounded-lg text-gray-400 hover:text-teal-500 hover:bg-teal-50 dark:hover:bg-teal-900/20 transition-all cursor-pointer"
-                        title="Reload feed"
+                        :title="$t('network.reloadFeed')"
                         :disabled="isFetchingSelectedNodePosts"
                       >
                         <RefreshCw class="h-3.5 w-3.5" :class="[isFetchingSelectedNodePosts ? 'animate-spin' : '']" />
@@ -17572,12 +17574,12 @@ onUnmounted(() => {
                     <!-- Loading State -->
                     <div v-if="isFetchingSelectedNodePosts" class="bg-gray-50/55 dark:bg-gray-900/40 border border-gray-150/50 dark:border-gray-750/20 rounded-2xl p-6 flex flex-col items-center justify-center gap-2 text-xs text-gray-500">
                       <LoaderCircle class="h-5 w-5 animate-spin text-teal-500" />
-                      <span class="font-bold">Streaming channel posts...</span>
+                      <span class="font-bold">{{ $t('network.streamingPosts') }}</span>
                     </div>
 
                     <!-- Empty Feed state -->
                     <div v-else-if="selectedNodePosts.length === 0" class="bg-gray-50/30 dark:bg-gray-900/20 border border-dashed border-gray-200 dark:border-gray-750 p-6 text-center rounded-2xl text-[11px] text-gray-400 dark:text-gray-500 italic">
-                      No posts retrieved or channel is empty. Click the reload icon above to fetch.
+                      {{ $t('network.noPostsFeed') }}
                     </div>
 
                     <!-- Scrollable posts stack -->
@@ -17590,7 +17592,7 @@ onUnmounted(() => {
                         <!-- Header with meta info -->
                         <div class="space-y-1.5 pb-1 border-b border-gray-100/60 dark:border-gray-750/30 relative z-10">
                           <div class="flex items-center justify-between text-[10px] font-semibold text-gray-400 dark:text-gray-500">
-                            <span class="font-mono bg-white dark:bg-gray-800 border border-gray-150/50 dark:border-gray-700/50 px-1.5 py-0.5 rounded text-[8px]">
+                            <span class="font-mono bg-white dark:bg-gray-800 border border-gray-150/50 dark:border-gray-750/50 px-1.5 py-0.5 rounded text-[8px]">
                               ID: {{ post.key ? post.key.split('.').pop() : (index + 1) }}
                             </span>
                             <span class="font-medium">
@@ -17620,7 +17622,7 @@ onUnmounted(() => {
 
                         <!-- Forward info subcard if any -->
                         <div v-if="post.data?.forward_url" class="border-l-2 border-indigo-400 bg-indigo-55/[0.02] dark:bg-indigo-950/[0.1] p-2 rounded-r-xl text-[10px] text-gray-500 dark:text-gray-450 italic relative z-10">
-                          <span class="font-black uppercase text-[8px] text-indigo-500 block mb-0.5 tracking-wider">Forwarded Message</span>
+                          <span class="font-black uppercase text-[8px] text-indigo-500 block mb-0.5 tracking-wider">{{ $t('network.forwardedMessage') }}</span>
                           {{ getForwardInfo(post)?.text || post.data.forward_url }}
                         </div>
 
@@ -17630,7 +17632,7 @@ onUnmounted(() => {
                         >
                         </div>
                         <div v-else-if="!(post.data?.photos && post.data.photos.length > 0) && !(post.data?.documents && post.data.documents.length > 0 && post.data.documents[0].mime_type && post.data.documents[0].mime_type.startsWith('image/')) && !(post.data?.videos && post.data.videos.length > 0)" class="text-xs text-gray-400 italic relative z-10">
-                          Media or metadata post with no text.
+                          {{ $t('network.mediaPostNoText') }}
                         </div>
 
                         <!-- Post Media Embeds -->
@@ -17736,7 +17738,7 @@ onUnmounted(() => {
                             <button
                               @click.stop="addToWorkspaceFromPost(post)"
                               class="p-1 rounded bg-white dark:bg-gray-800 border border-gray-150 dark:border-gray-750 text-gray-500 hover:text-teal-500 dark:text-gray-400 dark:hover:text-teal-400 transition-colors cursor-pointer"
-                              title="Add to Workspace analysis"
+                              :title="$t('network.addToWorkspaceAnalysis')"
                             >
                               <Layers class="h-3.5 w-3.5" />
                             </button>
@@ -17745,7 +17747,7 @@ onUnmounted(() => {
                               :href="post.url || post.link"
                               target="_blank"
                               class="p-1 rounded bg-teal-50/70 dark:bg-teal-950/40 border border-teal-100 dark:border-teal-900/30 text-teal-600 dark:text-teal-400 hover:bg-teal-100 dark:hover:bg-teal-900/60 transition-colors cursor-pointer"
-                              title="Join original post on Telegram"
+                              :title="$t('network.joinTelegramPost')"
                             >
                               <ExternalLink class="h-3.5 w-3.5" />
                             </a>
@@ -17758,7 +17760,7 @@ onUnmounted(() => {
                       <div ref="selectedNodeSentinelRef" class="pt-4 pb-6 flex flex-col items-center justify-center border-t border-gray-100/30 dark:border-gray-750/30">
                         <div v-if="isLoadingMoreSelectedNodePosts" class="flex items-center gap-2 text-xs font-semibold text-teal-600 dark:text-teal-400">
                           <Loader2 class="w-4 h-4 animate-spin text-teal-500" />
-                          <span>Loading older posts...</span>
+                          <span>{{ $t('network.loadingOlderPosts') }}</span>
                         </div>
                         <button
                           v-else
@@ -17766,7 +17768,7 @@ onUnmounted(() => {
                           class="px-4 py-2 bg-teal-50 dark:bg-teal-950/40 hover:bg-teal-150 dark:hover:bg-teal-900 border border-teal-100 dark:border-teal-900/40 rounded-xl text-xs font-bold text-teal-600 dark:text-teal-400 transition-all flex items-center gap-1.5 cursor-pointer shadow-sm hover:shadow"
                         >
                           <ChevronDown class="w-3.5 h-3.5" />
-                          <span>Load More Posts</span>
+                          <span>{{ $t('network.loadMorePosts') }}</span>
                         </button>
                       </div>
 
@@ -17781,7 +17783,7 @@ onUnmounted(() => {
                   class="w-full py-3 bg-red-500/10 hover:bg-red-500 text-red-600 hover:text-white rounded-2xl text-xs font-black transition-all flex items-center justify-center gap-1.5"
                 >
                   <Trash2 class="h-4 w-4" />
-                  Prune Node from Network
+                  {{ $t('network.pruneNode') }}
                 </button>
 
               </div>
@@ -17791,12 +17793,12 @@ onUnmounted(() => {
                 <div class="flex items-center justify-between pb-3 border-b border-gray-100 dark:border-gray-750">
                   <div class="flex items-center gap-2">
                     <Info class="h-4 w-4 text-teal-600 dark:text-teal-400" />
-                    <span class="text-xs font-black uppercase tracking-wider text-gray-700 dark:text-gray-300">Entity Inspector</span>
+                    <span class="text-xs font-black uppercase tracking-wider text-gray-700 dark:text-gray-300">{{ $t('network.entityInspector') }}</span>
                   </div>
                   <button
                     @click="isNetworkInspectorOpen = false"
                     class="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-750 transition-colors"
-                    title="Collapse Inspector"
+                    :title="$t('network.collapseInspector')"
                   >
                     <PanelRightClose class="h-4 w-4" />
                   </button>
@@ -17807,9 +17809,9 @@ onUnmounted(() => {
                     <Network class="h-8 w-8" />
                   </div>
                   <div class="space-y-1">
-                    <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">No Node Selected</h4>
+                    <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">{{ $t('network.noNodeSelected') }}</h4>
                     <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold max-w-[200px] leading-relaxed">
-                      Click on a node on the canvas layout to view profile statistics, manage connections, or jump to its parsed message streams.
+                      {{ $t('network.noNodeSelectedDesc') }}
                     </p>
                   </div>
                   <button
@@ -17817,7 +17819,7 @@ onUnmounted(() => {
                     class="px-3 py-1.5 bg-gray-100 dark:bg-gray-750 hover:bg-gray-200 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-xl text-[10px] font-bold transition-all flex items-center gap-1.5 cursor-pointer"
                   >
                     <PanelRightClose class="h-3 w-3" />
-                    <span>Hide to widen canvas</span>
+                    <span>{{ $t('network.hideToWidenCanvas') }}</span>
                   </button>
                 </div>
               </div>
@@ -17844,30 +17846,30 @@ onUnmounted(() => {
                 <span class="p-1.5 rounded-xl bg-teal-500/10 text-teal-600 dark:text-teal-400">
                   <User class="h-5 w-5" />
                 </span>
-                <span class="text-[10px] font-black text-teal-655 dark:text-teal-400 uppercase tracking-widest">Dossier Workspace</span>
+                <span class="text-[10px] font-black text-teal-655 dark:text-teal-400 uppercase tracking-widest">{{ $t('profiles.dossierWorkspace') }}</span>
               </div>
-              <h2 class="text-xl md:text-2xl font-black text-gray-900 dark:text-white tracking-tight">Identity & User Profile Explorer</h2>
+              <h2 class="text-xl md:text-2xl font-black text-gray-900 dark:text-white tracking-tight">{{ $t('profiles.title') }}</h2>
               <p class="text-xs text-gray-400 dark:text-gray-500 font-semibold max-w-xl">
-                Scan Telegram user nodes, look up cached database entities, and query deep registry descriptors.
+                {{ $t('profiles.subtitle') }}
               </p>
             </div>
 
             <!-- Dashboard micro-indicator -->
             <div class="grid grid-cols-3 gap-4 md:flex md:items-center md:gap-6 text-[11px] font-semibold text-gray-400 dark:text-gray-500 shrink-0 self-stretch md:self-center border-t md:border-t-0 md:border-l border-gray-200/60 dark:border-gray-750 pt-4 md:pt-0 md:pl-6">
               <div class="space-y-1">
-                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">History Pool</p>
-                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ lookupUserHistory.length }} lookups</p>
+                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">{{ $t('profiles.historyPool') }}</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ $t('profiles.lookupsCount', { count: lookupUserHistory.length }) }}</p>
               </div>
               <div class="space-y-1">
-                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">Registry Archives</p>
-                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ remoteProfiles.length }} catalogs</p>
+                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">{{ $t('profiles.registryArchives') }}</p>
+                <p class="font-mono text-gray-900 dark:text-white font-bold">{{ $t('profiles.catalogsCount', { count: remoteProfiles.length }) }}</p>
               </div>
               <div class="space-y-1">
-                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">Indexed Profiles</p>
+                <p class="text-[10px] uppercase font-black tracking-wider text-gray-400 dark:text-gray-500">{{ $t('profiles.indexedProfiles') }}</p>
                 <p class="font-mono text-gray-900 dark:text-white font-bold">
-                  <span v-if="loadingIndexedProfilesCount && indexedProfilesCount === null" class="animate-pulse text-teal-600 dark:text-teal-400 font-semibold text-xs">syncing...</span>
-                  <span v-else-if="indexedProfilesCount !== null">{{ indexedProfilesCount.toLocaleString() }} docs</span>
-                  <span v-else class="text-rose-500">offline</span>
+                  <span v-if="loadingIndexedProfilesCount && indexedProfilesCount === null" class="animate-pulse text-teal-600 dark:text-teal-400 font-semibold text-xs">{{ $t('profiles.syncing') }}</span>
+                  <span v-else-if="indexedProfilesCount !== null">{{ $t('profiles.docsCount', { count: indexedProfilesCount.toLocaleString() }) }}</span>
+                  <span v-else class="text-rose-500">{{ $t('profiles.offline') }}</span>
                 </p>
               </div>
             </div>
@@ -17881,15 +17883,15 @@ onUnmounted(() => {
               <MessageSquare class="h-5 w-5" />
             </span>
             <div>
-              <h3 class="text-sm font-black text-gray-900 dark:text-white uppercase tracking-wider">Cognitive Profile Assistant</h3>
-              <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">Ask dynamic questions directly referencing the entire profile intelligence pool.</p>
+              <h3 class="text-sm font-black text-gray-900 dark:text-white uppercase tracking-wider">{{ $t('profiles.cognitiveAssistant') }}</h3>
+              <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">{{ $t('profiles.cognitiveAssistantDesc') }}</p>
             </div>
           </div>
           
           <!-- Chat Content Area -->
           <div ref="profileChatContentRef" class="h-[480px] overflow-y-auto space-y-3 p-3 bg-gray-50/50 dark:bg-gray-900/30 rounded-2xl border border-gray-150/50 dark:border-gray-750/30">
             <div v-if="profileChatMessages.length === 0" class="text-center text-xs text-gray-400 dark:text-gray-500 py-36">
-              No conversations entered. Ask a question regarding profiles to start the analysis.
+              {{ $t('profiles.noConversations') }}
             </div>
             <div v-for="(msg, idx) in profileChatMessages" :key="idx" :class="msg.role === 'user' ? 'text-right' : 'text-left'">
               <div :class="msg.role === 'user' ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-900 dark:text-teal-200 px-3 py-2 rounded-2xl rounded-tr-none inline-block text-xs font-semibold max-w-xl' : 'text-left text-xs bg-white dark:bg-gray-800 shadow-sm border border-gray-150 dark:border-gray-750 px-4 py-3 rounded-2xl rounded-tl-none inline-block prose prose-xs dark:prose-invert max-w-full'">
@@ -17907,7 +17909,7 @@ onUnmounted(() => {
               <input 
                 v-model="profileChatInput" 
                 @keyup.enter="handleProfileChatSubmit(useProfileDB)" 
-                placeholder="Ask profile-related questions (e.g. Find all developers, list active admins...)" 
+                :placeholder="$t('profiles.aiPromptPlaceholder')" 
                 class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full pr-2" 
                 :disabled="isProfileChatLoading"
               />
@@ -17917,7 +17919,7 @@ onUnmounted(() => {
                 @mousedown.prevent
                 @click="profileChatInput = ''"
                 class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full transition-colors cursor-pointer shrink-0 ml-1"
-                title="Clear question"
+                :title="$t('profiles.clearQuestion')"
               >
                 <X class="w-3.5 h-3.5" />
               </button>
@@ -17936,7 +17938,7 @@ onUnmounted(() => {
               >
                 <span :class="['w-2 h-2 rounded-full shrink-0', useProfileDB ? 'bg-teal-500 animate-pulse' : 'bg-gray-300']"></span>
                 <Database class="h-3.5 w-3.5" />
-                <span>Use Profile DB</span>
+                <span>{{ $t('profiles.useProfileDb') }}</span>
               </button>
               <button 
                 @click="handleProfileChatSubmit(useProfileDB)" 
@@ -17944,7 +17946,7 @@ onUnmounted(() => {
                 class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-teal-400 text-white font-bold rounded-2xl text-xs transition-colors flex items-center gap-1.5 shrink-0 shadow-sm cursor-pointer"
               >
                 <Send class="h-3.5 w-3.5" />
-                <span>Ask</span>
+                <span>{{ $t('profiles.ask') }}</span>
               </button>
             </div>
           </div>
@@ -17962,9 +17964,9 @@ onUnmounted(() => {
                   <span class="p-1.5 rounded-xl bg-teal-500/10 text-teal-600 dark:text-teal-400">
                     <Database class="h-4 w-4" />
                   </span>
-                  <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Search Profile Index</h3>
+                  <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">{{ $t('profiles.searchProfileIndex') }}</h3>
                 </div>
-                <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">Perform high-performance full-text searches across indexed dossiers.</p>
+                <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">{{ $t('profiles.searchProfileIndexDesc') }}</p>
               </div>
 
               <!-- Search controls grid -->
@@ -17976,7 +17978,7 @@ onUnmounted(() => {
                     <input 
                       v-model="profileSearchQuery" 
                       @keyup.enter="searchProfilesFullText" 
-                      placeholder="e.g. bio, location, channels..." 
+                      :placeholder="$t('profiles.fullTextSearchPlaceholder')" 
                       class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full pr-2" 
                     />
                     <button
@@ -17985,7 +17987,7 @@ onUnmounted(() => {
                       @mousedown.prevent
                       @click="profileSearchQuery = ''"
                       class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full transition-colors cursor-pointer shrink-0 ml-1"
-                      title="Clear search query"
+                      :title="$t('profiles.clearSearchQuery')"
                     >
                       <X class="w-3.5 h-3.5" />
                     </button>
@@ -17993,16 +17995,16 @@ onUnmounted(() => {
 
                   <!-- Return Limit select -->
                   <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-auto">
-                    <label class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest pl-1">Limit:</label>
+                    <label class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest pl-1">{{ $t('profiles.limit') }}</label>
                     <div class="relative min-w-[75px]">
                       <select 
                         v-model="profileSearchLimit" 
                         class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-850 rounded-xl px-3 py-2 pr-8 text-xs font-bold text-gray-900 dark:text-white focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 cursor-pointer appearance-none"
                       >
-                        <option :value="5">5 hits</option>
-                        <option :value="10">10 hits</option>
-                        <option :value="20">20 hits</option>
-                        <option :value="50">50 hits</option>
+                        <option :value="5">{{ $t('profiles.hitsCount', { count: 5 }) }}</option>
+                        <option :value="10">{{ $t('profiles.hitsCount', { count: 10 }) }}</option>
+                        <option :value="20">{{ $t('profiles.hitsCount', { count: 20 }) }}</option>
+                        <option :value="50">{{ $t('profiles.hitsCount', { count: 50 }) }}</option>
                       </select>
                       <span class="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400">
                         <ChevronDown class="h-3.5 w-3.5" />
@@ -18019,7 +18021,7 @@ onUnmounted(() => {
                 >
                   <LoaderCircle v-if="isSearchingProfiles" class="h-3.5 w-3.5 animate-spin" />
                   <Search v-else class="h-3.5 w-3.5" />
-                  <span>Execute Search</span>
+                  <span>{{ $t('profiles.executeSearch') }}</span>
                 </button>
               </div>
 
@@ -18027,7 +18029,7 @@ onUnmounted(() => {
               <div v-if="profileSearchError" class="rounded-2xl bg-rose-500/[0.04] p-4 border border-rose-500/10 flex items-start gap-3">
                 <AlertCircle class="h-4 w-4 text-rose-500 shrink-0 mt-0.5" />
                 <div class="space-y-0.5">
-                  <p class="text-xs font-black uppercase tracking-wide text-rose-650 dark:text-rose-400">Search failed</p>
+                  <p class="text-xs font-black uppercase tracking-wide text-rose-650 dark:text-rose-400">{{ $t('profiles.searchFailed') }}</p>
                   <p class="text-xs text-rose-500/95 dark:text-gray-450 font-semibold leading-relaxed">{{ profileSearchError }}</p>
                 </div>
               </div>
@@ -18035,10 +18037,10 @@ onUnmounted(() => {
               <!-- Statistics / Results Header -->
               <div v-if="profileSearchResults" class="flex items-center justify-between border-t border-gray-100 dark:border-gray-800/85 pt-4">
                 <span class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">
-                  Found {{ profileSearchStats.total }} Matching Nodes
+                  {{ $t('profiles.foundMatchingNodes', { count: profileSearchStats.total }) }}
                 </span>
                 <span class="text-[9px] font-mono font-medium text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-900/40 px-2 py-0.5 rounded-md">
-                  Took {{ profileSearchStats.tookMs }} ms
+                  {{ $t('profiles.tookMs', { count: profileSearchStats.tookMs }) }}
                 </span>
               </div>
 
@@ -18062,7 +18064,7 @@ onUnmounted(() => {
                     </span>
                     <!-- Score badge -->
                     <span class="text-[9px] font-mono font-bold text-teal-650 dark:text-teal-400 bg-teal-500/[0.04] px-1.5 py-0.5 rounded border border-teal-500/10">
-                      Score: {{ parseFloat(hit._score || 0).toFixed(2) }}
+                      {{ $t('profiles.score', { score: parseFloat(hit._score || 0).toFixed(2) }) }}
                     </span>
                   </div>
 
@@ -18094,9 +18096,9 @@ onUnmounted(() => {
               <!-- Empty state when search triggered but hits are 0 -->
               <div v-else-if="profileSearchResults && profileSearchResults.hits?.hits?.length === 0" class="flex flex-col items-center justify-center py-8 text-center text-gray-400 dark:text-gray-500">
                 <Inbox class="w-8 h-8 mb-2 opacity-50" />
-                <p class="text-xs font-semibold">No dossiers match search</p>
+                <p class="text-xs font-semibold">{{ $t('profiles.noDossiersMatch') }}</p>
                 <p class="text-[10px] text-gray-450 dark:text-gray-500 mt-1 max-w-[200px] leading-normal">
-                  Try adjusting search term or scaling search queries.
+                  {{ $t('profiles.tryAdjustingSearch') }}
                 </p>
               </div>
             </div>
@@ -18106,19 +18108,19 @@ onUnmounted(() => {
               <div class="flex items-center justify-between mb-2">
                 <div class="flex items-center gap-2">
                   <FileText class="h-4.5 w-4.5 text-teal-600 dark:text-teal-400" />
-                  <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">Remote Profiles Index</h3>
+                  <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">{{ $t('profiles.remoteProfilesIndex') }}</h3>
                 </div>
                 <button
                   @click="fetchRemoteProfiles"
                   :disabled="loadingRemoteProfiles"
                   class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
-                  title="Reload Remote Profiles"
+                  :title="$t('profiles.reloadRemoteProfiles')"
                 >
                   <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingRemoteProfiles }" />
                 </button>
               </div>
               <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold leading-relaxed">
-                Unlock high-fidelity profiles maintained in foreign indexers. Select any directory source below to bind details into the inspector pane immediately.
+                {{ $t('profiles.remoteProfilesDesc') }}
               </p>
 
               <div v-if="loadingRemoteProfiles" class="flex flex-col items-center justify-center py-6 text-gray-400">
@@ -18155,9 +18157,9 @@ onUnmounted(() => {
               <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-teal-50 dark:bg-teal-950/40 mb-4 shadow-inner border border-teal-100/10">
                 <FileText class="h-7 w-7 text-teal-500" />
               </div>
-              <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider mb-2">No Remote Profile Selected</h4>
+              <h4 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider mb-2">{{ $t('profiles.noRemoteProfileSelected') }}</h4>
               <p class="text-xs text-gray-400 dark:text-gray-500 font-semibold max-w-sm leading-relaxed">
-                Tap any file entry from the remote profiles index on the left to load its interactive dossier catalog here.
+                {{ $t('profiles.noRemoteProfileSelectedDesc') }}
               </p>
             </div>
 
@@ -18171,7 +18173,7 @@ onUnmounted(() => {
                       <FileText class="h-4.5 w-4.5" />
                     </span>
                     <div>
-                      <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">Catalog Target</h3>
+                      <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">{{ $t('profiles.catalogTarget') }}</h3>
                       <h4 class="text-xs sm:text-sm font-black text-gray-900 dark:text-white mt-1 break-all max-w-[180px] xs:max-w-xs sm:max-w-md">{{ selectedRemoteProfileName }}</h4>
                     </div>
                   </div>
@@ -18181,11 +18183,11 @@ onUnmounted(() => {
                       @click="indexProfileToBackend" 
                       :disabled="isIndexingProfile"
                       class="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
-                      title="Index profile target to database"
+                      :title="$t('profiles.indexProfileTitle')"
                     >
                       <LoaderCircle v-if="isIndexingProfile" class="h-3.5 w-3.5 animate-spin" />
                       <Database v-else class="h-3.5 w-3.5" />
-                      <span>Index</span>
+                      <span>{{ $t('profiles.index') }}</span>
                     </button>
                     <button @click="selectedRemoteProfileContent = null; selectedRemoteProfileName = ''; selectedRemoteProfileRawText = '';" class="p-1.5 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-750 text-gray-400 hover:text-gray-900 dark:hover:text-white transition-all cursor-pointer">
                       <X class="h-4 w-4" />
@@ -18204,7 +18206,7 @@ onUnmounted(() => {
             <div v-if="profileError" class="rounded-2xl bg-rose-500/[0.04] p-5 border border-rose-500/15 flex items-start gap-4">
               <AlertCircle class="h-5 w-5 text-rose-500 shrink-0 mt-0.5" />
               <div class="space-y-1">
-                <h3 class="text-xs font-black uppercase tracking-wider text-rose-600 dark:text-rose-450">Catalogue Query Failure</h3>
+                <h3 class="text-xs font-black uppercase tracking-wider text-rose-600 dark:text-rose-450">{{ $t('profiles.catalogueQueryFailure') }}</h3>
                 <p class="text-xs text-rose-500 dark:text-gray-400 font-semibold leading-relaxed">{{ profileError }}</p>
               </div>
             </div>

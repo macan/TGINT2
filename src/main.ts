@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import './index.css'
 import App from './App.vue'
+import { i18nPlugin, t } from './i18n'
 
 // Global image load error interceptor for '/telegram-photo/' resources
 window.addEventListener(
@@ -39,5 +40,9 @@ window.addEventListener(
   true // Use capture phase to intercept 'error' events which do not bubble
 )
 
-createApp(App).mount('#app')
+const app = createApp(App)
+app.use(i18nPlugin)
+app.config.globalProperties.$t = t
+app.config.globalProperties.t = t
+app.mount('#app')
 

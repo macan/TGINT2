@@ -1,4 +1,5 @@
 import { ref, computed } from 'vue';
+import type { App as VueApp } from 'vue';
 import type { LocaleCode, LanguageOption, TranslationDictionary } from './types';
 import en from './locales/en';
 import zhCN from './locales/zh-CN';
@@ -150,4 +151,13 @@ export const useI18n = () => {
     setLocale,
     onLocaleLayoutChange
   };
+};
+
+export const i18nPlugin = {
+  install(app: VueApp) {
+    app.config.globalProperties.$t = t;
+    app.config.globalProperties.t = t;
+    app.provide('$t', t);
+    app.provide('t', t);
+  }
 };
