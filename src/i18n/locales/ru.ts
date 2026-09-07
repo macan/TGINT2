@@ -224,7 +224,7 @@ export default {
     contactShared: "Контакт отправлен",
     viewDocument: "Посмотреть документ",
     viewVersionHistory: "История версий и сравнение различий",
-    oldVersions: "старые версии",
+    oldVersions: "Версия",
     viewRawPostData: "Показать исходные данные поста",
     noMediaPosts: "В этом канале нет медиа-публикаций.",
     openInTelegram: "ОТКРЫТЬ В TELEGRAM",

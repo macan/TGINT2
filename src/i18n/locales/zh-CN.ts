@@ -224,7 +224,7 @@ export default {
     contactShared: "已分享联系人",
     viewDocument: "查看文档",
     viewVersionHistory: "查看历史版本并比对差异",
-    oldVersions: "历史版本",
+    oldVersions: "版本",
     viewRawPostData: "查看原始帖子数据",
     noMediaPosts: "该频道暂无多媒体动态。",
     openInTelegram: "在 TELEGRAM 中打开",

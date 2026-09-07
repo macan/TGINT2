@@ -224,7 +224,7 @@ export default {
     contactShared: "Contact Shared",
     viewDocument: "View Document",
     viewVersionHistory: "View version history and compare diffs",
-    oldVersions: "old versions",
+    oldVersions: "Version",
     viewRawPostData: "View Raw Post Data",
     noMediaPosts: "No media posts found in this channel.",
     openInTelegram: "OPEN IN TELEGRAM",

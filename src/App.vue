@@ -256,6 +256,7 @@ const isFetchingOldVersions = ref(false);
 const oldVersionsError = ref("");
 const oldVersionsList = ref<VersionItem[]>([]);
 const oldVersionsPostKey = ref("");
+const isChannelVersionHistory = ref(false);
 const oldVersionsActiveTab = ref<"textDiff" | "jsonDiff" | "inspector">("textDiff");
 const selectedVersionAIndex = ref(0);
 const selectedVersionBIndex = ref(0);
@@ -392,8 +393,132 @@ const fetchOldVersions = async (
   return results;
 };
 
+const fetchChannelOldVersions = async (
+  channelIdentifier: string,
+  onProgress?: (results: VersionItem[]) => void
+): Promise<VersionItem[]> => {
+  const channelName = channelIdentifier;
+  if (!channelName) throw new Error("Channel name is missing.");
+
+  const results: VersionItem[] = [];
+  const fetchedSet = new Set<string>();
+
+  const url = `https://i.gogingko.net/api/v1/v/telegram-channel/${encodeURIComponent(channelName)}?_t=${Date.now()}`;
+  const headers: Record<string, string> = {
+    "x-gos-intent": "13",
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+  };
+  if (loginToken.value) {
+    headers["x-gos-token"] = loginToken.value;
+  }
+
+  const res1 = await fetch(url, { headers });
+  if (!res1.ok) {
+    throw new Error(`Failed to fetch channel version history (HTTP ${res1.status})`);
+  }
+
+  const body1 = await res1.json();
+  const set1 = res1.headers.get("x-gos-set");
+  const propAllHeader1 = res1.headers.get("x-gos-prop-all");
+  const propAll1 = parsePropAllHeader(propAllHeader1);
+  const pset1 = propAll1["x-gos-pset"] || propAll1["pset"] || null;
+  const lastModified = res1.headers.get('Last-Modified');
+
+  if (set1) {
+    fetchedSet.add(set1);
+  }
+
+  results.push({
+    versionIndex: 1,
+    set: set1,
+    pset: pset1,
+    propAll: propAll1,
+    data: body1,
+    fetchedAt: lastModified,
+  });
+  if (onProgress) onProgress(results);
+
+  let currentPset = pset1;
+  let versionCounter = 2;
+
+  while (currentPset && !fetchedSet.has(currentPset)) {
+    const loopHeaders: Record<string, string> = {
+      "x-gos-lookup-in-set": currentPset,
+      "Cache-Control": "no-cache, no-store, must-revalidate",
+      "Pragma": "no-cache",
+    };
+    if (loginToken.value) {
+      loopHeaders["x-gos-token"] = loginToken.value;
+    }
+
+    const loopRes = await fetch(url, { headers: loopHeaders });
+    if (!loopRes.ok) {
+      console.warn(`Channel version loop fetch failed for set ${currentPset} (HTTP ${loopRes.status})`);
+      break;
+    }
+
+    const loopBody = await loopRes.json();
+    const loopSet = loopRes.headers.get("x-gos-set");
+    const loopPropAllHeader = loopRes.headers.get("x-gos-prop-all");
+    const loopPropAll = parsePropAllHeader(loopPropAllHeader);
+    const nextPset = loopPropAll["x-gos-pset"] || loopPropAll["pset"] || null;
+    const loopLastModified = loopRes.headers.get('Last-Modified');
+
+    if (loopSet) {
+      fetchedSet.add(loopSet);
+    }
+
+    results.push({
+      versionIndex: versionCounter++,
+      set: loopSet,
+      pset: nextPset,
+      propAll: loopPropAll,
+      data: loopBody,
+      fetchedAt: loopLastModified,
+    });
+    if (onProgress) onProgress(results);
+
+    currentPset = nextPset;
+  }
+
+  return results;
+};
+
+const openChannelOldVersionsModal = async (channelName: string) => {
+  oldVersionsPostKey.value = `@${channelName}`;
+  isChannelVersionHistory.value = true;
+  showOldVersionsModal.value = true;
+  isFetchingOldVersions.value = true;
+  oldVersionsError.value = "";
+  oldVersionsList.value = [];
+  selectedVersionAIndex.value = 0;
+  selectedVersionBIndex.value = 0;
+  singleVersionIndex.value = 0;
+
+  try {
+    const list = await fetchChannelOldVersions(channelName, (currentResults) => {
+      oldVersionsList.value = [...currentResults];
+    });
+    oldVersionsList.value = list;
+    if (list.length > 1) {
+      selectedVersionAIndex.value = list.length - 1;
+      selectedVersionBIndex.value = 0;
+    } else {
+      selectedVersionAIndex.value = 0;
+      selectedVersionBIndex.value = 0;
+    }
+  } catch (err: any) {
+    console.error("Failed to load channel old versions:", err);
+    oldVersionsError.value = err.message || "Failed to load channel version history.";
+  } finally {
+    isFetchingOldVersions.value = false;
+  }
+};
+
 const openOldVersionsModal = async (post: any) => {
   oldVersionsPostKey.value = post.key || post.id || post.data?.id || "Unknown";
+  isChannelVersionHistory.value = false;
   showOldVersionsModal.value = true;
   isFetchingOldVersions.value = true;
   oldVersionsError.value = "";
@@ -427,7 +552,11 @@ const getPostMessageText = (data: any): string => {
   if (typeof data.message === "string") return data.message;
   if (typeof data.text === "string") return data.text;
   if (typeof data.caption === "string") return data.caption;
+  if (typeof data.description === "string") return data.description;
+  if (typeof data.about === "string") return data.about;
+  if (typeof data.title === "string") return data.title;
   if (data.data?.message) return data.data.message;
+  if (data.data?.description) return data.data.description;
   return JSON.stringify(data, null, 2);
 };
 
@@ -10478,7 +10607,7 @@ onUnmounted(() => {
                 <div>
                   <div class="flex items-center gap-2">
                     <h2 class="text-base font-extrabold text-gray-900 dark:text-gray-100 leading-tight">
-                      Post Version History
+                      {{ isChannelVersionHistory ? 'Profile Version History' : 'Post Version History' }}
                     </h2>
                     <span
                       class="font-mono bg-gray-200/70 dark:bg-gray-700/80 text-gray-700 dark:text-gray-300 px-2 py-0.5 rounded-md text-[11px] font-bold"
@@ -10768,7 +10897,7 @@ onUnmounted(() => {
                       <!-- Content Message Preview -->
                       <div class="p-4 bg-white dark:bg-gray-900 rounded-2xl border border-gray-200 dark:border-gray-800 space-y-2">
                         <h4 class="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                          Post Content
+                          {{ isChannelVersionHistory ? 'Profile Content' : 'Post Content' }}
                         </h4>
                         <div class="text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
                           {{ getPostMessageText(oldVersionsList[singleVersionIndex].data) }}
@@ -11754,23 +11883,31 @@ onUnmounted(() => {
                   </h2>
                   
                   <p
-                    class="font-bold text-xs mb-5 flex items-center flex-wrap gap-2 tracking-wide"
+                    class="font-bold text-xs mb-4 flex items-center gap-2 tracking-wide"
                     :class="currentChannelName.startsWith('-100') ? 'text-amber-600 dark:text-amber-400' : 'text-teal-600 dark:text-teal-400'"
                   >
                     <span>@{{ metadata.username || metadata.name || channelName }}</span>
-                    <button @click="addToWorkspace" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-teal-600 dark:text-teal-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" :title="t('explorer.workspace')">
-                      <Layout class="h-2.5 w-2.5" />
-                      {{ t('explorer.workspace') }}
-                    </button>
-                    <button @click="addChannelToListenDirectory(metadata.title || channelName, metadata.username || channelName)" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-purple-600 dark:text-purple-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" :title="t('nav.listen')">
-                      <Radio class="h-2.5 w-2.5" />
-                      {{ t('nav.listen') }}
-                    </button>
-                    <button @click="searchOnGoogle(metadata.username || metadata.name || channelName)" class="ml-2 flex items-center gap-1 px-1.5 py-0.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-700 dark:hover:bg-gray-600 text-blue-600 dark:text-blue-400 rounded-md border border-gray-200 dark:border-gray-600 text-[9px] font-extrabold transition-all cursor-pointer" title="Google">
-                      <Globe class="h-2.5 w-2.5" />
-                      Google
-                    </button>
                   </p>
+
+                  <!-- Action Buttons Toolbar: Workspace, Listen, Google, Versions -->
+                  <div class="flex items-center gap-2 flex-wrap mb-5">
+                    <button @click="addToWorkspace" class="flex items-center gap-1.5 px-3 py-1.5 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/50 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 rounded-xl border border-teal-200 dark:border-teal-800/60 text-xs font-bold transition-all cursor-pointer shadow-3xs" :title="t('explorer.workspace')">
+                      <Layout class="h-3.5 w-3.5 text-teal-500" />
+                      <span>{{ t('explorer.workspace') }}</span>
+                    </button>
+                    <button @click="addChannelToListenDirectory(metadata.title || channelName, metadata.username || channelName)" class="flex items-center gap-1.5 px-3 py-1.5 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/50 dark:hover:bg-purple-900/60 text-purple-700 dark:text-purple-300 rounded-xl border border-purple-200 dark:border-purple-800/60 text-xs font-bold transition-all cursor-pointer shadow-3xs" :title="t('nav.listen')">
+                      <Radio class="h-3.5 w-3.5 text-purple-500" />
+                      <span>{{ t('nav.listen') }}</span>
+                    </button>
+                    <button @click="searchOnGoogle(metadata.username || metadata.name || channelName)" class="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/50 dark:hover:bg-blue-900/60 text-blue-700 dark:text-blue-300 rounded-xl border border-blue-200 dark:border-blue-800/60 text-xs font-bold transition-all cursor-pointer shadow-3xs" title="Google">
+                      <Globe class="h-3.5 w-3.5 text-blue-500" />
+                      <span>Google</span>
+                    </button>
+                    <button @click="openChannelOldVersionsModal(metadata.username || metadata.name || channelName)" class="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/50 dark:hover:bg-amber-900/60 text-amber-700 dark:text-amber-300 rounded-xl border border-amber-200 dark:border-amber-800/60 text-xs font-bold transition-all cursor-pointer shadow-3xs" :title="t('explorer.oldVersions')">
+                      <History class="h-3.5 w-3.5 text-amber-500" />
+                      <span>{{ t('explorer.oldVersions') }}</span>
+                    </button>
+                  </div>
 
                   <div
                     v-if="metadata.description || metadata.about"
@@ -11783,16 +11920,17 @@ onUnmounted(() => {
                     </p>
                   </div>
 
-                  <div class="grid grid-cols-2 gap-3">
+                  <!-- Optimized Counters Grid -->
+                  <div class="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
                     <div
                       v-if="metadata.subscribers || metadata.members || metadata.participants_count"
-                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
+                      class="bg-gray-50/70 dark:bg-gray-900/40 p-3.5 rounded-2xl border border-gray-150 dark:border-gray-750/70 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300 shadow-3xs"
                     >
                       <Users
-                        class="h-5 w-5 mb-1.5 text-teal-500"
+                        class="h-4.5 w-4.5 mb-1.5 text-teal-500"
                       />
                       <span
-                        class="text-base font-black text-gray-900 dark:text-white font-mono tracking-tight"
+                        class="text-sm font-black text-gray-900 dark:text-white font-mono tracking-tight"
                         >{{
                           (
                             metadata.subscribers || metadata.members || metadata.participants_count
@@ -11807,13 +11945,13 @@ onUnmounted(() => {
 
                     <div
                       v-if="metadata.date || metadata.createdAt"
-                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
+                      class="bg-gray-50/70 dark:bg-gray-900/40 p-3.5 rounded-2xl border border-gray-150 dark:border-gray-750/70 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300 shadow-3xs"
                     >
                       <Calendar
-                        class="h-5 w-5 mb-1.5 text-indigo-500"
+                        class="h-4.5 w-4.5 mb-1.5 text-indigo-500"
                       />
                       <span
-                        class="text-xs font-black text-gray-900 dark:text-white"
+                        class="text-xs font-black text-gray-900 dark:text-white truncate max-w-full"
                         >{{
                           formatDate(metadata.date || metadata.createdAt)
                         }}</span
@@ -11825,15 +11963,15 @@ onUnmounted(() => {
                     </div>
 
                     <div
-                      v-if="metadata.files"
-                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
+                      v-if="metadata.files !== undefined && metadata.files !== null"
+                      class="bg-gray-50/70 dark:bg-gray-900/40 p-3.5 rounded-2xl border border-gray-150 dark:border-gray-750/70 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300 shadow-3xs"
                     >
                       <FileText
-                        class="h-5 w-5 mb-1.5 text-amber-500"
+                        class="h-4.5 w-4.5 mb-1.5 text-amber-500"
                       />
                       <span
-                        class="text-base font-black text-gray-900 dark:text-white font-mono tracking-tight"
-                        >{{ metadata.files }}</span
+                        class="text-sm font-black text-gray-900 dark:text-white font-mono tracking-tight"
+                        >{{ Number(metadata.files).toLocaleString() }}</span
                       >
                       <span
                         class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
@@ -11842,15 +11980,15 @@ onUnmounted(() => {
                     </div>
 
                     <div
-                      v-if="metadata.photos"
-                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
+                      v-if="metadata.photos !== undefined && metadata.photos !== null"
+                      class="bg-gray-50/70 dark:bg-gray-900/40 p-3.5 rounded-2xl border border-gray-150 dark:border-gray-750/70 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300 shadow-3xs"
                     >
                       <ImageIcon
-                        class="h-5 w-5 mb-1.5 text-emerald-500"
+                        class="h-4.5 w-4.5 mb-1.5 text-emerald-500"
                       />
                       <span
-                        class="text-base font-black text-gray-900 dark:text-white font-mono tracking-tight"
-                        >{{ metadata.photos }}</span
+                        class="text-sm font-black text-gray-900 dark:text-white font-mono tracking-tight"
+                        >{{ Number(metadata.photos).toLocaleString() }}</span
                       >
                       <span
                         class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
@@ -11859,15 +11997,15 @@ onUnmounted(() => {
                     </div>
 
                     <div
-                      v-if="metadata.video"
-                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
+                      v-if="metadata.video !== undefined && metadata.video !== null"
+                      class="bg-gray-50/70 dark:bg-gray-900/40 p-3.5 rounded-2xl border border-gray-150 dark:border-gray-750/70 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300 shadow-3xs"
                     >
                       <Video
-                        class="h-5 w-5 mb-1.5 text-rose-500"
+                        class="h-4.5 w-4.5 mb-1.5 text-rose-500"
                       />
                       <span
-                        class="text-base font-black text-gray-900 dark:text-white font-mono tracking-tight"
-                        >{{ metadata.video }}</span
+                        class="text-sm font-black text-gray-900 dark:text-white font-mono tracking-tight"
+                        >{{ Number(metadata.video).toLocaleString() }}</span
                       >
                       <span
                         class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
@@ -11876,15 +12014,15 @@ onUnmounted(() => {
                     </div>
 
                     <div
-                      v-if="metadata.links"
-                      class="bg-gray-50/50 dark:bg-gray-900/10 p-3 rounded-2xl border border-gray-150 dark:border-gray-750 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300"
+                      v-if="metadata.links !== undefined && metadata.links !== null"
+                      class="bg-gray-50/70 dark:bg-gray-900/40 p-3.5 rounded-2xl border border-gray-150 dark:border-gray-750/70 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300 shadow-3xs"
                     >
                       <Link
-                        class="h-5 w-5 mb-1.5 text-blue-500"
+                        class="h-4.5 w-4.5 mb-1.5 text-blue-500"
                       />
                       <span
-                        class="text-base font-black text-gray-900 dark:text-white font-mono tracking-tight"
-                        >{{ metadata.links }}</span
+                        class="text-sm font-black text-gray-900 dark:text-white font-mono tracking-tight"
+                        >{{ Number(metadata.links).toLocaleString() }}</span
                       >
                       <span
                         class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
