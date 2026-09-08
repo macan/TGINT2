@@ -65,6 +65,13 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  FolderTree,
+  Eye,
+  BookOpen,
+  Move,
+  ArrowRightLeft,
+  Split,
+  Columns2,
   Plus,
   Trash2,
   Database,
@@ -1921,6 +1928,31 @@ const handleProfileChatSubmit = async (forceProfileDB?: boolean) => {
     isProfileChatLoading.value = false;
 };
 
+const copiedProfileChatIdx = ref<number | null>(null);
+
+const copyProfileChatMessage = async (text: string, idx: number) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    copiedProfileChatIdx.value = idx;
+    setTimeout(() => {
+      if (copiedProfileChatIdx.value === idx) {
+        copiedProfileChatIdx.value = null;
+      }
+    }, 2000);
+  } catch (err) {
+    console.error("Failed to copy message:", err);
+  }
+};
+
+const clearProfileChat = () => {
+  profileChatMessages.value = [];
+};
+
+const selectProfileChatPrompt = (promptKey: string) => {
+  profileChatInput.value = t(promptKey);
+  handleProfileChatSubmit(useProfileDB.value);
+};
+
 const explorerTab = ref<HTMLElement | null>(null);
 const explorerMinHeight = ref("0px");
 const suggestedChannels = ref<string[]>([]);
@@ -2086,6 +2118,27 @@ const newlyFetchedListenKeys = ref<Set<string>>(new Set());
 const isFetchingListenPosts = ref(false);
 const listenAutoRefreshActive = ref(false);
 let listenRefreshInterval: any = null;
+
+// Listen Layout Modes: 'view' (Reading focus) vs 'rearrange' (Reorganization focus)
+const listenLayoutMode = ref<'view' | 'rearrange'>(
+  (localStorage.getItem("listen_layout_mode") as 'view' | 'rearrange') || 'view'
+);
+
+const setListenLayoutMode = (mode: 'view' | 'rearrange') => {
+  listenLayoutMode.value = mode;
+  localStorage.setItem("listen_layout_mode", mode);
+  nextTick(() => {
+    initRelationsGraph();
+  });
+};
+
+// Rearrange Decision Tab: 'both' | 'graph' | 'posts'
+const rearrangeDecisionTab = ref<'both' | 'graph' | 'posts'>('both');
+
+// Move Item/Folder Modal State
+const isMoveModalOpen = ref(false);
+const itemToMove = ref<ListenItem | null>(null);
+const selectedMoveTargetFolderId = ref<string | null>(null);
 
 const isListenModalOpen = ref(false);
 const isImportModalOpen = ref(false);
@@ -2542,6 +2595,52 @@ const visibleDirectoryNodes = computed(() => {
   return getFilteredVisibleNodes(listenDirectory.value, listenSearchQuery.value.trim());
 });
 
+// Total count of listen items (non-folder leaves) across the entire directory, including all folders and sub-folders
+const totalListenItemsCount = computed<number>(() => {
+  let count = 0;
+  const countLeaves = (node: ListenItem) => {
+    if (!node.isFolder) {
+      count++;
+    } else if (node.children && Array.isArray(node.children)) {
+      for (const child of node.children) {
+        countLeaves(child);
+      }
+    }
+  };
+  if (Array.isArray(listenDirectory.value)) {
+    for (const item of listenDirectory.value) {
+      countLeaves(item);
+    }
+  }
+  return count;
+});
+
+// Total count of folders across root and all nested sub-folders
+const totalListenFoldersCount = computed<number>(() => {
+  let count = 0;
+  const countFolders = (node: ListenItem) => {
+    if (node.isFolder) {
+      count++;
+      if (node.children && Array.isArray(node.children)) {
+        for (const child of node.children) {
+          countFolders(child);
+        }
+      }
+    }
+  };
+  if (Array.isArray(listenDirectory.value)) {
+    for (const item of listenDirectory.value) {
+      countFolders(item);
+    }
+  }
+  return count;
+});
+
+// Count of currently visible/filtered non-folder listen items
+const visibleListenItemsCount = computed<number>(() => {
+  return visibleDirectoryNodes.value.filter((n: any) => !n.item.isFolder).length;
+});
+
 // Drag and drop states for Listen Directory items
 const draggedNode = ref<any | null>(null);
 const dragOverNode = ref<any | null>(null);
@@ -2668,6 +2767,150 @@ const selectListenItem = (item: ListenItem) => {
     selectedListenNode.value = item;
     fetchListenPosts(item);
   }
+};
+
+const getParentFolderId = (
+  nodes: ListenItem[],
+  targetId: string,
+  currentParentId: string | null = null
+): { found: boolean; parentId: string | null } => {
+  for (const node of nodes) {
+    if (node.id === targetId) {
+      return { found: true, parentId: currentParentId };
+    }
+    if (node.isFolder && node.children) {
+      const res = getParentFolderId(node.children, targetId, node.id);
+      if (res.found) return res;
+    }
+  }
+  return { found: false, parentId: null };
+};
+
+const openMoveModal = (item: ListenItem) => {
+  if (!item) return;
+  itemToMove.value = item;
+  const parentInfo = getParentFolderId(listenDirectory.value, item.id);
+  selectedMoveTargetFolderId.value = parentInfo.parentId;
+  isMoveModalOpen.value = true;
+};
+
+const confirmMoveItem = () => {
+  if (!itemToMove.value) {
+    isMoveModalOpen.value = false;
+    return;
+  }
+  const idToMove = itemToMove.value.id;
+  const targetFolderId = selectedMoveTargetFolderId.value;
+
+  // Detach from current parent
+  let extractedItem: ListenItem | null = null;
+  findNodeAndPerform(listenDirectory.value, idToMove, (nodes, idx) => {
+    extractedItem = nodes.splice(idx, 1)[0];
+  });
+
+  if (!extractedItem) {
+    isMoveModalOpen.value = false;
+    itemToMove.value = null;
+    return;
+  }
+
+  if (targetFolderId === null) {
+    // Put at root level
+    listenDirectory.value.push(extractedItem);
+  } else {
+    // Put into target folder
+    findNodeAndPerform(listenDirectory.value, targetFolderId, (nodes, idx) => {
+      const folder = nodes[idx];
+      if (folder.isFolder) {
+        if (!folder.children) {
+          folder.children = [];
+        }
+        folder.children.push(extractedItem!);
+        expandedFolders.value[folder.id] = true;
+      }
+    });
+  }
+
+  saveListenDirectory();
+  toastMessage.value = t("listen.toastMoveSuccess", { name: (extractedItem as ListenItem).name });
+  toastType.value = "success";
+  setTimeout(() => {
+    toastMessage.value = "";
+  }, 3000);
+
+  isMoveModalOpen.value = false;
+  itemToMove.value = null;
+};
+
+const availableFolderOptions = computed(() => {
+  const options: Array<{
+    id: string | null;
+    name: string;
+    depth: number;
+    disabled: boolean;
+    isCurrent: boolean;
+    itemCount: number;
+  }> = [];
+
+  const parentInfo = itemToMove.value
+    ? getParentFolderId(listenDirectory.value, itemToMove.value.id)
+    : { found: false, parentId: null };
+  const currentParentId = parentInfo.parentId;
+
+  // Root level option
+  options.push({
+    id: null,
+    name: t("listen.rootDirectory"),
+    depth: 0,
+    disabled: itemToMove.value ? currentParentId === null : false,
+    isCurrent: currentParentId === null,
+    itemCount: totalListenItemsCount.value
+  });
+
+  const traverse = (nodes: ListenItem[], depth = 1) => {
+    for (const node of nodes) {
+      if (node.isFolder) {
+        const isSelf = !!(itemToMove.value && itemToMove.value.id === node.id);
+        const isChildDescendant = !!(itemToMove.value && isDescendant(itemToMove.value, node.id));
+        const isCurrent = currentParentId === node.id;
+        const disabled = isSelf || isChildDescendant || isCurrent;
+
+        options.push({
+          id: node.id,
+          name: node.name,
+          depth,
+          disabled,
+          isCurrent,
+          itemCount: getFolderItemsCount(node)
+        });
+
+        if (node.children) {
+          traverse(node.children, depth + 1);
+        }
+      }
+    }
+  };
+
+  traverse(listenDirectory.value, 1);
+  return options;
+});
+
+const expandAllFolders = () => {
+  const expandRecursive = (nodes: ListenItem[]) => {
+    for (const node of nodes) {
+      if (node.isFolder) {
+        expandedFolders.value[node.id] = true;
+        if (node.children) {
+          expandRecursive(node.children);
+        }
+      }
+    }
+  };
+  expandRecursive(listenDirectory.value);
+};
+
+const collapseAllFolders = () => {
+  expandedFolders.value = {};
 };
 
 function formatDateForSearch(date) {
@@ -15250,23 +15493,127 @@ onUnmounted(() => {
 
       <!-- Listen Tab -->
       <div v-show="activeTab === 'listen'" class="space-y-6 w-full max-w-full mx-auto px-0 py-6">
+        <!-- Mode Switcher Navigation Header -->
+        <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/70 dark:border-gray-700/70 shadow-sm p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div class="flex items-center gap-3.5 min-w-0">
+            <div class="h-10 w-10 sm:h-11 sm:w-11 rounded-2xl bg-teal-50 dark:bg-teal-950/50 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 shrink-0 shadow-xs">
+              <component :is="listenLayoutMode === 'view' ? Eye : FolderTree" class="h-5 w-5" />
+            </div>
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <h2 class="text-base sm:text-lg font-black text-gray-900 dark:text-white tracking-tight">
+                  {{ t('listen.listenDirectory') }}
+                </h2>
+                <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-teal-50 dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 border border-teal-200/60 dark:border-teal-800/40 tabular-nums">
+                  {{ totalListenItemsCount }} {{ totalListenItemsCount === 1 ? t('listen.folderItemSingular') : t('listen.folderItemPlural') }}
+                </span>
+                <span v-if="totalListenFoldersCount > 0" class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 dark:bg-gray-700/60 text-gray-600 dark:text-gray-300 tabular-nums">
+                  {{ totalListenFoldersCount }} {{ totalListenFoldersCount === 1 ? t('listen.folderSingular') : t('listen.foldersPlural') }}
+                </span>
+              </div>
+              <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5 truncate max-w-2xl">
+                {{ listenLayoutMode === 'view' ? t('listen.modeViewHint') : t('listen.modeRearrangeHint') }}
+              </p>
+            </div>
+          </div>
+
+          <!-- Mode Segmented Control -->
+          <div class="flex items-center gap-1.5 bg-gray-100/80 dark:bg-gray-900/60 p-1.5 rounded-2xl border border-gray-200/60 dark:border-gray-700/60 self-start md:self-auto shrink-0">
+            <button
+              @click="setListenLayoutMode('view')"
+              class="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer select-none"
+              :class="[
+                listenLayoutMode === 'view'
+                  ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+              ]"
+            >
+              <Eye class="h-4 w-4" />
+              <span>{{ t('listen.modeView') }}</span>
+            </button>
+            <button
+              @click="setListenLayoutMode('rearrange')"
+              class="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer select-none"
+              :class="[
+                listenLayoutMode === 'rearrange'
+                  ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+              ]"
+            >
+              <FolderTree class="h-4 w-4" />
+              <span>{{ t('listen.modeRearrange') }}</span>
+            </button>
+          </div>
+        </div>
+
         <!-- Main Panel Split Grid -->
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start w-full">
           
-          <!-- Left sidebar (directory tree + Relations Graph below) -->
-          <div class="lg:col-span-4 xl:col-span-3 flex flex-col gap-6 w-full">
+          <!-- Left sidebar (directory tree + Relations Graph below in View Mode) -->
+          <div
+            :class="[
+              listenLayoutMode === 'view'
+                ? 'lg:col-span-4 xl:col-span-3'
+                : 'lg:col-span-7 xl:col-span-7'
+            ]"
+            class="flex flex-col gap-6 w-full transition-all duration-200"
+          >
             <!-- Left directory tree widget -->
             <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col min-h-[500px] w-full">
             <!-- Watchlist Header -->
             <div class="p-4 border-b border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shrink-0">
               <div>
-                <h3 class="text-sm font-black uppercase tracking-wider text-gray-700 dark:text-gray-300 flex items-center gap-2">
-                  <Radio class="h-4 w-4 text-teal-500 animate-pulse" />
-                  <span>{{ t('listen.listenDirectory') }}</span>
-                </h3>
-                <p class="text-[11px] text-gray-400 mt-0.5">{{ t('listen.hierarchicalWatchlists') }}</p>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <h3 class="text-sm font-black uppercase tracking-wider text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                    <Radio class="h-4 w-4 text-teal-500 animate-pulse" />
+                    <span>{{ t('listen.listenDirectory') }}</span>
+                  </h3>
+                  <!-- Badge for total items count including items in folders and sub-folders -->
+                  <span
+                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold transition-all tabular-nums shadow-2xs select-none"
+                    :class="[
+                      listenSearchQuery.trim()
+                        ? 'bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/70 dark:border-amber-800/50'
+                        : 'bg-teal-50 dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 border border-teal-200/60 dark:border-teal-800/40'
+                    ]"
+                    :title="listenSearchQuery.trim()
+                      ? t('listen.totalItemsFilteredTooltip', { visible: visibleListenItemsCount, total: totalListenItemsCount })
+                      : t('listen.totalItemsTooltip', { count: totalListenItemsCount })"
+                  >
+                    <template v-if="listenSearchQuery.trim()">
+                      {{ visibleListenItemsCount }} / {{ totalListenItemsCount }} {{ totalListenItemsCount === 1 ? t('listen.folderItemSingular') : t('listen.folderItemPlural') }}
+                    </template>
+                    <template v-else>
+                      {{ totalListenItemsCount }} {{ totalListenItemsCount === 1 ? t('listen.folderItemSingular') : t('listen.folderItemPlural') }}
+                    </template>
+                  </span>
+                </div>
+                <p class="text-[11px] text-gray-400 mt-0.5 flex items-center gap-1.5 flex-wrap">
+                  <span>{{ t('listen.hierarchicalWatchlists') }}</span>
+                  <template v-if="totalListenFoldersCount > 0">
+                    <span class="text-gray-300 dark:text-gray-600">•</span>
+                    <span class="text-gray-400 dark:text-gray-500 font-medium">
+                      {{ totalListenFoldersCount }} {{ totalListenFoldersCount === 1 ? t('listen.folderSingular') : t('listen.foldersPlural') }}
+                    </span>
+                  </template>
+                </p>
               </div>
               <div class="flex items-center gap-1.5 self-end sm:self-auto">
+                <button
+                  @click="expandAllFolders"
+                  class="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
+                  :title="t('listen.expandAll')"
+                >
+                  <ChevronDown class="h-3.5 w-3.5" />
+                </button>
+                <button
+                  @click="collapseAllFolders"
+                  class="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
+                  :title="t('listen.collapseAll')"
+                >
+                  <ChevronUp class="h-3.5 w-3.5" />
+                </button>
+                <div class="h-4 w-px bg-gray-200 dark:bg-gray-700 mx-0.5"></div>
                 <button
                   @click="openAddModal('', true)"
                   class="px-2 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 rounded-lg text-xs font-bold text-gray-600 dark:text-gray-300 flex items-center gap-1 transition-colors"
@@ -15283,6 +15630,15 @@ onUnmounted(() => {
                   <Plus class="h-3 w-3" />
                   <span>{{ t('listen.listen') }}</span>
                 </button>
+              </div>
+            </div>
+
+            <!-- Rearrange Mode Information Banner -->
+            <div v-if="listenLayoutMode === 'rearrange'" class="px-4 py-2.5 bg-gradient-to-r from-teal-500/10 via-cyan-500/5 to-transparent border-b border-teal-500/20 flex items-start gap-2.5 text-xs text-teal-800 dark:text-teal-300">
+              <FolderTree class="h-4 w-4 text-teal-600 dark:text-teal-400 shrink-0 mt-0.5" />
+              <div class="flex-1 min-w-0">
+                <span class="font-bold text-teal-700 dark:text-teal-300">{{ t('listen.rearrangeTitle') }}:</span>
+                <span class="opacity-90 ml-1 text-gray-600 dark:text-gray-300">{{ t('listen.rearrangeTip') }}</span>
               </div>
             </div>
 
@@ -15426,6 +15782,15 @@ onUnmounted(() => {
                     <FolderPlus class="h-3 w-3" />
                   </button>
 
+                  <!-- Move item/folder to another destination -->
+                  <button
+                    @click.stop="openMoveModal(node.item)"
+                    class="p-1 hover:bg-teal-50 dark:hover:bg-teal-950/40 rounded-md text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
+                    :title="t('listen.moveTo')"
+                  >
+                    <ArrowRightLeft class="h-3 w-3" />
+                  </button>
+
                   <!-- Edit configs -->
                   <button
                     @click.stop="openEditModal(node.item)"
@@ -15476,14 +15841,21 @@ onUnmounted(() => {
                   <span>{{ isSyncingListen ? t('listen.syncing') : t('listen.sync') }}</span>
                 </button>
               </div>
-              <span class="text-[9px] font-semibold text-gray-400 uppercase tracking-widest select-none">
-                {{ t('listen.localConfig') }}
-              </span>
+              <div class="flex items-center gap-1.5 text-[10px] text-gray-400 dark:text-gray-500 font-medium select-none">
+                <span :title="t('listen.totalItemsTooltip', { count: totalListenItemsCount })">
+                  {{ t('listen.totalItemsCountDetailed', { count: totalListenItemsCount }) }}
+                </span>
+                <span>•</span>
+                <span class="text-[9px] font-semibold text-gray-400 uppercase tracking-widest">
+                  {{ t('listen.localConfig') }}
+                </span>
+              </div>
             </div>
           </div>
 
-            <!-- Relations Graph Widget inside Listen Tab -->
+            <!-- Relations Graph Widget inside Listen Tab (Shown in View Mode) -->
             <div
+              v-if="listenLayoutMode === 'view'"
               class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm shadow-indigo-100/5 dark:shadow-none flex flex-col group/chart transition-all"
             >
               <div class="flex items-center justify-between mb-4">
@@ -15578,10 +15950,18 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- Right telemetry posts viewer (col-span-8) -->
-          <div class="lg:col-span-8 xl:col-span-9 space-y-6 w-full">
-            
-            <!-- Empty state when no node is selected -->
+          <!-- Right Column: View Mode (Large Reader) vs Rearrange Mode (Decision Assistant) -->
+          <div
+            :class="[
+              listenLayoutMode === 'view'
+                ? 'lg:col-span-8 xl:col-span-9'
+                : 'lg:col-span-5 xl:col-span-5'
+            ]"
+            class="space-y-6 w-full transition-all duration-200"
+          >
+            <!-- View Mode Layout -->
+            <template v-if="listenLayoutMode === 'view'">
+              <!-- Empty state when no node is selected -->
             <div v-if="!selectedListenNode" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center p-8 py-24 text-center w-full min-h-[920px]">
               <div class="max-w-md mx-auto flex flex-col items-center">
                 <div class="h-16 w-16 bg-teal-50 dark:bg-teal-950/20 rounded-full flex items-center justify-center text-teal-500 mb-6 border border-teal-100/50 dark:border-teal-900/20 scale-110">
@@ -16110,8 +16490,617 @@ onUnmounted(() => {
 
               </div>
             </div>
+            </template>
+
+            <!-- Rearrange Mode: Decision Assistant Layout (Graph & Posts Flow to support reorganization) -->
+            <template v-else>
+              <div class="flex flex-col gap-5 w-full">
+                <!-- Empty State if no item selected -->
+                <div v-if="!selectedListenNode" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 p-8 sm:p-12 text-center flex flex-col items-center justify-center shadow-sm min-h-[500px]">
+                  <div class="h-16 w-16 rounded-3xl bg-teal-50 dark:bg-teal-950/40 border border-teal-200/50 dark:border-teal-800/50 flex items-center justify-center text-teal-600 dark:text-teal-400 mb-4 shadow-xs">
+                    <Split class="h-8 w-8" />
+                  </div>
+                  <span class="px-3 py-1 rounded-full text-[11px] font-extrabold uppercase tracking-wider bg-teal-50 dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 border border-teal-200/60 dark:border-teal-800/40 mb-3">
+                    {{ t('listen.decisionHelperBadge') }}
+                  </span>
+                  <h3 class="text-base sm:text-lg font-bold text-gray-900 dark:text-white mb-2">
+                    {{ t('listen.noItemForDecision') }}
+                  </h3>
+                  <p class="text-xs text-gray-500 dark:text-gray-400 max-w-md leading-relaxed">
+                    {{ t('listen.noItemForDecisionDesc') }}
+                  </p>
+                </div>
+
+                <!-- Active Item Decision Workspace -->
+                <div v-else class="flex flex-col gap-5 w-full">
+                  <!-- Top Channel/Keyword Context Card -->
+                  <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 p-5 shadow-sm">
+                    <div class="flex items-start justify-between gap-4">
+                      <div class="flex items-center gap-3.5 min-w-0">
+                        <div class="relative shrink-0">
+                          <div
+                            v-if="selectedChannelMetadata?.photo || selectedListenNode.avatar"
+                            class="w-12 h-12 rounded-2xl overflow-hidden shadow-xs border border-gray-200 dark:border-gray-700"
+                          >
+                            <img
+                              :src="selectedChannelMetadata.photo && (selectedChannelMetadata.photo.startsWith('data:'))
+                                ? selectedChannelMetadata.photo
+                                : `https://i.gogingko.net/api/v1/v/telegram-profile/${selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument}`"
+                              @error="handleImageError"
+                              alt="Channel Avatar"
+                              class="w-full h-full object-cover"
+                              referrerpolicy="no-referrer"
+                            />
+                          </div>
+                          <div
+                            v-else
+                            class="w-12 h-12 rounded-2xl bg-teal-50 dark:bg-teal-950/50 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-base"
+                          >
+                            {{ getInitials(selectedListenNode.name) }}
+                          </div>
+                          <span
+                            class="absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 border-white dark:border-gray-800 flex items-center justify-center"
+                            :class="selectedListenNode.type === 'channel' ? 'bg-orange-500' : 'bg-cyan-500'"
+                          >
+                            <Radio v-if="selectedListenNode.type === 'channel'" class="h-2.5 w-2.5 text-white" />
+                            <Hash v-else class="h-2.5 w-2.5 text-white" />
+                          </span>
+                        </div>
+                        <div class="min-w-0">
+                          <div class="flex items-center gap-2 flex-wrap">
+                            <h3 class="text-sm sm:text-base font-bold text-gray-900 dark:text-white truncate">
+                              {{ selectedListenNode.name }}
+                            </h3>
+                            <span class="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
+                              {{ selectedListenNode.type === 'channel' ? t('listen.channelListening') : t('listen.keywordFiltering') }}
+                            </span>
+                          </div>
+                          <div class="flex items-center gap-3 mt-1 text-xs text-gray-500 dark:text-gray-400 flex-wrap">
+                            <span class="font-mono text-teal-600 dark:text-teal-400 font-semibold truncate max-w-[200px]">
+                              {{ selectedListenNode.type === 'channel' ? `@${selectedListenNode.argument}` : selectedListenNode.argument }}
+                            </span>
+                            <span v-if="selectedChannelMetadata?.subscribers" class="font-medium text-gray-400">
+                              • {{ formatViews(selectedChannelMetadata.subscribers) }} {{ t('explorer.subscribers') }}
+                            </span>
+                            <span class="font-mono text-[11px] text-gray-400">
+                              • {{ t('listen.cachedPosts', { count: listenPosts.length }) }}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Quick Move Button -->
+                      <button
+                        @click="openMoveModal(selectedListenNode)"
+                        class="px-3 py-2 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer shrink-0"
+                        :title="t('listen.moveTo')"
+                      >
+                        <ArrowRightLeft class="h-3.5 w-3.5" />
+                        <span>{{ t('listen.quickMoveAction') }}</span>
+                      </button>
+                    </div>
+
+                    <!-- About / Description snippet -->
+                    <p v-if="selectedChannelMetadata?.about || selectedListenNode.description" class="mt-3 text-xs text-gray-600 dark:text-gray-300 line-clamp-2 border-t border-gray-100 dark:border-gray-700/60 pt-2.5">
+                      {{ selectedChannelMetadata?.about || selectedListenNode.description }}
+                    </p>
+
+                    <!-- Decision Tabs Switcher -->
+                    <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700/60 flex items-center justify-between gap-2 flex-wrap">
+                      <div class="flex items-center gap-1.5 bg-gray-100 dark:bg-gray-900/60 p-1 rounded-xl">
+                        <button
+                          @click="rearrangeDecisionTab = 'both'"
+                          class="px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                          :class="rearrangeDecisionTab === 'both' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-2xs font-bold' : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'"
+                        >
+                          <Columns2 class="h-3.5 w-3.5" />
+                          <span>{{ t('listen.tabBoth') }}</span>
+                        </button>
+                        <button
+                          @click="rearrangeDecisionTab = 'graph'"
+                          class="px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                          :class="rearrangeDecisionTab === 'graph' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-2xs font-bold' : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'"
+                        >
+                          <Network class="h-3.5 w-3.5" />
+                          <span>{{ t('listen.tabGraph') }}</span>
+                        </button>
+                        <button
+                          @click="rearrangeDecisionTab = 'posts'"
+                          class="px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                          :class="rearrangeDecisionTab === 'posts' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-2xs font-bold' : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'"
+                        >
+                          <Activity class="h-3.5 w-3.5" />
+                          <span>{{ t('listen.tabPosts') }}</span>
+                        </button>
+                      </div>
+
+                      <span class="text-[11px] text-gray-400 dark:text-gray-500 italic hidden sm:inline">
+                        {{ t('listen.postsFlowDesc') }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <!-- Relations Graph Section in Decision Hub -->
+                  <div
+                    v-if="rearrangeDecisionTab === 'both' || rearrangeDecisionTab === 'graph'"
+                    class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 p-5 shadow-sm flex flex-col group/chart transition-all"
+                  >
+                    <div class="flex items-center justify-between mb-3">
+                      <div class="flex items-center gap-2">
+                        <div class="p-1.5 bg-teal-50 dark:bg-teal-950/40 rounded-lg">
+                          <Network class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <h4 class="text-xs font-black text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                            {{ t('listen.tabGraph') }}
+                          </h4>
+                          <span v-if="totalNeighborsCount > 0" class="text-[10px] font-semibold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-2 py-0.5 rounded-full">
+                            {{ t('explorer.nodesCount', { count: totalNeighborsCount }) }}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div class="flex items-center gap-1">
+                        <button
+                          @click="onGraphZoomIn"
+                          class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                          :title="t('explorer.zoomIn')"
+                        >
+                          <ZoomIn class="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          @click="onGraphZoomOut"
+                          class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                          :title="t('explorer.zoomOut')"
+                        >
+                          <ZoomOut class="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          @click="resetGraphView"
+                          class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                          :title="t('explorer.resetView')"
+                        >
+                          <RotateCcw class="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          @click="isGraphEnlarged = true"
+                          class="p-1.5 hover:bg-teal-50 dark:hover:bg-teal-950/35 text-teal-600 dark:text-teal-400 rounded-lg transition-colors cursor-pointer"
+                          :title="t('search.enlargeInteractiveView')"
+                        >
+                          <Maximize2 class="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div
+                      v-if="activeTab === 'listen' && !isGraphEnlarged"
+                      ref="graphCanvasContainer"
+                      :class="rearrangeDecisionTab === 'both' ? 'h-[250px]' : 'h-[440px]'"
+                      class="relative w-full bg-gray-50/50 dark:bg-gray-950/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/80 overflow-hidden"
+                    >
+                      <canvas
+                        ref="graphCanvas"
+                        @mousedown="onCanvasMouseDown"
+                        @mousemove="onCanvasMouseMove"
+                        @mouseup="onCanvasMouseUp"
+                        @wheel.prevent="onCanvasWheel"
+                        class="block w-full h-full"
+                      ></canvas>
+
+                      <div class="absolute bottom-2.5 left-3 right-3 flex flex-wrap items-center justify-between gap-1.5 text-[9px] font-medium text-gray-400 dark:text-gray-500 pointer-events-none select-none">
+                        <div>{{ t('search.dragNodesHint') }}</div>
+                        <div class="flex items-center gap-2">
+                          <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>{{ t('search.inbound') }}</span>
+                          <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-pink-500"></span>{{ t('search.outbound') }}</span>
+                          <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>{{ t('search.mutual') }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Posts Flow Section in Decision Hub -->
+                  <div
+                    v-if="rearrangeDecisionTab === 'both' || rearrangeDecisionTab === 'posts'"
+                    class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 p-5 shadow-sm flex flex-col transition-all"
+                  >
+                    <div class="flex items-center justify-between mb-3.5">
+                      <div class="flex items-center gap-2">
+                        <div class="p-1.5 bg-blue-50 dark:bg-blue-950/40 rounded-lg">
+                          <Activity class="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                        </div>
+                        <h4 class="text-xs font-black text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                          {{ t('listen.tabPosts') }}
+                        </h4>
+                        <span class="text-[10px] font-mono text-gray-400">
+                          ({{ listenPosts.length }})
+                        </span>
+                      </div>
+                      <span v-if="isFetchingListenPosts" class="flex items-center gap-1.5 text-xs text-teal-600 dark:text-teal-400 font-medium">
+                        <LoaderCircle class="h-3 w-3 animate-spin" />
+                        <span>{{ t('listen.connectingPipeline') }}</span>
+                      </span>
+                    </div>
+
+                    <!-- Enhanced larger preview feed list -->
+                    <div
+                      :class="rearrangeDecisionTab === 'both' ? 'max-h-[580px]' : 'max-h-[840px]'"
+                      class="overflow-y-auto space-y-4 pr-1.5"
+                    >
+                      <div v-if="listenPosts.length === 0 && !isFetchingListenPosts" class="py-12 text-center text-xs text-gray-400 dark:text-gray-500">
+                        {{ t('listen.noLogsFound') }}
+                      </div>
+
+                      <div
+                        v-for="post in listenPosts.slice(0, 30)"
+                        :key="post.key"
+                        class="p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-gray-200/90 dark:border-gray-700/80 bg-white/95 dark:bg-gray-900/70 hover:bg-white dark:hover:bg-gray-900 hover:border-teal-400/60 dark:hover:border-teal-500/50 hover:shadow-md dark:hover:shadow-lg dark:hover:shadow-black/50 transition-all duration-200 space-y-3.5 group/post"
+                      >
+                        <!-- Post Header: User/Author Info, Badge & External Actions -->
+                        <div class="flex items-start justify-between gap-3">
+                          <div class="flex items-center gap-2.5 min-w-0">
+                            <!-- Avatar -->
+                            <div
+                              class="w-9 h-9 rounded-xl overflow-hidden shadow-2xs border border-gray-200 dark:border-gray-700 shrink-0 bg-teal-50 dark:bg-teal-950/50 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-xs"
+                            >
+                              <img
+                                :src="getPostAvatarUrl(post)"
+                                @error="handleImageError"
+                                class="w-full h-full object-cover"
+                                alt="Author Avatar"
+                                referrerpolicy="no-referrer"
+                              />
+                            </div>
+
+                            <!-- Author Name & Badges -->
+                            <div class="min-w-0">
+                              <div class="flex items-center gap-1.5 flex-wrap">
+                                <span class="text-xs sm:text-sm font-bold text-gray-900 dark:text-gray-100 truncate">
+                                  {{ post.data?.author || post.data?.user || selectedListenNode?.name }}
+                                </span>
+                                <span
+                                  v-if="getUsername && getUsername(post)"
+                                  class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-md bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border border-teal-200/60 dark:border-teal-800/60 shrink-0"
+                                >
+                                  {{ getUsername(post) }}
+                                </span>
+                                <span
+                                  v-if="getToolName && getToolName(post)"
+                                  class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60 shrink-0"
+                                >
+                                  {{ getToolName(post) }}
+                                </span>
+                              </div>
+                              <div class="flex items-center gap-2 text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">
+                                <span class="flex items-center gap-1">
+                                  <Calendar class="h-3 w-3 text-gray-400 dark:text-gray-500" />
+                                  <span>{{ post.data?.date ? formatDate(post.data.date) : '' }}</span>
+                                </span>
+                                <span v-if="post.mtime" class="hidden sm:inline text-gray-400 dark:text-gray-500">
+                                  ({{ t('listen.scrapedAt', { time: formatScrapedDate(post.mtime) }) }})
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <!-- External Link & Version history -->
+                          <div class="flex items-center gap-1 shrink-0">
+                            <button
+                              v-if="hasOldVersions(post)"
+                              @click="openOldVersionsModal(post)"
+                              class="p-1.5 hover:bg-amber-50 dark:hover:bg-amber-950/40 text-amber-600 dark:text-amber-400 rounded-lg transition-colors cursor-pointer"
+                              :title="t('listen.viewVersionHistory')"
+                            >
+                              <History class="h-3.5 w-3.5" />
+                            </button>
+                            <a
+                              v-if="post.url || post.link"
+                              :href="post.url || post.link"
+                              target="_blank"
+                              class="p-1.5 text-gray-400 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40 rounded-lg transition-colors cursor-pointer"
+                              :title="t('listen.viewTg')"
+                            >
+                              <ExternalLink class="h-3.5 w-3.5" />
+                            </a>
+                          </div>
+                        </div>
+
+                        <!-- Quoted Reply Segment (if any) -->
+                        <div
+                          v-if="post.data?.reply && post.data.reply.length >= 2"
+                          class="border-l-3 border-teal-400 dark:border-teal-500 bg-teal-50/60 dark:bg-teal-950/30 px-3 py-2 rounded-r-xl text-xs text-gray-700 dark:text-gray-200 italic"
+                        >
+                          <div class="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 mb-0.5">
+                            <Reply class="h-2.5 w-2.5" />
+                            <span>{{ t('listen.replyToMessage') }}</span>
+                          </div>
+                          <div class="line-clamp-2">{{ post.data.reply[1] }}</div>
+                        </div>
+
+                        <!-- Forward Quote Segment (if any) -->
+                        <div
+                          v-if="post.data?.forward_url"
+                          class="border-l-3 border-purple-400 dark:border-purple-500 bg-purple-50/60 dark:bg-purple-950/30 px-3 py-2 rounded-r-xl text-xs text-gray-700 dark:text-gray-200 italic flex items-center justify-between gap-2"
+                        >
+                          <div class="min-w-0">
+                            <div class="flex items-center gap-1 text-[9px] font-black uppercase tracking-wider text-purple-600 dark:text-purple-400 mb-0.5">
+                              <Forward class="h-2.5 w-2.5" />
+                              <span>{{ t('listen.forward') }}</span>
+                            </div>
+                            <div class="line-clamp-2">{{ getForwardInfo(post)?.text || post.data.forward_url }}</div>
+                          </div>
+                          <button
+                            v-if="getForwardInfo(post)?.target"
+                            @click="activeTab = 'explorer'; channelName = getForwardInfo(post).target; searchChannel()"
+                            class="px-2 py-1 bg-purple-100 hover:bg-purple-200 dark:bg-purple-900/60 text-purple-700 dark:text-purple-200 rounded-lg text-[10px] font-bold shrink-0 transition-colors cursor-pointer"
+                          >
+                            @{{ getForwardInfo(post).target }}
+                          </button>
+                        </div>
+
+                        <!-- Post Content Text (Spacious, Multi-line, HTML & Highlights) -->
+                        <div v-if="getSafePostContent(post) || post.data?.message" class="space-y-2">
+                          <div
+                            v-html="highlightTextByKeywords(getSafePostContent(post) || post.data?.message || '')"
+                            class="text-xs sm:text-sm text-gray-800 dark:text-gray-100 leading-relaxed whitespace-pre-wrap break-words max-h-[340px] overflow-y-auto pr-1 select-text"
+                          ></div>
+                          <div class="flex items-center gap-2">
+                            <button
+                              @click="translatePost(post)"
+                              class="inline-flex items-center gap-1 text-[10px] text-gray-500 dark:text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors cursor-pointer"
+                            >
+                              <Languages v-if="!isTranslating[post.key]" class="h-3 w-3" />
+                              <Loader2 v-else class="h-3 w-3 animate-spin" />
+                              <span>{{ t('listen.translateContents') }}</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        <!-- Photos Preview -->
+                        <div
+                          v-if="post.data?.photos && post.data.photos.length > 0"
+                          class="rounded-2xl overflow-hidden border border-gray-200/80 dark:border-gray-700/80 bg-black/5 dark:bg-black/40 group cursor-zoom-in relative max-w-lg shadow-2xs"
+                          @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`)"
+                        >
+                          <img
+                            :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`"
+                            class="w-full h-auto max-h-[320px] object-cover transition-transform duration-500 group-hover:scale-[1.01]"
+                            alt="Telegram Post Photo"
+                            referrerpolicy="no-referrer"
+                          />
+                          <div
+                            v-if="post.data.photos.length > 1"
+                            class="absolute bottom-2.5 right-2.5 px-2.5 py-1 rounded-full text-[10px] font-bold bg-black/75 text-white backdrop-blur-xs flex items-center gap-1.5 shadow-sm"
+                          >
+                            <ImageIcon class="h-3 w-3 text-teal-400" />
+                            <span>+{{ post.data.photos.length - 1 }}</span>
+                          </div>
+                        </div>
+
+                        <!-- Document Photos Preview -->
+                        <div
+                          v-if="post.data?.documents && post.data.documents.length > 0 && post.data.documents[0].mime_type && post.data.documents[0].mime_type.startsWith('image/')"
+                          class="rounded-2xl overflow-hidden border border-gray-200/80 dark:border-gray-700/80 bg-black/5 dark:bg-black/40 group cursor-zoom-in relative max-w-lg shadow-2xs"
+                          @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`)"
+                        >
+                          <img
+                            :src="`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`"
+                            class="w-full h-auto max-h-[320px] object-contain mx-auto transition-transform duration-500 group-hover:scale-[1.01]"
+                            alt="Telegram Document Photo"
+                            referrerpolicy="no-referrer"
+                          />
+                        </div>
+
+                        <!-- Videos Playable Player -->
+                        <div
+                          v-if="post.data?.videos && post.data.videos.length > 0"
+                          class="rounded-2xl overflow-hidden border border-gray-200/80 dark:border-gray-700/80 bg-black max-w-lg shadow-sm"
+                        >
+                          <video controls preload="metadata" playsinline class="w-full h-auto max-h-[300px]">
+                            <source :src="getVideoUrl(post)" type="video/mp4" />
+                          </video>
+                        </div>
+
+                        <!-- Link Metadata Embeds (if available) -->
+                        <div
+                          v-if="post.data?.linkPreview"
+                          class="rounded-2xl overflow-hidden border border-gray-200/80 dark:border-gray-700/80 bg-gray-50/90 dark:bg-gray-800/90 flex flex-col sm:flex-row shadow-2xs"
+                        >
+                          <div
+                            v-if="post.data.linkPreview.image"
+                            class="sm:w-24 sm:h-24 shrink-0 bg-gray-200 dark:bg-gray-800 overflow-hidden cursor-zoom-in"
+                            @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)"
+                          >
+                            <img
+                              :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`"
+                              class="w-full h-full object-cover"
+                              alt="Link Preview"
+                            />
+                          </div>
+                          <div class="p-3 flex-1 min-w-0">
+                            <div class="text-[9px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 truncate mb-0.5">
+                              {{ post.data.linkPreview.siteName || t('listen.embedWebpage') }}
+                            </div>
+                            <a
+                              v-if="post.data.linkPreview.href"
+                              :href="post.data.linkPreview.href"
+                              target="_blank"
+                              class="text-xs font-bold text-gray-900 dark:text-gray-100 hover:text-teal-600 dark:hover:text-teal-400 transition-colors block line-clamp-1"
+                            >
+                              {{ post.data.linkPreview.title || t('listen.embedLinkUrl') }}
+                            </a>
+                            <p v-if="post.data.linkPreview.description" class="text-[11px] text-gray-600 dark:text-gray-300 line-clamp-2 mt-0.5">
+                              {{ post.data.linkPreview.description }}
+                            </p>
+                          </div>
+                        </div>
+
+                        <!-- Documents Preview (PDF, Files) -->
+                        <div
+                          v-for="(doc, dIdx) in getPostDocuments(post)"
+                          :key="dIdx"
+                          class="rounded-xl border border-gray-200/80 dark:border-gray-700/80 bg-gray-50/90 dark:bg-gray-800/90 flex items-center p-3 gap-3 shadow-2xs"
+                        >
+                          <FileText class="h-6 w-6 text-red-500 shrink-0" />
+                          <div class="flex-1 min-w-0">
+                            <div class="text-xs font-bold text-gray-900 dark:text-gray-100 truncate">
+                              {{ doc.title }}
+                            </div>
+                            <a
+                              v-if="doc.url"
+                              :href="doc.url"
+                              target="_blank"
+                              class="text-[11px] text-teal-600 dark:text-teal-400 hover:underline font-semibold"
+                            >
+                              {{ t('listen.viewDocument') }}
+                            </a>
+                          </div>
+                        </div>
+
+                        <!-- Bottom Post Meta Strip: Post ID, Date, View Count, User/Author, Reactions -->
+                        <div class="pt-3 border-t border-gray-200/80 dark:border-gray-700/70 flex flex-wrap items-center justify-between gap-2.5 text-xs text-gray-500 dark:text-gray-400">
+                          <div class="flex items-center gap-2.5 flex-wrap">
+                            <!-- Post ID badge -->
+                            <span
+                              v-if="post.key || post.id"
+                              class="font-mono text-[10px] font-bold px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 select-all"
+                              :title="`Post ID: ${post.key || post.id}`"
+                            >
+                              ID: {{ post.key || post.id }}
+                            </span>
+
+                            <!-- Author/User -->
+                            <span class="inline-flex items-center gap-1 text-[11px] text-gray-700 dark:text-gray-300 font-medium">
+                              <User class="h-3 w-3 text-teal-600 dark:text-teal-400" />
+                              <span class="truncate max-w-[140px]">{{ post.data?.author || post.data?.user || selectedListenNode?.name }}</span>
+                            </span>
+
+                            <!-- View Count -->
+                            <span
+                              v-if="post.data?.views != null"
+                              class="inline-flex items-center gap-1 text-[11px] font-mono text-gray-700 dark:text-gray-300 font-semibold"
+                            >
+                              <Eye class="h-3 w-3 text-gray-400 dark:text-gray-500" />
+                              <span>{{ formatViews(post.data.views) }}</span>
+                            </span>
+
+                            <!-- Forwards -->
+                            <span
+                              v-if="post.data?.forwards"
+                              class="inline-flex items-center gap-0.5 text-[11px] text-teal-600 dark:text-teal-400 font-medium"
+                            >
+                              <span>↗</span>
+                              <span>{{ post.data.forwards }}</span>
+                            </span>
+                          </div>
+
+                          <!-- Post Reactions -->
+                          <div
+                            v-if="post.data?.reactions && getParsedReactions(post.data.reactions).length > 0"
+                            class="flex flex-wrap items-center gap-1"
+                          >
+                            <span
+                              v-for="(react, rIdx) in getParsedReactions(post.data.reactions)"
+                              :key="rIdx"
+                              class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 shadow-3xs"
+                            >
+                              <span v-html="react.emoji"></span>
+                              <span class="text-[9px] font-mono font-bold text-gray-500 dark:text-gray-400">{{ react.count.toLocaleString() }}</span>
+                            </span>
+                          </div>
+                        </div>
+
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
           </div>
 
+        </div>
+      </div>
+
+      <!-- Move Item/Folder Modal Popup -->
+      <div 
+        v-if="isMoveModalOpen" 
+        class="fixed inset-0 z-[115] flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm"
+        @click.self="isMoveModalOpen = false"
+      >
+        <div class="w-full max-w-md bg-white dark:bg-gray-800 rounded-3xl overflow-hidden shadow-2xl border border-gray-150 dark:border-gray-700 animate-in fade-in zoom-in duration-200">
+          <div class="p-6">
+            <div class="flex items-center justify-between mb-4 border-b border-gray-150 dark:border-gray-700 pb-3">
+              <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
+                <ArrowRightLeft class="h-5 w-5 text-teal-500" />
+                <span>{{ t('listen.moveItemTitle') }}</span>
+              </h3>
+              <button @click="isMoveModalOpen = false" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg p-1 cursor-pointer">
+                <X class="h-5 w-5" />
+              </button>
+            </div>
+
+            <div class="space-y-4">
+              <p class="text-xs text-gray-600 dark:text-gray-300 leading-relaxed">
+                {{ t('listen.moveItemPrompt', { name: itemToMove?.name || '' }) }}
+              </p>
+
+              <!-- Destination Folder Picker List -->
+              <div class="max-h-[300px] overflow-y-auto space-y-1 rounded-2xl border border-gray-200 dark:border-gray-700 p-2 bg-gray-50/50 dark:bg-gray-900/40">
+                <div
+                  v-for="folderOpt in availableFolderOptions"
+                  :key="folderOpt.id ?? 'root'"
+                  @click="!folderOpt.disabled && (selectedMoveTargetFolderId = folderOpt.id)"
+                  class="flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition-colors"
+                  :class="[
+                    folderOpt.disabled
+                      ? 'opacity-40 cursor-not-allowed bg-transparent text-gray-400 dark:text-gray-600'
+                      : selectedMoveTargetFolderId === folderOpt.id
+                        ? 'bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800/60 text-teal-700 dark:text-teal-300 shadow-2xs cursor-pointer'
+                        : 'hover:bg-white dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300 cursor-pointer'
+                  ]"
+                  :style="{ paddingLeft: `calc(0.75rem + ${folderOpt.depth * 1.25}rem)` }"
+                >
+                  <div class="flex items-center gap-2 min-w-0">
+                    <component
+                      :is="folderOpt.id === null ? Database : Folder"
+                      class="h-4 w-4 shrink-0"
+                      :class="folderOpt.id === null ? 'text-teal-500' : 'text-yellow-500'"
+                    />
+                    <span class="truncate">{{ folderOpt.name }}</span>
+                  </div>
+
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <span v-if="folderOpt.isCurrent" class="text-[10px] font-bold text-gray-400">
+                      {{ t('listen.currentLocation') }}
+                    </span>
+                    <span v-else-if="folderOpt.disabled" class="text-[10px] text-gray-400 italic">
+                      {{ t('listen.cannotMoveDescendant') }}
+                    </span>
+                    <span v-else class="text-[10px] font-mono text-gray-400 px-1.5 py-0.5 rounded bg-gray-200/60 dark:bg-gray-700/60">
+                      {{ folderOpt.itemCount }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="flex items-center justify-end gap-3 pt-3 border-t border-gray-150 dark:border-gray-700">
+                <button
+                  type="button"
+                  @click="isMoveModalOpen = false"
+                  class="px-4 py-2 rounded-xl text-xs font-bold text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+                >
+                  {{ t('search.cancel') }}
+                </button>
+                <button
+                  type="button"
+                  @click="confirmMoveItem"
+                  class="px-4 py-2 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white rounded-xl text-xs font-bold shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
+                >
+                  <CheckCircle2 class="h-4 w-4" />
+                  <span>{{ t('listen.confirmMove') }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -18015,89 +19004,248 @@ onUnmounted(() => {
         </div>
 
         <!-- Profile Chat Dialog Widget -->
-        <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-6 md:p-8 shadow-sm flex flex-col space-y-4">
-          <div class="flex items-center gap-2 border-b border-gray-150 dark:border-gray-750 pb-3">
-            <span class="p-1.5 rounded-xl bg-teal-500/10 text-teal-600 dark:text-teal-400">
-              <MessageSquare class="h-5 w-5" />
-            </span>
-            <div>
-              <h3 class="text-sm font-black text-gray-900 dark:text-white uppercase tracking-wider">{{ $t('profiles.cognitiveAssistant') }}</h3>
-              <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold">{{ $t('profiles.cognitiveAssistantDesc') }}</p>
+        <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-750 p-5 sm:p-7 shadow-xs flex flex-col space-y-4 transition-colors">
+          <!-- Assistant Header Toolbar -->
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 border-b border-gray-150 dark:border-gray-750">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-2xl bg-teal-500/10 dark:bg-teal-500/15 text-teal-600 dark:text-teal-400 border border-teal-500/20 flex items-center justify-center shrink-0 shadow-3xs">
+                <Bot class="h-5 w-5" />
+              </div>
+              <div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <h3 class="text-sm sm:text-base font-black text-gray-900 dark:text-white tracking-tight">{{ $t('profiles.cognitiveAssistant') }}</h3>
+                  <span 
+                    class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold font-mono transition-colors"
+                    :class="useProfileDB ? 'bg-teal-50 dark:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60' : 'bg-gray-100 dark:bg-gray-750 text-gray-500 dark:text-gray-400 border border-gray-200/80 dark:border-gray-700'"
+                  >
+                    <span class="w-1.5 h-1.5 rounded-full" :class="useProfileDB ? 'bg-teal-500 animate-pulse' : 'bg-gray-400'"></span>
+                    {{ useProfileDB ? $t('profiles.statusReferencingDb') : $t('profiles.statusGeneralAi') }}
+                  </span>
+                </div>
+                <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold leading-relaxed mt-0.5">{{ $t('profiles.cognitiveAssistantDesc') }}</p>
+              </div>
+            </div>
+
+            <!-- Header Action Controls -->
+            <div class="flex items-center gap-2 self-end sm:self-center shrink-0">
+              <span v-if="profileChatMessages.length > 0" class="text-[11px] font-mono font-bold px-2.5 py-1 rounded-xl bg-gray-100 dark:bg-gray-750 text-gray-600 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700">
+                {{ profileChatMessages.length }} {{ profileChatMessages.length === 1 ? 'msg' : 'msgs' }}
+              </span>
+              <button
+                v-if="profileChatMessages.length > 0"
+                @click="clearProfileChat"
+                type="button"
+                class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-gray-500 dark:text-gray-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 border border-gray-200/80 dark:border-gray-700 hover:border-rose-200 dark:hover:border-rose-800/60 transition-all cursor-pointer shadow-3xs"
+                :title="$t('profiles.clearChat')"
+              >
+                <Trash2 class="w-3.5 h-3.5" />
+                <span>{{ $t('profiles.clearChat') }}</span>
+              </button>
             </div>
           </div>
           
           <!-- Chat Content Area -->
-          <div ref="profileChatContentRef" class="h-[480px] overflow-y-auto space-y-3 p-3 bg-gray-50/50 dark:bg-gray-900/30 rounded-2xl border border-gray-150/50 dark:border-gray-750/30">
-            <div v-if="profileChatMessages.length === 0" class="text-center text-xs text-gray-400 dark:text-gray-500 py-36">
-              {{ $t('profiles.noConversations') }}
-            </div>
-            <div v-for="(msg, idx) in profileChatMessages" :key="idx" :class="msg.role === 'user' ? 'text-right' : 'text-left'">
-              <div :class="msg.role === 'user' ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-900 dark:text-teal-200 px-3 py-2 rounded-2xl rounded-tr-none inline-block text-xs font-semibold max-w-xl' : 'text-left text-xs bg-white dark:bg-gray-800 shadow-sm border border-gray-150 dark:border-gray-750 px-4 py-3 rounded-2xl rounded-tl-none inline-block prose prose-xs dark:prose-invert max-w-full'">
-                <div v-html="md.render(msg.content)"></div>
+          <div ref="profileChatContentRef" class="h-[480px] sm:h-[500px] overflow-y-auto space-y-4 p-4 sm:p-5 bg-gray-50/70 dark:bg-gray-900/50 rounded-2xl border border-gray-150 dark:border-gray-750/70 scroll-smooth">
+            <!-- Empty state with starter query suggestions -->
+            <div v-if="profileChatMessages.length === 0" class="h-full flex flex-col items-center justify-center py-6 px-4 text-center">
+              <div class="w-12 h-12 rounded-2xl bg-teal-500/10 dark:bg-teal-500/15 text-teal-600 dark:text-teal-400 border border-teal-500/20 flex items-center justify-center mb-3 shadow-3xs">
+                <Sparkles class="w-6 h-6" />
+              </div>
+              <h4 class="text-sm sm:text-base font-black text-gray-900 dark:text-white tracking-tight mb-1">
+                {{ $t('profiles.cognitiveAssistant') }}
+              </h4>
+              <p class="text-xs text-gray-400 dark:text-gray-500 font-medium max-w-md leading-relaxed mb-5">
+                {{ $t('profiles.noConversations') }}
+              </p>
+
+              <!-- Starter Prompt Suggestions -->
+              <div class="w-full max-w-xl space-y-2 text-left">
+                <div class="text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500 flex items-center gap-1.5 pl-1">
+                  <Sparkles class="w-3 h-3 text-teal-500" />
+                  <span>{{ $t('profiles.suggestedPrompts') }}</span>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    @click="selectProfileChatPrompt('profiles.promptFindAdmins')"
+                    type="button"
+                    class="group p-3 rounded-xl bg-white dark:bg-gray-800/90 hover:bg-teal-50/70 dark:hover:bg-teal-950/30 border border-gray-200/80 dark:border-gray-750 hover:border-teal-300 dark:hover:border-teal-700/60 text-xs font-semibold text-gray-700 dark:text-gray-300 hover:text-teal-700 dark:hover:text-teal-300 transition-all text-left shadow-3xs cursor-pointer flex items-start gap-2.5"
+                  >
+                    <User class="w-3.5 h-3.5 text-teal-500 shrink-0 mt-0.5 group-hover:scale-110 transition-transform" />
+                    <span class="leading-snug">{{ $t('profiles.promptFindAdmins') }}</span>
+                  </button>
+                  <button
+                    @click="selectProfileChatPrompt('profiles.promptSummarizeSkills')"
+                    type="button"
+                    class="group p-3 rounded-xl bg-white dark:bg-gray-800/90 hover:bg-teal-50/70 dark:hover:bg-teal-950/30 border border-gray-200/80 dark:border-gray-750 hover:border-teal-300 dark:hover:border-teal-700/60 text-xs font-semibold text-gray-700 dark:text-gray-300 hover:text-teal-700 dark:hover:text-teal-300 transition-all text-left shadow-3xs cursor-pointer flex items-start gap-2.5"
+                  >
+                    <Sparkles class="w-3.5 h-3.5 text-teal-500 shrink-0 mt-0.5 group-hover:scale-110 transition-transform" />
+                    <span class="leading-snug">{{ $t('profiles.promptSummarizeSkills') }}</span>
+                  </button>
+                  <button
+                    @click="selectProfileChatPrompt('profiles.promptAffiliations')"
+                    type="button"
+                    class="group p-3 rounded-xl bg-white dark:bg-gray-800/90 hover:bg-teal-50/70 dark:hover:bg-teal-950/30 border border-gray-200/80 dark:border-gray-750 hover:border-teal-300 dark:hover:border-teal-700/60 text-xs font-semibold text-gray-700 dark:text-gray-300 hover:text-teal-700 dark:hover:text-teal-300 transition-all text-left shadow-3xs cursor-pointer flex items-start gap-2.5"
+                  >
+                    <Network class="w-3.5 h-3.5 text-teal-500 shrink-0 mt-0.5 group-hover:scale-110 transition-transform" />
+                    <span class="leading-snug">{{ $t('profiles.promptAffiliations') }}</span>
+                  </button>
+                  <button
+                    @click="selectProfileChatPrompt('profiles.promptLocations')"
+                    type="button"
+                    class="group p-3 rounded-xl bg-white dark:bg-gray-800/90 hover:bg-teal-50/70 dark:hover:bg-teal-950/30 border border-gray-200/80 dark:border-gray-750 hover:border-teal-300 dark:hover:border-teal-700/60 text-xs font-semibold text-gray-700 dark:text-gray-300 hover:text-teal-700 dark:hover:text-teal-300 transition-all text-left shadow-3xs cursor-pointer flex items-start gap-2.5"
+                  >
+                    <Globe class="w-3.5 h-3.5 text-teal-500 shrink-0 mt-0.5 group-hover:scale-110 transition-transform" />
+                    <span class="leading-snug">{{ $t('profiles.promptLocations') }}</span>
+                  </button>
+                </div>
               </div>
             </div>
-            <div v-if="isProfileChatLoading" class="text-xs text-teal-600 dark:text-teal-400 italic flex items-center gap-2">
-              <Loader2 class="h-3.5 w-3.5 animate-spin" /> {{ profileChatLoadingDetails }}
+
+            <!-- Chat Message Stream -->
+            <div v-for="(msg, idx) in profileChatMessages" :key="idx" class="space-y-1">
+              <!-- User Message -->
+              <div v-if="msg.role === 'user'" class="flex justify-end items-start gap-2 pl-6 sm:pl-16">
+                <div class="flex flex-col items-end space-y-1 max-w-xl">
+                  <span class="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider pr-1">{{ $t('profiles.you') }}</span>
+                  <div class="bg-teal-600 dark:bg-teal-600/95 text-white px-4 py-2.5 sm:py-3 rounded-2xl rounded-tr-xs text-xs sm:text-sm font-medium shadow-3xs leading-relaxed break-words">
+                    {{ msg.content }}
+                  </div>
+                </div>
+                <div class="w-7 h-7 rounded-xl bg-teal-600 text-white flex items-center justify-center shrink-0 mt-4 shadow-3xs text-xs">
+                  <User class="w-3.5 h-3.5" />
+                </div>
+              </div>
+
+              <!-- Assistant (Bot) Message -->
+              <div v-else class="flex justify-start items-start gap-2.5 sm:gap-3 pr-2 sm:pr-10">
+                <div class="w-8 h-8 rounded-xl bg-teal-500/10 dark:bg-teal-500/20 text-teal-600 dark:text-teal-400 border border-teal-500/20 flex items-center justify-center shrink-0 mt-1 shadow-3xs">
+                  <Bot class="w-4 h-4" />
+                </div>
+                <div class="bg-white dark:bg-gray-800 border border-gray-200/80 dark:border-gray-700/80 rounded-2xl rounded-tl-xs p-4 sm:p-5 shadow-3xs max-w-3xl w-full text-xs sm:text-sm space-y-3">
+                  <!-- Assistant Message Toolbar -->
+                  <div class="flex items-center justify-between pb-2 border-b border-gray-100 dark:border-gray-750">
+                    <div class="flex items-center gap-2">
+                      <span class="text-[11px] font-bold text-gray-800 dark:text-gray-200 tracking-wide">{{ $t('profiles.assistant') }}</span>
+                      <span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-teal-50 dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 border border-teal-500/15">
+                        Synthesized
+                      </span>
+                    </div>
+                    <button
+                      @click="copyProfileChatMessage(msg.content, idx)"
+                      type="button"
+                      class="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/60 transition-all cursor-pointer"
+                      :title="$t('profiles.copyReply')"
+                    >
+                      <CheckCircle2 v-if="copiedProfileChatIdx === idx" class="w-3 h-3 text-emerald-500" />
+                      <Copy v-else class="w-3 h-3" />
+                      <span>{{ copiedProfileChatIdx === idx ? $t('profiles.copiedReply') : $t('profiles.copyReply') }}</span>
+                    </button>
+                  </div>
+                  
+                  <!-- Rendered Markdown Body -->
+                  <div class="prose prose-xs sm:prose-sm dark:prose-invert max-w-none text-gray-800 dark:text-gray-200 leading-relaxed font-normal" v-html="md.render(msg.content)"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Loading Synthesizing State -->
+            <div v-if="isProfileChatLoading" class="flex justify-start items-start gap-2.5 sm:gap-3 pr-4 sm:pr-10">
+              <div class="w-8 h-8 rounded-xl bg-teal-500/15 dark:bg-teal-500/25 text-teal-600 dark:text-teal-400 border border-teal-500/30 flex items-center justify-center shrink-0 mt-1 shadow-3xs animate-pulse">
+                <Bot class="w-4 h-4 animate-bounce" />
+              </div>
+              <div class="bg-white dark:bg-gray-800 border border-gray-200/80 dark:border-gray-700/80 rounded-2xl rounded-tl-xs p-4 sm:p-5 shadow-3xs max-w-xl space-y-3">
+                <div class="flex items-center gap-2">
+                  <span class="text-[11px] font-bold text-gray-800 dark:text-gray-200">{{ $t('profiles.assistant') }}</span>
+                  <span class="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-teal-50 dark:bg-teal-950/50 text-teal-600 dark:text-teal-400 border border-teal-500/20">
+                    <Loader2 class="w-3 h-3 animate-spin" />
+                    <span>Synthesizing</span>
+                  </span>
+                </div>
+                <div class="flex items-center gap-2 text-xs font-mono font-medium text-teal-700 dark:text-teal-300 bg-teal-50/70 dark:bg-teal-950/50 p-2.5 rounded-xl border border-teal-200/60 dark:border-teal-800/50">
+                  <Loader2 class="h-3.5 w-3.5 animate-spin text-teal-500 shrink-0" />
+                  <span class="truncate">{{ profileChatLoadingDetails }}</span>
+                </div>
+              </div>
             </div>
           </div>
 
-          <!-- Input Block -->
-          <div class="flex flex-col sm:flex-row gap-2.5">
-            <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-850 rounded-2xl px-4 py-2.5 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all flex-grow">
-              <input 
+          <!-- Input Console Card -->
+          <div class="bg-gray-50/90 dark:bg-gray-900/60 border border-gray-200 dark:border-gray-750 rounded-2xl p-2.5 sm:p-3 shadow-xs focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500/80 dark:focus-within:border-teal-400/80 transition-all flex flex-col gap-2">
+            <!-- Textarea Prompt Input -->
+            <div class="relative flex items-start">
+              <textarea 
                 v-model="profileChatInput" 
-                @keyup.enter="handleProfileChatSubmit(useProfileDB)" 
+                @keydown.enter.exact.prevent="handleProfileChatSubmit(useProfileDB)" 
                 :placeholder="$t('profiles.aiPromptPlaceholder')" 
-                class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full pr-2" 
+                rows="2"
+                class="bg-transparent text-xs sm:text-sm font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 w-full resize-none p-1.5 pr-8 leading-relaxed" 
                 :disabled="isProfileChatLoading"
-              />
+              ></textarea>
               <button
                 v-if="profileChatInput"
                 type="button"
                 @mousedown.prevent
                 @click="profileChatInput = ''"
-                class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full transition-colors cursor-pointer shrink-0 ml-1"
+                class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/60 dark:hover:bg-gray-700/60 rounded-full transition-colors cursor-pointer shrink-0 absolute right-1.5 top-1.5"
                 :title="$t('profiles.clearQuestion')"
               >
                 <X class="w-3.5 h-3.5" />
               </button>
             </div>
-            <div class="flex gap-2 shrink-0">
-              <button 
-                @click="useProfileDB = !useProfileDB" 
-                type="button"
-                :class="[
-                  'px-4 py-2.5 rounded-2xl text-xs font-bold transition-all flex items-center gap-2 border cursor-pointer select-none',
-                  useProfileDB 
-                    ? 'bg-teal-50 dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 border-teal-200 dark:border-teal-900/30 font-black' 
-                    : 'bg-gray-50 dark:bg-gray-900 text-gray-400 dark:text-gray-500 border-gray-150 dark:border-gray-850 hover:bg-gray-100 dark:hover:bg-gray-850'
-                ]"
-                title="Toggle Profile Database Reference"
-              >
-                <span :class="['w-2 h-2 rounded-full shrink-0', useProfileDB ? 'bg-teal-500 animate-pulse' : 'bg-gray-300']"></span>
-                <Database class="h-3.5 w-3.5" />
-                <span>{{ $t('profiles.useProfileDb') }}</span>
-              </button>
-              <button 
-                @click="handleProfileChatSubmit(useProfileDB)" 
-                :disabled="isProfileChatLoading" 
-                class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:bg-teal-400 text-white font-bold rounded-2xl text-xs transition-colors flex items-center gap-1.5 shrink-0 shadow-sm cursor-pointer"
-              >
-                <Send class="h-3.5 w-3.5" />
-                <span>{{ $t('profiles.ask') }}</span>
-              </button>
+
+            <!-- Bottom Controls Toolbar -->
+            <div class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-gray-150 dark:border-gray-750/70">
+              <div class="flex items-center gap-3">
+                <!-- Reference Database Toggle Pill -->
+                <button 
+                  @click="useProfileDB = !useProfileDB" 
+                  type="button"
+                  :class="[
+                    'px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 border cursor-pointer select-none',
+                    useProfileDB 
+                      ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border-teal-300/80 dark:border-teal-800/80 shadow-3xs' 
+                      : 'bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-750'
+                  ]"
+                  :title="useProfileDB ? 'Referencing indexed profile database' : 'Using direct AI model without database prompt injection'"
+                >
+                  <span :class="['w-2 h-2 rounded-full shrink-0 transition-colors', useProfileDB ? 'bg-teal-500 animate-pulse' : 'bg-gray-400']"></span>
+                  <Database class="h-3.5 w-3.5" />
+                  <span>{{ useProfileDB ? $t('profiles.useProfileDb') : $t('profiles.generalAi') }}</span>
+                </button>
+
+                <span class="hidden md:inline-flex text-[11px] text-gray-400 dark:text-gray-500 font-medium">
+                  {{ $t('profiles.enterToSend') }}
+                </span>
+              </div>
+
+              <div class="flex items-center gap-2 ml-auto">
+                <button 
+                  @click="handleProfileChatSubmit(useProfileDB)" 
+                  :disabled="isProfileChatLoading || !profileChatInput.trim()" 
+                  class="px-5 py-2.5 bg-teal-600 hover:bg-teal-700 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl text-xs sm:text-sm transition-all flex items-center gap-2 shadow-xs cursor-pointer"
+                >
+                  <Loader2 v-if="isProfileChatLoading" class="h-3.5 w-3.5 animate-spin" />
+                  <Send v-else class="h-3.5 w-3.5" />
+                  <span>{{ isProfileChatLoading ? $t('profiles.askingAssistant') : $t('profiles.ask') }}</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
 
         <!-- Search Dossier Box Block -->
-        <div class="grid grid-cols-1 xl:grid-cols-12 gap-8 items-start w-full">
+        <div class="grid grid-cols-1 xl:grid-cols-12 gap-6 xl:gap-8 xl:items-stretch w-full">
           
           <!-- Outer lookup panel -->
-          <div class="col-span-12 xl:col-span-5 space-y-6 w-full">
+          <div class="col-span-12 xl:col-span-5 flex flex-col gap-5 w-full xl:h-[840px]">
             <!-- Profile Index Full-Text Search Card -->
-            <div class="bg-white dark:bg-gray-800 border border-gray-200/75 dark:border-gray-750 rounded-3xl p-6 shadow-sm space-y-5 relative">
-              <div class="space-y-1">
+            <div 
+              :class="[
+                'bg-white dark:bg-gray-800 border border-gray-200/75 dark:border-gray-750 rounded-3xl p-5 sm:p-6 shadow-sm relative flex flex-col transition-all duration-300',
+                profileSearchResults ? 'xl:flex-1 xl:min-h-0 space-y-3.5' : 'shrink-0 space-y-4'
+              ]"
+            >
+              <div class="space-y-1 shrink-0">
                 <div class="flex items-center gap-2">
                   <span class="p-1.5 rounded-xl bg-teal-500/10 text-teal-600 dark:text-teal-400">
                     <Database class="h-4 w-4" />
@@ -18108,7 +19256,7 @@ onUnmounted(() => {
               </div>
 
               <!-- Search controls grid -->
-              <div class="space-y-3.5">
+              <div class="space-y-3 shrink-0">
                 <!-- Limit and Query inputs side-by-side -->
                 <div class="flex flex-col gap-2.5 sm:flex-row sm:items-center">
                   <div class="relative flex items-center bg-gray-50 dark:bg-gray-900 border border-gray-150 dark:border-gray-850 rounded-2xl px-4 py-2.5 shadow-sm focus-within:ring-2 focus-within:ring-teal-500/20 focus-within:border-teal-500 transition-all flex-grow">
@@ -18123,7 +19271,7 @@ onUnmounted(() => {
                       v-if="profileSearchQuery"
                       type="button"
                       @mousedown.prevent
-                      @click="profileSearchQuery = ''"
+                      @click="profileSearchQuery = ''; profileSearchResults = null; profileSearchError = '';"
                       class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200/50 dark:hover:bg-gray-700/50 rounded-full transition-colors cursor-pointer shrink-0 ml-1"
                       :title="$t('profiles.clearSearchQuery')"
                     >
@@ -18164,7 +19312,7 @@ onUnmounted(() => {
               </div>
 
               <!-- Search Status & Error -->
-              <div v-if="profileSearchError" class="rounded-2xl bg-rose-500/[0.04] p-4 border border-rose-500/10 flex items-start gap-3">
+              <div v-if="profileSearchError" class="rounded-2xl bg-rose-500/[0.04] p-3.5 border border-rose-500/10 flex items-start gap-3 shrink-0">
                 <AlertCircle class="h-4 w-4 text-rose-500 shrink-0 mt-0.5" />
                 <div class="space-y-0.5">
                   <p class="text-xs font-black uppercase tracking-wide text-rose-650 dark:text-rose-400">{{ $t('profiles.searchFailed') }}</p>
@@ -18173,17 +19321,27 @@ onUnmounted(() => {
               </div>
 
               <!-- Statistics / Results Header -->
-              <div v-if="profileSearchResults" class="flex items-center justify-between border-t border-gray-100 dark:border-gray-800/85 pt-4">
+              <div v-if="profileSearchResults" class="flex items-center justify-between border-t border-gray-100 dark:border-gray-800/85 pt-3 shrink-0">
                 <span class="text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">
                   {{ $t('profiles.foundMatchingNodes', { count: profileSearchStats.total }) }}
                 </span>
-                <span class="text-[9px] font-mono font-medium text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-900/40 px-2 py-0.5 rounded-md">
-                  {{ $t('profiles.tookMs', { count: profileSearchStats.tookMs }) }}
-                </span>
+                <div class="flex items-center gap-2">
+                  <span class="text-[9px] font-mono font-medium text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-900/40 px-2 py-0.5 rounded-md">
+                    {{ $t('profiles.tookMs', { count: profileSearchStats.tookMs }) }}
+                  </span>
+                  <button 
+                    @click="profileSearchResults = null; profileSearchError = '';"
+                    type="button"
+                    class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-0.5 rounded hover:bg-gray-100 dark:hover:bg-gray-750 transition-colors cursor-pointer"
+                    title="Clear results"
+                  >
+                    <X class="h-3 w-3" />
+                  </button>
+                </div>
               </div>
 
               <!-- List of matching entries inside the Search Results Area -->
-              <div v-if="profileSearchResults && profileSearchResults.hits?.hits?.length > 0" class="space-y-3 max-h-[360px] overflow-y-auto pr-1">
+              <div v-if="profileSearchResults && profileSearchResults.hits?.hits?.length > 0" class="space-y-3 flex-1 min-h-0 overflow-y-auto pr-1">
                 <div 
                   v-for="hit in profileSearchResults.hits.hits" 
                   :key="hit._id" 
@@ -18232,7 +19390,7 @@ onUnmounted(() => {
               </div>
 
               <!-- Empty state when search triggered but hits are 0 -->
-              <div v-else-if="profileSearchResults && profileSearchResults.hits?.hits?.length === 0" class="flex flex-col items-center justify-center py-8 text-center text-gray-400 dark:text-gray-500">
+              <div v-else-if="profileSearchResults && profileSearchResults.hits?.hits?.length === 0" class="flex flex-col items-center justify-center py-6 text-center text-gray-400 dark:text-gray-500 flex-1 min-h-0">
                 <Inbox class="w-8 h-8 mb-2 opacity-50" />
                 <p class="text-xs font-semibold">{{ $t('profiles.noDossiersMatch') }}</p>
                 <p class="text-[10px] text-gray-450 dark:text-gray-500 mt-1 max-w-[200px] leading-normal">
@@ -18242,30 +19400,35 @@ onUnmounted(() => {
             </div>
 
             <!-- Beautiful collateral panel: remote dossier categories -->
-            <div class="bg-gradient-to-br from-white to-gray-50/50 dark:from-gray-800 dark:to-gray-900/40 border border-gray-200/80 dark:border-gray-750/80 rounded-3xl p-6 shadow-sm space-y-4">
-              <div class="flex items-center justify-between mb-2">
+            <div class="bg-gradient-to-br from-white to-gray-50/50 dark:from-gray-800 dark:to-gray-900/40 border border-gray-200/80 dark:border-gray-750/80 rounded-3xl p-5 sm:p-6 shadow-sm flex flex-col xl:flex-1 xl:min-h-0 space-y-3">
+              <div class="flex items-center justify-between shrink-0">
                 <div class="flex items-center gap-2">
                   <FileText class="h-4.5 w-4.5 text-teal-600 dark:text-teal-400" />
                   <h3 class="text-xs font-black text-gray-900 dark:text-white uppercase tracking-wider">{{ $t('profiles.remoteProfilesIndex') }}</h3>
                 </div>
-                <button
-                  @click="fetchRemoteProfiles"
-                  :disabled="loadingRemoteProfiles"
-                  class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
-                  :title="$t('profiles.reloadRemoteProfiles')"
-                >
-                  <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingRemoteProfiles }" />
-                </button>
+                <div class="flex items-center gap-2">
+                  <span v-if="remoteProfiles.length > 0" class="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-teal-50 dark:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200/60 dark:border-teal-800/60">
+                    {{ remoteProfiles.length }}
+                  </span>
+                  <button
+                    @click="fetchRemoteProfiles"
+                    :disabled="loadingRemoteProfiles"
+                    class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                    :title="$t('profiles.reloadRemoteProfiles')"
+                  >
+                    <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loadingRemoteProfiles }" />
+                  </button>
+                </div>
               </div>
-              <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold leading-relaxed">
+              <p class="text-[11px] text-gray-400 dark:text-gray-500 font-semibold leading-relaxed shrink-0">
                 {{ $t('profiles.remoteProfilesDesc') }}
               </p>
 
-              <div v-if="loadingRemoteProfiles" class="flex flex-col items-center justify-center py-6 text-gray-400">
+              <div v-if="loadingRemoteProfiles" class="flex flex-col items-center justify-center py-6 text-gray-400 flex-1 min-h-0">
                 <Loader2 class="w-6 h-6 animate-spin text-teal-500" />
               </div>
 
-              <div v-else class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2 gap-3 pt-2">
+              <div v-else class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2 gap-3 pt-1 flex-1 min-h-0 overflow-y-auto pr-1">
                 <button 
                   v-for="profile in remoteProfiles" 
                   :key="profile" 
@@ -18287,10 +19450,10 @@ onUnmounted(() => {
           </div>
 
           <!-- Inspector Dossier Visualizer Panel -->
-          <div class="col-span-12 xl:col-span-7 space-y-6 w-full">
+          <div class="col-span-12 xl:col-span-7 flex flex-col w-full xl:h-[840px]">
             
             <!-- Fallback empty state -->
-            <div v-if="!selectedRemoteProfileContent" class="flex flex-col items-center justify-center py-24 bg-white dark:bg-gray-800 border border-gray-200/60 dark:border-gray-750 rounded-3xl p-8 text-center shadow-sm relative overflow-hidden">
+            <div v-if="!selectedRemoteProfileContent" class="flex flex-col items-center justify-center flex-1 min-h-0 h-full py-16 md:py-24 bg-white dark:bg-gray-800 border border-gray-200/60 dark:border-gray-750 rounded-3xl p-8 text-center shadow-sm relative overflow-hidden">
               <div class="absolute -right-24 -bottom-24 w-48 h-48 bg-teal-500/[0.02] rounded-full blur-3xl pointer-events-none"></div>
               <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-teal-50 dark:bg-teal-950/40 mb-4 shadow-inner border border-teal-100/10">
                 <FileText class="h-7 w-7 text-teal-500" />
@@ -18302,10 +19465,10 @@ onUnmounted(() => {
             </div>
 
             <!-- Selected Remote Profile Binder Card -->
-            <transition v-if="selectedRemoteProfileContent" enter-active-class="transition duration-300 ease-out" enter-from-class="transform scale-98 opacity-0" enter-to-class="transform scale-100 opacity-100">
-              <div class="bg-white dark:bg-gray-800 rounded-3xl p-6 md:p-8 border border-gray-200/80 dark:border-gray-750 shadow-sm relative overflow-hidden space-y-6">
+            <transition enter-active-class="transition duration-300 ease-out" enter-from-class="transform scale-98 opacity-0" enter-to-class="transform scale-100 opacity-100">
+              <div v-if="selectedRemoteProfileContent" class="bg-white dark:bg-gray-800 rounded-3xl p-5 sm:p-7 md:p-8 border border-gray-200/80 dark:border-gray-750 shadow-sm relative overflow-hidden flex flex-col flex-1 min-h-0 h-full space-y-4 sm:space-y-5">
                 <!-- Abstract header info -->
-                <div class="flex items-center justify-between pb-4 border-b border-gray-100 dark:border-gray-800/80">
+                <div class="flex items-center justify-between pb-4 border-b border-gray-100 dark:border-gray-800/80 shrink-0">
                   <div class="flex items-center gap-2.5">
                     <span class="p-1.5 rounded-xl bg-teal-50 dark:bg-teal-950/40 text-teal-650 dark:text-teal-400">
                       <FileText class="h-4.5 w-4.5" />
@@ -18334,14 +19497,14 @@ onUnmounted(() => {
                 </div>
 
                 <!-- Document reader contents -->
-                <div class="prose dark:prose-invert prose-xs leading-relaxed max-w-none text-xs text-gray-750 dark:text-gray-300 p-5 bg-gray-50/50 dark:bg-gray-900/35 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl overflow-y-auto max-h-[850px]">
+                <div class="prose dark:prose-invert prose-xs leading-relaxed max-w-none text-xs text-gray-750 dark:text-gray-300 p-5 bg-gray-50/50 dark:bg-gray-900/35 border border-gray-150/40 dark:border-gray-850/50 rounded-2xl flex-1 min-h-0 overflow-y-auto">
                   <div v-html="selectedRemoteProfileContent" class="prose-sm prose-pre:whitespace-pre-wrap font-semibold"></div>
                 </div>
               </div>
             </transition>
 
             <!-- Global Index Fetch Error alert -->
-            <div v-if="profileError" class="rounded-2xl bg-rose-500/[0.04] p-5 border border-rose-500/15 flex items-start gap-4">
+            <div v-if="profileError" class="rounded-2xl bg-rose-500/[0.04] p-5 border border-rose-500/15 flex items-start gap-4 shrink-0 mt-4">
               <AlertCircle class="h-5 w-5 text-rose-500 shrink-0 mt-0.5" />
               <div class="space-y-1">
                 <h3 class="text-xs font-black uppercase tracking-wider text-rose-600 dark:text-rose-450">{{ $t('profiles.catalogueQueryFailure') }}</h3>
