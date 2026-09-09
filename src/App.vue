@@ -5340,7 +5340,34 @@ watch(activeTab, (newTab) => {
   }
 });
 
+// System Clock (Monitor Tab)
+const systemClockNow = ref(new Date());
+let systemClockTimer: any = null;
+
+const updateSystemClock = () => {
+  systemClockNow.value = new Date();
+};
+
+const systemClockDate = computed(() => {
+  const d = systemClockNow.value;
+  const year = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+});
+
+const systemClockTime = computed(() => {
+  const d = systemClockNow.value;
+  const hours = String(d.getUTCHours()).padStart(2, '0');
+  const minutes = String(d.getUTCMinutes()).padStart(2, '0');
+  const seconds = String(d.getUTCSeconds()).padStart(2, '0');
+  return `${hours}:${minutes}:${seconds}`;
+});
+
 onMounted(() => {
+  updateSystemClock();
+  systemClockTimer = setInterval(updateSystemClock, 1000);
+
   const urlParams = new URLSearchParams(window.location.search);
   const shareCardParam = urlParams.get('sc') || urlParams.get('sharecard');
   if (shareCardParam) {
@@ -5391,6 +5418,7 @@ let graphIntersectionObserver: IntersectionObserver | null = null;
 
 onUnmounted(() => {
   window.removeEventListener("scroll", handleScroll);
+  if (systemClockTimer) clearInterval(systemClockTimer);
   if (counterTimer) clearInterval(counterTimer);
   if (namespaceStatsTimer) clearInterval(namespaceStatsTimer);
   if (pendingJobsTimer) clearInterval(pendingJobsTimer);
@@ -5517,6 +5545,128 @@ watch(currentChannelName, (newChannel) => {
       postsRenderLimit.value = 50;
     }
 });
+
+interface ListenHit {
+  item: ListenItem;
+  path: string[];
+  matchedBy: "username" | "title";
+}
+
+const explorerListenHit = ref<ListenHit | null>(null);
+const explorerListenHint = ref<string>("Add to Listen Directory");
+
+const checkExplorerListenDirectory = () => {
+  const currentUsername = (
+    metadata.value?.username ||
+    metadata.value?.name ||
+    channelName.value ||
+    currentChannelName.value ||
+    ""
+  ).trim();
+
+  const currentTitle = (
+    metadata.value?.title ||
+    metadata.value?.name ||
+    channelName.value ||
+    currentChannelName.value ||
+    ""
+  ).trim();
+
+  const cleanTargetUser = currentUsername
+    .toLowerCase()
+    .replace(/^https?:\/\/t\.me\//i, "")
+    .replace(/^@/, "");
+  const cleanTargetTitle = currentTitle.toLowerCase();
+
+  const tree = listenDirectory.value || [];
+
+  const cleanStr = (s?: string) =>
+    (s || "")
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\/t\.me\//i, "")
+      .replace(/^@/, "");
+
+  const searchTree = (
+    nodes: ListenItem[],
+    currentPath: string[],
+    predicate: (item: ListenItem) => boolean
+  ): { item: ListenItem; path: string[] } | null => {
+    // 1. First pass: prioritize non-folder channel items
+    for (const node of nodes) {
+      const nodePath = [...currentPath, node.name];
+      if (!node.isFolder && predicate(node)) {
+        return { item: node, path: nodePath };
+      }
+      if (node.children && Array.isArray(node.children) && node.children.length > 0) {
+        const found = searchTree(node.children, nodePath, predicate);
+        if (found) return found;
+      }
+    }
+    // 2. Second pass: match folder node if applicable
+    for (const node of nodes) {
+      const nodePath = [...currentPath, node.name];
+      if (node.isFolder && predicate(node)) {
+        return { item: node, path: nodePath };
+      }
+    }
+    return null;
+  };
+
+  let hit: ListenHit | null = null;
+
+  // 2.1 check (search) current channel username in the listen directory item tree
+  if (cleanTargetUser) {
+    const userMatch = searchTree(tree, [], (node) => {
+      const arg = cleanStr(node.argument);
+      const nm = cleanStr(node.name);
+      return arg === cleanTargetUser || nm === cleanTargetUser;
+    });
+
+    if (userMatch) {
+      hit = {
+        item: userMatch.item,
+        path: userMatch.path,
+        matchedBy: "username"
+      };
+    }
+  }
+
+  // 2.3 if you find nothing, try to search current channel title in the listen directory item tree
+  if (!hit && cleanTargetTitle) {
+    const titleMatch = searchTree(tree, [], (node) => {
+      const nm = (node.name || "").trim().toLowerCase();
+      const arg = (node.argument || "").trim().toLowerCase();
+      return nm === cleanTargetTitle || arg === cleanTargetTitle;
+    });
+
+    if (titleMatch) {
+      hit = {
+        item: titleMatch.item,
+        path: titleMatch.path,
+        matchedBy: "title"
+      };
+    }
+  }
+
+  explorerListenHit.value = hit;
+
+  // 2.2 if you find hit, display hit info (including folder/subfolder/item) in the hint
+  // 2.3 Otherwise, display 'Add to Listen Directory'
+  if (hit) {
+    explorerListenHint.value = hit.path.join(" / ");
+  } else {
+    explorerListenHint.value = t("search.addToListenDirectory") || "Add to Listen Directory";
+  }
+};
+
+watch(
+  [metadata, channelName, currentChannelName, listenDirectory],
+  () => {
+    checkExplorerListenDirectory();
+  },
+  { deep: true, immediate: true }
+);
 
 watch(
   [filterAuthor, filterStartDate, filterEndDate, filterMedia, selectedUsernamesExplorer],
@@ -12386,7 +12536,13 @@ onUnmounted(() => {
                       <Layout class="h-3.5 w-3.5 text-teal-500" />
                       <span>{{ t('explorer.workspace') }}</span>
                     </button>
-                    <button @click="addChannelToListenDirectory(metadata.title || channelName, metadata.username || channelName)" class="flex items-center gap-1.5 px-3 py-1.5 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/50 dark:hover:bg-purple-900/60 text-purple-700 dark:text-purple-300 rounded-xl border border-purple-200 dark:border-purple-800/60 text-xs font-bold transition-all cursor-pointer shadow-3xs" :title="t('nav.listen')">
+                    <button
+                      @click="addChannelToListenDirectory(metadata.title || channelName, metadata.username || channelName)"
+                      @mouseenter="checkExplorerListenDirectory"
+                      @mousemove="checkExplorerListenDirectory"
+                      class="flex items-center gap-1.5 px-3 py-1.5 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/50 dark:hover:bg-purple-900/60 text-purple-700 dark:text-purple-300 rounded-xl border border-purple-200 dark:border-purple-800/60 text-xs font-bold transition-all cursor-pointer shadow-3xs"
+                      :title="explorerListenHint"
+                    >
                       <Radio class="h-3.5 w-3.5 text-purple-500" />
                       <span>{{ t('nav.listen') }}</span>
                     </button>
@@ -15677,10 +15833,10 @@ onUnmounted(() => {
               </div>
               <div class="mt-4">
                 <h3 class="text-base font-black text-gray-900 dark:text-white font-mono leading-none tracking-tight">
-                  2026-05-30
+                  {{ systemClockDate }}
                 </h3>
                 <p class="text-xl font-bold text-gray-600 dark:text-gray-400 font-mono mt-1">
-                  {{ String(new Date().getUTCHours()).padStart(2, '0') }}:{{ String(new Date().getUTCMinutes()).padStart(2, '0') }}:{{ String(new Date().getUTCSeconds()).padStart(2, '0') }} UTC
+                  {{ systemClockTime }} UTC
                 </p>
               </div>
             </div>
