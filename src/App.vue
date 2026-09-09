@@ -2144,6 +2144,13 @@ const isListenModalOpen = ref(false);
 const isImportModalOpen = ref(false);
 const importJsonInput = ref("");
 const importErrorMessage = ref("");
+const selectedImportFileName = ref("");
+const selectedImportFileSize = ref("");
+const importFileInputRef = ref<HTMLInputElement | null>(null);
+const isDraggingImportFile = ref(false);
+const isTreeCopied = ref(false);
+const isExportingTreeFile = ref(false);
+const lastListenExportMeta = ref<{ filename: string; timestamp: number } | null>(null);
 const isEditingListenItem = ref(false);
 const listenItemForm = ref({
   id: "",
@@ -2196,6 +2203,14 @@ const addChildToFolder = (nodes: ListenItem[], folderId: string, child: ListenIt
 
 const listenDirectoryTimestamp = ref<number>(0);
 
+const formatFileSize = (bytes: number): string => {
+  if (!bytes || bytes <= 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+};
+
 const loadListenDirectory = () => {
   const cached = localStorage.getItem("listen_directory_tree");
   if (cached) {
@@ -2212,6 +2227,15 @@ const loadListenDirectory = () => {
       console.error("Failed to load listen_directory_tree", e);
     }
   }
+
+  try {
+    const lastMeta = localStorage.getItem("last_listen_export_meta");
+    if (lastMeta) {
+      lastListenExportMeta.value = JSON.parse(lastMeta);
+    }
+  } catch (e) {
+    console.warn("Failed to load last_listen_export_meta", e);
+  }
 };
 
 const saveListenDirectory = (customTimestamp: number | null = null) => {
@@ -2223,60 +2247,159 @@ const saveListenDirectory = (customTimestamp: number | null = null) => {
   localStorage.setItem("listen_directory_tree", JSON.stringify(data));
 };
 
-const exportListenDirectoryToClipboard = () => {
+const copyListenDirectoryToClipboard = async () => {
   try {
     const data = {
       tree: listenDirectory.value,
       timestamp: listenDirectoryTimestamp.value
     };
     const dataStr = JSON.stringify(data, null, 2);
-    if (!navigator.clipboard) {
+    let success = false;
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(dataStr);
+        success = true;
+      } catch (err) {
+        console.warn("navigator.clipboard.writeText blocked or failed, attempting textarea fallback", err);
+      }
+    }
+
+    if (!success) {
       const textArea = document.createElement("textarea");
       textArea.value = dataStr;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-9999px";
+      textArea.style.top = "-9999px";
       document.body.appendChild(textArea);
+      textArea.focus();
       textArea.select();
-      document.execCommand("copy");
+      success = document.execCommand("copy");
       document.body.removeChild(textArea);
-      toastMessage.value = t("listen.toastExportSuccess");
-      toastType.value = "success";
-      setTimeout(() => { toastMessage.value = ""; }, 3000);
-      return;
     }
-    navigator.clipboard.writeText(dataStr)
-      .then(() => {
-        toastMessage.value = t("listen.toastExportSuccess");
-        toastType.value = "success";
-        setTimeout(() => { toastMessage.value = ""; }, 3000);
-      })
-      .catch((err) => {
-        console.error("Clipboard copy failed:", err);
-        const textArea = document.createElement("textarea");
-        textArea.value = dataStr;
-        document.body.appendChild(textArea);
-        textArea.select();
-        try {
-          document.execCommand("copy");
-          toastMessage.value = t("listen.toastExportSuccess");
-          toastType.value = "success";
-        } catch (e) {
-          toastMessage.value = t("listen.toastExportCopyFailed");
-          toastType.value = "error";
-        }
-        document.body.removeChild(textArea);
-        setTimeout(() => { toastMessage.value = ""; }, 3000);
-      });
+
+    if (success) {
+      isTreeCopied.value = true;
+      setTimeout(() => { isTreeCopied.value = false; }, 2000);
+      toastMessage.value = t("listen.toastCopySuccess");
+      toastType.value = "success";
+    } else {
+      toastMessage.value = t("listen.toastCopyFailed");
+      toastType.value = "error";
+    }
   } catch (err: any) {
+    toastMessage.value = t("listen.toastCopyFailed");
+    toastType.value = "error";
+  }
+  setTimeout(() => { toastMessage.value = ""; }, 3000);
+};
+
+// Backwards compatibility alias
+const exportListenDirectoryToClipboard = copyListenDirectoryToClipboard;
+
+const exportListenDirectoryToFile = async () => {
+  isExportingTreeFile.value = true;
+  try {
+    const data = {
+      tree: listenDirectory.value,
+      timestamp: listenDirectoryTimestamp.value
+    };
+    const dataStr = JSON.stringify(data, null, 2);
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const defaultName = `telegram_listen_directory_${dateStr}.json`;
+    let savedFileName = defaultName;
+
+    // 1. Try File System Access API (Chromium-based browsers: Chrome, Edge, Brave, Opera)
+    // The 'id' parameter instructs the browser to remember the last chosen directory path
+    if (typeof (window as any).showSaveFilePicker === "function") {
+      try {
+        const handle = await (window as any).showSaveFilePicker({
+          suggestedName: defaultName,
+          id: "telegram_listen_directory_export",
+          startIn: "documents",
+          types: [
+            {
+              description: "JSON Configuration Files",
+              accept: {
+                "application/json": [".json"]
+              }
+            }
+          ]
+        });
+
+        if (handle && handle.name) {
+          savedFileName = handle.name;
+        }
+
+        const writable = await handle.createWritable();
+        await writable.write(dataStr);
+        await writable.close();
+
+        const exportMeta = {
+          filename: savedFileName,
+          timestamp: Date.now()
+        };
+        localStorage.setItem("last_listen_export_meta", JSON.stringify(exportMeta));
+        lastListenExportMeta.value = exportMeta;
+
+        toastMessage.value = t("listen.toastExportFileSuccess", { filename: savedFileName });
+        toastType.value = "success";
+        setTimeout(() => { toastMessage.value = ""; }, 4000);
+        return;
+      } catch (pickerErr: any) {
+        if (pickerErr && pickerErr.name === "AbortError") {
+          // User intentionally cancelled dialog
+          return;
+        }
+        console.warn("showSaveFilePicker unavailable or restricted, fallback to blob download:", pickerErr);
+      }
+    }
+
+    // 2. Standard Blob Download fallback for browsers without File System Access API or iframe restrictions
+    const blob = new Blob([dataStr], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = defaultName;
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }, 1000);
+
+    const exportMeta = {
+      filename: defaultName,
+      timestamp: Date.now()
+    };
+    localStorage.setItem("last_listen_export_meta", JSON.stringify(exportMeta));
+    lastListenExportMeta.value = exportMeta;
+
+    toastMessage.value = t("listen.toastExportFileSuccess", { filename: defaultName });
+    toastType.value = "success";
+    setTimeout(() => { toastMessage.value = ""; }, 4000);
+  } catch (err: any) {
+    console.error("Export file failed:", err);
     toastMessage.value = t("listen.toastExportFailed", { error: err.message || err });
     toastType.value = "error";
-    setTimeout(() => { toastMessage.value = ""; }, 3000);
+    setTimeout(() => { toastMessage.value = ""; }, 4000);
+  } finally {
+    isExportingTreeFile.value = false;
   }
 };
 
-const importListenDirectoryFromClipboard = () => {
+const openImportDirectoryModal = () => {
   importJsonInput.value = "";
   importErrorMessage.value = "";
+  selectedImportFileName.value = "";
+  selectedImportFileSize.value = "";
+  isDraggingImportFile.value = false;
   isImportModalOpen.value = true;
-  
+};
+
+const importListenDirectoryFromClipboard = () => {
+  openImportDirectoryModal();
   if (navigator.clipboard && navigator.clipboard.readText) {
     navigator.clipboard.readText()
       .then((text) => {
@@ -2289,6 +2412,129 @@ const importListenDirectoryFromClipboard = () => {
       });
   }
 };
+
+const processImportFile = async (file: File) => {
+  if (!file) return;
+  selectedImportFileName.value = file.name;
+  selectedImportFileSize.value = formatFileSize(file.size);
+  importErrorMessage.value = "";
+  try {
+    const text = await file.text();
+    importJsonInput.value = text;
+  } catch (err: any) {
+    importErrorMessage.value = t("listen.fileReadError", { error: err.message || err });
+  }
+};
+
+const triggerImportFileSelect = async () => {
+  if (typeof (window as any).showOpenFilePicker === "function") {
+    try {
+      const [handle] = await (window as any).showOpenFilePicker({
+        multiple: false,
+        id: "telegram_listen_directory_import",
+        startIn: "documents",
+        types: [
+          {
+            description: "JSON Configuration Files",
+            accept: {
+              "application/json": [".json"]
+            }
+          }
+        ]
+      });
+      if (handle) {
+        const file = await handle.getFile();
+        await processImportFile(file);
+        return;
+      }
+    } catch (e: any) {
+      if (e && e.name === "AbortError") return;
+      console.warn("showOpenFilePicker fallback to standard file input", e);
+    }
+  }
+  importFileInputRef.value?.click();
+};
+
+const handleImportFileSelect = async (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  if (target && target.files && target.files.length > 0) {
+    const file = target.files[0];
+    await processImportFile(file);
+    target.value = "";
+  }
+};
+
+const onImportFileDrop = async (event: DragEvent) => {
+  isDraggingImportFile.value = false;
+  if (event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files.length > 0) {
+    const file = event.dataTransfer.files[0];
+    if (file) {
+      await processImportFile(file);
+    }
+  }
+};
+
+const clearImportFile = () => {
+  selectedImportFileName.value = "";
+  selectedImportFileSize.value = "";
+  importJsonInput.value = "";
+  importErrorMessage.value = "";
+};
+
+const pasteFromClipboardIntoImport = async () => {
+  if (navigator.clipboard && navigator.clipboard.readText) {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text && text.trim()) {
+        importJsonInput.value = text.trim();
+        selectedImportFileName.value = "";
+        selectedImportFileSize.value = "";
+        importErrorMessage.value = "";
+      }
+    } catch (err) {
+      console.warn("Clipboard read failed:", err);
+    }
+  }
+};
+
+const importJsonValidation = computed(() => {
+  if (!importJsonInput.value || !importJsonInput.value.trim()) return null;
+  try {
+    const parsed = JSON.parse(importJsonInput.value);
+    let items: ListenItem[] = [];
+    if (Array.isArray(parsed)) {
+      items = parsed;
+    } else if (parsed && typeof parsed === "object" && Array.isArray(parsed.tree)) {
+      items = parsed.tree;
+    } else {
+      return { valid: false, message: t("listen.errorInvalidStructure") };
+    }
+
+    let totalItems = 0;
+    let totalFolders = 0;
+    const countNodes = (nodes: ListenItem[]) => {
+      for (const n of nodes) {
+        totalItems++;
+        if (n.isFolder) {
+          totalFolders++;
+          if (n.children && Array.isArray(n.children)) {
+            countNodes(n.children);
+          }
+        }
+      }
+    };
+    countNodes(items);
+
+    return {
+      valid: true,
+      totalItems,
+      totalFolders,
+      timestamp: typeof parsed.timestamp === "number" ? parsed.timestamp : null
+    };
+  } catch (e: any) {
+    return { valid: false, message: e.message || "Invalid JSON syntax" };
+  }
+});
 
 const confirmListenDirectoryImport = () => {
   if (!importJsonInput.value.trim()) {
@@ -2317,6 +2563,8 @@ const confirmListenDirectoryImport = () => {
       isImportModalOpen.value = false;
       importJsonInput.value = "";
       importErrorMessage.value = "";
+      selectedImportFileName.value = "";
+      selectedImportFileSize.value = "";
     } else {
       importErrorMessage.value = t("listen.errorInvalidStructure");
     }
@@ -15812,25 +16060,42 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- Bottom Panel: Export / Import -->
+            <!-- Bottom Panel: Copy / Export / Import / Sync -->
             <div class="px-4 py-3 bg-gray-50/80 dark:bg-gray-900/40 border-t border-gray-150 dark:border-gray-700 flex items-center justify-between gap-2.5 shrink-0">
               <div class="flex items-center gap-1.5 flex-wrap">
+                <!-- 1. Copy Button: Copies JSON to clipboard -->
                 <button
-                  @click="exportListenDirectoryToClipboard"
+                  @click="copyListenDirectoryToClipboard"
                   class="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer"
-                  :title="t('listen.exportTreeClipboard')"
+                  :title="t('listen.copyTreeClipboard')"
                 >
-                  <Download class="h-3 w-3" />
+                  <CheckCircle2 v-if="isTreeCopied" class="h-3 w-3 text-teal-500" />
+                  <Copy v-else class="h-3 w-3" />
+                  <span>{{ isTreeCopied ? (t('common.copied') || t('common.copy')) : t('common.copy') }}</span>
+                </button>
+
+                <!-- 2. Export Button: Saves config file to local file system -->
+                <button
+                  @click="exportListenDirectoryToFile"
+                  :disabled="isExportingTreeFile"
+                  class="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  :title="lastListenExportMeta ? `${t('listen.exportTreeFile')} • ${t('listen.lastExported')}: ${lastListenExportMeta.filename}` : t('listen.exportTreeFile')"
+                >
+                  <Download class="h-3 w-3" :class="{ 'animate-bounce': isExportingTreeFile }" />
                   <span>{{ t('common.export') }}</span>
                 </button>
+
+                <!-- 3. Import Button: Opens import modal supporting local JSON file & clipboard -->
                 <button
-                  @click="importListenDirectoryFromClipboard"
+                  @click="openImportDirectoryModal"
                   class="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer"
-                  :title="t('listen.importTreeClipboard')"
+                  :title="t('listen.importDirectoryTree')"
                 >
                   <Upload class="h-3 w-3" />
                   <span>{{ t('common.import') }}</span>
                 </button>
+
+                <!-- 4. Remote Sync Button -->
                 <button
                   @click="syncListenDirectory"
                   :disabled="!(loginName && loginToken && isLoginTokenValid) || isSyncingListen"
@@ -17088,7 +17353,7 @@ onUnmounted(() => {
                   @click="isMoveModalOpen = false"
                   class="px-4 py-2 rounded-xl text-xs font-bold text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors cursor-pointer"
                 >
-                  {{ t('search.cancel') }}
+                  {{ t('common.cancel') }}
                 </button>
                 <button
                   type="button"
@@ -17242,31 +17507,159 @@ onUnmounted(() => {
         class="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm"
         @click.self="isImportModalOpen = false"
       >
-        <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-3xl overflow-hidden shadow-2xl border border-gray-150 dark:border-gray-700 animate-in fade-in zoom-in duration-300">
+        <div class="w-full max-w-xl bg-white dark:bg-gray-800 rounded-3xl overflow-hidden shadow-2xl border border-gray-150 dark:border-gray-700 animate-in fade-in zoom-in duration-300">
           <div class="p-6">
-            <div class="flex items-center justify-between mb-4 border-b border-gray-150 dark:border-gray-700 pb-3">
+            <!-- Modal Header -->
+            <div class="flex items-center justify-between mb-3 border-b border-gray-150 dark:border-gray-700 pb-3">
               <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
                 <Upload class="h-5 w-5 text-teal-500" />
                 <span>{{ t('listen.importDirectoryTree') }}</span>
               </h3>
-              <button @click="isImportModalOpen = false" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg p-1">
+              <button @click="isImportModalOpen = false" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg p-1 transition-colors cursor-pointer">
                 <X class="h-5 w-5" />
               </button>
             </div>
 
-            <p class="text-[11px] text-gray-500 dark:text-gray-400 mb-4 leading-normal">
+            <p class="text-[11px] text-gray-500 dark:text-gray-400 mb-4 leading-relaxed">
               {{ t('listen.importDesc') }}
             </p>
 
+            <!-- Hidden File Input for local file selection -->
+            <input
+              type="file"
+              ref="importFileInputRef"
+              accept=".json,application/json"
+              class="hidden"
+              @change="handleImportFileSelect"
+            />
+
             <div class="space-y-4">
+              <!-- Local File Selection Dropzone / Card -->
+              <div
+                @dragover.prevent="isDraggingImportFile = true"
+                @dragleave.prevent="isDraggingImportFile = false"
+                @drop.prevent="onImportFileDrop"
+                class="rounded-2xl border-2 transition-all p-3.5 flex flex-col sm:flex-row items-center justify-between gap-3"
+                :class="[
+                  isDraggingImportFile
+                    ? 'border-dashed border-teal-500 bg-teal-50/50 dark:bg-teal-950/30 ring-2 ring-teal-500/20'
+                    : selectedImportFileName
+                      ? 'border-teal-300/80 dark:border-teal-700/80 bg-teal-50/30 dark:bg-teal-950/20'
+                      : 'border-dashed border-gray-250 dark:border-gray-700 bg-gray-50/60 dark:bg-gray-900/40 hover:border-teal-400/60 hover:bg-teal-50/20 dark:hover:bg-teal-950/10'
+                ]"
+              >
+                <!-- If file loaded -->
+                <div v-if="selectedImportFileName" class="flex items-center gap-2.5 min-w-0 flex-1">
+                  <div class="w-8 h-8 rounded-xl bg-teal-100 dark:bg-teal-900/50 text-teal-600 dark:text-teal-400 flex items-center justify-center shrink-0 shadow-2xs">
+                    <FileCode class="h-4 w-4" />
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-1.5">
+                      <span class="text-xs font-bold text-gray-900 dark:text-white truncate">
+                        {{ selectedImportFileName }}
+                      </span>
+                      <span class="text-[10px] font-mono text-gray-400 dark:text-gray-500 shrink-0">
+                        ({{ selectedImportFileSize }})
+                      </span>
+                    </div>
+                    <span class="text-[10px] text-teal-600 dark:text-teal-400 font-medium">
+                      {{ t('listen.fileLoadedSuccess', { filename: selectedImportFileName, size: selectedImportFileSize }) }}
+                    </span>
+                  </div>
+                </div>
+
+                <!-- If no file loaded yet -->
+                <div v-else class="flex items-center gap-3 min-w-0 flex-1 text-center sm:text-left">
+                  <div class="w-8 h-8 rounded-xl bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 flex items-center justify-center shrink-0">
+                    <FolderOpen class="h-4 w-4 text-teal-500" />
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <span class="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                      {{ isDraggingImportFile ? t('listen.dropFileToLoad') : t('listen.selectLocalJsonFile') }}
+                    </span>
+                    <span class="text-[10px] text-gray-400 dark:text-gray-500 block truncate">
+                      {{ t('listen.orDragDropJson') }}
+                    </span>
+                  </div>
+                </div>
+
+                <!-- Action button on dropzone -->
+                <div class="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    @click="triggerImportFileSelect"
+                    class="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <FolderOpen class="h-3.5 w-3.5" />
+                    <span>{{ selectedImportFileName ? t('listen.browseJsonFile') : t('listen.selectLocalJsonFile') }}</span>
+                  </button>
+                  <button
+                    v-if="selectedImportFileName || importJsonInput"
+                    type="button"
+                    @click="clearImportFile"
+                    class="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-xl text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors cursor-pointer"
+                    :title="t('listen.clearSelectedFile')"
+                  >
+                    <X class="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+
+              <!-- JSON RAW CONTENT label and text area -->
               <div>
-                <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1.5 font-sans">{{ t('listen.jsonRawContent') }}</label>
-                <textarea
-                  v-model="importJsonInput"
-                  rows="8"
-                  placeholder='[ { "id": "node-1", "name": "Folder", "isFolder": true, "children": [] } ]'
-                  class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-750 bg-gray-55/40 dark:bg-gray-900/50 text-xs font-mono text-gray-900 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all"
-                ></textarea>
+                <div class="flex items-center justify-between mb-1.5">
+                  <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider font-sans">
+                    {{ t('listen.jsonRawContent') }}
+                  </label>
+                  <div class="flex items-center gap-2 text-[10px]">
+                    <span v-if="importJsonInput" class="text-gray-400 dark:text-gray-500 font-mono">
+                      {{ (importJsonInput.length / 1024).toFixed(1) }} KB
+                    </span>
+                    <button
+                      type="button"
+                      @click="pasteFromClipboardIntoImport"
+                      class="text-teal-600 hover:text-teal-700 dark:text-teal-400 font-bold transition-colors cursor-pointer"
+                    >
+                      {{ t('common.paste') || 'Paste' }}
+                    </button>
+                    <span class="text-gray-300 dark:text-gray-600">•</span>
+                    <button
+                      type="button"
+                      @click="clearImportFile"
+                      class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors cursor-pointer"
+                    >
+                      {{ t('common.clear') || 'Clear' }}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="relative">
+                  <textarea
+                    v-model="importJsonInput"
+                    rows="8"
+                    placeholder='[ { "id": "node-1", "name": "Folder", "isFolder": true, "children": [] } ]'
+                    @dragover.prevent="isDraggingImportFile = true"
+                    @dragleave.prevent="isDraggingImportFile = false"
+                    @drop.prevent="onImportFileDrop"
+                    class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50/40 dark:bg-gray-900/50 text-xs font-mono text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all select-text"
+                  ></textarea>
+                </div>
+              </div>
+
+              <!-- Validation Preview / Status badge -->
+              <div
+                v-if="importJsonValidation && importJsonValidation.valid"
+                class="p-2.5 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-800/60 rounded-xl text-xs font-semibold text-emerald-700 dark:text-emerald-300 flex items-center justify-between gap-2"
+              >
+                <div class="flex items-center gap-1.5">
+                  <CheckCircle2 class="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <span>
+                    {{ t('listen.validJsonBadge', { items: importJsonValidation.totalItems, folders: importJsonValidation.totalFolders }) }}
+                  </span>
+                </div>
+                <span v-if="importJsonValidation.timestamp" class="text-[10px] font-mono text-emerald-600/80 dark:text-emerald-400/80 shrink-0">
+                  {{ formatDate(importJsonValidation.timestamp) }}
+                </span>
               </div>
 
               <!-- Error Box if any -->
@@ -17279,13 +17672,14 @@ onUnmounted(() => {
             <div class="mt-6 flex items-center justify-end gap-2.5 border-t border-gray-150 dark:border-gray-700 pt-4">
               <button
                 @click="isImportModalOpen = false"
-                class="px-4 py-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-xl text-sm font-semibold text-gray-750 dark:text-gray-300 transition-colors"
+                class="px-4 py-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-xl text-sm font-semibold text-gray-750 dark:text-gray-300 transition-colors cursor-pointer"
               >
                 {{ t('common.cancel') }}
               </button>
               <button
                 @click="confirmListenDirectoryImport"
-                class="px-5 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold shadow-md shadow-teal-500/10 transition-colors flex items-center gap-1.5"
+                :disabled="!importJsonInput.trim()"
+                class="px-5 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-md shadow-teal-500/10 transition-colors flex items-center gap-1.5 cursor-pointer"
               >
                 <Upload class="h-3.5 w-3.5" />
                 <span>{{ t('listen.importDirectory') }}</span>
