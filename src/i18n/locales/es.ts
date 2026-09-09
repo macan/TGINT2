@@ -76,7 +76,7 @@ export default {
   channels: {
     userExtractionTitle: "Extracción de Identidad de Usuario",
     userExtractionSubtitle: "Consulte ID de Telegram, marcas verificadas, historial y canales vinculados",
-    userPlaceholder: "ej. durov, telegram",
+    userPlaceholder: "ej. gogingko",
     directoryTitle: "Directorio de Canales Públicos",
     directorySubtitle: "Explore canales de difusión indexados con métricas de alcance e idiomas",
     searchLabel: "Búsqueda de Canales",

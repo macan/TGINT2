@@ -76,7 +76,7 @@ export default {
   channels: {
     userExtractionTitle: "Анализ профиля пользователя",
     userExtractionSubtitle: "Поиск Telegram ID, верификации, истории юзернеймов и каналов",
-    userPlaceholder: "напр., durov, telegram",
+    userPlaceholder: "напр., gogingko",
     directoryTitle: "Каталог публичных каналов",
     directorySubtitle: "Просмотр проиндексированных каналов с охватом и языковыми метками",
     searchLabel: "Поиск по каталогу",

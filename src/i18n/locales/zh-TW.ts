@@ -76,7 +76,7 @@ export default {
   channels: {
     userExtractionTitle: "使用者身份深度畫像",
     userExtractionSubtitle: "查詢 Telegram 使用者 ID、官方驗證標記、歷史使用者名稱及關聯頻道矩陣",
-    userPlaceholder: "例如：durov, telegram",
+    userPlaceholder: "例如：gogingko",
     directoryTitle: "公開頻道檢索目錄",
     directorySubtitle: "探索已索引的廣播頻道庫，涵蓋受眾覆蓋率與多語言標記",
     searchLabel: "頻道檢索",

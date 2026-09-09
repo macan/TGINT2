@@ -76,7 +76,7 @@ export default {
   channels: {
     userExtractionTitle: "ユーザープロファイル抽出",
     userExtractionSubtitle: "TelegramユーザーID、公式認証、過去のユーザー名、関連チャンネルを分析",
-    userPlaceholder: "例：durov, telegram",
+    userPlaceholder: "例：gogingko",
     directoryTitle: "公開チャンネルディレクトリ",
     directorySubtitle: "インデックス済みチャンネルの一覧と多言語ターゲット",
     searchLabel: "チャンネル検索",

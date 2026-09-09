@@ -11749,7 +11749,7 @@ onUnmounted(() => {
                         @keyup.enter="fetchTelegramUser" 
                         @focus="isHistoryVisible = true" 
                         @blur="handleBlur"
-                        placeholder="e.g. durov, telegram" 
+                        :placeholder="t('channels.userPlaceholder')" 
                         class="bg-transparent text-xs font-semibold outline-none text-gray-900 dark:text-white placeholder-gray-400 w-full pr-2" 
                       />
                       <button
@@ -13332,10 +13332,10 @@ onUnmounted(() => {
                         <button
                           @click.stop="sharePost(post)"
                           class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
-                          :title="t('channels.share')"
+                          :title="t('explorer.share')"
                         >
                           <Share2 class="h-3 w-3 text-teal-500" />
-                          <span>{{ t('channels.share') }}</span>
+                          <span>{{ t('explorer.share') }}</span>
                         </button>
                         <a
                           v-if="post.url || post.link"

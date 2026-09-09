@@ -76,7 +76,7 @@ export default {
   channels: {
     userExtractionTitle: "User Identity Extraction",
     userExtractionSubtitle: "Lookup Telegram user ID, verified flags, handle history & connected channels",
-    userPlaceholder: "e.g. durov, telegram",
+    userPlaceholder: "e.g. gogingko",
     directoryTitle: "Public Channels Directory",
     directorySubtitle: "Explore indexed broadcast channels with reach metrics and language indicators",
     searchLabel: "Channel Search",
