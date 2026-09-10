@@ -11957,34 +11957,47 @@ onUnmounted(() => {
           <div class="absolute -bottom-16 -left-16 w-32 h-32 bg-indigo-500/5 dark:bg-indigo-500/10 rounded-full blur-2xl pointer-events-none"></div>
 
           <div class="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-6">
-            <!-- Left: Beautiful Tab Switches -->
+            <!-- Left: Beautiful Tab Switches (shrunk for space) & Total Fetched Count -->
             <div class="space-y-2.5">
               <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest">{{ t('channels.metadataDirectory') }}</label>
-              <div class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900 border border-gray-200/80 dark:border-gray-700 p-1 rounded-2xl w-full sm:w-80">
-                <button 
-                  @click="activeChannelOrUser = 'channel'; fetchChannels(false)"
-                  :class="[
-                    'flex-1 py-2 text-xs font-black rounded-xl transition-all duration-300 flex items-center justify-center gap-2 cursor-pointer',
-                    activeChannelOrUser === 'channel'
-                      ? 'bg-teal-600 text-white shadow-md shadow-teal-500/10'
-                      : 'text-gray-450 hover:text-gray-650 dark:text-gray-400 dark:hover:text-gray-250'
-                  ]"
+              <div class="flex flex-wrap items-center gap-2.5">
+                <!-- Compact Channels/Users switch -->
+                <div class="inline-flex items-center gap-1 bg-gray-50/80 dark:bg-gray-900 border border-gray-200/80 dark:border-gray-700 p-1 rounded-2xl">
+                  <button 
+                    @click="activeChannelOrUser = 'channel'; fetchChannels(false)"
+                    :class="[
+                      'px-3.5 py-1.5 text-xs font-black rounded-xl transition-all duration-300 flex items-center justify-center gap-1.5 cursor-pointer',
+                      activeChannelOrUser === 'channel'
+                        ? 'bg-teal-600 text-white shadow-md shadow-teal-500/10'
+                        : 'text-gray-450 hover:text-gray-650 dark:text-gray-400 dark:hover:text-gray-250'
+                    ]"
+                  >
+                    <Hash class="h-3.5 w-3.5" />
+                    <span>{{ t('channels.channels') }}</span>
+                  </button>
+                  <button 
+                    @click="activeChannelOrUser = 'user'; fetchChannels(false)"
+                    :class="[
+                      'px-3.5 py-1.5 text-xs font-black rounded-xl transition-all duration-300 flex items-center justify-center gap-1.5 cursor-pointer',
+                      activeChannelOrUser === 'user'
+                        ? 'bg-teal-600 text-white shadow-md shadow-teal-500/10'
+                        : 'text-gray-450 hover:text-gray-650 dark:text-gray-400 dark:hover:text-gray-250'
+                    ]"
+                  >
+                    <User class="h-3.5 w-3.5" />
+                    <span>{{ t('channels.users') }}</span>
+                  </button>
+                </div>
+
+                <!-- Total Fetched Count in Toolbar -->
+                <div 
+                  class="inline-flex items-center gap-2 px-3 py-1.5 bg-gray-50/80 dark:bg-gray-900/80 border border-gray-200/80 dark:border-gray-700/80 rounded-2xl shadow-3xs"
+                  :title="t('channels.totalFetched')"
                 >
-                  <Hash class="h-3.5 w-3.5" />
-                  {{ t('channels.channels') }}
-                </button>
-                <button 
-                  @click="activeChannelOrUser = 'user'; fetchChannels(false)"
-                  :class="[
-                    'flex-1 py-2 text-xs font-black rounded-xl transition-all duration-300 flex items-center justify-center gap-2 cursor-pointer',
-                    activeChannelOrUser === 'user'
-                      ? 'bg-teal-600 text-white shadow-md shadow-teal-500/10'
-                      : 'text-gray-450 hover:text-gray-650 dark:text-gray-400 dark:hover:text-gray-250'
-                  ]"
-                >
-                  <User class="h-3.5 w-3.5" />
-                  {{ t('channels.users') }}
-                </button>
+                  <span class="w-2 h-2 rounded-full bg-teal-500" :class="[isLoadingChannels ? 'animate-ping' : '']"></span>
+                  <span class="text-xs font-black text-teal-600 dark:text-teal-400 font-mono">{{ channels.length }}</span>
+                  <span class="text-[11px] font-bold text-gray-500 dark:text-gray-400">{{ t('channels.totalFetched') }}</span>
+                </div>
               </div>
             </div>
 
@@ -12130,7 +12143,27 @@ onUnmounted(() => {
         </div>
 
         <!-- Directory Display Area -->
-        <div v-else>
+        <div v-else class="space-y-4">
+          <!-- Total Fetched Items Header Bar for Grid and List Views -->
+          <div class="flex items-center justify-between px-3 py-2 bg-white/70 dark:bg-gray-800/70 backdrop-blur-md rounded-2xl border border-gray-200/80 dark:border-gray-700/80 shadow-3xs">
+            <div class="flex flex-wrap items-center gap-2.5">
+              <span class="inline-flex items-center gap-1.5 text-xs font-bold text-gray-700 dark:text-gray-200">
+                <span class="w-2 h-2 rounded-full bg-teal-500"></span>
+                <span class="font-mono font-black text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/60 px-2 py-0.5 rounded-lg border border-teal-200/50 dark:border-teal-800/50">{{ channels.length }}</span>
+                <span>{{ t('channels.totalFetched') }}</span>
+                <span class="text-gray-300 dark:text-gray-600">•</span>
+                <span class="text-gray-500 dark:text-gray-400 font-medium capitalize">{{ activeChannelOrUser === 'channel' ? t('channels.channels') : t('channels.users') }}</span>
+              </span>
+              <span v-if="channelSearchQuery" class="hidden sm:inline text-xs text-gray-400 dark:text-gray-500">
+                (filter: <span class="font-semibold text-gray-600 dark:text-gray-300">"{{ channelSearchQuery }}"</span>)
+              </span>
+            </div>
+            <div class="text-[11px] font-medium text-gray-400 dark:text-gray-500 flex items-center gap-1.5">
+              <component :is="channelViewMode === 'grid' ? LayoutGrid : List" class="w-3.5 h-3.5 text-teal-500" />
+              <span>{{ channelViewMode === 'grid' ? t('channels.gridView') : t('channels.listView') }}</span>
+            </div>
+          </div>
+
           <!-- Grid View Mode -->
           <div v-if="channelViewMode === 'grid'" class="columns-1 sm:columns-2 md:columns-3 lg:columns-4 xl:columns-5 2xl:columns-6 gap-6">
             <div v-for="channel in channels" :key="channel.name || channel.id || channel.username"
