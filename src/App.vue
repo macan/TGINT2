@@ -880,8 +880,12 @@ const selectHistory = (user: string) => {
 const counters = ref<Record<string, number>>({});
 const frequencies = ref<Record<string, number>>({});
 const pendingJobs = ref<number | null>(null);
+const pendingQ0Jobs = ref<number | null>(null);
+const pendingQ1Jobs = ref<number | null>(null);
 let counterTimer: any = null;
 let pendingJobsTimer: any = null;
+let pendingQ0Timer: any = null;
+let pendingQ1Timer: any = null;
 
 const namespaceStats = ref<Record<string, number>>({
   'telegram-post': 470000000,
@@ -974,6 +978,37 @@ const fetchPendingJobs = async () => {
   }
 };
 
+const fetchQ0Jobs = async () => {
+  try {
+    const response = await fetch("https://i.gogingko.net/api/v1/z/test2/q0", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      pendingQ0Jobs.value = data.gso?.result ?? 0;
+    }
+  } catch (err) {
+    console.error("Failed to fetch q0 pending jobs:", err);
+  }
+};
+
+const fetchQ1Jobs = async () => {
+  try {
+    const response = await fetch("https://i.gogingko.net/api/v1/z/test2/q1", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    if (response.ok) {
+      const data = await response.json();
+      pendingQ1Jobs.value = data.gso?.result ?? 0;
+    }
+  } catch (err) {
+    console.error("Failed to fetch q1 pending jobs:", err);
+  }
+};
 
 // Filtering state
 const filterAuthor = ref("");
@@ -3013,6 +3048,9 @@ const selectListenItem = (item: ListenItem) => {
   } else {
     newlyFetchedListenKeys.value.clear();
     selectedListenNode.value = item;
+    lastListenScrollY.value = 0;
+    lastListenPostKey.value = "";
+    tabScrollPositions.value['listen'] = 0;
     fetchListenPosts(item);
   }
 };
@@ -4896,11 +4934,77 @@ const addEdge = (source: string, target: string, data: any = {}) => {
 };
 
 const tabScrollPositions = ref<Record<string, number>>({});
+const lastListenScrollY = ref(0);
+const lastListenPostKey = ref("");
+
+const restoreListenScrollPosition = () => {
+  const targetScroll = lastListenScrollY.value || tabScrollPositions.value['listen'] || 0;
+  const targetPostKey = lastListenPostKey.value;
+  
+  if (targetScroll <= 0 && !targetPostKey) return;
+
+  let isRestored = false;
+
+  const applyScroll = () => {
+    if (activeTab.value !== 'listen' || isRestored) return;
+
+    if (targetPostKey) {
+      const el = document.getElementById(`listen-post-${targetPostKey}`);
+      if (el) {
+        if (targetScroll > 0 && document.documentElement.scrollHeight >= targetScroll) {
+          window.scrollTo(0, targetScroll);
+          isRestored = Math.abs(window.scrollY - targetScroll) < 50;
+        } else {
+          el.scrollIntoView({ block: 'center', behavior: 'auto' });
+          isRestored = true;
+        }
+        return;
+      }
+    }
+
+    if (targetScroll > 0) {
+      window.scrollTo(0, targetScroll);
+      if (document.documentElement.scrollHeight >= targetScroll) {
+        isRestored = Math.abs(window.scrollY - targetScroll) < 50;
+      }
+    }
+  };
+
+  nextTick(() => {
+    applyScroll();
+    requestAnimationFrame(() => {
+      applyScroll();
+      setTimeout(applyScroll, 50);
+      setTimeout(applyScroll, 150);
+      setTimeout(applyScroll, 300);
+    });
+  });
+};
+
+const jumpToExplorerFromListen = (channel: string, postKey?: string) => {
+  if (postKey) {
+    lastListenPostKey.value = postKey;
+  }
+  const currentY = window.scrollY;
+  lastListenScrollY.value = currentY;
+  tabScrollPositions.value['listen'] = currentY;
+
+  activeTab.value = 'explorer';
+  channelName.value = channel;
+  searchChannel();
+};
 
 watch(activeTab, (newTab, oldTab) => {
   // Save current scroll position
   if (oldTab) {
-    tabScrollPositions.value[oldTab] = window.scrollY;
+    if (oldTab === 'listen') {
+      if (window.scrollY > 0 || !tabScrollPositions.value['listen']) {
+        tabScrollPositions.value['listen'] = window.scrollY;
+        lastListenScrollY.value = window.scrollY;
+      }
+    } else {
+      tabScrollPositions.value[oldTab] = window.scrollY;
+    }
   }
 
   // If we are leaving workspace, save state
@@ -4919,10 +5023,14 @@ watch(activeTab, (newTab, oldTab) => {
   }
 
   // Restore scroll position
-  nextTick(() => {
-    const savedScroll = tabScrollPositions.value[newTab] || 0;
-    window.scrollTo(0, savedScroll);
-  });
+  if (newTab === 'listen') {
+    restoreListenScrollPosition();
+  } else {
+    nextTick(() => {
+      const savedScroll = tabScrollPositions.value[newTab] || 0;
+      window.scrollTo(0, savedScroll);
+    });
+  }
 });
 
 // Auto Finding State
@@ -5238,6 +5346,10 @@ const fetchSinglePost = async () => {
 
 const handleScroll = () => {
   showBackToTop.value = window.scrollY > 500;
+  if (activeTab.value === 'listen') {
+    lastListenScrollY.value = window.scrollY;
+    tabScrollPositions.value['listen'] = window.scrollY;
+  }
 };
 
 const scrollToTop = () => {
@@ -5404,6 +5516,10 @@ onMounted(() => {
     namespaceStatsTimer = setInterval(fetchNamespaceStats, 30000);
     fetchPendingJobs();
     pendingJobsTimer = setInterval(fetchPendingJobs, 30000);
+    fetchQ0Jobs();
+    pendingQ0Timer = setInterval(fetchQ0Jobs, 30000);
+    fetchQ1Jobs();
+    pendingQ1Timer = setInterval(fetchQ1Jobs, 30000);
     if (activeTab.value === 'explorer') {
       pollingTimer = setInterval(pollLatestPosts, 30000);
     }
@@ -5422,6 +5538,8 @@ onUnmounted(() => {
   if (counterTimer) clearInterval(counterTimer);
   if (namespaceStatsTimer) clearInterval(namespaceStatsTimer);
   if (pendingJobsTimer) clearInterval(pendingJobsTimer);
+  if (pendingQ0Timer) clearInterval(pendingQ0Timer);
+  if (pendingQ1Timer) clearInterval(pendingQ1Timer);
   if (pollingTimer) clearInterval(pollingTimer);
   if (listenRefreshInterval) clearInterval(listenRefreshInterval);
   if (activeLoopAnimId) cancelAnimationFrame(activeLoopAnimId);
@@ -7730,10 +7848,13 @@ const onCanvasMouseUp = (e: MouseEvent) => {
     if (!draggedNodeMoved.value) {
       const node = graphNodes.value.find(n => n.id === draggedNodeId.value);
       if (node && !node.isCenter) {
-        channelName.value = node.id;
-        // switch to explorer tab and do new channel search
-        activeTab.value = 'explorer';
-        searchChannel();
+        if (activeTab.value === 'listen') {
+          jumpToExplorerFromListen(node.id);
+        } else {
+          channelName.value = node.id;
+          activeTab.value = 'explorer';
+          searchChannel();
+        }
       }
     }
     draggedNodeId.value = null;
@@ -7835,18 +7956,16 @@ const searchChannel = async () => {
         `https://i.gogingko.net/api/v1/v/telegram-channel/${name.slice(4)}`
       );
     }
-    // try to lookup the resolve cache
-    if (metaRes.status === 404) {
-      const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${name}`)
-      if (resolveRes.ok) {
-        const data = await resolveRes.json()
-        if (data.state == 0 && data.gso?.result) {
-          name = data.gso.result
-          currentChannelName.value = name
-          metaRes = await fetch(
-            `https://i.gogingko.net/api/v1/v/telegram-channel/${name}`
-          );
-        }
+    // try to lookup the resolve cache, even metaRes.stats is ok
+    const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${name}`)
+    if (resolveRes.ok) {
+      const data = await resolveRes.json()
+      if (data.state == 0 && data.gso?.result) {
+        name = data.gso.result
+        currentChannelName.value = name
+        metaRes = await fetch(
+          `https://i.gogingko.net/api/v1/v/telegram-channel/${name}`
+        );
       }
     }
     // try to lookup the mjobs counter
@@ -15787,7 +15906,7 @@ onUnmounted(() => {
           
           <div class="flex items-center gap-3">
             <button
-              @click="fetchCounters"
+              @click="fetchCounters(); fetchPendingJobs(); fetchQ0Jobs(); fetchQ1Jobs();"
               class="px-4 py-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/50 rounded-xl text-sm font-semibold text-gray-700 dark:text-gray-300 transition-colors flex items-center gap-2"
             >
               <RefreshCw class="h-4 w-4" />
@@ -15801,27 +15920,27 @@ onUnmounted(() => {
         </div>
 
         <!-- Metric Details Bento Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 xl:gap-5">
           <!-- Pending Workload & Activity Status Card -->
-          <div class="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20 p-6 rounded-3xl border border-blue-100 dark:border-blue-900/30 shadow-sm flex flex-col justify-between">
+          <div class="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20 p-5 xl:p-6 rounded-3xl border border-blue-100 dark:border-blue-900/30 shadow-sm flex flex-col justify-between">
             <div>
               <div class="flex items-center justify-between">
-                <span class="text-xs font-bold font-mono uppercase tracking-wider text-blue-600 dark:text-blue-400">{{ $t('monitor.pendingJobs') }}</span>
-                <span class="p-1.5 bg-blue-100 dark:bg-blue-900/40 rounded-lg text-blue-600 dark:text-blue-400">
+                <span class="text-xs font-bold font-mono uppercase tracking-wider text-blue-600 dark:text-blue-400 truncate" :title="$t('monitor.pendingJobs')">{{ $t('monitor.pendingJobs') }}</span>
+                <span class="p-1.5 bg-blue-100 dark:bg-blue-900/40 rounded-lg text-blue-600 dark:text-blue-400 shrink-0">
                   <Activity class="h-4 w-4" />
                 </span>
               </div>
               <div class="mt-4">
-                <p class="text-3xl font-black text-gray-900 dark:text-white tabular-nums">
+                <p class="text-2xl xl:text-3xl font-black text-gray-900 dark:text-white tabular-nums">
                   {{ pendingJobs !== null ? pendingJobs : '0' }}
                 </p>
-                <p class="text-xs text-gray-400 mt-1">
+                <p class="text-[11px] text-gray-400 mt-1 line-clamp-2 leading-snug" :title="$t('monitor.pendingJobsDesc')">
                   {{ $t('monitor.pendingJobsDesc') }}
                 </p>
               </div>
             </div>
             
-            <div class="mt-6 pt-4 border-t border-blue-100 dark:border-blue-900/20 flex items-center justify-between text-xs">
+            <div class="mt-4 pt-3 border-t border-blue-100 dark:border-blue-900/20 flex items-center justify-between text-xs">
               <span class="text-gray-500">{{ $t('monitor.status') }}</span>
               <span class="font-bold text-blue-600 dark:text-blue-400 flex items-center gap-1">
                 <CheckCircle2 class="h-3.5 w-3.5" />
@@ -15830,51 +15949,107 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- Total Metrics Catalogued Card -->
-          <div class="bg-gradient-to-br from-pink-50 to-rose-50 dark:from-pink-950/20 dark:to-rose-950/20 p-6 rounded-3xl border border-pink-100 dark:border-pink-900/30 shadow-sm flex flex-col justify-between">
+          <!-- Pending Q0 Jobs Card -->
+          <div class="bg-gradient-to-br from-emerald-50 to-teal-50 dark:from-emerald-950/20 dark:to-teal-950/20 p-5 xl:p-6 rounded-3xl border border-emerald-100 dark:border-emerald-900/30 shadow-sm flex flex-col justify-between">
             <div>
               <div class="flex items-center justify-between">
-                <span class="text-xs font-bold font-mono uppercase tracking-wider text-pink-600 dark:text-pink-400">{{ $t('monitor.capturedObjectsToday') }}</span>
-                <span class="p-1.5 bg-pink-100 dark:bg-pink-900/40 rounded-lg text-pink-600 dark:text-pink-400">
+                <span class="text-xs font-bold font-mono uppercase tracking-wider text-emerald-600 dark:text-emerald-400 truncate" :title="$t('monitor.pendingQ0Jobs')">{{ $t('monitor.pendingQ0Jobs') }}</span>
+                <span class="p-1.5 bg-emerald-100 dark:bg-emerald-900/40 rounded-lg text-emerald-600 dark:text-emerald-400 shrink-0">
+                  <Inbox class="h-4 w-4" />
+                </span>
+              </div>
+              <div class="mt-4">
+                <p class="text-2xl xl:text-3xl font-black text-gray-900 dark:text-white tabular-nums">
+                  {{ pendingQ0Jobs !== null ? pendingQ0Jobs : '0' }}
+                </p>
+                <p class="text-[11px] text-gray-400 mt-1 line-clamp-2 leading-snug" :title="$t('monitor.pendingQ0JobsDesc')">
+                  {{ $t('monitor.pendingQ0JobsDesc') }}
+                </p>
+              </div>
+            </div>
+            
+            <div class="mt-4 pt-3 border-t border-emerald-100 dark:border-emerald-900/20 flex items-center justify-between text-xs">
+              <span class="text-gray-500">{{ $t('monitor.status') }}</span>
+              <span class="font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
+                <CheckCircle2 class="h-3.5 w-3.5" />
+                <span>{{ $t('monitor.queueActive') }}</span>
+              </span>
+            </div>
+          </div>
+
+          <!-- Pending Q1 Jobs Card -->
+          <div class="bg-gradient-to-br from-purple-50 to-indigo-50 dark:from-purple-950/20 dark:to-indigo-950/20 p-5 xl:p-6 rounded-3xl border border-purple-100 dark:border-purple-900/30 shadow-sm flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-bold font-mono uppercase tracking-wider text-purple-600 dark:text-purple-400 truncate" :title="$t('monitor.pendingQ1Jobs')">{{ $t('monitor.pendingQ1Jobs') }}</span>
+                <span class="p-1.5 bg-purple-100 dark:bg-purple-900/40 rounded-lg text-purple-600 dark:text-purple-400 shrink-0">
+                  <ListFilter class="h-4 w-4" />
+                </span>
+              </div>
+              <div class="mt-4">
+                <p class="text-2xl xl:text-3xl font-black text-gray-900 dark:text-white tabular-nums">
+                  {{ pendingQ1Jobs !== null ? pendingQ1Jobs : '0' }}
+                </p>
+                <p class="text-[11px] text-gray-400 mt-1 line-clamp-2 leading-snug" :title="$t('monitor.pendingQ1JobsDesc')">
+                  {{ $t('monitor.pendingQ1JobsDesc') }}
+                </p>
+              </div>
+            </div>
+            
+            <div class="mt-4 pt-3 border-t border-purple-100 dark:border-purple-900/20 flex items-center justify-between text-xs">
+              <span class="text-gray-500">{{ $t('monitor.status') }}</span>
+              <span class="font-bold text-purple-600 dark:text-purple-400 flex items-center gap-1">
+                <CheckCircle2 class="h-3.5 w-3.5" />
+                <span>{{ $t('monitor.queueActive') }}</span>
+              </span>
+            </div>
+          </div>
+
+          <!-- Total Metrics Catalogued Card -->
+          <div class="bg-gradient-to-br from-pink-50 to-rose-50 dark:from-pink-950/20 dark:to-rose-950/20 p-5 xl:p-6 rounded-3xl border border-pink-100 dark:border-pink-900/30 shadow-sm flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-bold font-mono uppercase tracking-wider text-pink-600 dark:text-pink-400 truncate" :title="$t('monitor.capturedObjectsToday')">{{ $t('monitor.capturedObjectsToday') }}</span>
+                <span class="p-1.5 bg-pink-100 dark:bg-pink-900/40 rounded-lg text-pink-600 dark:text-pink-400 shrink-0">
                   <Layers class="h-4 w-4" />
                 </span>
               </div>
               <div class="mt-4">
-                <p class="text-3xl font-black text-gray-900 dark:text-white tabular-nums">
+                <p class="text-2xl xl:text-3xl font-black text-gray-900 dark:text-white tabular-nums">
                   {{ Object.values(counters).reduce((a, b) => a + b, 0).toLocaleString() }}
                 </p>
-                <p class="text-xs text-gray-400 mt-1">
+                <p class="text-[11px] text-gray-400 mt-1 line-clamp-2 leading-snug" :title="$t('monitor.capturedObjectsDesc')">
                   {{ $t('monitor.capturedObjectsDesc') }}
                 </p>
               </div>
             </div>
             
-            <div class="mt-6 pt-4 border-t border-pink-100 dark:border-pink-900/20 flex items-center justify-between text-xs">
+            <div class="mt-4 pt-3 border-t border-pink-100 dark:border-pink-900/20 flex items-center justify-between text-xs">
               <span class="text-gray-500">{{ $t('monitor.syncInterval') }}</span>
               <span class="font-bold text-pink-600 dark:text-pink-400">{{ $t('monitor.refreshed30s') }}</span>
             </div>
           </div>
 
           <!-- Network Diagnostics Card -->
-          <div class="bg-white dark:bg-gray-800 p-6 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col justify-between">
+          <div class="bg-white dark:bg-gray-800 p-5 xl:p-6 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col justify-between">
             <div>
               <div class="flex items-center justify-between">
-                <span class="text-xs font-bold font-mono uppercase tracking-wider text-gray-500 dark:text-gray-400">{{ $t('monitor.systemClock') }}</span>
-                <span class="p-1.5 bg-gray-100 dark:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 font-mono">
+                <span class="text-xs font-bold font-mono uppercase tracking-wider text-gray-500 dark:text-gray-400 truncate" :title="$t('monitor.systemClock')">{{ $t('monitor.systemClock') }}</span>
+                <span class="p-1.5 bg-gray-100 dark:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 font-mono shrink-0">
                   <Clock class="h-4 w-4" />
                 </span>
               </div>
               <div class="mt-4">
-                <h3 class="text-base font-black text-gray-900 dark:text-white font-mono leading-none tracking-tight">
+                <h3 class="text-sm xl:text-base font-black text-gray-900 dark:text-white font-mono leading-none tracking-tight">
                   {{ systemClockDate }}
                 </h3>
-                <p class="text-xl font-bold text-gray-600 dark:text-gray-400 font-mono mt-1">
+                <p class="text-lg xl:text-xl font-bold text-gray-600 dark:text-gray-400 font-mono mt-1">
                   {{ systemClockTime }} UTC
                 </p>
               </div>
             </div>
             
-            <div class="mt-6 pt-4 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs">
+            <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs">
               <span class="text-gray-500">{{ $t('monitor.region') }}</span>
               <span class="font-bold text-gray-700 dark:text-gray-300">{{ $t('monitor.globalCluster') }}</span>
             </div>
@@ -16617,6 +16792,7 @@ onUnmounted(() => {
                   <div
                     v-for="(post, index) in listenPosts"
                     :key="post.key || index"
+                    :id="'listen-post-' + (post.key || index)"
                     class="rounded-3xl shadow-sm border p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden bg-white dark:bg-gray-800"
                     :class="[
                       newlyFetchedListenKeys.has(post.key) || (post.id && newlyFetchedListenKeys.has(post.id))
@@ -16734,7 +16910,7 @@ onUnmounted(() => {
                         </div>
                         <button
                           v-if="getForwardInfo(post)?.target"
-                          @click="activeTab = 'explorer'; channelName = getForwardInfo(post).target; searchChannel()"
+                          @click="jumpToExplorerFromListen(getForwardInfo(post).target, post.key)"
                           class="inline-flex items-center gap-1 px-2.5 py-1.5 bg-purple-50 hover:bg-purple-100 dark:bg-purple-900/40 dark:hover:bg-purple-900/70 text-purple-600 dark:text-purple-400 rounded-xl border border-purple-200/50 dark:border-purple-850 text-[10px] font-bold transition-all shrink-0 cursor-pointer self-start"
                           :title="t('listen.viewChannel')"
                         >
@@ -16899,12 +17075,8 @@ onUnmounted(() => {
                       </div>
                       <div class="flex items-center gap-2">
                         <button
-                          class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-900/20 transition-colors"
-                          @click="
-                            activeTab = 'explorer';
-                            channelName = post.key.split('.')[0];
-                            searchChannel();
-                          "
+                          class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-900/20 transition-colors cursor-pointer"
+                          @click="jumpToExplorerFromListen(post.key.split('.')[0], post.key)"
                         >
                           {{ post.key.split('.')[0] }}
                         </button>
@@ -17284,7 +17456,7 @@ onUnmounted(() => {
                           </div>
                           <button
                             v-if="getForwardInfo(post)?.target"
-                            @click="activeTab = 'explorer'; channelName = getForwardInfo(post).target; searchChannel()"
+                            @click="jumpToExplorerFromListen(getForwardInfo(post).target, post.key)"
                             class="px-2 py-1 bg-purple-100 hover:bg-purple-200 dark:bg-purple-900/60 text-purple-700 dark:text-purple-200 rounded-lg text-[10px] font-bold shrink-0 transition-colors cursor-pointer"
                           >
                             @{{ getForwardInfo(post).target }}
