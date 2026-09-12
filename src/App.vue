@@ -2183,6 +2183,17 @@ const selectedImportFileName = ref("");
 const selectedImportFileSize = ref("");
 const importFileInputRef = ref<HTMLInputElement | null>(null);
 const isDraggingImportFile = ref(false);
+const importRemoteUrlInput = ref("");
+const isFetchingRemoteImport = ref(false);
+
+const resolvedRemoteImportUrl = computed(() => {
+  const trimmed = importRemoteUrlInput.value.trim();
+  if (!trimmed) return "";
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed.replace(/(https?:\/\/i\.gogingko\.net)\/API\//i, "$1/api/");
+  }
+  return `https://i.gogingko.net/api/v1/v/exchange/${encodeURIComponent(trimmed)}`;
+});
 const isTreeCopied = ref(false);
 const isExportingTreeFile = ref(false);
 const lastListenExportMeta = ref<{ filename: string; timestamp: number } | null>(null);
@@ -2430,6 +2441,8 @@ const openImportDirectoryModal = () => {
   selectedImportFileName.value = "";
   selectedImportFileSize.value = "";
   isDraggingImportFile.value = false;
+  importRemoteUrlInput.value = "";
+  isFetchingRemoteImport.value = false;
   isImportModalOpen.value = true;
 };
 
@@ -2514,6 +2527,89 @@ const clearImportFile = () => {
   selectedImportFileSize.value = "";
   importJsonInput.value = "";
   importErrorMessage.value = "";
+  importRemoteUrlInput.value = "";
+};
+
+const fetchRemoteImportObject = async () => {
+  const input = importRemoteUrlInput.value.trim();
+  if (!input) {
+    importErrorMessage.value = t("listen.errorEmptyRemoteInput");
+    return;
+  }
+
+  const targetUrl = resolvedRemoteImportUrl.value;
+  const isGosObject = !/^https?:\/\//i.test(input);
+
+  isFetchingRemoteImport.value = true;
+  importErrorMessage.value = "";
+
+  try {
+    const headers: Record<string, string> = {
+      Accept: "application/json, text/plain, */*"
+    };
+    if (loginToken.value && isLoginTokenValid.value) {
+      headers["x-gos-token"] = loginToken.value;
+    }
+
+    const response = await fetch(targetUrl, {
+      method: "GET",
+      headers
+    });
+
+    if (response.status === 404) {
+      throw new Error(
+        isGosObject
+          ? t("listen.errorGosObjectNotFound", { name: input })
+          : t("listen.errorRemoteUrlNotFound")
+      );
+    }
+
+    if (!response.ok) {
+      throw new Error(`Remote server responded with HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    const rawText = await response.text();
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      // not direct JSON
+    }
+
+    let contentToLoad = rawText;
+
+    if (parsed && typeof parsed === "object") {
+      if (parsed.state === 0 && parsed.gso && parsed.gso.result !== undefined) {
+        let res = parsed.gso.result;
+        if (typeof res === "string") {
+          try {
+            const innerParsed = JSON.parse(res);
+            contentToLoad = JSON.stringify(innerParsed, null, 2);
+          } catch {
+            contentToLoad = res;
+          }
+        } else {
+          contentToLoad = JSON.stringify(res, null, 2);
+        }
+      } else if (parsed.state === 1 && parsed.info) {
+        throw new Error(parsed.info);
+      } else {
+        contentToLoad = JSON.stringify(parsed, null, 2);
+      }
+    }
+
+    importJsonInput.value = contentToLoad;
+    selectedImportFileName.value = isGosObject ? `GOS: ${input}` : (targetUrl.split("/").pop() || "remote.json");
+    selectedImportFileSize.value = formatFileSize(new Blob([contentToLoad]).size);
+    toastMessage.value = t("listen.toastRemoteFetchSuccess");
+    toastType.value = "success";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  } catch (err: any) {
+    console.error("Failed to fetch remote object:", err);
+    importErrorMessage.value = t("listen.errorRemoteFetchFailed", { error: err.message || err });
+  } finally {
+    isFetchingRemoteImport.value = false;
+  }
 };
 
 const pasteFromClipboardIntoImport = async () => {
@@ -17868,8 +17964,8 @@ onUnmounted(() => {
         class="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm"
         @click.self="isImportModalOpen = false"
       >
-        <div class="w-full max-w-xl bg-white dark:bg-gray-800 rounded-3xl overflow-hidden shadow-2xl border border-gray-150 dark:border-gray-700 animate-in fade-in zoom-in duration-300">
-          <div class="p-6">
+        <div class="w-full max-w-xl bg-white dark:bg-gray-800 rounded-3xl overflow-hidden shadow-2xl border border-gray-150 dark:border-gray-700 animate-in fade-in zoom-in duration-300 max-h-[90vh] flex flex-col">
+          <div class="p-6 overflow-y-auto flex-1">
             <!-- Modal Header -->
             <div class="flex items-center justify-between mb-3 border-b border-gray-150 dark:border-gray-700 pb-3">
               <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
@@ -17904,13 +18000,13 @@ onUnmounted(() => {
                 :class="[
                   isDraggingImportFile
                     ? 'border-dashed border-teal-500 bg-teal-50/50 dark:bg-teal-950/30 ring-2 ring-teal-500/20'
-                    : selectedImportFileName
+                    : selectedImportFileName && !selectedImportFileName.startsWith('GOS:') && !selectedImportFileName.endsWith('remote.json')
                       ? 'border-teal-300/80 dark:border-teal-700/80 bg-teal-50/30 dark:bg-teal-950/20'
                       : 'border-dashed border-gray-250 dark:border-gray-700 bg-gray-50/60 dark:bg-gray-900/40 hover:border-teal-400/60 hover:bg-teal-50/20 dark:hover:bg-teal-950/10'
                 ]"
               >
                 <!-- If file loaded -->
-                <div v-if="selectedImportFileName" class="flex items-center gap-2.5 min-w-0 flex-1">
+                <div v-if="selectedImportFileName && !selectedImportFileName.startsWith('GOS:') && !selectedImportFileName.endsWith('remote.json')" class="flex items-center gap-2.5 min-w-0 flex-1">
                   <div class="w-8 h-8 rounded-xl bg-teal-100 dark:bg-teal-900/50 text-teal-600 dark:text-teal-400 flex items-center justify-center shrink-0 shadow-2xs">
                     <FileCode class="h-4 w-4" />
                   </div>
@@ -17952,7 +18048,7 @@ onUnmounted(() => {
                     class="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
                     <FolderOpen class="h-3.5 w-3.5" />
-                    <span>{{ selectedImportFileName ? t('listen.browseJsonFile') : t('listen.selectLocalJsonFile') }}</span>
+                    <span>{{ selectedImportFileName && !selectedImportFileName.startsWith('GOS:') ? t('listen.browseJsonFile') : t('listen.selectLocalJsonFile') }}</span>
                   </button>
                   <button
                     v-if="selectedImportFileName || importJsonInput"
@@ -17963,6 +18059,67 @@ onUnmounted(() => {
                   >
                     <X class="h-4 w-4" />
                   </button>
+                </div>
+              </div>
+
+              <!-- OR Divider -->
+              <div class="relative flex py-0.5 items-center">
+                <div class="flex-grow border-t border-gray-200 dark:border-gray-700"></div>
+                <span class="flex-shrink mx-3 text-[10px] font-extrabold uppercase tracking-wider text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 px-2.5 py-0.5 rounded-full border border-gray-200 dark:border-gray-700">
+                  {{ t('listen.orLoadRemoteUrl') }}
+                </span>
+                <div class="flex-grow border-t border-gray-200 dark:border-gray-700"></div>
+              </div>
+
+              <!-- Remote URL / GOS Object Loading Module -->
+              <div class="rounded-2xl border border-gray-200 dark:border-gray-700 bg-gray-50/60 dark:bg-gray-900/40 p-3.5 space-y-2.5">
+                <div class="flex items-center justify-between">
+                  <label class="text-[11px] font-bold text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
+                    <Globe class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                    <span>{{ t('listen.remoteUrlOrGosName') }}</span>
+                  </label>
+                  <span v-if="resolvedRemoteImportUrl && !/^https?:\/\//i.test(importRemoteUrlInput.trim())" class="text-[10px] font-mono font-semibold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-1.5 py-0.5 rounded border border-teal-200/60 dark:border-teal-800/40">
+                    GOS Exchange
+                  </span>
+                </div>
+
+                <div class="flex items-center gap-2">
+                  <div class="relative flex-1 min-w-0">
+                    <input
+                      v-model="importRemoteUrlInput"
+                      type="text"
+                      :placeholder="t('listen.remoteUrlPlaceholder')"
+                      @keydown.enter.prevent="fetchRemoteImportObject"
+                      class="w-full pl-3 pr-7 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-xs text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all font-mono"
+                    />
+                    <button
+                      v-if="importRemoteUrlInput"
+                      type="button"
+                      @click="importRemoteUrlInput = ''"
+                      class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors p-0.5 cursor-pointer"
+                    >
+                      <X class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    @click="fetchRemoteImportObject"
+                    :disabled="!importRemoteUrlInput.trim() || isFetchingRemoteImport"
+                    class="px-4 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-xs transition-colors flex items-center gap-1.5 shrink-0 cursor-pointer"
+                  >
+                    <RefreshCw v-if="isFetchingRemoteImport" class="h-3.5 w-3.5 animate-spin" />
+                    <Download v-else class="h-3.5 w-3.5" />
+                    <span>{{ isFetchingRemoteImport ? t('listen.fetching') : t('listen.fetchRemote') }}</span>
+                  </button>
+                </div>
+
+                <!-- Realtime Resolved URL hint when typing -->
+                <div v-if="importRemoteUrlInput.trim()" class="flex items-center gap-1.5 text-[10px] text-gray-500 dark:text-gray-400">
+                  <span class="font-semibold text-gray-400 dark:text-gray-500 shrink-0">{{ t('listen.targetUrl') }}:</span>
+                  <span class="font-mono text-teal-600 dark:text-teal-400 truncate select-all" :title="resolvedRemoteImportUrl">
+                    {{ resolvedRemoteImportUrl }}
+                  </span>
                 </div>
               </div>
 
