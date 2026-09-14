@@ -48,3 +48,14 @@ export interface GraphEdge {
   targetDist?: number;
   _index?: number;
 }
+
+export type FreshnessLevel = 'today' | 'recent' | 'week' | 'month' | 'stale';
+
+export interface ListenItemFreshness {
+  timestamp: number;
+  dateStr: string;
+  postCount: number;
+  level: FreshnessLevel;
+  relativeTime: string;
+  formattedDate: string;
+}

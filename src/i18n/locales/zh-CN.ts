@@ -587,7 +587,16 @@ export default {
     postsFlowDesc: "快速浏览最近发布的帖子，了解频道关注话题与内容风格。",
     decisionHelperBadge: "决策支持",
     noItemForDecision: "未选择监听项",
-    noItemForDecisionDesc: "点击左侧任意频道或关键词，即可在此预览其关联图谱与内容流，辅助精准分类归档。"
+    noItemForDecisionDesc: "点击左侧任意频道或关键词，即可在此预览其关联图谱与内容流，辅助精准分类归档。",
+    freshness: "活跃新鲜度",
+    newestPost: "最新帖子",
+    cachedPostsCount: "{count} 条已缓存帖子",
+    freshnessLegendToday: "< 24小时",
+    freshnessLegendRecent: "1 - 3天",
+    freshnessLegendWeek: "3 - 7天",
+    freshnessLegendMonth: "7 - 30天",
+    freshnessLegendStale: "> 30天",
+    freshnessTooltip: "目录行色彩代表最新缓存帖子的时间新鲜度"
   },
   autoFinding: {
     title: "自动化广度优先发现引擎",

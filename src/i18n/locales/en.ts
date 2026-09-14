@@ -587,7 +587,16 @@ export default {
     postsFlowDesc: "Inspect recent posts to verify content topics and focus areas.",
     decisionHelperBadge: "Decision Support",
     noItemForDecision: "No Listen Item Selected",
-    noItemForDecisionDesc: "Click any channel or keyword on the left to preview its relations graph and content flow to guide your classification."
+    noItemForDecisionDesc: "Click any channel or keyword on the left to preview its relations graph and content flow to guide your classification.",
+    freshness: "Freshness",
+    newestPost: "Newest Post",
+    cachedPostsCount: "{count} cached posts",
+    freshnessLegendToday: "< 24h",
+    freshnessLegendRecent: "1 - 3d",
+    freshnessLegendWeek: "3 - 7d",
+    freshnessLegendMonth: "7 - 30d",
+    freshnessLegendStale: "> 30d",
+    freshnessTooltip: "Line color indicates activity freshness based on newest cached post datetime"
   },
   autoFinding: {
     title: "Automated BFS Discovery Engine",

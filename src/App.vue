@@ -96,7 +96,7 @@ import MarkdownIt from "markdown-it";
 import markdownItMark from "markdown-it-mark";
 // @ts-ignore
 import clm from "country-locale-map";
-import { ListenItem, AutoFindingCell, GraphNode, GraphEdge } from "./types";
+import { ListenItem, AutoFindingCell, GraphNode, GraphEdge, ListenItemFreshness, FreshnessLevel } from "./types";
 import { getInitials, truncateString, getSha1HexDigest } from "./utils/helpers";
 import {
   useI18n,
@@ -2190,9 +2190,9 @@ const resolvedRemoteImportUrl = computed(() => {
   const trimmed = importRemoteUrlInput.value.trim();
   if (!trimmed) return "";
   if (/^https?:\/\//i.test(trimmed)) {
-    return trimmed.replace(/(https?:\/\/i\.gogingko\.net)\/API\//i, "$1/api/");
+    return trimmed;
   }
-  return `https://i.gogingko.net/api/v1/v/exchange/${encodeURIComponent(trimmed)}`;
+  return `https://i.gogingko.net/API/v1/v/exchange/${encodeURIComponent(trimmed)}`;
 });
 const isTreeCopied = ref(false);
 const isExportingTreeFile = ref(false);
@@ -2689,6 +2689,7 @@ const confirmListenDirectoryImport = () => {
     if (Array.isArray(treeData)) {
       listenDirectory.value = treeData;
       saveListenDirectory(tStamp);
+      loadAllListenPostsFreshnessFromIndexedDB();
       toastMessage.value = t("listen.toastImportSuccess");
       toastType.value = "success";
       isImportModalOpen.value = false;
@@ -2894,6 +2895,12 @@ const deleteListenItem = (id: string, name: string = "") => {
 const confirmDeleteListenItem = () => {
   if (itemToDeleteId.value) {
     const id = itemToDeleteId.value;
+    clearCachedPostsIndexedDB(id);
+    if (listenItemsFreshnessMap.value[id]) {
+      const updated = { ...listenItemsFreshnessMap.value };
+      delete updated[id];
+      listenItemsFreshnessMap.value = updated;
+    }
     findNodeAndPerform(listenDirectory.value, id, (nodes, idx) => {
       nodes.splice(idx, 1);
     });
@@ -3394,6 +3401,278 @@ const clearCachedPostsIndexedDB = async (nodeId: string): Promise<void> => {
   }
 };
 
+const formatFreshnessDate = (dateVal: number | string | Date): string => {
+  if (!dateVal) return "";
+  try {
+    const d = typeof dateVal === "number"
+      ? (dateVal < 10000000000 ? new Date(dateVal * 1000) : new Date(dateVal))
+      : new Date(dateVal);
+    if (isNaN(d.getTime())) return String(dateVal);
+    return format(d, "MMM d, yyyy h:mm:ss a");
+  } catch {
+    return String(dateVal);
+  }
+};
+
+const formatFreshnessRelative = (ageMs: number): string => {
+  if (ageMs <= 60 * 1000) {
+    return "just now";
+  }
+  const ONE_HOUR = 3600 * 1000;
+  const ONE_DAY = 24 * ONE_HOUR;
+  if (ageMs < ONE_HOUR) {
+    return `${Math.max(1, Math.floor(ageMs / (60 * 1000)))}m ago`;
+  }
+  if (ageMs < ONE_DAY) {
+    return `${Math.floor(ageMs / ONE_HOUR)}h ago`;
+  }
+  if (ageMs < 30 * ONE_DAY) {
+    return `${Math.floor(ageMs / ONE_DAY)}d ago`;
+  }
+  if (ageMs < 365 * ONE_DAY) {
+    return `${Math.floor(ageMs / (30 * ONE_DAY))}mo ago`;
+  }
+  return `${Math.floor(ageMs / (365 * ONE_DAY))}y ago`;
+};
+
+const computeItemFreshnessFromPosts = (posts: any[]): ListenItemFreshness | null => {
+  if (!Array.isArray(posts) || posts.length === 0) return null;
+  let maxTime = 0;
+  let rawDateVal: any = null;
+
+  for (const p of posts) {
+    if (!p) continue;
+    const raw = p.data?.date ?? p.date ?? p.data?.created_at ?? p.created_at ?? p.data?.timestamp ?? p.timestamp ?? p.message?.date;
+    if (!raw) continue;
+    let t = 0;
+    if (typeof raw === "number") {
+      t = raw < 10000000000 ? raw * 1000 : raw;
+    } else {
+      const parsed = new Date(raw).getTime();
+      t = isNaN(parsed) ? 0 : parsed;
+    }
+    if (t > maxTime) {
+      maxTime = t;
+      rawDateVal = raw;
+    }
+  }
+
+  if (maxTime <= 0) return null;
+
+  const now = Date.now();
+  const ageMs = Math.max(0, now - maxTime);
+  const ONE_HOUR = 3600 * 1000;
+  const ONE_DAY = 24 * ONE_HOUR;
+
+  let level: FreshnessLevel;
+  if (ageMs <= ONE_DAY) {
+    level = 'today';
+  } else if (ageMs <= 3 * ONE_DAY) {
+    level = 'recent';
+  } else if (ageMs <= 7 * ONE_DAY) {
+    level = 'week';
+  } else if (ageMs <= 30 * ONE_DAY) {
+    level = 'month';
+  } else {
+    level = 'stale';
+  }
+
+  return {
+    timestamp: maxTime,
+    dateStr: typeof rawDateVal === 'string' ? rawDateVal : (rawDateVal ? new Date(maxTime).toISOString() : ''),
+    postCount: posts.length,
+    level,
+    relativeTime: formatFreshnessRelative(ageMs),
+    formattedDate: formatFreshnessDate(maxTime)
+  };
+};
+
+const listenItemsFreshnessMap = ref<Record<string, ListenItemFreshness>>({});
+
+const updateItemFreshness = (nodeId: string, posts: any[]) => {
+  if (!nodeId) return;
+  const freshness = computeItemFreshnessFromPosts(posts);
+  if (freshness) {
+    listenItemsFreshnessMap.value = {
+      ...listenItemsFreshnessMap.value,
+      [nodeId]: freshness
+    };
+  } else if (listenItemsFreshnessMap.value[nodeId]) {
+    const updated = { ...listenItemsFreshnessMap.value };
+    delete updated[nodeId];
+    listenItemsFreshnessMap.value = updated;
+  }
+};
+
+const loadAllListenPostsFreshnessFromIndexedDB = async () => {
+  try {
+    const db = await initIndexedDB();
+    const transaction = db.transaction("posts", "readonly");
+    const store = transaction.objectStore("posts");
+    const freshness: Record<string, ListenItemFreshness> = {};
+
+    const request = store.openCursor();
+    request.onsuccess = (event: any) => {
+      const cursor = event.target.result;
+      if (cursor) {
+        const nodeId = String(cursor.key);
+        const posts = cursor.value;
+        if (Array.isArray(posts) && posts.length > 0) {
+          const res = computeItemFreshnessFromPosts(posts);
+          if (res) {
+            freshness[nodeId] = res;
+          }
+        }
+        cursor.continue();
+      } else {
+        listenItemsFreshnessMap.value = {
+          ...listenItemsFreshnessMap.value,
+          ...freshness
+        };
+      }
+    };
+    request.onerror = (err) => {
+      console.error("Error iterating listen posts in IndexedDB:", err);
+    };
+  } catch (err) {
+    console.error("Failed to load listen posts freshness from IndexedDB:", err);
+  }
+};
+
+const getItemOrFolderFreshness = (item: ListenItem): ListenItemFreshness | null => {
+  if (!item) return null;
+  if (!item.isFolder) {
+    return listenItemsFreshnessMap.value[item.id] || null;
+  }
+  let newest: ListenItemFreshness | null = null;
+  const traverse = (node: ListenItem) => {
+    if (!node.isFolder) {
+      const f = listenItemsFreshnessMap.value[node.id];
+      if (f && (!newest || f.timestamp > newest.timestamp)) {
+        newest = f;
+      }
+    } else if (node.children && Array.isArray(node.children)) {
+      for (const child of node.children) {
+        traverse(child);
+      }
+    }
+  };
+  if (item.children && Array.isArray(item.children)) {
+    for (const child of item.children) {
+      traverse(child);
+    }
+  }
+  return newest;
+};
+
+const getListenItemLineClasses = (node: { item: ListenItem; depth: number }): string => {
+  const isSelected = !!(selectedListenNode.value && selectedListenNode.value.id === node.item.id);
+  const freshness = getItemOrFolderFreshness(node.item);
+  const isPrivateChannel = node.item.type === 'channel' && node.item.argument?.startsWith('-100');
+
+  // Drag-and-drop feedback classes
+  if (dragOverNode.value && dragOverNode.value.item.id === node.item.id && dragOverPosition.value === 'inside') {
+    return 'border-dashed border-teal-500 bg-teal-50/40 dark:bg-teal-950/30 scale-[0.98] text-teal-800 dark:text-teal-300';
+  }
+  if (draggedNode.value && draggedNode.value.item.id === node.item.id) {
+    return 'opacity-40 border-dashed border-gray-300 dark:border-gray-600';
+  }
+
+  // 1. Freshness-colored lines when posts have been fetched and cached
+  if (freshness) {
+    switch (freshness.level) {
+      case 'today':
+        return isSelected
+          ? 'bg-emerald-500/20 hover:bg-emerald-500/25 border-emerald-500 dark:border-emerald-400 text-emerald-950 dark:text-emerald-100 ring-1 ring-emerald-500/40 font-bold shadow-xs'
+          : 'bg-emerald-500/[0.08] hover:bg-emerald-500/[0.14] border-emerald-500/35 hover:border-emerald-500/50 text-emerald-950 dark:bg-emerald-500/[0.14] dark:hover:bg-emerald-500/[0.20] dark:border-emerald-500/40 dark:text-emerald-200';
+      case 'recent':
+        return isSelected
+          ? 'bg-teal-500/20 hover:bg-teal-500/25 border-teal-500 dark:border-teal-400 text-teal-950 dark:text-teal-100 ring-1 ring-teal-500/40 font-bold shadow-xs'
+          : 'bg-teal-500/[0.07] hover:bg-teal-500/[0.13] border-teal-500/30 hover:border-teal-500/45 text-teal-950 dark:bg-teal-500/[0.12] dark:hover:bg-teal-500/[0.18] dark:border-teal-500/35 dark:text-teal-200';
+      case 'week':
+        return isSelected
+          ? 'bg-sky-500/20 hover:bg-sky-500/25 border-sky-500 dark:border-sky-400 text-sky-950 dark:text-sky-100 ring-1 ring-sky-500/40 font-bold shadow-xs'
+          : 'bg-sky-500/[0.06] hover:bg-sky-500/[0.12] border-sky-500/30 hover:border-sky-500/45 text-sky-950 dark:bg-sky-500/[0.10] dark:hover:bg-sky-500/[0.16] dark:border-sky-500/35 dark:text-sky-200';
+      case 'month':
+        return isSelected
+          ? 'bg-amber-500/20 hover:bg-amber-500/25 border-amber-500 dark:border-amber-400 text-amber-950 dark:text-amber-100 ring-1 ring-amber-500/40 font-bold shadow-xs'
+          : 'bg-amber-500/[0.06] hover:bg-amber-500/[0.11] border-amber-500/30 hover:border-amber-500/40 text-amber-950 dark:bg-amber-500/[0.09] dark:hover:bg-amber-500/[0.15] dark:border-amber-500/30 dark:text-amber-200';
+      case 'stale':
+        return isSelected
+          ? 'bg-slate-500/15 hover:bg-slate-500/20 border-slate-400 dark:border-slate-500 text-slate-900 dark:text-slate-100 ring-1 ring-slate-400/40 font-bold shadow-xs'
+          : 'bg-slate-500/[0.04] hover:bg-slate-500/[0.08] border-slate-400/25 hover:border-slate-400/35 text-slate-700 dark:bg-slate-700/25 dark:hover:bg-slate-700/35 dark:border-slate-600/30 dark:text-slate-300';
+    }
+  }
+
+  // 2. Default styling if posts have not yet been fetched/cached
+  if (isSelected) {
+    if (isPrivateChannel) {
+      return 'bg-amber-500/15 hover:bg-amber-500/20 border-amber-300 dark:border-amber-800/40 text-amber-900 dark:text-amber-400 font-bold ring-1 ring-amber-500/30';
+    }
+    return 'bg-teal-50 hover:bg-teal-100/80 border-teal-200 text-teal-700 dark:bg-teal-950/30 dark:hover:bg-teal-900/20 dark:border-teal-900/40 dark:text-teal-400 font-bold';
+  }
+
+  if (isPrivateChannel) {
+    return 'bg-amber-500/5 hover:bg-amber-500/10 border-amber-500/10 hover:border-amber-500/20 text-amber-700/95 dark:text-amber-400';
+  }
+
+  return 'bg-transparent hover:bg-gray-50 border-transparent text-gray-700 dark:text-gray-300 dark:hover:bg-gray-700/40';
+};
+
+const getFreshnessAccentColor = (level: string): string => {
+  switch (level) {
+    case 'today':
+      return 'bg-emerald-500 dark:bg-emerald-400 shadow-xs shadow-emerald-500/50';
+    case 'recent':
+      return 'bg-teal-500 dark:bg-teal-400 shadow-xs shadow-teal-500/40';
+    case 'week':
+      return 'bg-sky-500 dark:bg-sky-400 shadow-xs shadow-sky-500/40';
+    case 'month':
+      return 'bg-amber-500 dark:bg-amber-400 shadow-xs shadow-amber-500/40';
+    case 'stale':
+    default:
+      return 'bg-slate-400 dark:bg-slate-500';
+  }
+};
+
+const getFreshnessBadgeClasses = (level: string): string => {
+  switch (level) {
+    case 'today':
+      return 'bg-emerald-100 text-emerald-800 border-emerald-300/80 dark:bg-emerald-950/70 dark:text-emerald-300 dark:border-emerald-700/60';
+    case 'recent':
+      return 'bg-teal-100 text-teal-800 border-teal-300/80 dark:bg-teal-950/70 dark:text-teal-300 dark:border-teal-700/60';
+    case 'week':
+      return 'bg-sky-100 text-sky-800 border-sky-300/80 dark:bg-sky-950/70 dark:text-sky-300 dark:border-sky-700/60';
+    case 'month':
+      return 'bg-amber-100 text-amber-800 border-amber-300/80 dark:bg-amber-950/70 dark:text-amber-300 dark:border-amber-700/60';
+    case 'stale':
+    default:
+      return 'bg-slate-100 text-slate-700 border-slate-300/80 dark:bg-slate-800/70 dark:text-slate-300 dark:border-slate-700/60';
+  }
+};
+
+const getFreshnessDotColor = (level: string): string => {
+  switch (level) {
+    case 'today':
+      return 'bg-emerald-500 dark:bg-emerald-400 animate-pulse';
+    case 'recent':
+      return 'bg-teal-500 dark:bg-teal-400';
+    case 'week':
+      return 'bg-sky-500 dark:bg-sky-400';
+    case 'month':
+      return 'bg-amber-500 dark:bg-amber-400';
+    case 'stale':
+    default:
+      return 'bg-slate-400 dark:bg-slate-500';
+  }
+};
+
+const getListenItemLineTitle = (item: ListenItem): string => {
+  const freshness = getItemOrFolderFreshness(item);
+  if (!freshness) return item.name;
+  return `${item.name}\n${t('listen.newestPost')}: ${freshness.formattedDate} (${freshness.relativeTime})\n${t('listen.cachedPostsCount', { count: freshness.postCount })}`;
+};
+
 const getListenPostsCacheLimit = (): number => {
   // Determine memory limits (defaulting to 4GB if not accessible/supported)
   const memory = (navigator as any).deviceMemory || 4;
@@ -3433,6 +3712,9 @@ const fetchListenPosts = async (node: ListenItem) => {
   let cached: any[] = [];
   try {
     cached = await getCachedPostsIndexedDB(node.id);
+    if (cached && cached.length > 0) {
+      updateItemFreshness(node.id, cached);
+    }
   } catch (err) {
     console.error("Failed to load cached listen posts from IndexedDB:", err);
   }
@@ -3649,6 +3931,7 @@ const fetchListenPosts = async (node: ListenItem) => {
       // Save to cache
       try {
         await setCachedPostsIndexedDB(node.id, finalPosts);
+        updateItemFreshness(node.id, finalPosts);
       } catch (err) {
         console.error("Failed to save cached posts to IndexedDB:", err);
       }
@@ -3796,7 +4079,13 @@ watch(selectedListenNode, (newNode) => {
 
 const clearCachedListenPosts = async () => {
   if (!selectedListenNode.value) return;
-  await clearCachedPostsIndexedDB(selectedListenNode.value.id);
+  const id = selectedListenNode.value.id;
+  await clearCachedPostsIndexedDB(id);
+  if (listenItemsFreshnessMap.value[id]) {
+    const updated = { ...listenItemsFreshnessMap.value };
+    delete updated[id];
+    listenItemsFreshnessMap.value = updated;
+  }
   listenPosts.value = [];
   newlyFetchedListenKeys.value.clear();
 };
@@ -5189,6 +5478,7 @@ watch(activeTab, (newTab, oldTab) => {
   // Restore scroll position
   if (newTab === 'listen') {
     restoreListenScrollPosition();
+    loadAllListenPostsFreshnessFromIndexedDB();
   } else if (newTab === 'search') {
     restoreSearchScrollPosition();
   } else {
@@ -5695,6 +5985,7 @@ onMounted(() => {
     loadSavedProfiles();
     loadLogin();
     loadListenDirectory();
+    loadAllListenPostsFreshnessFromIndexedDB();
     fetchIndexedProfilesCount();
   }
 });
@@ -16446,6 +16737,39 @@ onUnmounted(() => {
               </div>
             </div>
 
+            <!-- Freshness Activity Legend Guide -->
+            <div 
+              class="px-3.5 py-2 bg-gradient-to-r from-teal-50/70 via-slate-50/80 to-teal-50/60 dark:from-teal-950/45 dark:via-slate-900/90 dark:to-teal-950/35 border-b border-teal-100/80 dark:border-teal-900/50 flex items-center justify-between text-[10px] text-gray-500 dark:text-gray-400 shrink-0 select-none overflow-x-auto scrollbar-none gap-2"
+              :title="t('listen.freshnessTooltip')"
+            >
+              <div class="flex items-center gap-1.5 font-bold shrink-0">
+                <Sparkles class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 shrink-0" />
+                <span class="text-teal-900 dark:text-teal-200 tracking-wide font-sans">{{ t('listen.freshness') }}</span>
+              </div>
+              <div class="flex items-center gap-1.5 font-mono text-[9px] shrink-0">
+                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold bg-emerald-100/80 text-emerald-800 border border-emerald-300/70 dark:bg-emerald-950/80 dark:text-emerald-300 dark:border-emerald-700/60 shadow-2xs">
+                  <span class="h-1.5 w-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse"></span>
+                  {{ t('listen.freshnessLegendToday') }}
+                </span>
+                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold bg-teal-100/80 text-teal-800 border border-teal-300/70 dark:bg-teal-950/80 dark:text-teal-300 dark:border-teal-700/60 shadow-2xs">
+                  <span class="h-1.5 w-1.5 rounded-full bg-teal-500 dark:bg-teal-400"></span>
+                  {{ t('listen.freshnessLegendRecent') }}
+                </span>
+                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold bg-sky-100/80 text-sky-800 border border-sky-300/70 dark:bg-sky-950/80 dark:text-sky-300 dark:border-sky-700/60 shadow-2xs">
+                  <span class="h-1.5 w-1.5 rounded-full bg-sky-500 dark:bg-sky-400"></span>
+                  {{ t('listen.freshnessLegendWeek') }}
+                </span>
+                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold bg-amber-100/80 text-amber-800 border border-amber-300/70 dark:bg-amber-950/80 dark:text-amber-300 dark:border-amber-700/60 shadow-2xs">
+                  <span class="h-1.5 w-1.5 rounded-full bg-amber-500 dark:bg-amber-400"></span>
+                  {{ t('listen.freshnessLegendMonth') }}
+                </span>
+                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold bg-slate-200/80 text-slate-700 border border-slate-300/70 dark:bg-slate-800/90 dark:text-slate-200 dark:border-slate-600/70 shadow-2xs">
+                  <span class="h-1.5 w-1.5 rounded-full bg-slate-400 dark:bg-slate-400"></span>
+                  {{ t('listen.freshnessLegendStale') }}
+                </span>
+              </div>
+            </div>
+
             <!-- Scrollable Directories Stream -->
             <div class="p-3 overflow-y-auto flex-1 space-y-1 select-none max-h-[820px]">
               <div v-if="visibleDirectoryNodes.length === 0" class="flex flex-col items-center justify-center py-16 text-center text-gray-400 dark:text-gray-500">
@@ -16463,21 +16787,8 @@ onUnmounted(() => {
                 @dragover="onDragOver($event, node)"
                 @dragend="onDragEnd"
                 @drop="onDrop($event, node)"
-                :class="[
-                  selectedListenNode && selectedListenNode.id === node.item.id
-                    ? (node.item.type === 'channel' && node.item.argument?.startsWith('-100'))
-                      ? 'bg-amber-500/15 hover:bg-amber-500/20 border-amber-200 dark:border-amber-800/40 text-amber-900 dark:text-amber-400 font-bold'
-                      : 'bg-teal-50 hover:bg-teal-100/80 border-teal-100 text-teal-700 dark:bg-teal-950/20 dark:hover:bg-teal-900/10 dark:border-teal-900/30 dark:text-teal-400'
-                    : (node.item.type === 'channel' && node.item.argument?.startsWith('-100'))
-                      ? 'bg-amber-500/5 hover:bg-amber-500/10 border-amber-500/10 hover:border-amber-500/20 text-amber-700/95 dark:text-amber-400'
-                      : 'bg-transparent hover:bg-gray-50 border-transparent text-gray-700 dark:text-gray-300 dark:hover:bg-gray-700/40',
-                  dragOverNode && dragOverNode.item.id === node.item.id && dragOverPosition === 'inside'
-                    ? 'border-dashed border-teal-500 bg-teal-50/30 dark:bg-teal-950/20 scale-[0.98]'
-                    : '',
-                  draggedNode && draggedNode.item.id === node.item.id
-                    ? 'opacity-40 border-dashed border-gray-300 dark:border-gray-600'
-                    : ''
-                ]"
+                :class="getListenItemLineClasses(node)"
+                :title="getListenItemLineTitle(node.item)"
                 :style="{ paddingLeft: `calc(0.5rem + ${node.depth * 1.25}rem)` }"
               >
                 <!-- Drop indicator lines -->
@@ -16496,6 +16807,13 @@ onUnmounted(() => {
                   <GripVertical class="h-3 w-3" />
                 </div>
 
+                <!-- Freshness vertical accent pill -->
+                <span 
+                  v-if="getItemOrFolderFreshness(node.item)" 
+                  class="w-1 h-3.5 rounded-full shrink-0 mr-1.5 transition-colors"
+                  :class="getFreshnessAccentColor(getItemOrFolderFreshness(node.item)!.level)"
+                ></span>
+
                 <!-- Interaction click targets -->
                 <div 
                   @click="selectListenItem(node.item)"
@@ -16508,11 +16826,13 @@ onUnmounted(() => {
                   </span>
                   <span v-else class="w-3.5 h-3.5 flex items-center justify-center shrink-0">
                     <span 
-                      class="h-1.5 w-1.5 rounded-full"
+                      class="h-1.5 w-1.5 rounded-full transition-colors"
                       :class="[
-                        node.item.type === 'channel' 
-                          ? (node.item.argument?.startsWith('-100') ? 'bg-amber-500' : 'bg-orange-400') 
-                          : 'bg-cyan-400'
+                        getItemOrFolderFreshness(node.item)
+                          ? getFreshnessDotColor(getItemOrFolderFreshness(node.item)!.level)
+                          : (node.item.type === 'channel' 
+                              ? (node.item.argument?.startsWith('-100') ? 'bg-amber-500' : 'bg-orange-400') 
+                              : 'bg-cyan-400')
                       ]"
                     ></span>
                   </span>
@@ -16544,6 +16864,16 @@ onUnmounted(() => {
                     {{ getFolderItemsCount(node.item) }}
                   </span>
                 </div>
+
+                <!-- Freshness Relative Timestamp Badge -->
+                <span 
+                  v-if="getItemOrFolderFreshness(node.item)"
+                  class="ml-auto mr-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold tracking-tight border flex items-center gap-1 shrink-0 select-none transition-colors"
+                  :class="getFreshnessBadgeClasses(getItemOrFolderFreshness(node.item)!.level)"
+                >
+                  <span class="h-1.5 w-1.5 rounded-full" :class="getFreshnessDotColor(getItemOrFolderFreshness(node.item)!.level)"></span>
+                  <span class="whitespace-nowrap font-mono">{{ getItemOrFolderFreshness(node.item)!.relativeTime }}</span>
+                </span>
 
                 <!-- Action Button Hover Overlay -->
                 <div class="flex items-center gap-1 relative z-20 shrink-0 pl-1">
@@ -16803,6 +17133,15 @@ onUnmounted(() => {
                     <span v-if="listenAutoRefreshActive" class="text-[10px] bg-green-500/10 text-green-500 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider animate-pulse flex items-center gap-1">
                       <span class="h-1.5 w-1.5 bg-green-500 rounded-full"></span>
                       {{ t('listen.listeningLive') }}
+                    </span>
+                    <span 
+                      v-if="getItemOrFolderFreshness(selectedListenNode)"
+                      class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider flex items-center gap-1 border transition-colors font-mono"
+                      :class="getFreshnessBadgeClasses(getItemOrFolderFreshness(selectedListenNode)!.level)"
+                      :title="`${t('listen.newestPost')}: ${getItemOrFolderFreshness(selectedListenNode)!.formattedDate}`"
+                    >
+                      <span class="h-1.5 w-1.5 rounded-full" :class="getFreshnessDotColor(getItemOrFolderFreshness(selectedListenNode)!.level)"></span>
+                      <span>{{ t('listen.freshness') }}: {{ getItemOrFolderFreshness(selectedListenNode)!.relativeTime }}</span>
                     </span>
                   </div>
                   <h2 class="text-xl font-black text-gray-900 dark:text-white tracking-tight">
@@ -17350,6 +17689,15 @@ onUnmounted(() => {
                             </h3>
                             <span class="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
                               {{ selectedListenNode.type === 'channel' ? t('listen.channelListening') : t('listen.keywordFiltering') }}
+                            </span>
+                            <span 
+                              v-if="getItemOrFolderFreshness(selectedListenNode)"
+                              class="px-2 py-0.5 rounded-md text-[10px] font-bold border inline-flex items-center gap-1 transition-colors select-none font-mono"
+                              :class="getFreshnessBadgeClasses(getItemOrFolderFreshness(selectedListenNode)!.level)"
+                              :title="`${t('listen.newestPost')}: ${getItemOrFolderFreshness(selectedListenNode)!.formattedDate}`"
+                            >
+                              <span class="h-1.5 w-1.5 rounded-full" :class="getFreshnessDotColor(getItemOrFolderFreshness(selectedListenNode)!.level)"></span>
+                              <span>{{ t('listen.freshness') }}: {{ getItemOrFolderFreshness(selectedListenNode)!.relativeTime }}</span>
                             </span>
                           </div>
                           <div class="flex items-center gap-3 mt-1 text-xs text-gray-500 dark:text-gray-400 flex-wrap">
