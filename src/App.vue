@@ -5090,6 +5090,69 @@ const jumpToExplorerFromListen = (channel: string, postKey?: string) => {
   searchChannel();
 };
 
+const lastSearchScrollY = ref(0);
+const lastSearchPostKey = ref("");
+
+const restoreSearchScrollPosition = () => {
+  const targetScroll = lastSearchScrollY.value || tabScrollPositions.value['search'] || 0;
+  const targetPostKey = lastSearchPostKey.value;
+  
+  if (targetScroll <= 0 && !targetPostKey) return;
+
+  let isRestored = false;
+
+  const applyScroll = () => {
+    if (activeTab.value !== 'search' || isRestored) return;
+
+    if (targetPostKey) {
+      const el = document.getElementById(`search-post-${targetPostKey}`) ||
+                 document.querySelector(`[data-search-post-key="${targetPostKey}"]`) ||
+                 document.getElementById(`post-${targetPostKey}`);
+      if (el) {
+        if (targetScroll > 0 && document.documentElement.scrollHeight >= targetScroll) {
+          window.scrollTo(0, targetScroll);
+          isRestored = Math.abs(window.scrollY - targetScroll) < 50;
+        } else {
+          el.scrollIntoView({ block: 'center', behavior: 'auto' });
+          isRestored = true;
+        }
+        return;
+      }
+    }
+
+    if (targetScroll > 0) {
+      window.scrollTo(0, targetScroll);
+      if (document.documentElement.scrollHeight >= targetScroll) {
+        isRestored = Math.abs(window.scrollY - targetScroll) < 50;
+      }
+    }
+  };
+
+  nextTick(() => {
+    applyScroll();
+    requestAnimationFrame(() => {
+      applyScroll();
+      setTimeout(applyScroll, 50);
+      setTimeout(applyScroll, 150);
+      setTimeout(applyScroll, 300);
+      setTimeout(applyScroll, 500);
+    });
+  });
+};
+
+const jumpToExplorerFromSearch = (channel: string, postKey?: string) => {
+  if (postKey) {
+    lastSearchPostKey.value = postKey;
+  }
+  const currentY = window.scrollY;
+  lastSearchScrollY.value = currentY;
+  tabScrollPositions.value['search'] = currentY;
+
+  activeTab.value = 'explorer';
+  channelName.value = channel;
+  searchChannel();
+};
+
 watch(activeTab, (newTab, oldTab) => {
   // Save current scroll position
   if (oldTab) {
@@ -5097,6 +5160,11 @@ watch(activeTab, (newTab, oldTab) => {
       if (window.scrollY > 0 || !tabScrollPositions.value['listen']) {
         tabScrollPositions.value['listen'] = window.scrollY;
         lastListenScrollY.value = window.scrollY;
+      }
+    } else if (oldTab === 'search') {
+      if (window.scrollY > 0 || !tabScrollPositions.value['search']) {
+        tabScrollPositions.value['search'] = window.scrollY;
+        lastSearchScrollY.value = window.scrollY;
       }
     } else {
       tabScrollPositions.value[oldTab] = window.scrollY;
@@ -5121,6 +5189,8 @@ watch(activeTab, (newTab, oldTab) => {
   // Restore scroll position
   if (newTab === 'listen') {
     restoreListenScrollPosition();
+  } else if (newTab === 'search') {
+    restoreSearchScrollPosition();
   } else {
     nextTick(() => {
       const savedScroll = tabScrollPositions.value[newTab] || 0;
@@ -5445,6 +5515,9 @@ const handleScroll = () => {
   if (activeTab.value === 'listen') {
     lastListenScrollY.value = window.scrollY;
     tabScrollPositions.value['listen'] = window.scrollY;
+  } else if (activeTab.value === 'search') {
+    lastSearchScrollY.value = window.scrollY;
+    tabScrollPositions.value['search'] = window.scrollY;
   }
 };
 
@@ -8226,6 +8299,10 @@ const searchChannel = async () => {
 
 const performGlobalSearch = async () => {
   if (!globalSearchQuery.value.trim()) return;
+
+  lastSearchScrollY.value = 0;
+  lastSearchPostKey.value = "";
+  tabScrollPositions.value['search'] = 0;
 
   isSearching.value = true;
   searchError.value = "";
@@ -14743,7 +14820,8 @@ onUnmounted(() => {
             <div class="space-y-4">
               <div
                 v-for="(post, index) in filteredSearchResults"
-                :id="`post-${post.key}`"
+                :id="'search-post-' + (post.key || index)"
+                :data-search-post-key="post.key"
                 :key="post.key || index"
                 :class="[
                   'relative rounded-3xl shadow-sm border p-6 hover:shadow-md transition-all duration-350',
@@ -14911,7 +14989,7 @@ onUnmounted(() => {
                     </div>
                     <button
                       v-if="getForwardInfo(post)?.target"
-                      @click="activeTab = 'explorer'; channelName = getForwardInfo(post).target; searchChannel()"
+                      @click="jumpToExplorerFromSearch(getForwardInfo(post).target, post.key)"
                       class="inline-flex items-center gap-1 px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/40 dark:hover:bg-indigo-900/70 text-indigo-600 dark:text-indigo-400 rounded-xl border border-indigo-200/50 dark:border-indigo-850 text-[10px] font-bold transition-all shrink-0 cursor-pointer self-start"
                       :title="t('explorer.viewChannel')"
                     >
@@ -15117,12 +15195,9 @@ onUnmounted(() => {
                   </div>
                   <div class="flex items-center gap-2">
                     <button
-                      class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-blue-500 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"
-                      @click="
-                        activeTab = 'explorer';
-                        channelName = post.key.split('.')[0];
-                        searchChannel();
-                      "
+                      class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-blue-500 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors cursor-pointer"
+                      @click="jumpToExplorerFromSearch(post.key.split('.')[0], post.key)"
+                      :title="t('explorer.viewChannel')"
                     >
                       {{ post.key.split('.')[0] }}
                     </button>
