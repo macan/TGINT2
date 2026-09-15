@@ -6328,24 +6328,104 @@ const closePostModal = () => {
   selectedPost.value = null;
 };
 
-const latestPostTimeDelta = computed(() => {
+const explorerLatestPostFreshness = computed((): {
+  level: FreshnessLevel;
+  timeDelta: string;
+  formattedDate: string;
+  badgeClasses: string;
+  dotClasses: string;
+  iconClasses: string;
+} | null => {
   if (!posts.value || posts.value.length === 0) return null;
-  const latestDateStr = posts.value[0]?.data?.date;
-  if (!latestDateStr) return null;
+  let freshness = computeItemFreshnessFromPosts(posts.value);
 
-  try {
-    let dateObj;
-    if (typeof latestDateStr === "number" && latestDateStr < 10000000000) {
-      dateObj = new Date(latestDateStr * 1000);
-    } else {
-      dateObj = new Date(latestDateStr);
+  if (!freshness) {
+    const raw = posts.value[0]?.data?.date;
+    if (raw) {
+      let t = 0;
+      if (typeof raw === "number") {
+        t = raw < 10000000000 ? raw * 1000 : raw;
+      } else {
+        const parsed = new Date(raw).getTime();
+        t = isNaN(parsed) ? 0 : parsed;
+      }
+      if (t > 0) {
+        const now = Date.now();
+        const ageMs = Math.max(0, now - t);
+        const ONE_HOUR = 3600 * 1000;
+        const ONE_DAY = 24 * ONE_HOUR;
+        let level: FreshnessLevel = 'stale';
+        if (ageMs <= ONE_DAY) level = 'today';
+        else if (ageMs <= 3 * ONE_DAY) level = 'recent';
+        else if (ageMs <= 7 * ONE_DAY) level = 'week';
+        else if (ageMs <= 30 * ONE_DAY) level = 'month';
+
+        freshness = {
+          timestamp: t,
+          dateStr: String(raw),
+          postCount: posts.value.length,
+          level,
+          relativeTime: formatFreshnessRelative(ageMs),
+          formattedDate: formatFreshnessDate(t)
+        };
+      }
     }
-
-    if (isNaN(dateObj.getTime())) return null;
-    return formatDistanceToNow(dateObj, { addSuffix: true });
-  } catch {
-    return null;
   }
+
+  if (!freshness) return null;
+
+  const dateObj = new Date(freshness.timestamp);
+  let timeDelta = "";
+  try {
+    timeDelta = formatDistanceToNow(dateObj, { addSuffix: true });
+  } catch {
+    timeDelta = freshness.relativeTime;
+  }
+
+  let badgeClasses = "";
+  let dotClasses = "";
+  let iconClasses = "";
+
+  switch (freshness.level) {
+    case 'today':
+      badgeClasses = 'bg-emerald-50 text-emerald-800 border-emerald-300/80 dark:bg-emerald-950/70 dark:text-emerald-300 dark:border-emerald-700/60 shadow-xs shadow-emerald-500/10';
+      dotClasses = 'bg-emerald-500 dark:bg-emerald-400 animate-pulse';
+      iconClasses = 'text-emerald-600 dark:text-emerald-400';
+      break;
+    case 'recent':
+      badgeClasses = 'bg-teal-50 text-teal-800 border-teal-300/80 dark:bg-teal-950/70 dark:text-teal-300 dark:border-teal-700/60 shadow-xs shadow-teal-500/10';
+      dotClasses = 'bg-teal-500 dark:bg-teal-400';
+      iconClasses = 'text-teal-600 dark:text-teal-400';
+      break;
+    case 'week':
+      badgeClasses = 'bg-sky-50 text-sky-800 border-sky-300/80 dark:bg-sky-950/70 dark:text-sky-300 dark:border-sky-700/60 shadow-xs shadow-sky-500/10';
+      dotClasses = 'bg-sky-500 dark:bg-sky-400';
+      iconClasses = 'text-sky-600 dark:text-sky-400';
+      break;
+    case 'month':
+      badgeClasses = 'bg-amber-50 text-amber-900 border-amber-300/80 dark:bg-amber-950/70 dark:text-amber-300 dark:border-amber-700/60 shadow-xs shadow-amber-500/10';
+      dotClasses = 'bg-amber-500 dark:bg-amber-400';
+      iconClasses = 'text-amber-600 dark:text-amber-400';
+      break;
+    case 'stale':
+    default:
+      badgeClasses = 'bg-slate-100 text-slate-700 border-slate-300/80 dark:bg-slate-800/80 dark:text-slate-300 dark:border-slate-700/70 shadow-xs';
+      dotClasses = 'bg-slate-400 dark:bg-slate-500';
+      iconClasses = 'text-slate-500 dark:text-slate-400';
+      break;
+  }
+
+  return {
+    ...freshness,
+    timeDelta,
+    badgeClasses,
+    dotClasses,
+    iconClasses
+  };
+});
+
+const latestPostTimeDelta = computed(() => {
+  return explorerLatestPostFreshness.value?.timeDelta || null;
 });
 const lightboxPhoto = ref<string | null>(null);
 const lightboxScale = ref(1);
@@ -13662,10 +13742,20 @@ onUnmounted(() => {
                   </div>
                   <span
                     v-if="latestPostTimeDelta"
-                    class="ml-2 sm:ml-4 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 border border-emerald-200/50 dark:border-emerald-800/50 text-[10px] uppercase tracking-widest font-black flex items-center shadow-sm"
+                    class="ml-2 sm:ml-4 px-2.5 py-1 rounded-lg border text-[10px] uppercase tracking-widest font-black flex items-center shadow-xs transition-colors select-none font-mono"
+                    :class="explorerLatestPostFreshness ? explorerLatestPostFreshness.badgeClasses : 'bg-emerald-50 dark:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 border-emerald-200/50 dark:border-emerald-800/50'"
+                    :title="explorerLatestPostFreshness ? `${t('listen.newestPost')}: ${explorerLatestPostFreshness.formattedDate} (${explorerLatestPostFreshness.timeDelta})` : undefined"
                   >
-                    <Clock class="h-3 w-3 mr-1.5" />
-                    {{ t('explorer.latestPost', { time: latestPostTimeDelta }) }}
+                    <span
+                      v-if="explorerLatestPostFreshness"
+                      class="h-1.5 w-1.5 rounded-full mr-1.5 shrink-0 transition-colors"
+                      :class="explorerLatestPostFreshness.dotClasses"
+                    ></span>
+                    <Clock
+                      class="h-3 w-3 mr-1.5 shrink-0"
+                      :class="explorerLatestPostFreshness ? explorerLatestPostFreshness.iconClasses : 'text-emerald-600 dark:text-emerald-400'"
+                    />
+                    <span>{{ t('explorer.latestPost', { time: latestPostTimeDelta }) }}</span>
                   </span>
                 </h3>
 
