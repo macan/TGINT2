@@ -90,6 +90,9 @@ import {
   Orbit,
   Compass,
   Target,
+  Zap,
+  Square,
+  Play,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -3150,6 +3153,12 @@ const selectListenItem = (item: ListenItem) => {
     toggleFolderExpanded(item.id);
   } else {
     newlyFetchedListenKeys.value.clear();
+    // Clear newly fetched unread badge for this selected item
+    if (newlyFetchedPostsCountMap.value[item.id]) {
+      const updated = { ...newlyFetchedPostsCountMap.value };
+      delete updated[item.id];
+      newlyFetchedPostsCountMap.value = updated;
+    }
     selectedListenNode.value = item;
     lastListenScrollY.value = 0;
     lastListenPostKey.value = "";
@@ -3569,6 +3578,7 @@ const getListenItemLineClasses = (node: { item: ListenItem; depth: number }): st
   const isSelected = !!(selectedListenNode.value && selectedListenNode.value.id === node.item.id);
   const freshness = getItemOrFolderFreshness(node.item);
   const isPrivateChannel = node.item.type === 'channel' && node.item.argument?.startsWith('-100');
+  const newPostsCount = getItemOrFolderNewPostsCount(node.item);
 
   // Drag-and-drop feedback classes
   if (dragOverNode.value && dragOverNode.value.item.id === node.item.id && dragOverPosition.value === 'inside') {
@@ -3578,7 +3588,15 @@ const getListenItemLineClasses = (node: { item: ListenItem; depth: number }): st
     return 'opacity-40 border-dashed border-gray-300 dark:border-gray-600';
   }
 
-  // 1. Freshness-colored lines when posts have been fetched and cached
+  // 1. If item has newly fetched unread posts, apply marked highlight style to immediately catch attention
+  if (newPostsCount > 0) {
+    if (isSelected) {
+      return 'bg-emerald-500/25 hover:bg-emerald-500/30 border-emerald-500 dark:border-emerald-400 text-emerald-950 dark:text-emerald-100 font-extrabold ring-2 ring-emerald-500/60 shadow-xs';
+    }
+    return 'bg-emerald-500/15 hover:bg-emerald-500/20 border-emerald-500/50 hover:border-emerald-500/70 text-emerald-950 dark:text-emerald-200 dark:bg-emerald-500/20 dark:hover:bg-emerald-500/25 dark:border-emerald-500/50 ring-1 ring-emerald-500/30 font-semibold';
+  }
+
+  // 2. Freshness-colored lines when posts have been fetched and cached
   if (freshness) {
     switch (freshness.level) {
       case 'today':
@@ -3604,7 +3622,7 @@ const getListenItemLineClasses = (node: { item: ListenItem; depth: number }): st
     }
   }
 
-  // 2. Default styling if posts have not yet been fetched/cached
+  // 3. Default styling if posts have not yet been fetched/cached
   if (isSelected) {
     if (isPrivateChannel) {
       return 'bg-amber-500/15 hover:bg-amber-500/20 border-amber-300 dark:border-amber-800/40 text-amber-900 dark:text-amber-400 font-bold ring-1 ring-amber-500/30';
@@ -3669,8 +3687,10 @@ const getFreshnessDotColor = (level: string): string => {
 
 const getListenItemLineTitle = (item: ListenItem): string => {
   const freshness = getItemOrFolderFreshness(item);
-  if (!freshness) return item.name;
-  return `${item.name}\n${t('listen.newestPost')}: ${freshness.formattedDate} (${freshness.relativeTime})\n${t('listen.cachedPostsCount', { count: freshness.postCount })}`;
+  const newCount = getItemOrFolderNewPostsCount(item);
+  const newCountNotice = newCount > 0 ? `\n🔥 ${t('listen.hasNewPostsTip', { count: newCount })}` : '';
+  if (!freshness) return `${item.name}${newCountNotice}`;
+  return `${item.name}${newCountNotice}\n${t('listen.newestPost')}: ${freshness.formattedDate} (${freshness.relativeTime})\n${t('listen.cachedPostsCount', { count: freshness.postCount })}`;
 };
 
 const getListenPostsCacheLimit = (): number => {
@@ -3693,6 +3713,470 @@ const getListenPostsCacheLimit = (): number => {
   }
   // Low performance (e.g., old/dual-core or low RAM): Cache fewer (500) to keep localStorage loading and parsing instantaneous
   return 500;
+};
+
+// --- Background Sync Engine for Listen Directory ---
+const isListenBackgroundSyncEnabled = ref<boolean>(
+  localStorage.getItem("listen_bg_sync_enabled") !== "false"
+);
+const isBackgroundSyncRunning = ref<boolean>(false);
+const activeBackgroundSyncItemId = ref<string | null>(null);
+let backgroundSyncAbortController: AbortController | null = null;
+const lastItemSyncTimeMap = ref<Record<string, number>>({});
+// Tracks newly fetched posts count per listen item ID to visually badge updated channels & folders
+const newlyFetchedPostsCountMap = ref<Record<string, number>>({});
+
+const clearAllNewlyFetchedBadges = () => {
+  newlyFetchedPostsCountMap.value = {};
+};
+
+const getItemOrFolderNewPostsCount = (nodeItem: ListenItem): number => {
+  if (!nodeItem.isFolder) {
+    return newlyFetchedPostsCountMap.value[nodeItem.id] || 0;
+  }
+  // For folders, aggregate the new post counts across all nested child items
+  let total = 0;
+  const countLeaves = (item: ListenItem) => {
+    if (!item.isFolder) {
+      total += newlyFetchedPostsCountMap.value[item.id] || 0;
+    } else if (item.children && Array.isArray(item.children)) {
+      for (const child of item.children) {
+        countLeaves(child);
+      }
+    }
+  };
+  countLeaves(nodeItem);
+  return total;
+};
+
+const totalNewlyFetchedPostsCount = computed(() => {
+  return Object.values(newlyFetchedPostsCountMap.value).reduce((acc, count) => acc + count, 0);
+});
+
+interface BackgroundSyncProgress {
+  total: number;
+  current: number;
+  currentItemName: string;
+  updatedChannelsCount: number;
+  newPostsCount: number;
+  errorCount: number;
+  lastCompletedAt?: string | null;
+}
+
+const backgroundSyncProgress = ref<BackgroundSyncProgress>({
+  total: 0,
+  current: 0,
+  currentItemName: "",
+  updatedChannelsCount: 0,
+  newPostsCount: 0,
+  errorCount: 0,
+  lastCompletedAt: null
+});
+
+const getAllListenLeafItems = (nodes: ListenItem[]): ListenItem[] => {
+  const leaves: ListenItem[] = [];
+  const traverse = (node: ListenItem) => {
+    if (!node.isFolder) {
+      leaves.push(node);
+    } else if (node.children && Array.isArray(node.children)) {
+      for (const child of node.children) {
+        traverse(child);
+      }
+    }
+  };
+  for (const node of nodes) {
+    traverse(node);
+  }
+  return leaves;
+};
+
+const getItemSyncPriorityScore = (item: ListenItem): number => {
+  const freshness = getItemOrFolderFreshness(item);
+  // Priority 0: Never fetched or 0 cached posts -> highest urgency to discover channel content
+  if (!freshness || freshness.postCount === 0) {
+    return 0;
+  }
+  // Prioritize active channels: active today means frequent updates
+  switch (freshness.level) {
+    case 'today':
+      return 1;
+    case 'recent':
+      return 2;
+    case 'week':
+      return 3;
+    case 'month':
+      return 4;
+    case 'stale':
+    default:
+      return 5;
+  }
+};
+
+const toggleListenBackgroundSync = () => {
+  isListenBackgroundSyncEnabled.value = !isListenBackgroundSyncEnabled.value;
+  localStorage.setItem("listen_bg_sync_enabled", String(isListenBackgroundSyncEnabled.value));
+  if (!isListenBackgroundSyncEnabled.value && isBackgroundSyncRunning.value) {
+    cancelBackgroundSync();
+  }
+};
+
+const cancelBackgroundSync = () => {
+  if (backgroundSyncAbortController) {
+    backgroundSyncAbortController.abort();
+    backgroundSyncAbortController = null;
+  }
+  isBackgroundSyncRunning.value = false;
+  activeBackgroundSyncItemId.value = null;
+};
+
+const syncSingleListenItem = async (
+  node: ListenItem,
+  signal?: AbortSignal
+): Promise<{ newPosts: number; success: boolean }> => {
+  if (!node || node.isFolder) return { newPosts: 0, success: true };
+  if (signal?.aborted) return { newPosts: 0, success: false };
+
+  const getPostId = (post: any): string => {
+    return post.key || post.id || (post.data && post.data.id) || '';
+  };
+
+  const getPostTimestamp = (dateVal: any) => {
+    if (!dateVal) return 0;
+    if (typeof dateVal === "number" && dateVal < 10000000000)
+      return dateVal * 1000;
+    const parsed = new Date(dateVal).getTime();
+    return isNaN(parsed) ? 0 : parsed;
+  };
+
+  let cached: any[] = [];
+  try {
+    cached = (await getCachedPostsIndexedDB(node.id)) || [];
+  } catch {
+    cached = [];
+  }
+
+  let savedMaxPostNumber = 0;
+  for (const p of cached) {
+    const id = getPostId(p);
+    if (id) {
+      const parts = id.split('.');
+      if (parts.length > 1) {
+        const num = parseInt(parts[1], 10);
+        if (!isNaN(num) && num > savedMaxPostNumber) {
+          savedMaxPostNumber = num;
+        }
+      }
+    }
+  }
+
+  let fetchedPosts: any[] = [];
+
+  try {
+    if (node.type === "channel") {
+      let username = node.argument?.trim();
+      if (!username) return { newPosts: 0, success: false };
+      if (username.startsWith('@')) username = username.slice(1);
+
+      // Fast cache resolve check
+      try {
+        const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${username}`, { signal });
+        if (resolveRes.ok) {
+          const data = await resolveRes.json();
+          if (data.state === 0 && data.gso?.result) {
+            username = data.gso.result;
+          }
+        }
+      } catch {
+        // Fallback to original username
+      }
+
+      if (signal?.aborted) return { newPosts: 0, success: false };
+
+      // In background mode, limit to 2 batches maximum to prevent blocking other jobs
+      const MAX_BG_ITERATIONS = 2;
+      let iterationCount = 0;
+      let allFetched: any[] = [];
+      let batchMinPostNumber = Infinity;
+      let url = `https://i.gogingko.net/api/v1/last/${username}?n=50`;
+
+      while (iterationCount < MAX_BG_ITERATIONS) {
+        if (signal?.aborted) return { newPosts: 0, success: false };
+
+        const response = await fetch(url, {
+          headers: { "x-gos-rawcontent": "1" },
+          signal
+        });
+        if (!response.ok) break;
+
+        const data = await response.json();
+        if (signal?.aborted) return { newPosts: 0, success: false };
+
+        const batchPosts = Array.isArray(data) ? data : (data.data || data.posts || data.items || []);
+        if (batchPosts.length === 0) break;
+
+        allFetched.push(...batchPosts);
+
+        let currentBatchMin = Infinity;
+        for (const p of batchPosts) {
+          const id = getPostId(p);
+          if (id) {
+            const parts = id.split('.');
+            if (parts.length > 1) {
+              const num = parseInt(parts[1], 10);
+              if (!isNaN(num) && num < currentBatchMin) {
+                currentBatchMin = num;
+              }
+            }
+          }
+        }
+        batchMinPostNumber = currentBatchMin;
+
+        // If we reached previously cached max post or end of batch
+        if (
+          batchMinPostNumber === Infinity ||
+          savedMaxPostNumber === 0 ||
+          batchMinPostNumber <= savedMaxPostNumber
+        ) {
+          break;
+        }
+
+        url = `https://i.gogingko.net/api/v1/last/${username}?n=50&b=${batchMinPostNumber}`;
+        iterationCount++;
+      }
+
+      fetchedPosts = allFetched;
+    } else if (node.type === "keyword") {
+      const keywords = node.argument?.trim().split(',');
+      if (keywords && keywords.length > 0) {
+        const start = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const end = new Date();
+        const fieldQueries = keywords.map(keyword => {
+          if (keyword.startsWith('+')) return `+content:"${keyword}"`;
+          if (keyword.startsWith('-')) return `-content:"${keyword}"`;
+          return `content:"${keyword}"`;
+        }).join(' ');
+        const dateRange = `date:[to_date("${formatDateForSearch(start)}", "%Y-%m-%dT%H:%M:%S%z") TO to_date("${formatDateForSearch(end)}", "%Y-%m-%dT%H:%M:%S%z")]`;
+        const finalQuery = `(${fieldQueries}) AND ${dateRange}`;
+
+        const response = await fetch("https://i.gogingko.net/api/v1/ft/telegram", {
+          method: "GET",
+          headers: {
+            "x-gos-ft-query": encodeURIComponent(finalQuery),
+            "x-gos-ft-sort": "date-",
+            "x-gos-ft-topk": "30",
+          },
+          signal
+        });
+        if (response.ok) {
+          const data = await response.json();
+          const keys = data.keys || [];
+          if (keys.length > 0) {
+            const mgetPayload = keys[0].map((fullKey: string) => {
+              const idx = fullKey.indexOf(".");
+              return { ns: fullKey.slice(0, idx), key: fullKey.slice(idx + 1) };
+            });
+            const mgetResponse = await fetch("https://i.gogingko.net/api/v1/mget/_", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(mgetPayload),
+              signal
+            });
+            if (mgetResponse.ok) {
+              const postsData = await mgetResponse.json();
+              fetchedPosts = Array.isArray(postsData) ? postsData : (postsData.data || []);
+            }
+          }
+        }
+      }
+    }
+
+    let newlyAddedCount = 0;
+    if (fetchedPosts.length > 0) {
+      const cachedKeys = new Set(cached.map(p => getPostId(p)).filter(Boolean));
+      const hasPreviousCache = cached.length > 0;
+      const mergedMap = new Map<string, any>();
+      for (const p of cached) {
+        const id = getPostId(p);
+        if (id) mergedMap.set(id, p);
+      }
+      for (const p of fetchedPosts) {
+        const id = getPostId(p);
+        if (id) {
+          if (!hasPreviousCache || !cachedKeys.has(id)) {
+            newlyAddedCount++;
+          }
+          mergedMap.set(id, p);
+        }
+      }
+
+      const merged = Array.from(mergedMap.values());
+      merged.sort((a, b) => getPostTimestamp(b.data?.date) - getPostTimestamp(a.data?.date));
+
+      const cacheLimit = getListenPostsCacheLimit();
+      const finalPosts = merged.slice(0, cacheLimit);
+
+      await setCachedPostsIndexedDB(node.id, finalPosts);
+      updateItemFreshness(node.id, finalPosts);
+
+      // Record newly fetched posts count so the listen directory node shows a badge
+      if (newlyAddedCount > 0) {
+        newlyFetchedPostsCountMap.value = {
+          ...newlyFetchedPostsCountMap.value,
+          [node.id]: (newlyFetchedPostsCountMap.value[node.id] || 0) + newlyAddedCount
+        };
+      }
+
+      // If this item is currently selected, update view in real-time
+      if (selectedListenNode.value && selectedListenNode.value.id === node.id) {
+        listenPosts.value = finalPosts;
+        for (const p of fetchedPosts) {
+          const id = getPostId(p);
+          if (id && (!hasPreviousCache || !cachedKeys.has(id))) {
+            newlyFetchedListenKeys.value.add(id);
+          }
+        }
+      }
+    }
+
+    lastItemSyncTimeMap.value[node.id] = Date.now();
+    return { newPosts: newlyAddedCount, success: true };
+  } catch (err) {
+    if (signal?.aborted) return { newPosts: 0, success: false };
+    console.error(`Error syncing listen item ${node.name}:`, err);
+    return { newPosts: 0, success: false };
+  }
+};
+
+const startManualBackgroundSync = async (forceAll = false) => {
+  if (!isListenBackgroundSyncEnabled.value) {
+    toastMessage.value = t("listen.bgSyncDisabledNotice");
+    toastType.value = "info";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+    return;
+  }
+
+  if (isBackgroundSyncRunning.value) {
+    return;
+  }
+
+  const leaves = getAllListenLeafItems(listenDirectory.value);
+  if (leaves.length === 0) {
+    toastMessage.value = t("listen.errorEmptyDirectory");
+    toastType.value = "info";
+    setTimeout(() => { toastMessage.value = ""; }, 2500);
+    return;
+  }
+
+  // Smart prioritization algorithm utilizing computed freshness:
+  // 0 = Never fetched or 0 cached posts (High urgency to populate initial state)
+  // 1 = Active Today (< 24h) - Rapid changes, highest value to refetch
+  // 2 = Active Recent (1-3d)
+  // 3 = Active Week (3-7d)
+  // 4 = Active Month (7-30d)
+  // 5 = Inactive / Stale (> 30d) - Low frequency
+  // Tiebreaker: Longest time since last sync
+  const now = Date.now();
+  const queue = [...leaves].sort((a, b) => {
+    const scoreA = getItemSyncPriorityScore(a);
+    const scoreB = getItemSyncPriorityScore(b);
+    if (scoreA !== scoreB) return scoreA - scoreB;
+
+    const lastSyncA = lastItemSyncTimeMap.value[a.id] || 0;
+    const lastSyncB = lastItemSyncTimeMap.value[b.id] || 0;
+    return lastSyncA - lastSyncB;
+  });
+
+  // Filter out items synced less than 90 seconds ago unless forceAll is true
+  const itemsToSync = forceAll 
+    ? queue 
+    : queue.filter(item => {
+        const lastSync = lastItemSyncTimeMap.value[item.id] || 0;
+        return (now - lastSync) > 90 * 1000;
+      });
+
+  if (itemsToSync.length === 0) {
+    toastMessage.value = t("listen.allChannelsUpToDate");
+    toastType.value = "info";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+    return;
+  }
+
+  isBackgroundSyncRunning.value = true;
+  backgroundSyncAbortController = new AbortController();
+  const signal = backgroundSyncAbortController.signal;
+
+  backgroundSyncProgress.value = {
+    total: itemsToSync.length,
+    current: 0,
+    currentItemName: "",
+    updatedChannelsCount: 0,
+    newPostsCount: 0,
+    errorCount: 0
+  };
+
+  try {
+    for (let i = 0; i < itemsToSync.length; i++) {
+      if (!isListenBackgroundSyncEnabled.value || signal.aborted) {
+        break;
+      }
+
+      const item = itemsToSync[i];
+      activeBackgroundSyncItemId.value = item.id;
+      backgroundSyncProgress.value.current = i + 1;
+      backgroundSyncProgress.value.currentItemName = item.name;
+
+      try {
+        const res = await syncSingleListenItem(item, signal);
+        if (res.newPosts > 0) {
+          backgroundSyncProgress.value.updatedChannelsCount++;
+          backgroundSyncProgress.value.newPostsCount += res.newPosts;
+        }
+      } catch (err) {
+        console.error(`Background sync failed for ${item.name}:`, err);
+        backgroundSyncProgress.value.errorCount++;
+      }
+
+      // Page Performance Optimization:
+      // 1. Give main thread a chance to yield via requestIdleCallback
+      if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+        await new Promise((resolve) => (window as any).requestIdleCallback(resolve, { timeout: 150 }));
+      }
+      // 2. Controlled delay between requests (650ms) to avoid network congestion and API 429 rate limits
+      await new Promise((resolve) => setTimeout(resolve, 650));
+    }
+  } finally {
+    const finalUpdated = backgroundSyncProgress.value.updatedChannelsCount;
+    const finalPosts = backgroundSyncProgress.value.newPostsCount;
+    const isAborted = signal.aborted || !isListenBackgroundSyncEnabled.value;
+
+    isBackgroundSyncRunning.value = false;
+    activeBackgroundSyncItemId.value = null;
+    backgroundSyncAbortController = null;
+    backgroundSyncProgress.value.lastCompletedAt = new Date().toLocaleTimeString();
+
+    if (!isAborted && itemsToSync.length > 0) {
+      toastMessage.value = t("listen.syncCompleted", {
+        updated: finalUpdated,
+        posts: finalPosts
+      });
+      toastType.value = "success";
+      setTimeout(() => { toastMessage.value = ""; }, 4000);
+    }
+  }
+};
+
+let listenBgSyncInterval: any = null;
+const setupListenBackgroundSyncTimer = () => {
+  if (listenBgSyncInterval) {
+    clearInterval(listenBgSyncInterval);
+    listenBgSyncInterval = null;
+  }
+  // Periodic background check every 5 minutes if enabled and active tab is listen
+  listenBgSyncInterval = setInterval(() => {
+    if (isListenBackgroundSyncEnabled.value && !isBackgroundSyncRunning.value && activeTab.value === 'listen') {
+      startManualBackgroundSync(false);
+    }
+  }, 5 * 60 * 1000);
 };
 
 const fetchListenPosts = async (node: ListenItem) => {
@@ -4085,6 +4569,11 @@ const clearCachedListenPosts = async () => {
     const updated = { ...listenItemsFreshnessMap.value };
     delete updated[id];
     listenItemsFreshnessMap.value = updated;
+  }
+  if (newlyFetchedPostsCountMap.value[id]) {
+    const updatedCounts = { ...newlyFetchedPostsCountMap.value };
+    delete updatedCounts[id];
+    newlyFetchedPostsCountMap.value = updatedCounts;
   }
   listenPosts.value = [];
   newlyFetchedListenKeys.value.clear();
@@ -5986,6 +6475,7 @@ onMounted(() => {
     loadLogin();
     loadListenDirectory();
     loadAllListenPostsFreshnessFromIndexedDB();
+    setupListenBackgroundSyncTimer();
     fetchIndexedProfilesCount();
   }
 });
@@ -6002,6 +6492,8 @@ onUnmounted(() => {
   if (pendingQ1Timer) clearInterval(pendingQ1Timer);
   if (pollingTimer) clearInterval(pollingTimer);
   if (listenRefreshInterval) clearInterval(listenRefreshInterval);
+  if (listenBgSyncInterval) clearInterval(listenBgSyncInterval);
+  cancelBackgroundSync();
   if (activeLoopAnimId) cancelAnimationFrame(activeLoopAnimId);
   if (graphResizeObserver) {
     graphResizeObserver.disconnect();
@@ -16681,32 +17173,101 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- Mode Segmented Control -->
-          <div class="flex items-center gap-1.5 bg-gray-100/80 dark:bg-gray-900/60 p-1.5 rounded-2xl border border-gray-200/60 dark:border-gray-700/60 self-start md:self-auto shrink-0">
-            <button
-              @click="setListenLayoutMode('view')"
-              class="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer select-none"
+          <!-- Actions & Controls Group -->
+          <div class="flex flex-wrap items-center gap-2.5 self-start md:self-auto shrink-0">
+            <!-- Global Background Fetch Switch -->
+            <div 
+              class="flex items-center gap-2.5 px-3 py-1.5 rounded-2xl border transition-all select-none shadow-2xs"
               :class="[
-                listenLayoutMode === 'view'
-                  ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-sm'
-                  : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+                isListenBackgroundSyncEnabled
+                  ? 'bg-teal-50/80 border-teal-200/90 text-teal-950 dark:bg-teal-950/40 dark:border-teal-800/60 dark:text-teal-200'
+                  : 'bg-gray-100/80 border-gray-200/70 text-gray-500 dark:bg-gray-800/60 dark:border-gray-700/60 dark:text-gray-400'
               ]"
+              :title="isListenBackgroundSyncEnabled ? t('listen.bgSyncEnabledTip') : t('listen.bgSyncDisabledTip')"
             >
-              <Eye class="h-4 w-4" />
-              <span>{{ t('listen.modeView') }}</span>
-            </button>
+              <div class="flex items-center gap-1.5">
+                <Zap 
+                  class="h-3.5 w-3.5 transition-colors" 
+                  :class="isListenBackgroundSyncEnabled ? 'text-teal-600 dark:text-teal-400 fill-teal-500/20' : 'text-gray-400'"
+                />
+                <span class="text-xs font-semibold whitespace-nowrap">{{ t('listen.bgSync') }}</span>
+              </div>
+              
+              <!-- Accessible Switch Toggle Button -->
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="isListenBackgroundSyncEnabled"
+                @click="toggleListenBackgroundSync"
+                class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-2"
+                :class="isListenBackgroundSyncEnabled ? 'bg-teal-600 dark:bg-teal-500' : 'bg-gray-300 dark:bg-gray-600'"
+              >
+                <span
+                  aria-hidden="true"
+                  class="pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out"
+                  :class="isListenBackgroundSyncEnabled ? 'translate-x-4' : 'translate-x-0'"
+                />
+              </button>
+            </div>
+
+            <!-- Manual Sync Button / Active Syncing Widget -->
+            <div v-if="isBackgroundSyncRunning" class="flex items-center gap-1.5 bg-teal-100/90 dark:bg-teal-950/70 pl-3 pr-1.5 py-1 rounded-2xl border border-teal-300/80 dark:border-teal-700/70 shadow-2xs">
+              <RefreshCw class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 animate-spin shrink-0" />
+              <span class="text-xs font-bold text-teal-950 dark:text-teal-200 tabular-nums">
+                {{ t('listen.syncingProgress', { current: backgroundSyncProgress.current, total: backgroundSyncProgress.total }) }}
+              </span>
+              <button
+                @click="cancelBackgroundSync"
+                class="ml-1 flex items-center gap-1 px-2 py-1 rounded-xl text-[11px] font-bold bg-white dark:bg-gray-800 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800/50 shadow-2xs transition-all cursor-pointer"
+                :title="t('listen.stopSync')"
+              >
+                <Square class="h-3 w-3 fill-rose-500 text-rose-500" />
+                <span>{{ t('listen.stopSync') }}</span>
+              </button>
+            </div>
+
             <button
-              @click="setListenLayoutMode('rearrange')"
-              class="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer select-none"
+              v-else
+              @click="startManualBackgroundSync(false)"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-bold transition-all cursor-pointer select-none shadow-2xs border"
               :class="[
-                listenLayoutMode === 'rearrange'
-                  ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-sm'
-                  : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+                isListenBackgroundSyncEnabled
+                  ? 'bg-white hover:bg-teal-50/80 dark:bg-gray-800 dark:hover:bg-gray-700/80 text-teal-700 dark:text-teal-300 border-teal-200/80 dark:border-teal-800/60 active:scale-95'
+                  : 'bg-gray-100 dark:bg-gray-800/40 text-gray-400 dark:text-gray-500 border-gray-200/60 dark:border-gray-700/50 opacity-60 cursor-not-allowed'
               ]"
+              :title="t('listen.syncPriorityTooltip')"
             >
-              <FolderTree class="h-4 w-4" />
-              <span>{{ t('listen.modeRearrange') }}</span>
+              <RefreshCw class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+              <span>{{ t('listen.syncAll') }}</span>
             </button>
+
+            <!-- Mode Segmented Control -->
+            <div class="flex items-center gap-1 bg-gray-100/80 dark:bg-gray-900/60 p-1 rounded-2xl border border-gray-200/60 dark:border-gray-700/60">
+              <button
+                @click="setListenLayoutMode('view')"
+                class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer select-none"
+                :class="[
+                  listenLayoutMode === 'view'
+                    ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
+                    : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+                ]"
+              >
+                <Eye class="h-3.5 w-3.5" />
+                <span>{{ t('listen.modeView') }}</span>
+              </button>
+              <button
+                @click="setListenLayoutMode('rearrange')"
+                class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer select-none"
+                :class="[
+                  listenLayoutMode === 'rearrange'
+                    ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
+                    : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+                ]"
+              >
+                <FolderTree class="h-3.5 w-3.5" />
+                <span>{{ t('listen.modeRearrange') }}</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -16763,6 +17324,25 @@ onUnmounted(() => {
                 </p>
               </div>
               <div class="flex items-center gap-1.5 self-end sm:self-auto">
+                <!-- Clear unread new badges button if any new posts are highlighted -->
+                <button
+                  v-if="totalNewlyFetchedPostsCount > 0"
+                  @click="clearAllNewlyFetchedBadges"
+                  class="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/40 border border-emerald-300/80 dark:border-emerald-700/60 rounded-lg text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1 transition-all shadow-2xs cursor-pointer select-none"
+                  :title="t('listen.clearNewBadges')"
+                >
+                  <Sparkles class="h-3 w-3 text-emerald-500 animate-pulse" />
+                  <span class="font-mono tabular-nums">+{{ totalNewlyFetchedPostsCount }}</span>
+                  <X class="h-2.5 w-2.5 opacity-60 hover:opacity-100" />
+                </button>
+                <button
+                  @click="isBackgroundSyncRunning ? cancelBackgroundSync() : startManualBackgroundSync(false)"
+                  class="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors cursor-pointer"
+                  :class="isBackgroundSyncRunning ? 'text-teal-600 dark:text-teal-400' : 'text-gray-500 dark:text-gray-400 hover:text-teal-600 dark:hover:text-teal-400'"
+                  :title="isBackgroundSyncRunning ? t('listen.stopSync') : t('listen.syncAll')"
+                >
+                  <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isBackgroundSyncRunning }" />
+                </button>
                 <button
                   @click="expandAllFolders"
                   class="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
@@ -16803,6 +17383,53 @@ onUnmounted(() => {
               <div class="flex-1 min-w-0">
                 <span class="font-bold text-teal-700 dark:text-teal-300">{{ t('listen.rearrangeTitle') }}:</span>
                 <span class="opacity-90 ml-1 text-gray-600 dark:text-gray-300">{{ t('listen.rearrangeTip') }}</span>
+              </div>
+            </div>
+
+            <!-- Background Sync Live Progress Banner -->
+            <div 
+              v-if="isBackgroundSyncRunning" 
+              class="px-4 py-2.5 bg-gradient-to-r from-teal-500/15 via-emerald-500/10 to-teal-500/5 border-b border-teal-500/25 flex flex-col gap-1.5 text-xs text-teal-900 dark:text-teal-200 shrink-0 select-none animate-fadeIn"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <div class="flex items-center gap-2 min-w-0">
+                  <RefreshCw class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 animate-spin shrink-0" />
+                  <span class="font-bold truncate text-teal-950 dark:text-teal-100">
+                    {{ t('listen.syncingItem', { name: backgroundSyncProgress.currentItemName || '...' }) }}
+                  </span>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                  <span class="text-[11px] font-mono font-bold text-teal-700 dark:text-teal-300 tabular-nums">
+                    {{ backgroundSyncProgress.current }} / {{ backgroundSyncProgress.total }}
+                  </span>
+                  <button
+                    @click="cancelBackgroundSync"
+                    class="px-1.5 py-0.5 rounded-md bg-white/90 dark:bg-gray-800/90 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200/80 dark:border-rose-800/60 text-[10px] font-bold flex items-center gap-1 shadow-2xs transition-colors cursor-pointer"
+                    :title="t('listen.stopSync')"
+                  >
+                    <Square class="h-2.5 w-2.5 fill-rose-500" />
+                    <span>{{ t('listen.stopSync') }}</span>
+                  </button>
+                </div>
+              </div>
+              <!-- Progress Bar -->
+              <div class="w-full bg-teal-200/50 dark:bg-teal-950/60 rounded-full h-1.5 overflow-hidden">
+                <div 
+                  class="bg-gradient-to-r from-teal-500 to-emerald-500 h-full rounded-full transition-all duration-300 ease-out"
+                  :style="{ width: `${backgroundSyncProgress.total > 0 ? (backgroundSyncProgress.current / backgroundSyncProgress.total) * 100 : 0}%` }"
+                ></div>
+              </div>
+              <div class="flex items-center justify-between text-[10px] text-teal-700 dark:text-teal-300 font-medium">
+                <span v-if="backgroundSyncProgress.newPostsCount > 0" class="text-emerald-700 dark:text-emerald-300 font-bold flex items-center gap-1">
+                  <CheckCircle2 class="h-3 w-3" />
+                  <span>+{{ backgroundSyncProgress.newPostsCount }} {{ t('listen.newBadge') }}</span>
+                </span>
+                <span v-else class="italic text-gray-500 dark:text-gray-400 truncate">
+                  {{ t('listen.syncPriorityTooltip') }}
+                </span>
+                <span class="font-mono text-[9px] text-gray-400 dark:text-gray-500 shrink-0">
+                  {{ Math.round((backgroundSyncProgress.current / (backgroundSyncProgress.total || 1)) * 100) }}%
+                </span>
               </div>
             </div>
 
@@ -16955,11 +17582,34 @@ onUnmounted(() => {
                   </span>
                 </div>
 
+                <!-- Newly Fetched Posts Visual Indicator Badge (Prominent Pulse Badge) -->
+                <span
+                  v-if="getItemOrFolderNewPostsCount(node.item) > 0"
+                  class="ml-auto mr-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-extrabold tracking-tight bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow-xs shadow-emerald-500/40 flex items-center gap-1 shrink-0 select-none animate-bounce"
+                  :title="t('listen.hasNewPostsTip', { count: getItemOrFolderNewPostsCount(node.item) })"
+                >
+                  <Sparkles class="h-2.5 w-2.5 text-emerald-100 shrink-0" />
+                  <span class="whitespace-nowrap font-mono tabular-nums">+{{ getItemOrFolderNewPostsCount(node.item) }}</span>
+                </span>
+
+                <!-- Active Background Syncing Indicator -->
+                <span
+                  v-if="activeBackgroundSyncItemId === node.item.id"
+                  class="mr-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-teal-50 dark:bg-teal-950/80 text-teal-700 dark:text-teal-300 border border-teal-300/90 dark:border-teal-700/80 flex items-center gap-1 shrink-0 select-none animate-pulse shadow-2xs"
+                  :class="{ 'ml-auto': getItemOrFolderNewPostsCount(node.item) === 0 }"
+                >
+                  <RefreshCw class="h-2.5 w-2.5 animate-spin text-teal-600 dark:text-teal-400" />
+                  <span class="font-mono uppercase text-[8px] tracking-wider">Syncing</span>
+                </span>
+
                 <!-- Freshness Relative Timestamp Badge -->
                 <span 
-                  v-if="getItemOrFolderFreshness(node.item)"
-                  class="ml-auto mr-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold tracking-tight border flex items-center gap-1 shrink-0 select-none transition-colors"
-                  :class="getFreshnessBadgeClasses(getItemOrFolderFreshness(node.item)!.level)"
+                  v-else-if="getItemOrFolderFreshness(node.item)"
+                  class="mr-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold tracking-tight border flex items-center gap-1 shrink-0 select-none transition-colors"
+                  :class="[
+                    getFreshnessBadgeClasses(getItemOrFolderFreshness(node.item)!.level),
+                    { 'ml-auto': getItemOrFolderNewPostsCount(node.item) === 0 }
+                  ]"
                 >
                   <span class="h-1.5 w-1.5 rounded-full" :class="getFreshnessDotColor(getItemOrFolderFreshness(node.item)!.level)"></span>
                   <span class="whitespace-nowrap font-mono">{{ getItemOrFolderFreshness(node.item)!.relativeTime }}</span>
