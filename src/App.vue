@@ -2173,6 +2173,46 @@ const setListenLayoutMode = (mode: 'view' | 'rearrange') => {
 // Rearrange Decision Tab: 'both' | 'graph' | 'posts'
 const rearrangeDecisionTab = ref<'both' | 'graph' | 'posts'>('both');
 
+// Scroll Position & View State Tracking for Listen Tab
+const tabScrollPositions = ref<Record<string, number>>({});
+const lastListenScrollY = ref(0);
+const lastListenPostKey = ref("");
+const rearrangePostsContainer = ref<HTMLElement | null>(null);
+const lastRearrangePostsScrollTop = ref<number>(0);
+let isProgrammaticScrollResetting = false;
+
+const resetRecentPostsWidgetScroll = () => {
+  isProgrammaticScrollResetting = true;
+  lastListenPostKey.value = "";
+  lastRearrangePostsScrollTop.value = 0;
+
+  // Reset view position of the right Recent posts view widget only (do not reset whole page scroll)
+  if (rearrangePostsContainer.value) {
+    rearrangePostsContainer.value.scrollTop = 0;
+  }
+
+  nextTick(() => {
+    if (rearrangePostsContainer.value) {
+      rearrangePostsContainer.value.scrollTop = 0;
+    }
+    requestAnimationFrame(() => {
+      if (rearrangePostsContainer.value) {
+        rearrangePostsContainer.value.scrollTop = 0;
+      }
+      setTimeout(() => {
+        isProgrammaticScrollResetting = false;
+      }, 100);
+    });
+  });
+};
+
+const handleRearrangePostsScroll = () => {
+  if (isProgrammaticScrollResetting) return;
+  if (rearrangePostsContainer.value) {
+    lastRearrangePostsScrollTop.value = rearrangePostsContainer.value.scrollTop;
+  }
+};
+
 // Move Item/Folder Modal State
 const isMoveModalOpen = ref(false);
 const itemToMove = ref<ListenItem | null>(null);
@@ -3160,10 +3200,8 @@ const selectListenItem = (item: ListenItem) => {
       newlyFetchedPostsCountMap.value = updated;
     }
     selectedListenNode.value = item;
-    lastListenScrollY.value = 0;
-    lastListenPostKey.value = "";
-    tabScrollPositions.value['listen'] = 0;
-    fetchListenPosts(item);
+    resetRecentPostsWidgetScroll();
+    fetchListenPosts(item, true);
   }
 };
 
@@ -4223,9 +4261,13 @@ const setupListenBackgroundSyncTimer = () => {
   }, 5 * 60 * 1000);
 };
 
-const fetchListenPosts = async (node: ListenItem) => {
+const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
   if (!node || node.isFolder) return;
   if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
+  
+  if (isNewSelection) {
+    resetRecentPostsWidgetScroll();
+  }
   
   const getPostId = (post: any): string => {
     return post.key || post.id || (post.data && post.data.id) || '';
@@ -4266,6 +4308,13 @@ const fetchListenPosts = async (node: ListenItem) => {
   if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
   listenPosts.value = cached;
   isFetchingListenPosts.value = true;
+  if (isNewSelection) {
+    nextTick(() => {
+      if (rearrangePostsContainer.value) {
+        rearrangePostsContainer.value.scrollTop = 0;
+      }
+    });
+  }
   
   try {
     let fetchedPosts: any[] = [];
@@ -4479,12 +4528,26 @@ const fetchListenPosts = async (node: ListenItem) => {
 
       freshlyAdded.forEach(id => newlyFetchedListenKeys.value.add(id));
       listenPosts.value = finalPosts;
+      if (isNewSelection) {
+        nextTick(() => {
+          if (rearrangePostsContainer.value) {
+            rearrangePostsContainer.value.scrollTop = 0;
+          }
+        });
+      }
     }
   } catch (e) {
     console.error("Error in fetchListenPosts:", e);
   } finally {
     if (selectedListenNode.value?.id === node.id) {
       isFetchingListenPosts.value = false;
+      if (isNewSelection) {
+        nextTick(() => {
+          if (rearrangePostsContainer.value) {
+            rearrangePostsContainer.value.scrollTop = 0;
+          }
+        });
+      }
     }
   }
 };
@@ -5851,24 +5914,36 @@ const addEdge = (source: string, target: string, data: any = {}) => {
   }
 };
 
-const tabScrollPositions = ref<Record<string, number>>({});
-const lastListenScrollY = ref(0);
-const lastListenPostKey = ref("");
-
 const restoreListenScrollPosition = () => {
   const targetScroll = lastListenScrollY.value || tabScrollPositions.value['listen'] || 0;
   const targetPostKey = lastListenPostKey.value;
+  const targetRearrangeScroll = lastRearrangePostsScrollTop.value || 0;
   
-  if (targetScroll <= 0 && !targetPostKey) return;
+  if (targetScroll <= 0 && !targetPostKey && targetRearrangeScroll <= 0) {
+    window.scrollTo({ top: 0, behavior: 'auto' });
+    if (rearrangePostsContainer.value) {
+      rearrangePostsContainer.value.scrollTop = 0;
+    }
+    return;
+  }
 
   let isRestored = false;
 
   const applyScroll = () => {
     if (activeTab.value !== 'listen' || isRestored) return;
 
+    if (listenLayoutMode.value === 'rearrange' && rearrangePostsContainer.value && targetRearrangeScroll > 0) {
+      rearrangePostsContainer.value.scrollTop = targetRearrangeScroll;
+    }
+
     if (targetPostKey) {
       const el = document.getElementById(`listen-post-${targetPostKey}`);
       if (el) {
+        if (listenLayoutMode.value === 'rearrange' && rearrangePostsContainer.value && rearrangePostsContainer.value.contains(el)) {
+          el.scrollIntoView({ block: 'center', behavior: 'auto' });
+          isRestored = true;
+          return;
+        }
         if (targetScroll > 0 && document.documentElement.scrollHeight >= targetScroll) {
           window.scrollTo(0, targetScroll);
           isRestored = Math.abs(window.scrollY - targetScroll) < 50;
@@ -5906,6 +5981,9 @@ const jumpToExplorerFromListen = (channel: string, postKey?: string) => {
   const currentY = window.scrollY;
   lastListenScrollY.value = currentY;
   tabScrollPositions.value['listen'] = currentY;
+  if (listenLayoutMode.value === 'rearrange' && rearrangePostsContainer.value) {
+    lastRearrangePostsScrollTop.value = rearrangePostsContainer.value.scrollTop;
+  }
 
   activeTab.value = 'explorer';
   channelName.value = channel;
@@ -5982,6 +6060,9 @@ watch(activeTab, (newTab, oldTab) => {
       if (window.scrollY > 0 || !tabScrollPositions.value['listen']) {
         tabScrollPositions.value['listen'] = window.scrollY;
         lastListenScrollY.value = window.scrollY;
+      }
+      if (listenLayoutMode.value === 'rearrange' && rearrangePostsContainer.value) {
+        lastRearrangePostsScrollTop.value = rearrangePostsContainer.value.scrollTop;
       }
     } else if (oldTab === 'search') {
       if (window.scrollY > 0 || !tabScrollPositions.value['search']) {
@@ -6804,7 +6885,7 @@ watch(graphCanvasContainer, (containerEl) => {
     graphResizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const width = entry.contentRect.width || 300;
-        const height = isGraphEnlarged.value ? 540 : 300;
+        const height = isGraphEnlarged.value ? 540 : (entry.contentRect.height > 0 ? Math.round(entry.contentRect.height) : 300);
         graphCanvasWidth.value = width;
         graphCanvasHeight.value = height;
         
@@ -6848,10 +6929,12 @@ watch(isProfileVisible, (visible) => {
   }
 });
 
-watch([selectedChannelMetadata, forwardsChannelsListen, ftoChannelsListen, currentChannelName, forwardsChannels, ftoChannels], () => {
-  if (graphCanvasContainer.value) {
-    initRelationsGraph();
-  }
+watch([selectedChannelMetadata, forwardsChannelsListen, ftoChannelsListen, currentChannelName, forwardsChannels, ftoChannels, rearrangeDecisionTab], () => {
+  nextTick(() => {
+    if (graphCanvasContainer.value) {
+      initRelationsGraph();
+    }
+  });
 });
 
 const openPostModal = (post: any) => {
@@ -17323,12 +17406,19 @@ onUnmounted(() => {
             :class="[
               listenLayoutMode === 'view'
                 ? 'lg:col-span-4 xl:col-span-3'
-                : 'lg:col-span-7 xl:col-span-7'
+                : 'lg:col-span-7 xl:col-span-7 2xl:col-span-7'
             ]"
             class="flex flex-col gap-6 w-full transition-all duration-200"
           >
             <!-- Left directory tree widget -->
-            <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col min-h-[500px] w-full">
+            <div 
+              class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col w-full"
+              :class="[
+                listenLayoutMode === 'rearrange'
+                  ? 'lg:h-[1150px] xl:h-[1200px] 2xl:h-[1280px] min-h-[700px]'
+                  : 'min-h-[500px]'
+              ]"
+            >
             <!-- Watchlist Header -->
             <div class="p-4 border-b border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shrink-0">
               <div>
@@ -17532,7 +17622,14 @@ onUnmounted(() => {
             </div>
 
             <!-- Scrollable Directories Stream -->
-            <div class="p-3 overflow-y-auto flex-1 space-y-1 select-none max-h-[820px]">
+            <div 
+              class="p-3 overflow-y-auto space-y-1 select-none"
+              :class="[
+                listenLayoutMode === 'rearrange'
+                  ? 'flex-1 min-h-0'
+                  : 'flex-1 max-h-[820px]'
+              ]"
+            >
               <div v-if="visibleDirectoryNodes.length === 0" class="flex flex-col items-center justify-center py-16 text-center text-gray-400 dark:text-gray-500">
                 <Inbox class="h-10 w-10 mb-2 opacity-50" />
                 <p class="text-xs">{{ t('listen.noWatchlists') }}</p>
@@ -17868,10 +17965,10 @@ onUnmounted(() => {
           <div
             :class="[
               listenLayoutMode === 'view'
-                ? 'lg:col-span-8 xl:col-span-9'
-                : 'lg:col-span-5 xl:col-span-5'
+                ? 'lg:col-span-8 xl:col-span-9 space-y-6'
+                : 'lg:col-span-5 xl:col-span-5 2xl:col-span-5 flex flex-col gap-5 lg:h-[1150px] xl:h-[1200px] 2xl:h-[1280px]'
             ]"
-            class="space-y-6 w-full transition-all duration-200"
+            class="w-full transition-all duration-200"
           >
             <!-- View Mode Layout -->
             <template v-if="listenLayoutMode === 'view'">
@@ -18414,9 +18511,9 @@ onUnmounted(() => {
 
             <!-- Rearrange Mode: Decision Assistant Layout (Graph & Posts Flow to support reorganization) -->
             <template v-else>
-              <div class="flex flex-col gap-5 w-full">
+              <div class="flex flex-col gap-5 w-full flex-1 min-h-0">
                 <!-- Empty State if no item selected -->
-                <div v-if="!selectedListenNode" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 p-8 sm:p-12 text-center flex flex-col items-center justify-center shadow-sm min-h-[500px]">
+                <div v-if="!selectedListenNode" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 p-8 sm:p-12 text-center flex flex-col items-center justify-center shadow-sm w-full flex-1 lg:h-[1150px] xl:h-[1200px] 2xl:h-[1280px] min-h-[700px]">
                   <div class="h-16 w-16 rounded-3xl bg-teal-50 dark:bg-teal-950/40 border border-teal-200/50 dark:border-teal-800/50 flex items-center justify-center text-teal-600 dark:text-teal-400 mb-4 shadow-xs">
                     <Split class="h-8 w-8" />
                   </div>
@@ -18432,9 +18529,9 @@ onUnmounted(() => {
                 </div>
 
                 <!-- Active Item Decision Workspace -->
-                <div v-else class="flex flex-col gap-5 w-full">
+                <div v-else class="flex flex-col gap-5 w-full flex-1 min-h-0">
                   <!-- Top Channel/Keyword Context Card -->
-                  <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 p-5 shadow-sm">
+                  <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 p-4 sm:p-5 shadow-sm shrink-0">
                     <div class="flex items-start justify-between gap-4">
                       <div class="flex items-center gap-3.5 min-w-0">
                         <div class="relative shrink-0">
@@ -18549,119 +18646,125 @@ onUnmounted(() => {
                     </div>
                   </div>
 
-                  <!-- Relations Graph Section in Decision Hub -->
+                  <!-- Decision Visualizer Column for Graph and Posts (Widgets 3 & 4 in top-down manner) -->
                   <div
-                    v-if="rearrangeDecisionTab === 'both' || rearrangeDecisionTab === 'graph'"
-                    class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 p-5 shadow-sm flex flex-col group/chart transition-all"
+                    class="w-full flex-1 min-h-0 flex flex-col gap-5 transition-all duration-200"
                   >
-                    <div class="flex items-center justify-between mb-3">
-                      <div class="flex items-center gap-2">
-                        <div class="p-1.5 bg-teal-50 dark:bg-teal-950/40 rounded-lg">
-                          <Network class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
-                        </div>
+                    <!-- Relations Graph Section in Decision Hub (Widget 3) -->
+                    <div
+                      v-if="rearrangeDecisionTab === 'both' || rearrangeDecisionTab === 'graph'"
+                      :class="rearrangeDecisionTab === 'both' ? 'h-[400px] xl:h-[420px] 2xl:h-[460px] shrink-0' : 'flex-1 min-h-0'"
+                      class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 p-4 sm:p-5 shadow-sm flex flex-col group/chart transition-all overflow-hidden"
+                    >
+                      <div class="flex items-center justify-between mb-3 shrink-0">
                         <div class="flex items-center gap-2">
+                          <div class="p-1.5 bg-teal-50 dark:bg-teal-950/40 rounded-lg">
+                            <Network class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <h4 class="text-xs font-black text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                              {{ t('listen.tabGraph') }}
+                            </h4>
+                            <span v-if="totalNeighborsCount > 0" class="text-[10px] font-semibold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-2 py-0.5 rounded-full">
+                              {{ t('explorer.nodesCount', { count: totalNeighborsCount }) }}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div class="flex items-center gap-1 shrink-0">
+                          <button
+                            @click="onGraphZoomIn"
+                            class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                            :title="t('explorer.zoomIn')"
+                          >
+                            <ZoomIn class="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            @click="onGraphZoomOut"
+                            class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                            :title="t('explorer.zoomOut')"
+                          >
+                            <ZoomOut class="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            @click="resetGraphView"
+                            class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
+                            :title="t('explorer.resetView')"
+                          >
+                            <RotateCcw class="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            @click="isGraphEnlarged = true"
+                            class="p-1.5 hover:bg-teal-50 dark:hover:bg-teal-950/35 text-teal-600 dark:text-teal-400 rounded-lg transition-colors cursor-pointer"
+                            :title="t('search.enlargeInteractiveView')"
+                          >
+                            <Maximize2 class="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <div
+                        v-if="activeTab === 'listen' && !isGraphEnlarged"
+                        ref="graphCanvasContainer"
+                        class="relative flex-1 min-h-0 w-full bg-gray-50/50 dark:bg-gray-950/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/80 overflow-hidden"
+                      >
+                        <canvas
+                          ref="graphCanvas"
+                          @mousedown="onCanvasMouseDown"
+                          @mousemove="onCanvasMouseMove"
+                          @mouseup="onCanvasMouseUp"
+                          @wheel.prevent="onCanvasWheel"
+                          class="block w-full h-full"
+                        ></canvas>
+
+                        <div class="absolute bottom-2.5 left-3 right-3 flex flex-wrap items-center justify-between gap-1.5 text-[9px] font-medium text-gray-400 dark:text-gray-500 pointer-events-none select-none">
+                          <div>{{ t('search.dragNodesHint') }}</div>
+                          <div class="flex items-center gap-2">
+                            <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>{{ t('search.inbound') }}</span>
+                            <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-pink-500"></span>{{ t('search.outbound') }}</span>
+                            <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>{{ t('search.mutual') }}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Posts Flow Section in Decision Hub (Widget 4) -->
+                    <div
+                      v-if="rearrangeDecisionTab === 'both' || rearrangeDecisionTab === 'posts'"
+                      class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 p-4 sm:p-5 shadow-sm flex flex-col flex-1 min-h-0 transition-all overflow-hidden"
+                    >
+                      <div class="flex items-center justify-between mb-3.5 shrink-0">
+                        <div class="flex items-center gap-2">
+                          <div class="p-1.5 bg-blue-50 dark:bg-blue-950/40 rounded-lg">
+                            <Activity class="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+                          </div>
                           <h4 class="text-xs font-black text-gray-700 dark:text-gray-300 uppercase tracking-wider">
-                            {{ t('listen.tabGraph') }}
+                            {{ t('listen.tabPosts') }}
                           </h4>
-                          <span v-if="totalNeighborsCount > 0" class="text-[10px] font-semibold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-2 py-0.5 rounded-full">
-                            {{ t('explorer.nodesCount', { count: totalNeighborsCount }) }}
+                          <span class="text-[10px] font-mono text-gray-400">
+                            ({{ listenPosts.length }})
                           </span>
                         </div>
-                      </div>
-
-                      <div class="flex items-center gap-1">
-                        <button
-                          @click="onGraphZoomIn"
-                          class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
-                          :title="t('explorer.zoomIn')"
-                        >
-                          <ZoomIn class="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          @click="onGraphZoomOut"
-                          class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
-                          :title="t('explorer.zoomOut')"
-                        >
-                          <ZoomOut class="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          @click="resetGraphView"
-                          class="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-700/60 text-gray-500 dark:text-gray-400 rounded-lg transition-colors cursor-pointer"
-                          :title="t('explorer.resetView')"
-                        >
-                          <RotateCcw class="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          @click="isGraphEnlarged = true"
-                          class="p-1.5 hover:bg-teal-50 dark:hover:bg-teal-950/35 text-teal-600 dark:text-teal-400 rounded-lg transition-colors cursor-pointer"
-                          :title="t('search.enlargeInteractiveView')"
-                        >
-                          <Maximize2 class="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </div>
-
-                    <div
-                      v-if="activeTab === 'listen' && !isGraphEnlarged"
-                      ref="graphCanvasContainer"
-                      :class="rearrangeDecisionTab === 'both' ? 'h-[250px]' : 'h-[440px]'"
-                      class="relative w-full bg-gray-50/50 dark:bg-gray-950/40 rounded-2xl border border-gray-150/40 dark:border-gray-800/80 overflow-hidden"
-                    >
-                      <canvas
-                        ref="graphCanvas"
-                        @mousedown="onCanvasMouseDown"
-                        @mousemove="onCanvasMouseMove"
-                        @mouseup="onCanvasMouseUp"
-                        @wheel.prevent="onCanvasWheel"
-                        class="block w-full h-full"
-                      ></canvas>
-
-                      <div class="absolute bottom-2.5 left-3 right-3 flex flex-wrap items-center justify-between gap-1.5 text-[9px] font-medium text-gray-400 dark:text-gray-500 pointer-events-none select-none">
-                        <div>{{ t('search.dragNodesHint') }}</div>
-                        <div class="flex items-center gap-2">
-                          <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>{{ t('search.inbound') }}</span>
-                          <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-pink-500"></span>{{ t('search.outbound') }}</span>
-                          <span class="flex items-center gap-0.5"><span class="w-1.5 h-1.5 rounded-full bg-violet-500"></span>{{ t('search.mutual') }}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- Posts Flow Section in Decision Hub -->
-                  <div
-                    v-if="rearrangeDecisionTab === 'both' || rearrangeDecisionTab === 'posts'"
-                    class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 p-5 shadow-sm flex flex-col transition-all"
-                  >
-                    <div class="flex items-center justify-between mb-3.5">
-                      <div class="flex items-center gap-2">
-                        <div class="p-1.5 bg-blue-50 dark:bg-blue-950/40 rounded-lg">
-                          <Activity class="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
-                        </div>
-                        <h4 class="text-xs font-black text-gray-700 dark:text-gray-300 uppercase tracking-wider">
-                          {{ t('listen.tabPosts') }}
-                        </h4>
-                        <span class="text-[10px] font-mono text-gray-400">
-                          ({{ listenPosts.length }})
+                        <span v-if="isFetchingListenPosts" class="flex items-center gap-1.5 text-xs text-teal-600 dark:text-teal-400 font-medium">
+                          <LoaderCircle class="h-3 w-3 animate-spin" />
+                          <span>{{ t('listen.connectingPipeline') }}</span>
                         </span>
                       </div>
-                      <span v-if="isFetchingListenPosts" class="flex items-center gap-1.5 text-xs text-teal-600 dark:text-teal-400 font-medium">
-                        <LoaderCircle class="h-3 w-3 animate-spin" />
-                        <span>{{ t('listen.connectingPipeline') }}</span>
-                      </span>
-                    </div>
 
-                    <!-- Enhanced larger preview feed list -->
-                    <div
-                      :class="rearrangeDecisionTab === 'both' ? 'max-h-[580px]' : 'max-h-[840px]'"
-                      class="overflow-y-auto space-y-4 pr-1.5"
-                    >
+                      <!-- Enhanced larger preview feed list -->
+                      <div
+                        ref="rearrangePostsContainer"
+                        @scroll="handleRearrangePostsScroll"
+                        class="flex-1 min-h-0 overflow-y-auto space-y-3.5 pr-1.5 scrollbar-thin"
+                      >
                       <div v-if="listenPosts.length === 0 && !isFetchingListenPosts" class="py-12 text-center text-xs text-gray-400 dark:text-gray-500">
                         {{ t('listen.noLogsFound') }}
                       </div>
 
                       <div
-                        v-for="post in listenPosts.slice(0, 30)"
-                        :key="post.key"
+                        v-for="(post, index) in listenPosts.slice(0, 30)"
+                        :key="post.key || index"
+                        :id="'listen-post-' + (post.key || index)"
                         class="p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-gray-200/90 dark:border-gray-700/80 bg-white/95 dark:bg-gray-900/70 hover:bg-white dark:hover:bg-gray-900 hover:border-teal-400/60 dark:hover:border-teal-500/50 hover:shadow-md dark:hover:shadow-lg dark:hover:shadow-black/50 transition-all duration-200 space-y-3.5 group/post"
                       >
                         <!-- Post Header: User/Author Info, Badge & External Actions -->
@@ -18943,7 +19046,8 @@ onUnmounted(() => {
                   </div>
                 </div>
               </div>
-            </template>
+            </div>
+          </template>
           </div>
 
         </div>
