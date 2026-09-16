@@ -3716,9 +3716,53 @@ const getListenPostsCacheLimit = (): number => {
 };
 
 // --- Background Sync Engine for Listen Directory ---
+const checkIsMobileDevice = (): boolean => {
+  if (typeof window === "undefined" || typeof navigator === "undefined") {
+    return false;
+  }
+  // 1. User Agent regex for common mobile / tablet identifiers
+  const ua = navigator.userAgent || "";
+  const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|mobile/i.test(ua);
+
+  // 2. iPadOS detection (Safari on iPad reports MacIntel platform, but has touch points)
+  const isIPad = (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+  // 3. Screen width / coarse pointer check fallback (phones/tablets < 768px or coarse pointer without hover)
+  const isSmallScreen = typeof window.innerWidth === "number" && window.innerWidth < 768;
+  const isTouchOnly = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse) and (hover: none)").matches;
+
+  return isMobileUA || isIPad || isSmallScreen || isTouchOnly;
+};
+
+const getInitialListenBackgroundSyncState = (): boolean => {
+  try {
+    const saved = localStorage.getItem("listen_bg_sync_enabled");
+    if (saved !== null) {
+      // Saved state exists in localStorage: restore user's preference
+      return saved === "true";
+    }
+  } catch (e) {
+    console.warn("Could not read listen_bg_sync_enabled from localStorage:", e);
+  }
+  // Only if there is no local saved state:
+  // Desktop device: enable by default (true)
+  // Mobile device: disable by default (false)
+  const isMobile = checkIsMobileDevice();
+  return !isMobile;
+};
+
 const isListenBackgroundSyncEnabled = ref<boolean>(
-  localStorage.getItem("listen_bg_sync_enabled") !== "false"
+  getInitialListenBackgroundSyncState()
 );
+
+// Persist the switch state in local storage whenever it changes
+watch(isListenBackgroundSyncEnabled, (newVal) => {
+  try {
+    localStorage.setItem("listen_bg_sync_enabled", String(newVal));
+  } catch (e) {
+    console.warn("Could not save listen_bg_sync_enabled to localStorage:", e);
+  }
+});
 const isBackgroundSyncRunning = ref<boolean>(false);
 const activeBackgroundSyncItemId = ref<string | null>(null);
 let backgroundSyncAbortController: AbortController | null = null;
