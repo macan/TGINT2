@@ -50,6 +50,7 @@ export default {
     edit: "Изменить",
     copy: "Копировать",
     copied: "Скопировано!",
+    paste: "Вставить",
     loading: "Загрузка...",
     reset: "Сброс",
     error: "Ошибка",

@@ -50,6 +50,7 @@ export default {
     edit: "編集",
     copy: "コピー",
     copied: "コピー完了！",
+    paste: "貼り付け",
     loading: "読み込み中...",
     reset: "リセット",
     error: "エラー",

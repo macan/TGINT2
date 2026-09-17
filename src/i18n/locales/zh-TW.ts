@@ -50,6 +50,7 @@ export default {
     edit: "編輯",
     copy: "複製",
     copied: "已複製！",
+    paste: "貼上",
     loading: "載入中...",
     reset: "重設",
     error: "錯誤",

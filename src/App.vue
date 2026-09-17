@@ -1475,35 +1475,356 @@ const fetchTelegramUser = async () => {
     loadingTelegramUser.value = true;
     telegramError.value = "";
     telegramUser.value = null;
+    const username = telegramUsername.value.trim().replace(/^@/, "");
     try {
-        const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-user/${telegramUsername.value}`);
-        if (!response.ok) throw new Error("User not found");
-        telegramUser.value = await response.json();
-        const username = telegramUsername.value.trim();
+        let isChannel = false;
+        let response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-user/${username}`);
+        let userData: any = null;
+
+        if (response.ok) {
+            const data = await response.json();
+            // Check if telegram-user returned not found state
+            if (data && data.state === 1 && !data.username && !data.first_name) {
+                // Fallback to telegram-channel namespace
+                const channelRes = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${username}`);
+                if (channelRes.ok) {
+                    userData = await channelRes.json();
+                    isChannel = true;
+                } else {
+                    throw new Error("User or channel not found");
+                }
+            } else {
+                userData = data;
+            }
+        } else {
+            // Fallback to telegram-channel namespace
+            const channelRes = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${username}`);
+            if (channelRes.ok) {
+                userData = await channelRes.json();
+                isChannel = true;
+            } else {
+                throw new Error("User or channel not found");
+            }
+        }
+
+        if (!userData) throw new Error("Entity not found");
+
+        if (isChannel) {
+            userData.isChannel = true;
+            userData.title = userData.title || userData.name || username;
+            userData.username = userData.username || username;
+        } else {
+            if ('about' in userData) {
+                userData.description = userData.about;
+                userData.title = `${userData.first_name || ''} ${userData.last_name || ''}`.trim();
+                userData.status = userData.status?.status;
+            }
+        }
+
+        // set DC Flag
+        if (userData.photo) {
+            const match = String(userData.photo).match(/cdn(\d+)/);
+            if (match) {
+                userData.cdnNumber = match[1];
+                userData.cdnRegion = TelegramCDNRegions[userData.cdnNumber as keyof typeof TelegramCDNRegions];
+            }
+        }
+
+        telegramUser.value = userData;
+
         if (!lookupUserHistory.value.includes(username)) {
             lookupUserHistory.value.unshift(username);
             if (lookupUserHistory.value.length > 10) lookupUserHistory.value.pop();
             localStorage.setItem('telegramUserLookupHistory', JSON.stringify(lookupUserHistory.value));
         }
-        // there are two differnt user results, we should regular it
-        if ('about' in telegramUser.value) {
-          telegramUser.value.description = telegramUser.value.about
-          telegramUser.value.title = `${telegramUser.value.first_name || ''} ${telegramUser.value.last_name || ''}`
-          telegramUser.value.status = telegramUser.value.status?.status
-        }
-        // set DC Flag
-        if (telegramUser.value.photo) {
-          const match = String(telegramUser.value.photo).match(/cdn(\d+)/);
-          if (match) {
-            telegramUser.value.cdnNumber = match[1];
-            telegramUser.value.cdnRegion = TelegramCDNRegions[telegramUser.value.cdnNumber as keyof typeof TelegramCDNRegions];
-          }
-        }
-    } catch(err) {
-        telegramError.value = err.message;
+    } catch(err: any) {
+        telegramError.value = err.message || "Failed to fetch user or channel";
     } finally {
         loadingTelegramUser.value = false;
     }
+};
+
+const formatNumber = (num: any): string => {
+  if (num == null) return "0";
+  if (typeof num === "number") return num.toLocaleString();
+  const parsed = Number(num);
+  if (!isNaN(parsed)) return parsed.toLocaleString();
+  return String(num);
+};
+
+// --- Explorer / Global Username Hover Tooltip & Metadata Lookup ---
+interface TelegramUserLookupData {
+  username?: string;
+  title?: string;
+  first_name?: string;
+  last_name?: string;
+  description?: string;
+  about?: string;
+  photo?: string;
+  id?: string | number;
+  uid?: string | number;
+  lang?: string;
+  phone?: string;
+  status?: string;
+  cdnNumber?: string;
+  cdnRegion?: [string, string];
+  is_bot?: boolean;
+  verified?: boolean;
+  isChannel?: boolean;
+  members?: number;
+  photos?: number;
+  links?: number;
+  _type?: string;
+  [key: string]: any;
+}
+
+interface UsernameLookupEntry {
+  loading: boolean;
+  error: string | null;
+  data: TelegramUserLookupData | null;
+}
+
+const usernameLookupCache = ref<Record<string, UsernameLookupEntry>>({});
+
+const hoveredUsername = ref<string | null>(null);
+const isUsernameTooltipVisible = ref(false);
+const usernameTooltipPos = ref<{ top: number; left: number; placeLeft?: boolean }>({ top: 0, left: 0, placeLeft: false });
+const usernameTooltipCopied = ref(false);
+
+let usernameHoverDebounceTimer: any = null;
+let usernameHideGraceTimer: any = null;
+
+const getCleanHandle = (raw: string | null | undefined): string => {
+  if (!raw) return "";
+  return String(raw).trim().replace(/^@/, "").split("/").pop() || String(raw);
+};
+
+const currentLookupState = computed<UsernameLookupEntry | null>(() => {
+  if (!hoveredUsername.value) return null;
+  const username = hoveredUsername.value;
+  const clean = getCleanHandle(username);
+  return usernameLookupCache.value[username] || usernameLookupCache.value[clean] || null;
+});
+
+const currentHoveredUserMetadata = computed<TelegramUserLookupData | null>(() => {
+  return currentLookupState.value?.data || null;
+});
+
+const lookupTelegramUserMetadata = async (rawUsername: string) => {
+  if (!rawUsername) return;
+  const username = String(rawUsername).trim();
+  const cleanHandle = getCleanHandle(username);
+  if (!cleanHandle) return;
+
+  // Already cached or currently loading?
+  const existing = usernameLookupCache.value[username] || usernameLookupCache.value[cleanHandle];
+  if (existing?.loading || existing?.data) {
+    return;
+  }
+
+  // Find any local hints from posts (e.g. author name, uid)
+  let localAuthor: string | undefined;
+  let localUid: string | number | undefined;
+  const activePostList = activeTab.value === 'search' ? searchResults.value : posts.value;
+  for (const p of activePostList) {
+    const rawUser = p.data?.user;
+    let u: string | undefined;
+    if (rawUser) {
+      const parts = rawUser.split("/");
+      u = parts[parts.length - 1];
+    } else if (p.data?.uid !== undefined) {
+      u = String(p.data?.uid);
+    }
+    if (u === username || u === cleanHandle) {
+      if (p.data?.author) localAuthor = p.data.author;
+      if (p.data?.uid !== undefined) localUid = p.data.uid;
+      break;
+    }
+  }
+
+  usernameLookupCache.value[username] = {
+    loading: true,
+    error: null,
+    data: null,
+  };
+
+  try {
+    // 1. First attempt: Query telegram-user namespace
+    let userData: TelegramUserLookupData | null = null;
+    try {
+      const userRes = await fetch(`https://i.gogingko.net/api/v1/v/telegram-user/${encodeURIComponent(cleanHandle)}`);
+      if (userRes.ok) {
+        const userJson = await userRes.json();
+        if (userJson && userJson.state !== 1 && (userJson.id || userJson.username || userJson.first_name || userJson.title || userJson.about)) {
+          userData = { ...userJson, isChannel: false };
+        }
+      }
+    } catch {
+      // Continue to fallback
+    }
+
+    // 2. If user metadata not found, fallback to query telegram-channel namespace
+    if (!userData) {
+      try {
+        const channelRes = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${encodeURIComponent(cleanHandle)}`);
+        if (channelRes.ok) {
+          const channelJson = await channelRes.json();
+          if (channelJson && channelJson.state !== 1 && (channelJson.title || channelJson.username || channelJson._type || channelJson.description || channelJson.members !== undefined)) {
+            userData = {
+              ...channelJson,
+              isChannel: true,
+            };
+          }
+        }
+      } catch {
+        // Fallback failed
+      }
+    }
+
+    if (!userData) {
+      throw new Error("User or channel metadata not found");
+    }
+
+    // Regularize and parse fields for both User and Channel / Group
+    if ("about" in userData && !userData.description) {
+      userData.description = userData.about;
+    }
+
+    if (userData.isChannel) {
+      userData.title = userData.title || userData.name || localAuthor || cleanHandle;
+    } else {
+      if (!userData.title) {
+        userData.title = `${userData.first_name || ""} ${userData.last_name || ""}`.trim() || userData.username || localAuthor || cleanHandle;
+      }
+      userData.status = userData.status?.status || (typeof userData.status === "string" ? userData.status : undefined);
+    }
+
+    // Extract CDN / DC info from photo url if available
+    if (userData.photo) {
+      const match = String(userData.photo).match(/cdn(\d+)/);
+      if (match) {
+        userData.cdnNumber = match[1];
+        userData.cdnRegion = TelegramCDNRegions[userData.cdnNumber as keyof typeof TelegramCDNRegions];
+      }
+    }
+
+    if (!userData.username) {
+      userData.username = cleanHandle;
+    }
+    if (!userData.id && localUid) {
+      userData.id = localUid;
+    }
+    if (localAuthor && !userData.title) {
+      userData.title = localAuthor;
+    }
+
+    usernameLookupCache.value[username] = {
+      loading: false,
+      error: null,
+      data: userData,
+    };
+    if (cleanHandle !== username) {
+      usernameLookupCache.value[cleanHandle] = usernameLookupCache.value[username];
+    }
+  } catch (err: any) {
+    usernameLookupCache.value[username] = {
+      loading: false,
+      error: err.message || "Metadata unavailable",
+      data: null,
+    };
+    if (cleanHandle !== username) {
+      usernameLookupCache.value[cleanHandle] = usernameLookupCache.value[username];
+    }
+  }
+};
+
+const handleUsernameMouseEnter = (username: string, event: MouseEvent) => {
+  if (usernameHideGraceTimer) {
+    clearTimeout(usernameHideGraceTimer);
+    usernameHideGraceTimer = null;
+  }
+
+  hoveredUsername.value = username;
+
+  const target = event.currentTarget as HTMLElement;
+  if (target) {
+    const rect = target.getBoundingClientRect();
+    const tooltipWidth = 340;
+    const tooltipHeight = 330;
+
+    let left = rect.right + 12;
+    let placeLeft = false;
+
+    // Check right screen overflow
+    if (left + tooltipWidth > window.innerWidth - 16) {
+      left = Math.max(16, rect.left - tooltipWidth - 12);
+      placeLeft = true;
+    }
+
+    // Align vertically
+    let top = rect.top - 8;
+    if (top + tooltipHeight > window.innerHeight - 16) {
+      top = Math.max(16, window.innerHeight - tooltipHeight - 16);
+    }
+    if (top < 16) top = 16;
+
+    usernameTooltipPos.value = { top, left, placeLeft };
+  }
+
+  isUsernameTooltipVisible.value = true;
+
+  // Debounce API call slightly to prevent rapid sweep overload
+  if (usernameHoverDebounceTimer) clearTimeout(usernameHoverDebounceTimer);
+  usernameHoverDebounceTimer = setTimeout(() => {
+    lookupTelegramUserMetadata(username);
+  }, 130);
+};
+
+const handleUsernameMouseLeave = () => {
+  if (usernameHoverDebounceTimer) {
+    clearTimeout(usernameHoverDebounceTimer);
+    usernameHoverDebounceTimer = null;
+  }
+  usernameHideGraceTimer = setTimeout(() => {
+    isUsernameTooltipVisible.value = false;
+    hoveredUsername.value = null;
+    usernameTooltipCopied.value = false;
+  }, 220);
+};
+
+const handleTooltipMouseEnter = () => {
+  if (usernameHideGraceTimer) {
+    clearTimeout(usernameHideGraceTimer);
+    usernameHideGraceTimer = null;
+  }
+  isUsernameTooltipVisible.value = true;
+};
+
+const handleTooltipMouseLeave = () => {
+  usernameHideGraceTimer = setTimeout(() => {
+    isUsernameTooltipVisible.value = false;
+    hoveredUsername.value = null;
+    usernameTooltipCopied.value = false;
+  }, 200);
+};
+
+const copyTooltipUsername = (username: string) => {
+  const clean = getCleanHandle(username);
+  navigator.clipboard.writeText(`@${clean}`);
+  usernameTooltipCopied.value = true;
+  toastMessage.value = `Copied @${clean} to clipboard`;
+  setTimeout(() => {
+    usernameTooltipCopied.value = false;
+  }, 2000);
+};
+
+const jumpToChannelsLookup = (username: string) => {
+  const clean = getCleanHandle(username);
+  telegramUsername.value = clean;
+  activeTab.value = 'channel';
+  isUsernameTooltipVisible.value = false;
+  hoveredUsername.value = null;
+  fetchTelegramUser();
 };
 
 const runAutoFinding = async () => {
@@ -2181,6 +2502,31 @@ const rearrangePostsContainer = ref<HTMLElement | null>(null);
 const lastRearrangePostsScrollTop = ref<number>(0);
 let isProgrammaticScrollResetting = false;
 
+// Progressive post rendering for Listen Tab to optimize widget loading/reloading performance
+const listenPostsRenderLimit = ref<number>(30);
+
+const visibleListenPosts = computed(() => {
+  return listenPosts.value.slice(0, listenPostsRenderLimit.value);
+});
+
+const hasMoreListenPosts = computed(() => {
+  return listenPosts.value.length > listenPostsRenderLimit.value;
+});
+
+const loadMoreListenPosts = () => {
+  if (listenPostsRenderLimit.value < listenPosts.value.length) {
+    listenPostsRenderLimit.value += 30;
+  }
+};
+
+const listenBottomSentinel = ref<HTMLElement | null>(null);
+let listenObserver: IntersectionObserver | null = null;
+
+// High-speed memory caches to prevent redundant network fetches on channel re-selection / reloads
+const listenChannelMetadataCache = ref<Record<string, any>>({});
+const listenResolveCache = new Map<string, string>();
+const listenProfileCache = new Map<string, any>();
+
 const resetRecentPostsWidgetScroll = () => {
   isProgrammaticScrollResetting = true;
   lastListenPostKey.value = "";
@@ -2210,6 +2556,11 @@ const handleRearrangePostsScroll = () => {
   if (isProgrammaticScrollResetting) return;
   if (rearrangePostsContainer.value) {
     lastRearrangePostsScrollTop.value = rearrangePostsContainer.value.scrollTop;
+    // Auto-expand rendered posts when user scrolls near the bottom of rearrange posts container
+    const { scrollTop, scrollHeight, clientHeight } = rearrangePostsContainer.value;
+    if (scrollTop + clientHeight >= scrollHeight - 250) {
+      loadMoreListenPosts();
+    }
   }
 };
 
@@ -2235,7 +2586,7 @@ const resolvedRemoteImportUrl = computed(() => {
   if (/^https?:\/\//i.test(trimmed)) {
     return trimmed;
   }
-  return `https://i.gogingko.net/API/v1/v/exchange/${encodeURIComponent(trimmed)}`;
+  return `https://i.gogingko.net/api/v1/v/exchange/${encodeURIComponent(trimmed)}`;
 });
 const isTreeCopied = ref(false);
 const isExportingTreeFile = ref(false);
@@ -3001,7 +3352,10 @@ const getFilteredVisibleNodes = (nodes: ListenItem[], term: string, depth = 0, p
 };
 
 const getFolderItemsCount = (item: ListenItem): number => {
-  if (!item.isFolder) return 0;
+  if (!item || !item.isFolder) return 0;
+  if (folderStatsMap.value?.itemsCountMap && typeof folderStatsMap.value.itemsCountMap[item.id] === 'number') {
+    return folderStatsMap.value.itemsCountMap[item.id];
+  }
   let count = 0;
   const countLeaves = (node: ListenItem) => {
     if (!node.isFolder) {
@@ -3535,6 +3889,52 @@ const computeItemFreshnessFromPosts = (posts: any[]): ListenItemFreshness | null
 };
 
 const listenItemsFreshnessMap = ref<Record<string, ListenItemFreshness>>({});
+// Tracks newly fetched posts count per listen item ID to visually badge updated channels & folders
+const newlyFetchedPostsCountMap = ref<Record<string, number>>({});
+
+// Memoized O(N) aggregate folder stats computed once per directory / freshness / badge mutation
+const folderStatsMap = computed(() => {
+  const freshnessMap: Record<string, ListenItemFreshness> = {};
+  const newPostsMap: Record<string, number> = {};
+  const itemsCountMap: Record<string, number> = {};
+
+  const compute = (node: ListenItem): { freshness: ListenItemFreshness | null; newCount: number; itemCount: number } => {
+    if (!node.isFolder) {
+      const f = listenItemsFreshnessMap.value[node.id] || null;
+      const nc = newlyFetchedPostsCountMap.value[node.id] || 0;
+      return { freshness: f, newCount: nc, itemCount: 1 };
+    }
+
+    let newestF: ListenItemFreshness | null = null;
+    let totalNc = 0;
+    let totalItems = 0;
+
+    if (node.children && Array.isArray(node.children)) {
+      for (const child of node.children) {
+        const childStats = compute(child);
+        if (childStats.freshness && (!newestF || childStats.freshness.timestamp > newestF.timestamp)) {
+          newestF = childStats.freshness;
+        }
+        totalNc += childStats.newCount;
+        totalItems += childStats.itemCount;
+      }
+    }
+
+    if (newestF) freshnessMap[node.id] = newestF;
+    newPostsMap[node.id] = totalNc;
+    itemsCountMap[node.id] = totalItems;
+
+    return { freshness: newestF, newCount: totalNc, itemCount: totalItems };
+  };
+
+  if (Array.isArray(listenDirectory.value)) {
+    for (const root of listenDirectory.value) {
+      compute(root);
+    }
+  }
+
+  return { freshnessMap, newPostsMap, itemsCountMap };
+});
 
 const updateItemFreshness = (nodeId: string, posts: any[]) => {
   if (!nodeId) return;
@@ -3551,7 +3951,12 @@ const updateItemFreshness = (nodeId: string, posts: any[]) => {
   }
 };
 
+let hasLoadedListenFreshnessOnce = false;
+
 const loadAllListenPostsFreshnessFromIndexedDB = async () => {
+  if (hasLoadedListenFreshnessOnce && Object.keys(listenItemsFreshnessMap.value).length > 0) {
+    return;
+  }
   try {
     const db = await initIndexedDB();
     const transaction = db.transaction("posts", "readonly");
@@ -3572,6 +3977,7 @@ const loadAllListenPostsFreshnessFromIndexedDB = async () => {
         }
         cursor.continue();
       } else {
+        hasLoadedListenFreshnessOnce = true;
         listenItemsFreshnessMap.value = {
           ...listenItemsFreshnessMap.value,
           ...freshness
@@ -3591,25 +3997,15 @@ const getItemOrFolderFreshness = (item: ListenItem): ListenItemFreshness | null 
   if (!item.isFolder) {
     return listenItemsFreshnessMap.value[item.id] || null;
   }
-  let newest: ListenItemFreshness | null = null;
-  const traverse = (node: ListenItem) => {
-    if (!node.isFolder) {
-      const f = listenItemsFreshnessMap.value[node.id];
-      if (f && (!newest || f.timestamp > newest.timestamp)) {
-        newest = f;
-      }
-    } else if (node.children && Array.isArray(node.children)) {
-      for (const child of node.children) {
-        traverse(child);
-      }
-    }
-  };
-  if (item.children && Array.isArray(item.children)) {
-    for (const child of item.children) {
-      traverse(child);
-    }
+  return folderStatsMap.value?.freshnessMap[item.id] || null;
+};
+
+const getItemOrFolderNewPostsCount = (nodeItem: ListenItem): number => {
+  if (!nodeItem) return 0;
+  if (!nodeItem.isFolder) {
+    return newlyFetchedPostsCountMap.value[nodeItem.id] || 0;
   }
-  return newest;
+  return folderStatsMap.value?.newPostsMap[nodeItem.id] || 0;
 };
 
 const getListenItemLineClasses = (node: { item: ListenItem; depth: number }): string => {
@@ -3805,30 +4201,9 @@ const isBackgroundSyncRunning = ref<boolean>(false);
 const activeBackgroundSyncItemId = ref<string | null>(null);
 let backgroundSyncAbortController: AbortController | null = null;
 const lastItemSyncTimeMap = ref<Record<string, number>>({});
-// Tracks newly fetched posts count per listen item ID to visually badge updated channels & folders
-const newlyFetchedPostsCountMap = ref<Record<string, number>>({});
 
 const clearAllNewlyFetchedBadges = () => {
   newlyFetchedPostsCountMap.value = {};
-};
-
-const getItemOrFolderNewPostsCount = (nodeItem: ListenItem): number => {
-  if (!nodeItem.isFolder) {
-    return newlyFetchedPostsCountMap.value[nodeItem.id] || 0;
-  }
-  // For folders, aggregate the new post counts across all nested child items
-  let total = 0;
-  const countLeaves = (item: ListenItem) => {
-    if (!item.isFolder) {
-      total += newlyFetchedPostsCountMap.value[item.id] || 0;
-    } else if (item.children && Array.isArray(item.children)) {
-      for (const child of item.children) {
-        countLeaves(child);
-      }
-    }
-  };
-  countLeaves(nodeItem);
-  return total;
 };
 
 const totalNewlyFetchedPostsCount = computed(() => {
@@ -4274,8 +4649,15 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
   };
 
   if (node.type === 'channel') {
-    forwardsChannelsListen.value = [];
-    ftoChannelsListen.value = [];
+    const rawArg = node.argument?.trim();
+    if (rawArg && listenProfileCache.has(rawArg)) {
+      const profileData = listenProfileCache.get(rawArg);
+      forwardsChannelsListen.value = profileData.forwards || [];
+      ftoChannelsListen.value = profileData.fto || [];
+    } else {
+      forwardsChannelsListen.value = [];
+      ftoChannelsListen.value = [];
+    }
   }
 
   // 1. Immediately load cached posts from IndexedDB for instant display
@@ -4306,7 +4688,12 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
 
   // Bind cached items directly
   if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
-  listenPosts.value = cached;
+  if (isNewSelection) {
+    listenPostsRenderLimit.value = 30;
+    listenPosts.value = cached;
+  } else if (!listenPosts.value || listenPosts.value.length === 0) {
+    listenPosts.value = cached;
+  }
   isFetchingListenPosts.value = true;
   if (isNewSelection) {
     nextTick(() => {
@@ -4328,26 +4715,36 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
         return;
       }
 
-      // try to lookup the resolve cache
-      if (true) {
-        const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${username}`)
+      // try to lookup the resolve cache with fast in-memory memoization
+      if (listenResolveCache.has(username)) {
+        username = listenResolveCache.get(username)!;
+      } else {
+        const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${username}`);
         if (resolveRes.ok) {
-          const data = await resolveRes.json()
+          const data = await resolveRes.json();
           if (data.state == 0 && data.gso?.result) {
-            username = data.gso.result
+            username = data.gso.result;
+            listenResolveCache.set(node.argument?.trim() || username, username);
           }
         }
       }
 
-      try {
-        const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${username}`);
-        if (profileRes.ok) {
-          const profileData = await profileRes.json();
-          forwardsChannelsListen.value = profileData.forwards || [];
-          ftoChannelsListen.value = profileData.fto || [];
+      if (listenProfileCache.has(username)) {
+        const profileData = listenProfileCache.get(username);
+        forwardsChannelsListen.value = profileData.forwards || [];
+        ftoChannelsListen.value = profileData.fto || [];
+      } else {
+        try {
+          const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${username}`);
+          if (profileRes.ok) {
+            const profileData = await profileRes.json();
+            listenProfileCache.set(username, profileData);
+            forwardsChannelsListen.value = profileData.forwards || [];
+            ftoChannelsListen.value = profileData.fto || [];
+          }
+        } catch (e) {
+          console.error("Failed to fetch forwards and fto", e);
         }
-      } catch (e) {
-        console.error("Failed to fetch forwards and fto", e);
       }
 
       let allFetched: any[] = [];
@@ -4610,10 +5007,25 @@ const fetchSelectedChannelMetadata = async (node: ListenItem) => {
     return;
   }
   
-  let username = node.argument?.trim();
-  if (!username) {
+  let rawUsername = node.argument?.trim();
+  if (!rawUsername) {
     selectedChannelMetadata.value = null;
     return;
+  }
+
+  // Pre-load from memory cache if available for instantaneous display
+  if (listenChannelMetadataCache.value[rawUsername]) {
+    if (selectedListenNode.value?.id === node.id) {
+      selectedChannelMetadata.value = listenChannelMetadataCache.value[rawUsername];
+    }
+  }
+
+  let username = rawUsername;
+  if (listenResolveCache.has(username)) {
+    username = listenResolveCache.get(username)!;
+    if (listenChannelMetadataCache.value[username] && selectedListenNode.value?.id === node.id) {
+      selectedChannelMetadata.value = listenChannelMetadataCache.value[username];
+    }
   }
   
   isFetchingChannelMetadata.value = true;
@@ -4629,25 +5041,35 @@ const fetchSelectedChannelMetadata = async (node: ListenItem) => {
     }
     // try to lookup the resolve cache
     if (metaRes.status === 404) {
-      const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${username}`)
-      if (resolveRes.ok) {
-        const data = await resolveRes.json()
-        if (data.state == 0 && data.gso?.result) {
-          username = data.gso.result
-          metaRes = await fetch(
-            `https://i.gogingko.net/api/v1/v/telegram-channel/${username}`
-          );
+      if (listenResolveCache.has(rawUsername)) {
+        username = listenResolveCache.get(rawUsername)!;
+        metaRes = await fetch(
+          `https://i.gogingko.net/api/v1/v/telegram-channel/${username}`
+        );
+      } else {
+        const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${username}`);
+        if (resolveRes.ok) {
+          const data = await resolveRes.json();
+          if (data.state == 0 && data.gso?.result) {
+            username = data.gso.result;
+            listenResolveCache.set(rawUsername, username);
+            metaRes = await fetch(
+              `https://i.gogingko.net/api/v1/v/telegram-channel/${username}`
+            );
+          }
         }
       }
     }
     if (!metaRes.ok) throw new Error('Failed to fetch channel metadata');
     const data = await metaRes.json();
+    listenChannelMetadataCache.value[rawUsername] = data;
+    listenChannelMetadataCache.value[username] = data;
     if (selectedListenNode.value?.id === node.id) {
       selectedChannelMetadata.value = data;
     }
   } catch (error) {
     console.error("Error fetching channel metadata:", error);
-    if (selectedListenNode.value?.id === node.id) {
+    if (selectedListenNode.value?.id === node.id && !selectedChannelMetadata.value) {
       selectedChannelMetadata.value = null;
     }
   } finally {
@@ -4662,6 +5084,12 @@ watch(selectedListenNode, (newNode) => {
     startListenPolling();
   }
   if (newNode && newNode.type === 'channel') {
+    const rawArg = newNode.argument?.trim();
+    if (rawArg && listenChannelMetadataCache.value[rawArg]) {
+      selectedChannelMetadata.value = listenChannelMetadataCache.value[rawArg];
+    } else {
+      selectedChannelMetadata.value = null;
+    }
     fetchSelectedChannelMetadata(newNode);
   } else {
     selectedChannelMetadata.value = null;
@@ -5919,6 +6347,13 @@ const restoreListenScrollPosition = () => {
   const targetPostKey = lastListenPostKey.value;
   const targetRearrangeScroll = lastRearrangePostsScrollTop.value || 0;
   
+  if (targetPostKey) {
+    const idx = listenPosts.value.findIndex((p) => (p.key || p.id) === targetPostKey);
+    if (idx !== -1 && idx >= listenPostsRenderLimit.value) {
+      listenPostsRenderLimit.value = idx + 15;
+    }
+  }
+
   if (targetScroll <= 0 && !targetPostKey && targetRearrangeScroll <= 0) {
     window.scrollTo({ top: 0, behavior: 'auto' });
     if (rearrangePostsContainer.value) {
@@ -6747,25 +7182,12 @@ interface ListenHit {
   matchedBy: "username" | "title";
 }
 
-const explorerListenHit = ref<ListenHit | null>(null);
-const explorerListenHint = ref<string>("Add to Listen Directory");
-
-const checkExplorerListenDirectory = () => {
-  const currentUsername = (
-    metadata.value?.username ||
-    metadata.value?.name ||
-    channelName.value ||
-    currentChannelName.value ||
-    ""
-  ).trim();
-
-  const currentTitle = (
-    metadata.value?.title ||
-    metadata.value?.name ||
-    channelName.value ||
-    currentChannelName.value ||
-    ""
-  ).trim();
+const findListenDirectoryHit = (
+  username?: string,
+  title?: string
+): ListenHit | null => {
+  const currentUsername = (username || "").trim();
+  const currentTitle = (title || "").trim();
 
   const cleanTargetUser = currentUsername
     .toLowerCase()
@@ -6810,7 +7232,7 @@ const checkExplorerListenDirectory = () => {
 
   let hit: ListenHit | null = null;
 
-  // 2.1 check (search) current channel username in the listen directory item tree
+  // 1. check (search) channel username in the listen directory item tree
   if (cleanTargetUser) {
     const userMatch = searchTree(tree, [], (node) => {
       const arg = cleanStr(node.argument);
@@ -6827,7 +7249,7 @@ const checkExplorerListenDirectory = () => {
     }
   }
 
-  // 2.3 if you find nothing, try to search current channel title in the listen directory item tree
+  // 2. if not found, search channel title in the listen directory item tree
   if (!hit && cleanTargetTitle) {
     const titleMatch = searchTree(tree, [], (node) => {
       const nm = (node.name || "").trim().toLowerCase();
@@ -6844,10 +7266,33 @@ const checkExplorerListenDirectory = () => {
     }
   }
 
+  return hit;
+};
+
+const explorerListenHit = ref<ListenHit | null>(null);
+const explorerListenHint = ref<string>("Add to Listen Directory");
+
+const checkExplorerListenDirectory = () => {
+  const currentUsername = (
+    metadata.value?.username ||
+    metadata.value?.name ||
+    channelName.value ||
+    currentChannelName.value ||
+    ""
+  ).trim();
+
+  const currentTitle = (
+    metadata.value?.title ||
+    metadata.value?.name ||
+    channelName.value ||
+    currentChannelName.value ||
+    ""
+  ).trim();
+
+  const hit = findListenDirectoryHit(currentUsername, currentTitle);
   explorerListenHit.value = hit;
 
-  // 2.2 if you find hit, display hit info (including folder/subfolder/item) in the hint
-  // 2.3 Otherwise, display 'Add to Listen Directory'
+  // if hit found, display directory path in the hint, otherwise localized default
   if (hit) {
     explorerListenHint.value = hit.path.join(" / ");
   } else {
@@ -9751,10 +10196,31 @@ onMounted(() => {
   if (bottomSentinel.value) {
     observer.observe(bottomSentinel.value);
   }
+
+  // Progressive infinite rendering observer for Listen feed
+  listenObserver = new IntersectionObserver(
+    (entries) => {
+      if (
+        entries[0]?.isIntersecting &&
+        activeTab.value === "listen" &&
+        hasMoreListenPosts.value
+      ) {
+        loadMoreListenPosts();
+      }
+    },
+    { threshold: 0.1, rootMargin: "300px" }
+  );
+
+  if (listenBottomSentinel.value) {
+    listenObserver.observe(listenBottomSentinel.value);
+  }
 });
 
 onUnmounted(() => {
   window.removeEventListener("keydown", handleKeydown);
+  if (listenObserver) {
+    listenObserver.disconnect();
+  }
 });
 
 watch(
@@ -9763,6 +10229,16 @@ watch(
     if (observer) {
       observer.disconnect();
       if (newEl) observer.observe(newEl);
+    }
+  }
+);
+
+watch(
+  () => listenBottomSentinel.value,
+  (newEl) => {
+    if (listenObserver) {
+      listenObserver.disconnect();
+      if (newEl) listenObserver.observe(newEl);
     }
   }
 );
@@ -10099,12 +10575,58 @@ const timelineTicks = computed(() => {
 const networkNodes = ref<GraphNode[]>([]);
 const networkEdges = ref<GraphEdge[]>([]);
 const selectedNetworkNode = ref<GraphNode | null>(null);
+const networkListenHit = ref<ListenHit | null>(null);
+const networkListenHint = ref<string>("Add to Listen Directory");
+
+const checkNetworkListenDirectory = () => {
+  if (!selectedNetworkNode.value) {
+    networkListenHit.value = null;
+    networkListenHint.value = t("network.addToListenDirectory") || t("search.addToListenDirectory") || "Add to Listen Directory";
+    return;
+  }
+
+  const currentUsername = (
+    selectedNetworkNode.value.metadata?.username ||
+    selectedNetworkNode.value.metadata?.name ||
+    selectedNetworkNode.value.id ||
+    selectedNetworkNode.value.name ||
+    ""
+  ).trim();
+
+  const currentTitle = (
+    selectedNetworkNode.value.metadata?.title ||
+    selectedNetworkNode.value.metadata?.name ||
+    selectedNetworkNode.value.displayName ||
+    selectedNetworkNode.value.name ||
+    selectedNetworkNode.value.id ||
+    ""
+  ).trim();
+
+  const hit = findListenDirectoryHit(currentUsername, currentTitle);
+  networkListenHit.value = hit;
+
+  if (hit) {
+    networkListenHint.value = hit.path.join(" / ");
+  } else {
+    networkListenHint.value = t("network.addToListenDirectory") || t("search.addToListenDirectory") || "Add to Listen Directory";
+  }
+};
+
+watch(
+  [selectedNetworkNode, listenDirectory],
+  () => {
+    checkNetworkListenDirectory();
+  },
+  { deep: true, immediate: true }
+);
+
 const isFetchingSelectedNodeMetadata = ref(false);
 const selectedNodePosts = ref<any[]>([]);
 const isFetchingSelectedNodePosts = ref(false);
 
 watch(selectedNetworkNode, async (newNode) => {
   selectedNodePosts.value = [];
+  checkNetworkListenDirectory();
   if (!newNode) return;
 
   isFetchingSelectedNodePosts.value = true;
@@ -10128,6 +10650,7 @@ watch(selectedNetworkNode, async (newNode) => {
           newNode.name = data.name || data.title || newNode.id;
           newNode.displayName = data.title || newNode.id;
         }
+        checkNetworkListenDirectory();
       }
     } catch (err) {
       console.warn("Failed to fetch selected node metadata on-demand:", err);
@@ -13122,17 +13645,32 @@ onUnmounted(() => {
                         <img 
                           :src="(telegramUser.photo && telegramUser.photo.startsWith('data:')) ? telegramUser.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${telegramUser.username}`" 
                           @error="handleImageError" 
-                          class="w-16 h-16 rounded-2xl object-cover border-2 border-teal-500/10 shadow-sm" 
+                          :class="[
+                            'w-16 h-16 rounded-2xl object-cover border-2 shadow-sm',
+                            telegramUser.isChannel ? 'border-indigo-500/20' : 'border-teal-500/10'
+                          ]"
                           referrerPolicy="no-referrer"
                           :alt="t('channels.profilePhoto')" 
                         />
-                        <span class="absolute -bottom-1 -right-1 p-1 bg-teal-600 rounded-lg text-white border border-white dark:border-gray-800 shadow-md">
-                          <User class="h-3 w-3" />
+                        <span
+                          :class="[
+                            'absolute -bottom-1 -right-1 p-1 rounded-lg text-white border border-white dark:border-gray-800 shadow-md',
+                            telegramUser.isChannel ? 'bg-indigo-600' : 'bg-teal-600'
+                          ]"
+                        >
+                          <Radio v-if="telegramUser.isChannel" class="h-3 w-3" />
+                          <User v-else class="h-3 w-3" />
                         </span>
                       </div>
                       <div class="space-y-1">
-                        <div class="flex items-center gap-2">
+                        <div class="flex items-center gap-2 flex-wrap">
                           <h3 class="text-base font-black text-gray-900 dark:text-white leading-tight break-words max-w-[280px] sm:max-w-xs">{{ telegramUser.title || telegramUser.username }}</h3>
+                          <span
+                            v-if="telegramUser.isChannel"
+                            class="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 rounded-lg"
+                          >
+                            {{ t('explorer.channelOrGroupProfile') }}
+                          </span>
                           <button 
                             @click="telegramUser = null" 
                             class="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
@@ -13141,7 +13679,14 @@ onUnmounted(() => {
                             <X class="h-4 w-4" />
                           </button>
                         </div>
-                        <p class="text-xs font-bold text-teal-600 dark:text-teal-400 flex items-center gap-1">@{{ telegramUser.username }}</p>
+                        <p
+                          :class="[
+                            'text-xs font-bold flex items-center gap-1',
+                            telegramUser.isChannel ? 'text-indigo-600 dark:text-indigo-400' : 'text-teal-600 dark:text-teal-400'
+                          ]"
+                        >
+                          @{{ telegramUser.username }}
+                        </p>
                       </div>
                     </div>
 
@@ -13168,6 +13713,17 @@ onUnmounted(() => {
 
                   <!-- Bento Metrics layout -->
                   <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <!-- Channel Subscribers (if channel) -->
+                    <div v-if="telegramUser.isChannel && telegramUser.members !== undefined" class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-200/40 dark:border-gray-700/50 rounded-2xl flex items-center gap-3">
+                      <div class="p-1.5 rounded-xl bg-indigo-500/[0.08] dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 shrink-0">
+                        <Users class="h-4 w-4" />
+                      </div>
+                      <div class="space-y-0.5">
+                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">{{ t('channels.subscriberCount') || 'Subscribers' }}</p>
+                        <p class="text-xs font-bold font-mono text-indigo-600 dark:text-indigo-400">{{ formatNumber(telegramUser.members) }}</p>
+                      </div>
+                    </div>
+
                     <!-- ID -->
                     <div class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-200/40 dark:border-gray-700/50 rounded-2xl flex items-center gap-3">
                       <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 shrink-0">
@@ -13179,14 +13735,27 @@ onUnmounted(() => {
                       </div>
                     </div>
 
-                    <!-- Lang context -->
-                    <div class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-200/40 dark:border-gray-700/50 rounded-2xl flex items-center gap-3">
+                    <!-- Lang context (if not channel) -->
+                    <div v-if="!telegramUser.isChannel" class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-200/40 dark:border-gray-700/50 rounded-2xl flex items-center gap-3">
                       <div class="p-1.5 rounded-xl bg-teal-500/[0.08] dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 shrink-0">
                         <Globe class="h-4 w-4" />
                       </div>
                       <div class="space-y-0.5">
                         <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">{{ t('channels.localeProfile') }}</p>
                         <p class="text-xs font-bold text-gray-900 dark:text-white">{{ telegramUser.lang || t('channels.globalDefault') }}</p>
+                      </div>
+                    </div>
+
+                    <!-- Media Assets (if channel) -->
+                    <div v-if="telegramUser.isChannel && (telegramUser.photos !== undefined || telegramUser.links !== undefined)" class="p-4 bg-gray-50/50 dark:bg-gray-900/20 border border-gray-200/40 dark:border-gray-700/50 rounded-2xl flex items-center gap-3">
+                      <div class="p-1.5 rounded-xl bg-indigo-500/[0.08] dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 shrink-0">
+                        <Folder class="h-4 w-4" />
+                      </div>
+                      <div class="space-y-0.5">
+                        <p class="text-[9px] uppercase font-black text-gray-400 tracking-wider">{{ t('explorer.medias') }}</p>
+                        <p class="text-xs font-bold font-mono text-gray-900 dark:text-white">
+                          {{ telegramUser.photos ?? 0 }} photos • {{ telegramUser.links ?? 0 }} links
+                        </p>
                       </div>
                     </div>
 
@@ -14028,14 +14597,23 @@ onUnmounted(() => {
               <div
                 class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm"
               >
-                <div class="flex justify-between items-center mb-4">
-                  <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-                    {{ t('explorer.usernames') }}
-                  </h3>
-                  <button @click="copyUsernamesToClipboard(allUsernamesExplorer)" class="text-gray-400 hover:text-teal-500 transition-colors" :title="t('common.copy')">
+                <div class="flex justify-between items-center mb-2">
+                  <div class="flex items-center gap-2">
+                    <h3 class="text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                      {{ t('explorer.usernames') }}
+                    </h3>
+                    <span class="text-[10px] font-mono font-bold text-teal-600 dark:text-teal-400 bg-teal-50 dark:bg-teal-950/40 px-2 py-0.5 rounded-full border border-teal-200/50 dark:border-teal-800/50">
+                      {{ allUsernamesExplorer.length }}
+                    </span>
+                  </div>
+                  <button @click="copyUsernamesToClipboard(allUsernamesExplorer)" class="text-gray-400 hover:text-teal-500 transition-colors cursor-pointer" :title="t('common.copy')">
                     <Copy class="w-4 h-4" />
                   </button>
                 </div>
+                <p class="text-[10px] text-gray-400 dark:text-gray-500 mb-3 flex items-center gap-1.5 leading-snug">
+                  <Info class="w-3 h-3 text-teal-500/70 shrink-0" />
+                  <span>{{ t('explorer.usernamesHoverHint') }}</span>
+                </p>
                 <div
                   class="max-h-[calc(100vh-15rem)] overflow-y-auto space-y-1.5 pr-2 custom-scrollbar"
                 >
@@ -14043,15 +14621,47 @@ onUnmounted(() => {
                     v-for="username in allUsernamesExplorer"
                     :key="username"
                     @click="toggleUsernameExplorer(username)"
+                    @mouseenter="handleUsernameMouseEnter(username, $event)"
+                    @mouseleave="handleUsernameMouseLeave"
                     :class="[
-                      'w-full text-left px-3 py-2.5 rounded-xl text-xs font-semibold transition-all flex justify-between items-center cursor-pointer',
+                      'group/user w-full text-left px-3 py-2 rounded-xl text-xs font-semibold transition-all flex justify-between items-center cursor-pointer relative',
                       selectedUsernamesExplorer.includes(username)
                         ? 'bg-teal-600 text-white shadow-sm shadow-teal-500/10'
                         : 'bg-gray-50 dark:bg-gray-900 border border-gray-150/40 dark:border-gray-800/40 text-gray-700 dark:text-gray-300 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400',
                     ]"
                   >
-                    <span>{{ username }}</span>
-                    <span class="text-[10px] font-mono opacity-80 font-bold bg-white/20 px-1.5 py-0.5 rounded-md">{{ usernamePostCountsExplorer[username] || 0 }}</span>
+                    <span class="truncate mr-2 flex items-center gap-1">
+                      <span class="opacity-40 text-[11px] font-normal">@</span>
+                      <span class="group-hover/user:underline decoration-teal-400/50 underline-offset-2">{{ username.replace(/^@/, '') }}</span>
+                    </span>
+                    <div class="flex items-center gap-1.5 shrink-0">
+                      <!-- Cached indicator dot -->
+                      <span
+                        v-if="usernameLookupCache[username]?.loading"
+                        class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"
+                        title="Querying..."
+                      ></span>
+                      <span
+                        v-else-if="usernameLookupCache[username]?.data?.isChannel"
+                        class="w-1.5 h-1.5 rounded-full bg-indigo-400 shadow-xs"
+                        title="Channel / Group"
+                      ></span>
+                      <span
+                        v-else-if="usernameLookupCache[username]?.data"
+                        class="w-1.5 h-1.5 rounded-full bg-teal-400"
+                        title="User account"
+                      ></span>
+                      <span
+                        :class="[
+                          'text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-md transition-colors',
+                          selectedUsernamesExplorer.includes(username)
+                            ? 'bg-white/20 text-white'
+                            : 'bg-gray-200/70 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
+                        ]"
+                      >
+                        {{ usernamePostCountsExplorer[username] || 0 }}
+                      </span>
+                    </div>
                   </button>
                 </div>
               </div>
@@ -15693,6 +16303,8 @@ onUnmounted(() => {
                   v-for="username in allUsernames"
                   :key="username"
                   @click="toggleUsername(username)"
+                  @mouseenter="handleUsernameMouseEnter(username, $event)"
+                  @mouseleave="handleUsernameMouseLeave"
                   :class="[
                     'w-full text-left px-3 py-2.5 rounded-xl text-xs font-semibold transition-all flex justify-between items-center cursor-pointer',
                     selectedUsernames.includes(username)
@@ -15700,15 +16312,35 @@ onUnmounted(() => {
                       : 'bg-gray-50 dark:bg-gray-900 border border-gray-150/40 dark:border-gray-800/40 text-gray-700 dark:text-gray-300 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400',
                   ]"
                 >
-                  <span>{{ username }}</span>
-                  <span
-                    :class="[
-                      'text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-md',
-                      selectedUsernames.includes(username)
-                        ? 'opacity-80 bg-white/20 text-white'
-                        : 'opacity-70 bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
-                    ]"
-                  >{{ usernamePostCounts[username] || 0 }}</span>
+                  <span class="truncate mr-2 flex items-center gap-1">
+                    <span class="opacity-40 text-[11px] font-normal">@</span>
+                    <span>{{ username.replace(/^@/, '') }}</span>
+                  </span>
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <span
+                      v-if="usernameLookupCache[username]?.loading"
+                      class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping"
+                      title="Querying..."
+                    ></span>
+                    <span
+                      v-else-if="usernameLookupCache[username]?.data?.isChannel"
+                      class="w-1.5 h-1.5 rounded-full bg-indigo-400 shadow-xs"
+                      title="Channel / Group"
+                    ></span>
+                    <span
+                      v-else-if="usernameLookupCache[username]?.data"
+                      class="w-1.5 h-1.5 rounded-full bg-teal-400"
+                      title="User account"
+                    ></span>
+                    <span
+                      :class="[
+                        'text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-md',
+                        selectedUsernames.includes(username)
+                          ? 'opacity-80 bg-white/20 text-white'
+                          : 'opacity-70 bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
+                      ]"
+                    >{{ usernamePostCounts[username] || 0 }}</span>
+                  </div>
                 </button>
               </div>
             </div>
@@ -18086,13 +18718,18 @@ onUnmounted(() => {
               <!-- Channel Metadata Widget -->
               <div v-if="selectedListenNode.type === 'channel'" class="transition-all duration-300">
                 <!-- Loading Metadata state -->
-                <div v-if="isFetchingChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm p-6 flex items-center justify-center gap-3 text-gray-500 text-xs">
+                <div v-if="isFetchingChannelMetadata && !selectedChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm p-6 flex items-center justify-center gap-3 text-gray-500 text-xs">
                   <LoaderCircle class="h-4 w-4 animate-spin text-teal-500" />
                   <span>{{ t('listen.fetchingChannelProfile') }}</span>
                 </div>
                 
                 <!-- Display Metadata state -->
-                <div v-else-if="selectedChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col md:flex-row items-stretch">
+                <div v-else-if="selectedChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col md:flex-row items-stretch relative">
+                  <!-- Non-intrusive background refresh badge when updating existing channel metadata -->
+                  <div v-if="isFetchingChannelMetadata" class="absolute top-3 right-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-teal-50 dark:bg-teal-900/60 text-teal-600 dark:text-teal-300 text-[10px] font-bold animate-pulse border border-teal-200/60 dark:border-teal-800/60 z-20 shadow-2xs">
+                    <RefreshCw class="h-3 w-3 animate-spin" />
+                    <span>{{ t('listen.syncing') || 'Refreshing...' }}</span>
+                  </div>
                   <!-- Left accent gradient and avatar bar -->
                   <div class="bg-gradient-to-br from-teal-500/20 to-teal-600/5 dark:from-teal-950/40 dark:to-teal-900/10 p-6 flex flex-row md:flex-col items-center justify-center gap-4 border-b md:border-b-0 md:border-r border-gray-150 dark:border-gray-700 md:w-48 shrink-0 select-none">
                     <div 
@@ -18181,7 +18818,7 @@ onUnmounted(() => {
                 <!-- Active post list feeds cascade -->
                 <div v-else class="space-y-6">
                   <div
-                    v-for="(post, index) in listenPosts"
+                    v-for="(post, index) in visibleListenPosts"
                     :key="post.key || index"
                     :id="'listen-post-' + (post.key || index)"
                     class="rounded-3xl shadow-sm border p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden bg-white dark:bg-gray-800"
@@ -18503,6 +19140,22 @@ onUnmounted(() => {
                     </details>
 
                   </div>
+
+                  <!-- Progressive Rendering / Infinite Scroll Trigger for Listen Feed -->
+                  <div ref="listenBottomSentinel" class="py-4 flex flex-col items-center justify-center gap-2">
+                    <div v-if="hasMoreListenPosts" class="flex items-center gap-2">
+                      <button
+                        @click="loadMoreListenPosts"
+                        class="px-4 py-2 rounded-xl text-xs font-semibold bg-gray-100 dark:bg-gray-700 hover:bg-teal-50 hover:text-teal-600 dark:hover:bg-gray-600 dark:hover:text-teal-300 text-gray-600 dark:text-gray-300 transition-colors flex items-center gap-2 shadow-2xs border border-gray-200 dark:border-gray-600 cursor-pointer"
+                      >
+                        <ChevronDown class="h-4 w-4" />
+                        <span>{{ t('listen.loadMore') || 'Load more posts' }} ({{ visibleListenPosts.length }} / {{ listenPosts.length }})</span>
+                      </button>
+                    </div>
+                    <div v-else-if="listenPosts.length > 0" class="text-[11px] text-gray-400 dark:text-gray-500 font-medium py-2">
+                      {{ t('listen.allPostsLoaded') || 'All posts loaded' }} ({{ listenPosts.length }})
+                    </div>
+                  </div>
                 </div>
 
               </div>
@@ -18579,6 +19232,13 @@ onUnmounted(() => {
                             >
                               <span class="h-1.5 w-1.5 rounded-full" :class="getFreshnessDotColor(getItemOrFolderFreshness(selectedListenNode)!.level)"></span>
                               <span>{{ t('listen.freshness') }}: {{ getItemOrFolderFreshness(selectedListenNode)!.relativeTime }}</span>
+                            </span>
+                            <span
+                              v-if="isFetchingChannelMetadata"
+                              class="px-2 py-0.5 rounded-md text-[10px] font-bold border border-teal-200 dark:border-teal-800 bg-teal-50 dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 inline-flex items-center gap-1 animate-pulse"
+                            >
+                              <RefreshCw class="h-2.5 w-2.5 animate-spin" />
+                              <span>{{ t('listen.syncing') || 'Refreshing...' }}</span>
                             </span>
                           </div>
                           <div class="flex items-center gap-3 mt-1 text-xs text-gray-500 dark:text-gray-400 flex-wrap">
@@ -18762,7 +19422,7 @@ onUnmounted(() => {
                       </div>
 
                       <div
-                        v-for="(post, index) in listenPosts.slice(0, 30)"
+                        v-for="(post, index) in visibleListenPosts"
                         :key="post.key || index"
                         :id="'listen-post-' + (post.key || index)"
                         class="p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-gray-200/90 dark:border-gray-700/80 bg-white/95 dark:bg-gray-900/70 hover:bg-white dark:hover:bg-gray-900 hover:border-teal-400/60 dark:hover:border-teal-500/50 hover:shadow-md dark:hover:shadow-lg dark:hover:shadow-black/50 transition-all duration-200 space-y-3.5 group/post"
@@ -19041,6 +19701,22 @@ onUnmounted(() => {
                           </div>
                         </div>
 
+                      </div>
+
+                      <!-- Progressive Rendering / Infinite Scroll Trigger for Rearrange Posts Flow -->
+                      <div class="py-3 flex flex-col items-center justify-center gap-1.5">
+                        <div v-if="hasMoreListenPosts" class="flex items-center gap-2">
+                          <button
+                            @click="loadMoreListenPosts"
+                            class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-gray-100 dark:bg-gray-800 hover:bg-teal-50 hover:text-teal-600 dark:hover:bg-gray-700 dark:hover:text-teal-300 text-gray-600 dark:text-gray-300 transition-colors flex items-center gap-1.5 shadow-2xs border border-gray-200 dark:border-gray-700 cursor-pointer"
+                          >
+                            <ChevronDown class="h-3.5 w-3.5" />
+                            <span>{{ t('listen.loadMore') || 'Load more posts' }} ({{ visibleListenPosts.length }} / {{ listenPosts.length }})</span>
+                          </button>
+                        </div>
+                        <div v-else-if="listenPosts.length > 0" class="text-[10px] text-gray-400 dark:text-gray-500 font-medium py-1">
+                          {{ t('listen.allPostsLoaded') || 'All posts loaded' }} ({{ listenPosts.length }})
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -20839,8 +21515,10 @@ onUnmounted(() => {
                       <!-- Listen Button -->
                       <button
                         @click="addChannelToListenDirectory(selectedNetworkNode.displayName, selectedNetworkNode.id)"
+                        @mouseenter="checkNetworkListenDirectory"
+                        @mousemove="checkNetworkListenDirectory"
                         class="shrink-0 p-2.5 bg-purple-50/75 dark:bg-purple-950/40 hover:bg-purple-100 dark:hover:bg-purple-900/60 border border-purple-100 dark:border-purple-900/30 text-purple-600 dark:text-purple-400 rounded-xl transition-all cursor-pointer flex items-center justify-center shadow-sm hover:shadow"
-                        :title="$t('network.addToListenDirectory')"
+                        :title="networkListenHint"
                       >
                         <Radio class="h-4 w-4" />
                       </button>
@@ -21746,6 +22424,290 @@ onUnmounted(() => {
 
     </div>
 
+    <!-- Global Username Lookup Hover Card / Tooltip -->
+    <Teleport to="body">
+      <div
+        v-if="isUsernameTooltipVisible && hoveredUsername"
+        class="fixed z-[99999] pointer-events-auto transition-all duration-150 ease-out select-none"
+        :style="{
+          top: `${usernameTooltipPos.top}px`,
+          left: `${usernameTooltipPos.left}px`,
+        }"
+        @mouseenter="handleTooltipMouseEnter"
+        @mouseleave="handleTooltipMouseLeave"
+      >
+        <div
+          class="w-[330px] bg-white/95 dark:bg-gray-900/95 backdrop-blur-xl border border-gray-200/90 dark:border-gray-700/80 rounded-3xl shadow-2xl p-4 flex flex-col gap-3 animate-in fade-in zoom-in-95 duration-150"
+        >
+          <!-- Top Header: Avatar + Title + Handle + Close Button -->
+          <div class="flex items-start justify-between gap-2.5">
+            <div class="flex items-center gap-2.5 min-w-0 flex-1">
+              <!-- Avatar with fallback -->
+              <div
+                :class="[
+                  'relative w-11 h-11 rounded-2xl shrink-0 overflow-hidden border flex items-center justify-center shadow-2xs',
+                  currentHoveredUserMetadata?.isChannel
+                    ? 'bg-gradient-to-br from-indigo-500/20 to-indigo-700/15 border-indigo-500/30'
+                    : 'bg-gradient-to-br from-teal-500/20 to-teal-700/15 border-teal-500/30'
+                ]"
+              >
+                <img
+                  v-if="currentHoveredUserMetadata?.photo"
+                  :src="(currentHoveredUserMetadata.photo && currentHoveredUserMetadata.photo.startsWith('data:'))
+                    ? currentHoveredUserMetadata.photo
+                    : `https://i.gogingko.net/api/v1/v/telegram-profile/${getCleanHandle(hoveredUsername)}`"
+                  @error="handleImageError"
+                  class="w-full h-full object-cover"
+                  referrerPolicy="no-referrer"
+                  alt="Avatar"
+                />
+                <div
+                  v-else
+                  :class="[
+                    'text-xs font-black font-mono tracking-wider',
+                    currentHoveredUserMetadata?.isChannel ? 'text-indigo-600 dark:text-indigo-400' : 'text-teal-600 dark:text-teal-400'
+                  ]"
+                >
+                  {{ getInitials(currentHoveredUserMetadata?.title || hoveredUsername) || '@' }}
+                </div>
+                <!-- Entity Type Icon Badge -->
+                <span
+                  :class="[
+                    'absolute -bottom-0.5 -right-0.5 p-0.5 rounded-md text-white shadow-xs',
+                    currentHoveredUserMetadata?.isChannel ? 'bg-indigo-600' : 'bg-teal-600'
+                  ]"
+                >
+                  <Radio v-if="currentHoveredUserMetadata?.isChannel" class="w-2.5 h-2.5" />
+                  <User v-else class="w-2.5 h-2.5" />
+                </span>
+              </div>
+
+              <!-- Titles -->
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <h4 class="text-xs font-black text-gray-900 dark:text-white truncate max-w-[160px]" :title="currentHoveredUserMetadata?.title || hoveredUsername">
+                    {{ currentHoveredUserMetadata?.title || `@${getCleanHandle(hoveredUsername)}` }}
+                  </h4>
+                  <!-- Channel/Group Badge vs Bot vs Verified -->
+                  <span
+                    v-if="currentHoveredUserMetadata?.isChannel"
+                    class="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 rounded-md shrink-0"
+                  >
+                    CHANNEL
+                  </span>
+                  <span
+                    v-else-if="currentHoveredUserMetadata?.is_bot"
+                    class="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 bg-purple-500/15 text-purple-600 dark:text-purple-400 border border-purple-500/30 rounded-md shrink-0"
+                  >
+                    BOT
+                  </span>
+                  <span
+                    v-if="currentHoveredUserMetadata?.verified"
+                    class="text-[9px] font-bold text-teal-600 dark:text-teal-400 shrink-0"
+                    title="Verified"
+                  >
+                    <CheckCircle2 class="w-3.5 h-3.5" />
+                  </span>
+                </div>
+                <div class="flex items-center gap-1 mt-0.5">
+                  <span
+                    :class="[
+                      'text-[11px] font-mono font-medium truncate',
+                      currentHoveredUserMetadata?.isChannel ? 'text-indigo-600 dark:text-indigo-400' : 'text-teal-600 dark:text-teal-400'
+                    ]"
+                  >
+                    @{{ getCleanHandle(hoveredUsername) }}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Dismiss button -->
+            <button
+              @click="isUsernameTooltipVisible = false"
+              class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors shrink-0 cursor-pointer"
+              title="Close"
+            >
+              <X class="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <!-- Loading State Skeleton -->
+          <div v-if="currentLookupState?.loading" class="py-2 px-1 flex flex-col items-center justify-center gap-2 text-center">
+            <div class="flex items-center gap-2 text-xs font-bold text-teal-600 dark:text-teal-400">
+              <Loader2 class="w-3.5 h-3.5 animate-spin" />
+              <span>{{ t('explorer.lookingUpUser') }}</span>
+            </div>
+            <div class="w-full space-y-1.5 mt-1">
+              <div class="h-2 bg-gray-100 dark:bg-gray-800 rounded-full animate-pulse w-4/5 mx-auto"></div>
+              <div class="h-1.5 bg-gray-100 dark:bg-gray-800 rounded-full animate-pulse w-3/5 mx-auto"></div>
+            </div>
+          </div>
+
+          <!-- Metadata Found State -->
+          <div v-else-if="currentHoveredUserMetadata" class="space-y-2.5">
+            <!-- DC Region Banner if available -->
+            <div
+              v-if="currentHoveredUserMetadata.cdnNumber || currentHoveredUserMetadata.cdnRegion"
+              :class="[
+                'flex items-center justify-between px-3 py-1.5 rounded-xl text-[10px] border',
+                currentHoveredUserMetadata.isChannel
+                  ? 'bg-indigo-500/[0.08] dark:bg-indigo-500/15 border-indigo-500/25'
+                  : 'bg-teal-500/[0.08] dark:bg-teal-500/15 border-teal-500/25'
+              ]"
+            >
+              <div class="flex items-center gap-1.5">
+                <span
+                  :class="[
+                    'inline-block w-1.5 h-1.5 rounded-full animate-pulse',
+                    currentHoveredUserMetadata.isChannel ? 'bg-indigo-500 dark:bg-indigo-400' : 'bg-teal-500 dark:bg-teal-400'
+                  ]"
+                ></span>
+                <span
+                  :class="[
+                    'font-mono font-black uppercase tracking-wider',
+                    currentHoveredUserMetadata.isChannel ? 'text-indigo-700 dark:text-indigo-300' : 'text-teal-700 dark:text-teal-300'
+                  ]"
+                >
+                  DC {{ currentHoveredUserMetadata.cdnNumber }}
+                </span>
+              </div>
+              <span v-if="currentHoveredUserMetadata.cdnRegion" class="font-semibold text-gray-600 dark:text-gray-300 truncate max-w-[170px]">
+                {{ currentHoveredUserMetadata.cdnRegion[1] || currentHoveredUserMetadata.cdnRegion[0] }}
+              </span>
+            </div>
+
+            <!-- Bio / About / Channel Description if present -->
+            <div v-if="currentHoveredUserMetadata.description" class="space-y-1">
+              <p class="text-[11px] text-gray-600 dark:text-gray-300 font-normal leading-relaxed bg-gray-50/80 dark:bg-gray-950/40 p-2.5 rounded-xl border border-gray-150/40 dark:border-gray-800/50 max-h-20 overflow-y-auto custom-scrollbar break-words">
+                {{ currentHoveredUserMetadata.description }}
+              </p>
+            </div>
+
+            <!-- Bento Stats / Metadata Grid -->
+            <div class="grid grid-cols-2 gap-1.5 text-[11px]">
+              <!-- Channel Posts Count in Current View -->
+              <div class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50">
+                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 block">Posts in Channel</span>
+                <span
+                  :class="[
+                    'font-bold font-mono text-xs',
+                    currentHoveredUserMetadata.isChannel ? 'text-indigo-600 dark:text-indigo-400' : 'text-teal-600 dark:text-teal-400'
+                  ]"
+                >
+                  {{ usernamePostCountsExplorer[hoveredUsername] || usernamePostCounts[hoveredUsername] || 0 }}
+                </span>
+              </div>
+
+              <!-- Channel Members / Subscribers (if channel) OR Node ID (if user) -->
+              <div
+                v-if="currentHoveredUserMetadata.isChannel && currentHoveredUserMetadata.members !== undefined"
+                class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50"
+              >
+                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 block">Subscribers</span>
+                <span class="font-bold font-mono text-indigo-600 dark:text-indigo-400 text-xs block">
+                  {{ formatNumber(currentHoveredUserMetadata.members) }}
+                </span>
+              </div>
+              <div
+                v-else
+                class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50"
+              >
+                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 block">Node ID</span>
+                <span class="font-bold font-mono text-gray-800 dark:text-gray-200 text-xs truncate block" :title="String(currentHoveredUserMetadata.id || '')">
+                  {{ currentHoveredUserMetadata.id || currentHoveredUserMetadata.uid || 'N/A' }}
+                </span>
+              </div>
+
+              <!-- Additional Channel Media Stats (Photos/Links) if available -->
+              <div
+                v-if="currentHoveredUserMetadata.isChannel && (currentHoveredUserMetadata.photos !== undefined || currentHoveredUserMetadata.links !== undefined)"
+                class="col-span-2 px-2.5 py-1.5 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 flex items-center justify-between text-[10px]"
+              >
+                <span class="font-mono text-gray-500 dark:text-gray-400">
+                  <span class="font-bold text-gray-700 dark:text-gray-200">{{ currentHoveredUserMetadata.photos ?? 0 }}</span> photos
+                </span>
+                <span class="font-mono text-gray-500 dark:text-gray-400">
+                  <span class="font-bold text-gray-700 dark:text-gray-200">{{ currentHoveredUserMetadata.links ?? 0 }}</span> links
+                </span>
+                <span class="text-[9px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
+                  Public Channel
+                </span>
+              </div>
+
+              <!-- Status if present (for user) -->
+              <div
+                v-else-if="currentHoveredUserMetadata.status"
+                class="col-span-2 px-2 py-1.5 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 flex items-center justify-between"
+              >
+                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400">Status</span>
+                <span class="font-semibold text-gray-700 dark:text-gray-300 text-[10px] truncate max-w-[200px]">
+                  {{ currentHoveredUserMetadata.status }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Uncached / Not in Public Index State -->
+          <div v-else class="space-y-2 py-1">
+            <div class="flex items-center gap-1.5 text-amber-600 dark:text-amber-400 text-xs font-bold">
+              <Info class="w-3.5 h-3.5 shrink-0" />
+              <span>{{ t('explorer.noUserMetadata') }}</span>
+            </div>
+            <p class="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed">
+              {{ t('explorer.noUserMetadataDesc') }}
+            </p>
+            <div class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 flex items-center justify-between text-[11px]">
+              <span class="text-[10px] font-black uppercase tracking-wider text-gray-400">Channel Posts</span>
+              <span class="font-bold text-teal-600 dark:text-teal-400 font-mono">
+                {{ usernamePostCountsExplorer[hoveredUsername] || usernamePostCounts[hoveredUsername] || 0 }}
+              </span>
+            </div>
+          </div>
+
+          <!-- Action Footer Buttons -->
+          <div class="pt-2 border-t border-gray-150/70 dark:border-gray-800/70 flex items-center gap-1.5">
+            <!-- Filter channel posts toggle -->
+            <button
+              @click="activeTab === 'explorer' ? toggleUsernameExplorer(hoveredUsername) : toggleUsername(hoveredUsername)"
+              :class="[
+                'flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-3xs',
+                (selectedUsernamesExplorer.includes(hoveredUsername) || selectedUsernames.includes(hoveredUsername))
+                  ? 'bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200/60'
+                  : 'bg-teal-600 hover:bg-teal-700 text-white shadow-teal-600/20'
+              ]"
+            >
+              <Filter class="w-3.5 h-3.5" />
+              <span>
+                {{ (selectedUsernamesExplorer.includes(hoveredUsername) || selectedUsernames.includes(hoveredUsername))
+                  ? t('explorer.clearUserFilter')
+                  : t('explorer.filterByThisUser') }}
+              </span>
+            </button>
+
+            <!-- Dossier Lookup in Channel Tab -->
+            <button
+              @click="jumpToChannelsLookup(hoveredUsername)"
+              class="flex items-center justify-center gap-1 py-1.5 px-2.5 rounded-xl text-xs font-bold bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60 transition-colors cursor-pointer"
+              :title="t('explorer.userDossier')"
+            >
+              <ExternalLink class="w-3.5 h-3.5" />
+              <span>{{ t('explorer.userDossier') }}</span>
+            </button>
+
+            <!-- Copy @handle -->
+            <button
+              @click="copyTooltipUsername(hoveredUsername)"
+              class="p-1.5 rounded-xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-600 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60 transition-colors cursor-pointer shrink-0"
+              :title="usernameTooltipCopied ? 'Copied!' : 'Copy @handle'"
+            >
+              <CheckCircle2 v-if="usernameTooltipCopied" class="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
+              <Copy v-else class="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 

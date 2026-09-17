@@ -50,6 +50,7 @@ export default {
     edit: "Editar",
     copy: "Copiar",
     copied: "¡Copiado!",
+    paste: "Pegar",
     loading: "Cargando...",
     reset: "Restablecer",
     error: "Error",
