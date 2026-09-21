@@ -1162,7 +1162,7 @@ const generalAsk = async (userInputText, details) => {
             if (cleanQuery) {
               // Do a profile index search on ES
               const esPayload = {
-                size: 30,
+                size: 50,
                 query: {
                   match: {
                     content: cleanQuery
@@ -7342,9 +7342,16 @@ watch(currentChannelName, (newChannel) => {
     }
 });
 
+interface FolderCrumb {
+  id: string;
+  name: string;
+}
+
 interface ListenHit {
   item: ListenItem;
   path: string[];
+  folders: string[];
+  folderCrumbs: FolderCrumb[];
   matchedBy: "username" | "title";
 }
 
@@ -7373,16 +7380,22 @@ const findListenDirectoryHit = (
   const searchTree = (
     nodes: ListenItem[],
     currentPath: string[],
+    currentCrumbs: FolderCrumb[],
     predicate: (item: ListenItem) => boolean
-  ): { item: ListenItem; path: string[] } | null => {
+  ): { item: ListenItem; path: string[]; folders: string[]; folderCrumbs: FolderCrumb[] } | null => {
     // 1. First pass: prioritize non-folder channel items
     for (const node of nodes) {
       const nodePath = [...currentPath, node.name];
       if (!node.isFolder && predicate(node)) {
-        return { item: node, path: nodePath };
+        return { item: node, path: nodePath, folders: currentPath, folderCrumbs: currentCrumbs };
       }
       if (node.children && Array.isArray(node.children) && node.children.length > 0) {
-        const found = searchTree(node.children, nodePath, predicate);
+        const found = searchTree(
+          node.children,
+          nodePath,
+          [...currentCrumbs, { id: node.id, name: node.name }],
+          predicate
+        );
         if (found) return found;
       }
     }
@@ -7390,7 +7403,7 @@ const findListenDirectoryHit = (
     for (const node of nodes) {
       const nodePath = [...currentPath, node.name];
       if (node.isFolder && predicate(node)) {
-        return { item: node, path: nodePath };
+        return { item: node, path: nodePath, folders: currentPath, folderCrumbs: currentCrumbs };
       }
     }
     return null;
@@ -7400,7 +7413,7 @@ const findListenDirectoryHit = (
 
   // 1. check (search) channel username in the listen directory item tree
   if (cleanTargetUser) {
-    const userMatch = searchTree(tree, [], (node) => {
+    const userMatch = searchTree(tree, [], [], (node) => {
       const arg = cleanStr(node.argument);
       const nm = cleanStr(node.name);
       return arg === cleanTargetUser || nm === cleanTargetUser;
@@ -7410,6 +7423,8 @@ const findListenDirectoryHit = (
       hit = {
         item: userMatch.item,
         path: userMatch.path,
+        folders: userMatch.folders,
+        folderCrumbs: userMatch.folderCrumbs,
         matchedBy: "username"
       };
     }
@@ -7417,7 +7432,7 @@ const findListenDirectoryHit = (
 
   // 2. if not found, search channel title in the listen directory item tree
   if (!hit && cleanTargetTitle) {
-    const titleMatch = searchTree(tree, [], (node) => {
+    const titleMatch = searchTree(tree, [], [], (node) => {
       const nm = (node.name || "").trim().toLowerCase();
       const arg = (node.argument || "").trim().toLowerCase();
       return nm === cleanTargetTitle || arg === cleanTargetTitle;
@@ -7427,12 +7442,76 @@ const findListenDirectoryHit = (
       hit = {
         item: titleMatch.item,
         path: titleMatch.path,
+        folders: titleMatch.folders,
+        folderCrumbs: titleMatch.folderCrumbs,
         matchedBy: "title"
       };
     }
   }
 
   return hit;
+};
+
+const expandParentFoldersForNode = (targetId: string) => {
+  const findAndExpand = (nodes: ListenItem[], parents: string[]): boolean => {
+    for (const node of nodes) {
+      if (node.id === targetId) {
+        parents.forEach(pId => {
+          expandedFolders.value[pId] = true;
+        });
+        return true;
+      }
+      if (node.children && node.children.length > 0) {
+        const found = findAndExpand(node.children, [...parents, node.id]);
+        if (found) return true;
+      }
+    }
+    return false;
+  };
+  findAndExpand(listenDirectory.value, []);
+};
+
+const openListenItemFromExplorer = (item: ListenItem) => {
+  activeTab.value = "listen";
+  selectedListenNode.value = item;
+  selectedListenTagFilter.value = null;
+  listenSearchQuery.value = "";
+  expandParentFoldersForNode(item.id);
+  fetchListenPosts(item);
+};
+
+const openListenFolderFromExplorer = (folderId: string) => {
+  activeTab.value = "listen";
+  expandedFolders.value[folderId] = true;
+  expandParentFoldersForNode(folderId);
+  findNodeAndPerform(listenDirectory.value, folderId, (nodes, idx) => {
+    selectedListenNode.value = nodes[idx];
+    fetchListenPosts(nodes[idx]);
+  });
+};
+
+const filterListenByTagFromExplorer = (tag: string) => {
+  activeTab.value = "listen";
+  selectedListenTagFilter.value = tag;
+  listenSearchQuery.value = "";
+};
+
+const openAddChannelModalWithDetails = (name: string, username: string, parentId: string = "") => {
+  isEditingListenItem.value = false;
+  newTagInput.value = "";
+  editingTagIndex.value = null;
+  editingTagValue.value = "";
+  listenItemForm.value = {
+    id: "",
+    name: name || username,
+    isFolder: false,
+    type: "channel",
+    argument: username,
+    description: `Channel: @${username}`,
+    parentId,
+    tags: []
+  };
+  isListenModalOpen.value = true;
 };
 
 const explorerListenHit = ref<ListenHit | null>(null);
@@ -14615,6 +14694,200 @@ onUnmounted(() => {
                     >
                       {{ metadata.description || metadata.about }}
                     </p>
+                  </div>
+
+                  <!-- Listen Directory Info Widget Panel -->
+                  <div
+                    id="explorer-listen-status-panel"
+                    class="mb-6 rounded-2xl overflow-hidden border transition-all duration-300"
+                    :class="[
+                      explorerListenHit
+                        ? 'bg-teal-50/40 dark:bg-gray-900/45 border-teal-200/80 dark:border-teal-500/30 shadow-3xs'
+                        : 'bg-gray-50/50 dark:bg-gray-900/30 border-dashed border-gray-200 dark:border-gray-700/60'
+                    ]"
+                  >
+                    <!-- Header Strip -->
+                    <div
+                      class="px-4 py-2.5 border-b flex items-center justify-between gap-2"
+                      :class="[
+                        explorerListenHit
+                          ? 'border-teal-100/80 dark:border-gray-750/70 bg-teal-50/70 dark:bg-gray-900/70'
+                          : 'border-gray-150 dark:border-gray-750/60 bg-gray-100/40 dark:bg-gray-900/40'
+                      ]"
+                    >
+                      <div class="flex items-center gap-2 min-w-0">
+                        <Radio
+                          class="h-3.5 w-3.5 shrink-0"
+                          :class="explorerListenHit ? 'text-teal-600 dark:text-teal-400 animate-pulse' : 'text-gray-400 dark:text-gray-500'"
+                        />
+                        <span
+                          class="text-[11px] font-black uppercase tracking-wider truncate"
+                          :class="explorerListenHit ? 'text-teal-900 dark:text-teal-300' : 'text-gray-500 dark:text-gray-400'"
+                        >
+                          {{ explorerListenHit ? t('explorer.listenDirectoryLinked') : t('explorer.notInListenDirectory') }}
+                        </span>
+                      </div>
+
+                      <div class="flex items-center gap-1.5 shrink-0">
+                        <!-- If in Listen Directory: Quick Open & Edit buttons -->
+                        <template v-if="explorerListenHit">
+                          <button
+                            type="button"
+                            @click="openEditModal(explorerListenHit.item)"
+                            class="p-1 rounded-lg text-gray-500 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-300 hover:bg-teal-100/60 dark:hover:bg-gray-800 transition-colors cursor-pointer"
+                            :title="t('explorer.editItemConfig')"
+                          >
+                            <Edit class="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            @click="openListenItemFromExplorer(explorerListenHit.item)"
+                            class="px-2.5 py-1 rounded-xl text-[11px] font-bold bg-teal-600 hover:bg-teal-500 text-white flex items-center gap-1 transition-all shadow-3xs cursor-pointer"
+                            :title="t('explorer.openInListen')"
+                          >
+                            <span>{{ t('explorer.openInListen') }}</span>
+                            <ChevronRight class="h-3 w-3" />
+                          </button>
+                        </template>
+
+                        <!-- If NOT in Listen Directory: Quick Add Button -->
+                        <template v-else>
+                          <button
+                            type="button"
+                            @click="addChannelToListenDirectory(metadata.title || channelName, metadata.username || channelName)"
+                            class="px-2.5 py-1 rounded-xl text-[11px] font-bold bg-teal-600 hover:bg-teal-500 text-white flex items-center gap-1 transition-all shadow-3xs cursor-pointer"
+                            :title="t('search.addToListenDirectory')"
+                          >
+                            <Plus class="h-3 w-3" />
+                            <span>{{ t('search.addToListenDirectory') }}</span>
+                          </button>
+                        </template>
+                      </div>
+                    </div>
+
+                    <!-- Panel Body Content -->
+                    <div v-if="explorerListenHit" class="p-3.5 space-y-3 text-xs">
+                      <!-- 1. Folder / Subfolder Hierarchy -->
+                      <div class="space-y-1.5">
+                        <div class="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-400">
+                          <span class="flex items-center gap-1.5">
+                            <FolderTree class="h-3 w-3 text-teal-500 dark:text-teal-400" />
+                            <span>{{ t('explorer.directoryLocation') }}</span>
+                          </span>
+                          <span v-if="explorerListenHit.folders && explorerListenHit.folders.length > 0" class="font-mono text-[9px] text-teal-600 dark:text-teal-400 font-bold">
+                            {{ explorerListenHit.folders.length === 1 ? t('explorer.folder') : `${t('explorer.folder')} + ${t('explorer.subfolder')}` }}
+                          </span>
+                        </div>
+
+                        <!-- Breadcrumb chips row -->
+                        <div class="flex items-center gap-1.5 flex-wrap">
+                          <!-- If in Root (no folders) -->
+                          <div
+                            v-if="!explorerListenHit.folders || explorerListenHit.folders.length === 0"
+                            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-gray-100/80 dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700/80 text-gray-600 dark:text-gray-300 font-medium text-[11px]"
+                          >
+                            <Folder class="h-3 w-3 text-gray-400 dark:text-gray-400" />
+                            <span>{{ t('explorer.rootDirectory') }}</span>
+                          </div>
+
+                          <!-- If in Folder / Subfolder hierarchy -->
+                          <template v-else>
+                            <template v-for="(crumb, idx) in (explorerListenHit.folderCrumbs || [])" :key="crumb.id || idx">
+                              <!-- Folder Chip (clickable to navigate to that folder in Listen tab) -->
+                              <button
+                                type="button"
+                                @click="openListenFolderFromExplorer(crumb.id)"
+                                class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl font-bold text-[11px] transition-all cursor-pointer border shadow-3xs"
+                                :class="[
+                                  idx === 0
+                                    ? 'bg-amber-50/90 dark:bg-amber-950/40 border-amber-200/80 dark:border-amber-700/50 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50'
+                                    : 'bg-teal-50/90 dark:bg-teal-950/40 border-teal-200/80 dark:border-teal-700/50 text-teal-800 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900/50'
+                                ]"
+                                :title="idx === 0 ? `${t('explorer.folder')}: ${crumb.name}` : `${t('explorer.subfolder')}: ${crumb.name}`"
+                              >
+                                <component :is="idx === 0 ? Folder : FolderOpen" class="h-3 w-3 text-yellow-500 shrink-0" />
+                                <span class="truncate max-w-[120px]">{{ crumb.name }}</span>
+                              </button>
+
+                              <!-- Separator Chevron -->
+                              <ChevronRight v-if="idx < (explorerListenHit.folderCrumbs?.length || 1) - 1" class="h-3 w-3 text-gray-300 dark:text-gray-500 shrink-0" />
+                            </template>
+                          </template>
+                        </div>
+                      </div>
+
+                      <!-- 2. Tags Section -->
+                      <div class="space-y-1.5 pt-2 border-t border-gray-150/70 dark:border-gray-750/70">
+                        <div class="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-400">
+                          <span class="flex items-center gap-1.5">
+                            <Tag class="h-3 w-3 text-teal-500 dark:text-teal-400" />
+                            <span>{{ t('listen.itemTags') }}</span>
+                          </span>
+                          <span v-if="explorerListenHit.item.tags && explorerListenHit.item.tags.length > 0" class="font-mono text-[9px] text-teal-600 dark:text-teal-400 font-bold tabular-nums">
+                            {{ explorerListenHit.item.tags.length }}
+                          </span>
+                        </div>
+
+                        <!-- Active Tags Badges -->
+                        <div v-if="explorerListenHit.item.tags && explorerListenHit.item.tags.length > 0" class="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            v-for="tag in explorerListenHit.item.tags"
+                            :key="tag"
+                            @click="filterListenByTagFromExplorer(tag)"
+                            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer select-none border"
+                            :class="getTagBadgeStyle(tag)"
+                            :title="t('explorer.clickToFilterListen', { tag })"
+                          >
+                            <span class="opacity-60 text-[10px] font-mono">#</span>
+                            <span>{{ tag }}</span>
+                          </span>
+
+                          <button
+                            type="button"
+                            @click="openEditModal(explorerListenHit.item)"
+                            class="p-1 rounded-lg text-gray-400 hover:text-teal-600 dark:hover:text-teal-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer"
+                            :title="t('listen.tagAdd')"
+                          >
+                            <Plus class="h-3 w-3" />
+                          </button>
+                        </div>
+
+                        <!-- No Tags set yet: offer quick Add Tags -->
+                        <div v-else class="flex items-center justify-between py-0.5">
+                          <span class="text-xs text-gray-400 dark:text-gray-500 italic">{{ t('listen.noTags') }}</span>
+                          <button
+                            type="button"
+                            @click="openEditModal(explorerListenHit.item)"
+                            class="px-2 py-0.5 rounded-lg text-[11px] font-bold text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-gray-800 border border-dashed border-teal-300 dark:border-teal-700/80 flex items-center gap-1 transition-colors cursor-pointer"
+                          >
+                            <Plus class="h-2.5 w-2.5" />
+                            <span>{{ t('listen.tagAdd') }}</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <!-- 3. Config details (If item has custom name in directory) -->
+                      <div v-if="explorerListenHit.item.name && explorerListenHit.item.name !== metadata.title" class="pt-2 border-t border-gray-150/70 dark:border-gray-750/70 flex items-center justify-between text-[11px]">
+                        <span class="truncate font-medium">
+                          <span class="text-gray-400 dark:text-gray-400">{{ t('explorer.aliasInDirectory') }}:</span>
+                          <strong class="text-gray-700 dark:text-gray-200 ml-1">{{ explorerListenHit.item.name }}</strong>
+                        </span>
+                      </div>
+                    </div>
+
+                    <!-- Panel Footer for Unlinked item -->
+                    <div v-else class="p-3 text-[11px] text-gray-500 dark:text-gray-400 flex items-center justify-between">
+                      <span class="italic text-gray-400 dark:text-gray-500">
+                        {{ t('explorer.notInListenDirectory') }}
+                      </span>
+                      <button
+                        type="button"
+                        @click="openAddChannelModalWithDetails(metadata.title || channelName, metadata.username || channelName)"
+                        class="text-teal-600 dark:text-teal-400 hover:underline font-bold cursor-pointer"
+                      >
+                        {{ t('listen.addWatchDirectory') }}
+                      </button>
+                    </div>
                   </div>
 
                   <!-- Optimized Counters Grid -->
