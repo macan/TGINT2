@@ -629,7 +629,18 @@ export default {
     errorEmptyDirectory: "No listened channels or keywords found in directory",
     newPostsBadge: "+{count} new",
     clearNewBadges: "Clear new indicators",
-    hasNewPostsTip: "Has {count} new posts fetched"
+    hasNewPostsTip: "Has {count} new posts fetched",
+    itemTags: "Tags",
+    tagsPlaceholder: "Add tag and press Enter or comma...",
+    tagAdd: "Add Tag",
+    editTag: "Edit Tag",
+    deleteTag: "Remove tag",
+    popularTags: "Existing tags:",
+    noTags: "No tags added yet",
+    filterByTagTooltip: "Click to filter by #{tag}",
+    allTagsFilter: "All Tags",
+    tagFilterActive: "Filtered by tag: #{tag}",
+    clearTagFilter: "Clear tag filter"
   },
   autoFinding: {
     title: "Automated BFS Discovery Engine",

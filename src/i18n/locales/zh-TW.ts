@@ -614,7 +614,18 @@ export default {
     errorEmptyDirectory: "監聽目錄中沒有找到可同步的頻道或關鍵字",
     newPostsBadge: "+{count} 新動態",
     clearNewBadges: "清除未讀更新標記",
-    hasNewPostsTip: "擷取到 {count} 則新動態"
+    hasNewPostsTip: "擷取到 {count} 則新動態",
+    itemTags: "標籤",
+    tagsPlaceholder: "輸入標籤並按 Enter 或逗號...",
+    tagAdd: "新增標籤",
+    editTag: "編輯標籤",
+    deleteTag: "刪除標籤",
+    popularTags: "已有標籤：",
+    noTags: "暫無標籤",
+    filterByTagTooltip: "點擊按 #{tag} 篩選",
+    allTagsFilter: "所有標籤",
+    tagFilterActive: "已依標籤篩選: #{tag}",
+    clearTagFilter: "清除標籤篩選"
   },
   autoFinding: {
     title: "自動化廣度優先探索引擎",

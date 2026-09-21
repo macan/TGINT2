@@ -93,6 +93,8 @@ import {
   Zap,
   Square,
   Play,
+  Tag,
+  Check,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -1815,6 +1817,7 @@ const copyTooltipUsername = (username: string) => {
   toastMessage.value = `Copied @${clean} to clipboard`;
   setTimeout(() => {
     usernameTooltipCopied.value = false;
+    toastMessage.value = ""
   }, 2000);
 };
 
@@ -2438,7 +2441,8 @@ const listenDirectory = ref<ListenItem[]>([
         create_time: new Date().toISOString(),
         type: "channel",
         argument: "durov",
-        description: "Official channel of Telegram founder Pavel Durov"
+        description: "Official channel of Telegram founder Pavel Durov",
+        tags: ["founder", "telegram", "official"]
       },
       {
         id: "item-ai-keywords",
@@ -2447,7 +2451,8 @@ const listenDirectory = ref<ListenItem[]>([
         create_time: new Date().toISOString(),
         type: "keyword",
         argument: "artificial intelligence, deepmind, gemini",
-        description: "Post stream containing key AI phrases"
+        description: "Post stream containing key AI phrases",
+        tags: ["ai", "deepmind", "research"]
       }
     ]
   },
@@ -2458,7 +2463,8 @@ const listenDirectory = ref<ListenItem[]>([
     create_time: new Date().toISOString(),
     type: "channel",
     argument: "toncoin",
-    description: "Updates about TON network"
+    description: "Updates about TON network",
+    tags: ["crypto", "ton", "web3"]
   }
 ]);
 
@@ -2599,8 +2605,128 @@ const listenItemForm = ref({
   type: "channel" as "channel" | "keyword",
   argument: "",
   description: "",
-  parentId: ""
+  parentId: "",
+  tags: [] as string[]
 });
+
+// Tag configuration state within Add/Edit Item modal
+const newTagInput = ref("");
+const editingTagIndex = ref<number | null>(null);
+const editingTagValue = ref("");
+
+const addTagToForm = (tagToAdd?: string) => {
+  const raw = tagToAdd !== undefined ? tagToAdd : newTagInput.value;
+  if (!raw) return;
+  const parts = raw.split(/[,，]/);
+  for (let part of parts) {
+    let clean = part.trim();
+    if (clean.startsWith("#")) {
+      clean = clean.substring(1).trim();
+    }
+    if (clean && !listenItemForm.value.tags.includes(clean)) {
+      listenItemForm.value.tags.push(clean);
+    }
+  }
+  if (tagToAdd === undefined) {
+    newTagInput.value = "";
+  }
+};
+
+const removeTagFromForm = (index: number) => {
+  listenItemForm.value.tags.splice(index, 1);
+  if (editingTagIndex.value === index) {
+    editingTagIndex.value = null;
+    editingTagValue.value = "";
+  }
+};
+
+const startEditTag = (index: number) => {
+  editingTagIndex.value = index;
+  editingTagValue.value = listenItemForm.value.tags[index] || "";
+};
+
+const saveEditTag = (index: number) => {
+  let clean = editingTagValue.value.trim();
+  if (clean.startsWith("#")) {
+    clean = clean.substring(1).trim();
+  }
+  if (clean) {
+    const existsAt = listenItemForm.value.tags.indexOf(clean);
+    if (existsAt === -1 || existsAt === index) {
+      listenItemForm.value.tags[index] = clean;
+    }
+  } else {
+    removeTagFromForm(index);
+  }
+  editingTagIndex.value = null;
+  editingTagValue.value = "";
+};
+
+const cancelEditTag = () => {
+  editingTagIndex.value = null;
+  editingTagValue.value = "";
+};
+
+// Aggregate all unique tags used across non-folder items in Listen Directory
+const allDirectoryTags = computed<{ tag: string; count: number }[]>(() => {
+  const tagCounts: Record<string, number> = {};
+  const collect = (nodes: ListenItem[]) => {
+    for (const node of nodes) {
+      if (!node.isFolder && Array.isArray(node.tags)) {
+        for (const t of node.tags) {
+          if (t && typeof t === "string") {
+            const clean = t.trim();
+            if (clean) {
+              tagCounts[clean] = (tagCounts[clean] || 0) + 1;
+            }
+          }
+        }
+      }
+      if (node.isFolder && node.children) {
+        collect(node.children);
+      }
+    }
+  };
+  collect(listenDirectory.value);
+  return Object.entries(tagCounts)
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+});
+
+// Color palettes for tags with excellent light/dark contrast
+const tagColorPalettes = [
+  "bg-teal-50 dark:bg-teal-950/40 text-teal-700 dark:text-teal-300 border-teal-200/70 dark:border-teal-800/50 hover:border-teal-400",
+  "bg-sky-50 dark:bg-sky-950/40 text-sky-700 dark:text-sky-300 border-sky-200/70 dark:border-sky-800/50 hover:border-sky-400",
+  "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border-indigo-200/70 dark:border-indigo-800/50 hover:border-indigo-400",
+  "bg-violet-50 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200/70 dark:border-violet-800/50 hover:border-violet-400",
+  "bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200/70 dark:border-amber-800/50 hover:border-amber-400",
+  "bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200/70 dark:border-rose-800/50 hover:border-rose-400",
+  "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200/70 dark:border-emerald-800/50 hover:border-emerald-400",
+  "bg-orange-50 dark:bg-orange-950/40 text-orange-700 dark:text-orange-300 border-orange-200/70 dark:border-orange-800/50 hover:border-orange-400"
+];
+
+const getTagBadgeStyle = (tag: string): string => {
+  let hash = 0;
+  for (let i = 0; i < tag.length; i++) {
+    hash = (hash << 5) - hash + tag.charCodeAt(i);
+    hash |= 0;
+  }
+  const idx = Math.abs(hash) % tagColorPalettes.length;
+  return tagColorPalettes[idx];
+};
+
+// Tag filter for search
+const selectedListenTagFilter = ref<string | null>(null);
+const toggleListenTagFilter = (tag: string) => {
+  if (selectedListenTagFilter.value === tag) {
+    selectedListenTagFilter.value = null;
+  } else {
+    selectedListenTagFilter.value = tag;
+  }
+};
+const clearListenTagFilter = () => {
+  selectedListenTagFilter.value = null;
+};
 
 const toggleFolderExpanded = (id: string) => {
   expandedFolders.value[id] = !expandedFolders.value[id];
@@ -3208,6 +3334,9 @@ const addChannelToListenDirectory = (name: string, username: string) => {
 
 const openAddModal = (parentId: string = "", isFolder: boolean = false) => {
   isEditingListenItem.value = false;
+  newTagInput.value = "";
+  editingTagIndex.value = null;
+  editingTagValue.value = "";
   listenItemForm.value = {
     id: "",
     name: "",
@@ -3215,13 +3344,17 @@ const openAddModal = (parentId: string = "", isFolder: boolean = false) => {
     type: "channel",
     argument: "",
     description: "",
-    parentId
+    parentId,
+    tags: []
   };
   isListenModalOpen.value = true;
 };
 
 const openEditModal = (item: ListenItem) => {
   isEditingListenItem.value = true;
+  newTagInput.value = "";
+  editingTagIndex.value = null;
+  editingTagValue.value = "";
   listenItemForm.value = {
     id: item.id,
     name: item.name,
@@ -3229,13 +3362,23 @@ const openEditModal = (item: ListenItem) => {
     type: item.type || "channel",
     argument: item.argument || "",
     description: item.description || "",
-    parentId: ""
+    parentId: "",
+    tags: item.tags && Array.isArray(item.tags) ? [...item.tags] : []
   };
   isListenModalOpen.value = true;
 };
 
 const saveListenItemForm = () => {
   if (!listenItemForm.value.name.trim()) return;
+
+  // Auto-commit any lingering tag in newTagInput
+  if (newTagInput.value.trim()) {
+    addTagToForm();
+  }
+
+  const itemTags = !listenItemForm.value.isFolder && Array.isArray(listenItemForm.value.tags) && listenItemForm.value.tags.length > 0
+    ? [...listenItemForm.value.tags]
+    : undefined;
 
   if (isEditingListenItem.value) {
     findNodeAndPerform(listenDirectory.value, listenItemForm.value.id, (nodes, idx) => {
@@ -3245,7 +3388,8 @@ const saveListenItemForm = () => {
         name: listenItemForm.value.name,
         type: listenItemForm.value.type,
         argument: listenItemForm.value.argument,
-        description: listenItemForm.value.description
+        description: listenItemForm.value.description,
+        tags: itemTags
       };
       if (selectedListenNode.value && selectedListenNode.value.id === original.id) {
         selectedListenNode.value = nodes[idx];
@@ -3261,7 +3405,8 @@ const saveListenItemForm = () => {
       type: listenItemForm.value.isFolder ? undefined : listenItemForm.value.type,
       argument: listenItemForm.value.isFolder ? undefined : listenItemForm.value.argument,
       description: listenItemForm.value.description,
-      children: listenItemForm.value.isFolder ? [] : undefined
+      children: listenItemForm.value.isFolder ? [] : undefined,
+      tags: itemTags
     };
 
     if (listenItemForm.value.parentId) {
@@ -3312,11 +3457,31 @@ const confirmDeleteListenItem = () => {
 const listenSearchQuery = ref("");
 
 const nodeMatchesSearch = (node: ListenItem, term: string): boolean => {
+  if (!term && !selectedListenTagFilter.value) return true;
+
+  // 1. Tag filter matching (exact tag on item or inside folder)
+  if (selectedListenTagFilter.value) {
+    if (node.isFolder) {
+      const hasChildMatching = node.children && node.children.some(child => nodeMatchesSearch(child, term));
+      if (!hasChildMatching) return false;
+    } else {
+      if (!Array.isArray(node.tags) || !node.tags.includes(selectedListenTagFilter.value)) {
+        return false;
+      }
+    }
+  }
+
+  // 2. Text query matching (matches name, argument, or tag search)
   if (!term) return true;
   const lowerTerm = term.toLowerCase();
+  const cleanTerm = lowerTerm.startsWith('#') ? lowerTerm.substring(1) : lowerTerm;
   
   const selfMatches = (node.name && node.name.toLowerCase().includes(lowerTerm)) ||
-                      (node.argument && node.argument.toLowerCase().includes(lowerTerm));
+                      (node.argument && node.argument.toLowerCase().includes(lowerTerm)) ||
+                      (!node.isFolder && Array.isArray(node.tags) && node.tags.some(t => {
+                        const lt = t.toLowerCase();
+                        return lt.includes(lowerTerm) || lt.includes(cleanTerm);
+                      }));
   
   if (selfMatches) return true;
   
@@ -3329,12 +3494,13 @@ const nodeMatchesSearch = (node: ListenItem, term: string): boolean => {
 
 const getFilteredVisibleNodes = (nodes: ListenItem[], term: string, depth = 0, parentId: string | null = null): any[] => {
   const list: any[] = [];
+  const isFiltering = !!(term || selectedListenTagFilter.value);
   for (const node of nodes) {
-    if (term && !nodeMatchesSearch(node, term)) {
+    if (isFiltering && !nodeMatchesSearch(node, term)) {
       continue;
     }
     const hasChildren = !!(node.isFolder && node.children && node.children.length > 0);
-    const isExpanded = term ? true : !!expandedFolders.value[node.id];
+    const isExpanded = isFiltering ? true : !!expandedFolders.value[node.id];
     
     list.push({
       item: node,
@@ -7145,7 +7311,7 @@ const fetchChannelProfile = async (channel?: string) => {
           return dateB.getTime() - dateA.getTime()
         })
         if (clist.length > 0) {
-          channelProfileDate.value = clist[0].replace(`${profileName}-`, '')
+          channelProfileDate.value = (clist[0] || "").replace(`${profileName}-`, '')
           response = await fetch(`https://i.gogingko.net/api/v1/v/profiles/${clist[0]}`, {
             method: 'GET',
             headers: { 'x-gos-token': loginToken.value }
@@ -18200,7 +18366,7 @@ onUnmounted(() => {
             </div>
 
             <!-- Search Bar -->
-            <div class="px-4 py-3 border-b border-gray-100 dark:border-gray-700/60 bg-gray-50/30 dark:bg-gray-800/30 shrink-0">
+            <div class="px-4 py-3 border-b border-gray-100 dark:border-gray-700/60 bg-gray-50/30 dark:bg-gray-800/30 shrink-0 space-y-2">
               <div class="relative flex items-center group">
                 <Search class="absolute left-3.5 h-4 w-4 text-gray-400 dark:text-gray-500 group-focus-within:text-teal-500 transition-colors pointer-events-none z-10" />
                 <input
@@ -18216,6 +18382,57 @@ onUnmounted(() => {
                   :title="t('listen.clearSearch')"
                 >
                   <X class="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              <!-- Quick Tag Filter Chips Row -->
+              <div v-if="allDirectoryTags.length > 0" class="flex items-center gap-1.5 overflow-x-auto scrollbar-none py-0.5 select-none text-[10px]">
+                <div class="flex items-center gap-1 font-bold text-gray-400 dark:text-gray-500 shrink-0 mr-0.5">
+                  <Tag class="h-3 w-3 text-teal-500" />
+                </div>
+                
+                <!-- All / Clear Filter -->
+                <button
+                  @click="clearListenTagFilter"
+                  class="px-2 py-0.5 rounded-lg font-semibold transition-all shrink-0 cursor-pointer border"
+                  :class="[
+                    !selectedListenTagFilter
+                      ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-600 dark:text-teal-400 border-teal-200 dark:border-teal-800 font-bold'
+                      : 'bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700 hover:text-gray-900 dark:hover:text-white'
+                  ]"
+                >
+                  {{ t('listen.allTagsFilter') }}
+                </button>
+
+                <!-- Individual Tag Chips -->
+                <button
+                  v-for="item in allDirectoryTags"
+                  :key="item.tag"
+                  @click="toggleListenTagFilter(item.tag)"
+                  class="px-2 py-0.5 rounded-lg font-semibold transition-all shrink-0 cursor-pointer flex items-center gap-1 border"
+                  :class="[
+                    selectedListenTagFilter === item.tag
+                      ? 'bg-teal-500 text-white border-teal-600 shadow-2xs font-bold'
+                      : getTagBadgeStyle(item.tag)
+                  ]"
+                  :title="t('listen.filterByTagTooltip', { tag: item.tag })"
+                >
+                  <span>#{{ item.tag }}</span>
+                  <span class="opacity-75 text-[9px] font-mono tabular-nums">({{ item.count }})</span>
+                </button>
+              </div>
+
+              <!-- Active Tag Filter Badge with Clear Action -->
+              <div v-if="selectedListenTagFilter" class="flex items-center justify-between text-[10px] text-teal-800 dark:text-teal-200 bg-teal-50 dark:bg-teal-950/60 px-2.5 py-1 rounded-lg border border-teal-200 dark:border-teal-800/80">
+                <span class="font-medium flex items-center gap-1 truncate">
+                  <Tag class="h-3 w-3 text-teal-600 dark:text-teal-400 shrink-0" />
+                  <span>{{ t('listen.tagFilterActive', { tag: selectedListenTagFilter }) }}</span>
+                </span>
+                <button
+                  @click="clearListenTagFilter"
+                  class="text-teal-600 dark:text-teal-400 hover:text-teal-900 dark:hover:text-teal-100 font-bold cursor-pointer hover:underline shrink-0 ml-2"
+                >
+                  {{ t('common.reset') }}
                 </button>
               </div>
             </div>
@@ -18353,6 +18570,39 @@ onUnmounted(() => {
                   >
                     {{ getFolderItemsCount(node.item) }}
                   </span>
+
+                  <!-- Item Tags in Rearrange Mode (Proper style) -->
+                  <div 
+                    v-if="listenLayoutMode === 'rearrange' && !node.item.isFolder && node.item.tags && node.item.tags.length > 0"
+                    class="flex items-center gap-1 shrink-0 ml-1.5 flex-wrap max-w-[260px]"
+                  >
+                    <span
+                      v-for="tag in node.item.tags"
+                      :key="tag"
+                      @click.stop="toggleListenTagFilter(tag)"
+                      class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-semibold tracking-tight transition-all cursor-pointer select-none border"
+                      :class="[
+                        selectedListenTagFilter === tag
+                          ? 'bg-teal-500 text-white border-teal-600 shadow-2xs font-bold ring-1 ring-teal-400/50'
+                          : getTagBadgeStyle(tag)
+                      ]"
+                      :title="t('listen.filterByTagTooltip', { tag })"
+                    >
+                      <span class="opacity-60 text-[9px] font-mono">#</span>
+                      <span class="truncate max-w-[80px]">{{ tag }}</span>
+                    </span>
+                  </div>
+
+                  <!-- Quick Add Tag trigger in Rearrange Mode on hover if no tags yet -->
+                  <button
+                    v-if="listenLayoutMode === 'rearrange' && !node.item.isFolder && (!node.item.tags || node.item.tags.length === 0)"
+                    @click.stop="openEditModal(node.item)"
+                    class="opacity-0 group-hover:opacity-100 transition-opacity ml-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-medium text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40 border border-dashed border-gray-300 dark:border-gray-600 hover:border-teal-400 flex items-center gap-0.5 cursor-pointer shrink-0"
+                    :title="t('listen.tagAdd')"
+                  >
+                    <Plus class="h-2.5 w-2.5" />
+                    <span>{{ t('listen.itemTags') }}</span>
+                  </button>
                 </div>
 
                 <!-- Newly Fetched Posts Visual Indicator Badge (Prominent Pulse Badge) -->
@@ -19869,6 +20119,137 @@ onUnmounted(() => {
                       :placeholder="listenItemForm.type === 'channel' ? t('listen.channelPlaceholder') : t('listen.keywordsPlaceholder')"
                       class="w-full px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-750 bg-transparent text-sm text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
                     />
+                  </div>
+                </div>
+
+                <!-- Item Tags Configuration (Add, Delete, Modify) -->
+                <div class="p-3.5 bg-gray-50/80 dark:bg-gray-900/40 rounded-2xl border border-gray-150 dark:border-gray-700/80 space-y-3">
+                  <div class="flex items-center justify-between">
+                    <label class="text-xs font-bold text-gray-700 dark:text-gray-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <Tag class="h-3.5 w-3.5 text-teal-500" />
+                      <span>{{ t('listen.itemTags') }}</span>
+                      <span v-if="listenItemForm.tags && listenItemForm.tags.length > 0" class="text-[10px] px-1.5 py-0.2 rounded-full bg-teal-100 dark:bg-teal-900/60 text-teal-700 dark:text-teal-300 font-mono font-bold">
+                        {{ listenItemForm.tags.length }}
+                      </span>
+                    </label>
+                    <span class="text-[10px] text-gray-400 dark:text-gray-500">
+                      {{ t('listen.tagsPlaceholder') }}
+                    </span>
+                  </div>
+
+                  <!-- Active tags chips list (View, Edit, Delete) -->
+                  <div class="flex items-center gap-1.5 flex-wrap min-h-[30px]">
+                    <template v-if="listenItemForm.tags && listenItemForm.tags.length > 0">
+                      <div
+                        v-for="(tag, idx) in listenItemForm.tags"
+                        :key="idx"
+                        class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all"
+                        :class="getTagBadgeStyle(tag)"
+                      >
+                        <!-- Inline Edit mode for tag -->
+                        <template v-if="editingTagIndex === idx">
+                          <input
+                            v-model="editingTagValue"
+                            type="text"
+                            class="w-20 px-1 py-0.5 text-xs bg-white dark:bg-gray-800 border border-teal-500 rounded focus:outline-none text-gray-900 dark:text-white font-medium"
+                            @keydown.enter.prevent="saveEditTag(idx)"
+                            @keydown.esc.prevent="cancelEditTag"
+                            autofocus
+                          />
+                          <button
+                            type="button"
+                            @click="saveEditTag(idx)"
+                            class="p-0.5 text-teal-600 hover:text-teal-700 dark:text-teal-400 cursor-pointer"
+                            :title="t('common.confirm') || 'Save'"
+                          >
+                            <Check class="h-3 w-3" />
+                          </button>
+                          <button
+                            type="button"
+                            @click="cancelEditTag"
+                            class="p-0.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 cursor-pointer"
+                            :title="t('common.cancel')"
+                          >
+                            <X class="h-3 w-3" />
+                          </button>
+                        </template>
+
+                        <!-- Normal view for tag -->
+                        <template v-else>
+                          <span
+                            @click="startEditTag(idx)"
+                            class="cursor-pointer hover:underline flex items-center gap-0.5"
+                            :title="t('listen.editTag')"
+                          >
+                            <span class="opacity-60 font-mono text-[11px]">#</span>
+                            <span>{{ tag }}</span>
+                          </span>
+                          <button
+                            type="button"
+                            @click="startEditTag(idx)"
+                            class="p-0.5 hover:bg-black/5 dark:hover:bg-white/10 rounded text-gray-400 hover:text-blue-500 transition-colors cursor-pointer"
+                            :title="t('listen.editTag')"
+                          >
+                            <Edit class="h-2.5 w-2.5" />
+                          </button>
+                          <button
+                            type="button"
+                            @click="removeTagFromForm(idx)"
+                            class="p-0.5 hover:bg-red-100 dark:hover:bg-red-950/60 rounded text-gray-400 hover:text-red-500 transition-colors cursor-pointer"
+                            :title="t('listen.deleteTag')"
+                          >
+                            <X class="h-3 w-3" />
+                          </button>
+                        </template>
+                      </div>
+                    </template>
+                    <div v-else class="text-xs text-gray-400 dark:text-gray-500 italic py-1">
+                      {{ t('listen.noTags') }}
+                    </div>
+                  </div>
+
+                  <!-- Tag input row -->
+                  <div class="flex items-center gap-2">
+                    <div class="relative flex-1">
+                      <span class="absolute left-3 top-2.5 text-gray-400 dark:text-gray-500 text-xs font-mono font-bold">#</span>
+                      <input
+                        v-model="newTagInput"
+                        type="text"
+                        :placeholder="t('listen.tagsPlaceholder')"
+                        @keydown.enter.prevent="addTagToForm()"
+                        @keydown.188.prevent="addTagToForm()"
+                        class="w-full pl-7 pr-4 py-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-xs text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      @click="addTagToForm()"
+                      :disabled="!newTagInput.trim()"
+                      class="px-3 py-2 bg-teal-600 hover:bg-teal-700 disabled:opacity-40 text-white rounded-xl text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer shadow-xs"
+                    >
+                      <Plus class="h-3.5 w-3.5" />
+                      <span>{{ t('listen.tagAdd') }}</span>
+                    </button>
+                  </div>
+
+                  <!-- Existing suggestions from across the directory -->
+                  <div v-if="allDirectoryTags.length > 0" class="pt-1 flex items-center gap-1.5 flex-wrap text-[11px]">
+                    <span class="text-gray-400 dark:text-gray-500 text-[10px] font-medium">{{ t('listen.popularTags') }}</span>
+                    <button
+                      v-for="item in allDirectoryTags.slice(0, 8)"
+                      :key="item.tag"
+                      type="button"
+                      @click="addTagToForm(item.tag)"
+                      :disabled="listenItemForm.tags && listenItemForm.tags.includes(item.tag)"
+                      class="px-1.5 py-0.5 rounded-md text-[10px] font-medium border transition-all cursor-pointer"
+                      :class="[
+                        listenItemForm.tags && listenItemForm.tags.includes(item.tag)
+                          ? 'opacity-40 cursor-not-allowed bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-400'
+                          : 'bg-white dark:bg-gray-800 hover:bg-teal-50 hover:text-teal-600 dark:hover:bg-gray-700 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300'
+                      ]"
+                    >
+                      + #{{ item.tag }}
+                    </button>
                   </div>
                 </div>
               </div>

@@ -7,6 +7,7 @@ export interface ListenItem {
   argument?: string;
   description?: string;
   children?: ListenItem[];
+  tags?: string[];
 }
 
 export interface AutoFindingCell {

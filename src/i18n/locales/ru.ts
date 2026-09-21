@@ -614,7 +614,18 @@ export default {
     errorEmptyDirectory: "В каталоге нет каналов или ключевых слов для синхронизации",
     newPostsBadge: "+{count} новых",
     clearNewBadges: "Сбросить отметки новых",
-    hasNewPostsTip: "Получено {count} новых постов"
+    hasNewPostsTip: "Получено {count} новых постов",
+    itemTags: "Теги",
+    tagsPlaceholder: "Введите тег и нажмите Enter или запятую...",
+    tagAdd: "Добавить тег",
+    editTag: "Редактировать тег",
+    deleteTag: "Удалить тег",
+    popularTags: "Существующие теги:",
+    noTags: "Нет тегов",
+    filterByTagTooltip: "Фильтровать по #{tag}",
+    allTagsFilter: "Все теги",
+    tagFilterActive: "Фильтр по тегу: #{tag}",
+    clearTagFilter: "Сбросить фильтр тегов"
   },
   autoFinding: {
     title: "Автоматический поиск связей (BFS)",

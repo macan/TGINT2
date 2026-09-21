@@ -614,7 +614,18 @@ export default {
     errorEmptyDirectory: "ディレクトリ内に同期対象のアイテムがありません",
     newPostsBadge: "+{count} 件の新着",
     clearNewBadges: "新着バッジを消去",
-    hasNewPostsTip: "{count} 件の新着投稿が取得されました"
+    hasNewPostsTip: "{count} 件の新着投稿が取得されました",
+    itemTags: "タグ",
+    tagsPlaceholder: "タグを入力してEnterまたはカンマ...",
+    tagAdd: "タグ追加",
+    editTag: "タグを編集",
+    deleteTag: "タグを削除",
+    popularTags: "既存のタグ:",
+    noTags: "タグはありません",
+    filterByTagTooltip: "#{tag} で絞り込み",
+    allTagsFilter: "すべてのタグ",
+    tagFilterActive: "タグで絞り込み中: #{tag}",
+    clearTagFilter: "タグ絞り込みを解除"
   },
   autoFinding: {
     title: "自動探索エンジン (BFS)",

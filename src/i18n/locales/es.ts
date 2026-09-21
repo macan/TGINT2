@@ -614,7 +614,18 @@ export default {
     errorEmptyDirectory: "No se encontraron canales ni palabras clave para sincronizar",
     newPostsBadge: "+{count} nuevos",
     clearNewBadges: "Limpiar avisos de nuevos",
-    hasNewPostsTip: "Se obtuvieron {count} publicaciones nuevas"
+    hasNewPostsTip: "Se obtuvieron {count} publicaciones nuevas",
+    itemTags: "Etiquetas",
+    tagsPlaceholder: "Añadir etiqueta y presionar Enter o coma...",
+    tagAdd: "Añadir Etiqueta",
+    editTag: "Editar Etiqueta",
+    deleteTag: "Eliminar etiqueta",
+    popularTags: "Etiquetas existentes:",
+    noTags: "Sin etiquetas",
+    filterByTagTooltip: "Haga clic para filtrar por #{tag}",
+    allTagsFilter: "Todas las etiquetas",
+    tagFilterActive: "Filtrado por etiqueta: #{tag}",
+    clearTagFilter: "Quitar filtro de etiqueta"
   },
   autoFinding: {
     title: "Motor de Auto-Descubrimiento (BFS)",

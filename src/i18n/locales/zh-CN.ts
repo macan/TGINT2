@@ -629,7 +629,18 @@ export default {
     errorEmptyDirectory: "监听目录中没有找到可同步的频道或关键词",
     newPostsBadge: "+{count} 新动态",
     clearNewBadges: "清除未读更新标记",
-    hasNewPostsTip: "拉取到 {count} 条新动态"
+    hasNewPostsTip: "拉取到 {count} 条新动态",
+    itemTags: "标签",
+    tagsPlaceholder: "输入标签并按回车或逗号...",
+    tagAdd: "添加标签",
+    editTag: "编辑标签",
+    deleteTag: "删除标签",
+    popularTags: "已有标签：",
+    noTags: "暂无标签",
+    filterByTagTooltip: "点击按 #{tag} 过滤",
+    allTagsFilter: "所有标签",
+    tagFilterActive: "已按标签筛选: #{tag}",
+    clearTagFilter: "清除标签筛选"
   },
   autoFinding: {
     title: "自动化广度优先发现引擎",
