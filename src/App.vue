@@ -728,8 +728,9 @@ const analysisResultOfGraph = ref("");
 const isAnalyzing = ref(false);
 const isSummarizing = ref(false);
 const isPostFetcherVisible = ref(false);
-const copyUsernamesToClipboard = (allNames) => {
-    const text = allNames.join(',');
+const copyUsernamesToClipboard = (allNames: any) => {
+    const list = Array.isArray(allNames) ? allNames : (allNames?.value ? allNames.value : []);
+    const text = list.map((n: any) => String(n)).join(',');
     navigator.clipboard.writeText(text);
     toastMessage.value = "Usernames copied to clipboard!";
     toastType.value = "success";
@@ -747,6 +748,7 @@ const isAnalysisModalVisible = ref(false);
 const analyzedCount = ref(0);
 const lookupUserHistory = ref<string[]>(JSON.parse(localStorage.getItem('telegramUserLookupHistory') || '[]'));
 const dropdownContainer = ref<HTMLElement | null>(null);
+const explorerSearchFormRef = ref<HTMLElement | null>(null);
 
 const handleClickOutside = (event: MouseEvent) => {
     if (dropdownContainer.value && !dropdownContainer.value.contains(event.target as Node)) {
@@ -755,6 +757,27 @@ const handleClickOutside = (event: MouseEvent) => {
     if (languageDropdownRef.value && !languageDropdownRef.value.contains(event.target as Node)) {
         isLanguageMenuOpen.value = false;
     }
+    if (explorerSearchFormRef.value && !explorerSearchFormRef.value.contains(event.target as Node)) {
+        isInputFocused.value = false;
+    }
+};
+
+const handlePointerDownOutside = (event: PointerEvent | MouseEvent) => {
+    if (explorerSearchFormRef.value && !explorerSearchFormRef.value.contains(event.target as Node)) {
+        isInputFocused.value = false;
+    }
+};
+
+const handleWindowBlur = () => {
+    isInputFocused.value = false;
+    const inputEl = document.getElementById("explorer-search-input") as HTMLInputElement | null;
+    if (document.activeElement === inputEl) {
+        inputEl?.blur();
+    }
+};
+
+const handleWindowFocus = () => {
+    isInputFocused.value = false;
 };
 
 const startChatDrag = (e: MouseEvent) => {
@@ -857,16 +880,22 @@ const handleGlobalKeyDown = (e: KeyboardEvent) => {
 
 onMounted(() => {
     document.addEventListener('click', handleClickOutside);
+    document.addEventListener('pointerdown', handlePointerDownOutside);
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
     document.addEventListener('keydown', handleGlobalKeyDown);
+    window.addEventListener('blur', handleWindowBlur);
+    window.addEventListener('focus', handleWindowFocus);
 });
 
 onUnmounted(() => {
     document.removeEventListener('click', handleClickOutside);
+    document.removeEventListener('pointerdown', handlePointerDownOutside);
     document.removeEventListener('mousemove', onMouseMove);
     document.removeEventListener('mouseup', onMouseUp);
     document.removeEventListener('keydown', handleGlobalKeyDown);
+    window.removeEventListener('blur', handleWindowBlur);
+    window.removeEventListener('focus', handleWindowFocus);
 });
 
 const renderedMarkdown = computed(() => md.render(analysisResult.value));
@@ -1060,8 +1089,8 @@ const filteredPosts = computed(() => {
     result = result.filter((p) => {
       const rawUser = p.data?.user;
       if (!rawUser) {
-        if (p.data?.uid !== undefined) {
-          return selectedUsernamesExplorer.value.includes(p.data?.uid);
+        if (p.data?.uid !== undefined && p.data?.uid !== null) {
+          return selectedUsernamesExplorer.value.includes(String(p.data?.uid));
         }
         return false;
       }
@@ -7235,6 +7264,11 @@ const isProfileVisible = ref(true);
 // Explorer State
 const channelName = ref("");
 const isInputFocused = ref(false);
+const handleInputFocus = () => {
+  if (!loading.value) {
+    isInputFocused.value = true;
+  }
+};
 const clearExplorerInput = () => {
   channelName.value = "";
   nextTick(() => {
@@ -7826,23 +7860,27 @@ const selectedChannels = ref<string[]>([]);
 const lastVisitedChannels = ref<{ name: string; isPinned: boolean }[]>([]);
 
 const addToLastVisited = (name: string) => {
-  const index = lastVisitedChannels.value.findIndex((c) => c.name === name);
-  let channel = { name, isPinned: false };
+  if (!name || !name.trim()) return;
+  const cleanName = name.trim().replace(/^@/, "");
+  const index = lastVisitedChannels.value.findIndex((c) => c.name.toLowerCase() === cleanName.toLowerCase());
+  let channel = { name: cleanName, isPinned: false };
   if (index !== -1) {
-    channel = lastVisitedChannels.value[index];
+    channel = { ...lastVisitedChannels.value[index], name: cleanName };
     lastVisitedChannels.value.splice(index, 1);
   }
-  lastVisitedChannels.value.unshift(channel);
 
-  // Keep up to 20 channels, prioritizing pinned ones
   const pinned = lastVisitedChannels.value.filter((c) => c.isPinned);
   const unpinned = lastVisitedChannels.value.filter((c) => !c.isPinned);
 
-  if (unpinned.length > 20 - pinned.length) {
-    lastVisitedChannels.value = pinned.concat(
-      unpinned.slice(0, 20 - pinned.length)
-    );
+  if (channel.isPinned) {
+    pinned.unshift(channel);
+  } else {
+    unpinned.unshift(channel);
   }
+
+  const maxTotal = 24;
+  const allowedUnpinned = Math.max(0, maxTotal - pinned.length);
+  lastVisitedChannels.value = [...pinned, ...unpinned.slice(0, allowedUnpinned)];
 
   localStorage.setItem(
     "lastVisitedChannels",
@@ -7852,7 +7890,7 @@ const addToLastVisited = (name: string) => {
 
 const removeVisitedChannel = (name: string) => {
   lastVisitedChannels.value = lastVisitedChannels.value.filter(
-    (c) => c.name !== name
+    (c) => c.name.toLowerCase() !== name.toLowerCase()
   );
   localStorage.setItem(
     "lastVisitedChannels",
@@ -7861,9 +7899,12 @@ const removeVisitedChannel = (name: string) => {
 };
 
 const togglePin = (name: string) => {
-  const channel = lastVisitedChannels.value.find((c) => c.name === name);
+  const channel = lastVisitedChannels.value.find((c) => c.name.toLowerCase() === name.toLowerCase());
   if (channel) {
     channel.isPinned = !channel.isPinned;
+    const pinned = lastVisitedChannels.value.filter((c) => c.isPinned);
+    const unpinned = lastVisitedChannels.value.filter((c) => !c.isPinned);
+    lastVisitedChannels.value = [...pinned, ...unpinned];
     localStorage.setItem(
       "lastVisitedChannels",
       JSON.stringify(lastVisitedChannels.value)
@@ -7871,14 +7912,26 @@ const togglePin = (name: string) => {
   }
 };
 
-const clearAllChannels = () => {
-  lastVisitedChannels.value = lastVisitedChannels.value.filter(
-    (c) => c.isPinned
-  );
+const clearVisitedChannels = () => {
+  const hasUnpinned = lastVisitedChannels.value.some((c) => !c.isPinned);
+  if (hasUnpinned) {
+    lastVisitedChannels.value = lastVisitedChannels.value.filter(
+      (c) => c.isPinned
+    );
+  } else {
+    lastVisitedChannels.value = [];
+  }
   localStorage.setItem(
     "lastVisitedChannels",
     JSON.stringify(lastVisitedChannels.value)
   );
+};
+
+const selectVisitedChannel = (channel: { name: string; isPinned: boolean }) => {
+  if (loading.value) return;
+  channelName.value = channel.name;
+  isInputFocused.value = false;
+  searchChannel();
 };
 
 const allChannels = computed(() => {
@@ -7898,8 +7951,8 @@ const allUsernamesExplorer = computed(() => {
     if (rawUser) {
       const parts = rawUser.split("/");
       users.add(parts[parts.length - 1]);
-    } else if (p.data?.uid !== undefined) {
-      users.add(p.data?.uid)
+    } else if (p.data?.uid !== undefined && p.data?.uid !== null) {
+      users.add(String(p.data?.uid));
     }
   });
   return Array.from(users).sort();
@@ -7961,8 +8014,8 @@ const allUsernames = computed(() => {
     if (rawUser) {
       const parts = rawUser.split("/");
       users.add(parts[parts.length - 1]);
-    } else if (p.data?.uid !== undefined) {
-      users.add(p.data?.uid)
+    } else if (p.data?.uid !== undefined && p.data?.uid !== null) {
+      users.add(String(p.data?.uid));
     }
   });
   return Array.from(users).sort();
@@ -7975,8 +8028,8 @@ const filteredSearchResults = computed(() => {
     result = result.filter((p) => {
       const rawUser = p.data?.user;
       if (!rawUser) {
-        if (p.data?.uid !== undefined) {
-          return selectedUsernames.value.includes(p.data?.uid);
+        if (p.data?.uid !== undefined && p.data?.uid !== null) {
+          return selectedUsernames.value.includes(String(p.data?.uid));
         }
         return false;
       }
@@ -7998,11 +8051,12 @@ const filteredSearchResults = computed(() => {
 });
 
 const toggleUsernameExplorer = (username: string) => {
-  const index = selectedUsernamesExplorer.value.indexOf(username);
+  const str = String(username);
+  const index = selectedUsernamesExplorer.value.indexOf(str);
   if (index > -1) {
     selectedUsernamesExplorer.value.splice(index, 1);
   } else {
-    selectedUsernamesExplorer.value.push(username);
+    selectedUsernamesExplorer.value.push(str);
   }
 };
 
@@ -8013,11 +8067,12 @@ const handleBlur = () => {
 };
 
 const toggleUsername = (username: string) => {
-  const index = selectedUsernames.value.indexOf(username);
+  const str = String(username);
+  const index = selectedUsernames.value.indexOf(str);
   if (index > -1) {
     selectedUsernames.value.splice(index, 1);
   } else {
-    selectedUsernames.value.push(username);
+    selectedUsernames.value.push(str);
   }
 };
 
@@ -8213,19 +8268,22 @@ onMounted(() => {
 
 watch(channelName, (newVal) => {
     if (searchTimeout) clearTimeout(searchTimeout);
-    if (newVal.trim().length === 0 || !isLoginTokenValid.value) {
+    if (loading.value || newVal.trim().length === 0 || !isLoginTokenValid.value) {
         suggestedChannels.value = [];
         return;
     }
 
     searchTimeout = setTimeout(async () => {
+         if (loading.value) return;
          try {
             const response = await fetch(`https://i.gogingko.net/api/v1/zr/telegram-channel?prefix=${encodeURIComponent(newVal)}&k=24`, {
                 headers: { 'x-gos-token': loginToken.value }
             });
             if (response.ok) {
                 const data = await response.json();
-                suggestedChannels.value = data.keys || [];
+                if (!loading.value) {
+                    suggestedChannels.value = data.keys || [];
+                }
             }
          } catch (e) {
              console.error(e);
@@ -9752,6 +9810,13 @@ const onGraphZoomOut = () => {
 const searchChannel = async () => {
   if (!channelName.value.trim()) return;
 
+  // Clear any pending suggestion timer and clear suggestion results
+  if (searchTimeout) {
+    clearTimeout(searchTimeout);
+    searchTimeout = null;
+  }
+  suggestedChannels.value = [];
+
   // Reset explorer tab scroll position and scroll to top
   tabScrollPositions.value['explorer'] = 0;
   window.scrollTo(0, 0);
@@ -9764,6 +9829,14 @@ const searchChannel = async () => {
   }
 
   isInputFocused.value = false;
+  const inputEl = document.getElementById("explorer-search-input") as HTMLInputElement | null;
+  if (inputEl) {
+    inputEl.blur();
+  }
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.blur();
+  }
+
   loading.value = true;
   error.value = "";
   metadata.value = null;
@@ -9771,7 +9844,6 @@ const searchChannel = async () => {
   forwardsChannels.value = [];
   ftoChannels.value = [];
   hasMorePosts.value = true;
-  suggestedChannels.value = [];
   
   let name = channelName.value.trim().replace(/^@/, "");
   let binit = null;
@@ -9971,6 +10043,7 @@ const searchChannel = async () => {
     error.value = err.message || "An error occurred while fetching data";
   } finally {
     loading.value = false;
+    isInputFocused.value = false;
     nextTick(() => {
       explorerMinHeight.value = "0px";
     });
@@ -14481,7 +14554,12 @@ onUnmounted(() => {
       <!-- Explorer Tab -->
       <div ref="explorerTab" v-show="activeTab === 'explorer'" :style="{ minHeight: explorerMinHeight }">
         <div class="max-w-[95%] mx-auto mb-16 px-4 sm:px-0">
-              <form @submit.prevent="searchChannel" class="relative group">
+              <form
+                id="explorer-search-form"
+                ref="explorerSearchFormRef"
+                @submit.prevent="searchChannel"
+                class="relative group"
+              >
                 <div
                   class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none transition-transform duration-300 group-focus-within:scale-110 group-focus-within:text-teal-650 z-10"
                 >
@@ -14490,7 +14568,7 @@ onUnmounted(() => {
                 <input
                   id="explorer-search-input"
                   v-model="channelName"
-                  @focus="isInputFocused = true"
+                  @focus="handleInputFocus"
                   @blur="handleBlur"
                   type="text"
                   class="block w-full pl-14 pr-44 sm:pr-56 py-4 border border-gray-200 dark:border-gray-700 rounded-2xl leading-5 bg-white/95 dark:bg-gray-800/95 text-gray-900 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 text-sm font-semibold shadow-sm hover:shadow-md focus:shadow-lg transition-all duration-300"
@@ -14513,7 +14591,6 @@ onUnmounted(() => {
                     type="submit"
                     @click.prevent="searchChannel"
                     :disabled="loading || !channelName.trim()"
-                    @mousedown.prevent
                     class="h-full px-5 sm:px-6 bg-teal-600 text-white rounded-xl text-xs font-black tracking-wide hover:bg-teal-700 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center shadow-md shadow-teal-500/20 hover:shadow-teal-500/40 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer shrink-0"
                   >
                     <Loader2 v-if="loading" class="h-4 w-4 animate-spin mr-2" />
@@ -14521,15 +14598,15 @@ onUnmounted(() => {
                   </button>
                 </div>
                 
-                <!-- Autocomplete Dropdown -->
+                <!-- Autocomplete Dropdown (API suggestions) -->
                 <div
-                  v-if="isInputFocused && (lastVisitedChannels.length > 0 || suggestedChannels.length > 0)"
+                  v-if="!loading && isInputFocused && isLoginTokenValid && suggestedChannels.length > 0"
                   class="absolute z-50 w-full mt-2 bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-250/60 dark:border-gray-700/60 overflow-hidden"
                 >
-                   <div v-show="isLoginTokenValid && suggestedChannels.length > 0" class="px-4 py-2 text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
+                   <div class="px-4 py-2 text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
                      {{ t('explorer.autoCompleted') }}
                    </div>
-                   <div v-if="isLoginTokenValid && suggestedChannels.length > 0" class="max-h-60 overflow-y-auto">
+                   <div class="max-h-60 overflow-y-auto">
                      <button
                        v-for="channel in suggestedChannels"
                        :key="channel"
@@ -14547,37 +14624,98 @@ onUnmounted(() => {
                        </span>
                      </button>
                    </div>
-
-                   <div class="px-5 py-2.5 text-xs font-black text-gray-400 dark:text-gray-500 uppercase tracking-wider bg-gray-50 dark:bg-gray-900/50">
-                     {{ t('explorer.lastVisited') }}
-                   </div>
-                   <div class="max-h-60 overflow-y-auto">
-                     <div
-                       v-for="channel in lastVisitedChannels"
-                       :key="channel.name"
-                       class="flex items-center justify-between w-full text-left px-5 py-2.5 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 text-xs font-bold text-gray-700 dark:text-gray-200 transition-colors"
-                     >
-                       <span
-                         @click.prevent="
-                           channelName = channel.name;
-                           isInputFocused = false;
-                           searchChannel();
-                         "
-                         class="flex-1 cursor-pointer"
-                       >
-                         @{{ channel.name }}
-                       </span>
-                       <button
-                         @click.stop.prevent="removeVisitedChannel(channel.name)"
-                         class="ml-2 text-gray-400 hover:text-red-550 cursor-pointer"
-                         :title="t('common.delete')"
-                       >
-                         <X class="h-3.5 w-3.5" />
-                       </button>
-                     </div>
-                   </div>
                 </div>
               </form>
+
+              <!-- Last Visited Channels (below the search input box) -->
+              <div
+                v-if="lastVisitedChannels.length > 0"
+                class="mt-3.5 sm:mt-4 p-3.5 sm:p-4 rounded-2xl bg-white/95 dark:bg-gray-900/90 backdrop-blur-md border border-gray-200/80 dark:border-gray-800 shadow-sm transition-all duration-300"
+              >
+                <!-- Header: Label, Counts & Clear Action -->
+                <div class="flex items-center justify-between gap-2 mb-3 pb-2.5 border-b border-gray-100 dark:border-gray-800/80">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <div class="p-1 rounded-lg bg-teal-50 dark:bg-teal-950/60 text-teal-600 dark:text-teal-400 border border-teal-100/80 dark:border-teal-800/50">
+                      <Clock class="h-3.5 w-3.5" />
+                    </div>
+                    <span class="text-xs font-black uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                      {{ t('explorer.lastVisited') }}
+                    </span>
+                    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700">
+                      {{ lastVisitedChannels.length }}
+                    </span>
+                    <span
+                      v-if="lastVisitedChannels.some(c => c.isPinned)"
+                      class="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/50 px-2 py-0.5 rounded-full border border-amber-200/70 dark:border-amber-700/60"
+                    >
+                      <Pin class="h-2.5 w-2.5 fill-amber-500 text-amber-500" />
+                      {{ lastVisitedChannels.filter(c => c.isPinned).length }}
+                    </span>
+                  </div>
+
+                  <div class="flex items-center gap-2">
+                    <button
+                      type="button"
+                      @click="clearVisitedChannels"
+                      class="text-[11px] font-bold text-gray-400 hover:text-red-500 dark:text-gray-400 dark:hover:text-red-400 transition-colors flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-red-50/80 dark:hover:bg-red-950/30 cursor-pointer"
+                      :title="t('explorer.clearVisited')"
+                    >
+                      <Trash2 class="h-3 w-3" />
+                      <span>{{ t('common.clear') }}</span>
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Channels List Chips -->
+                <div class="flex flex-wrap items-center gap-2 sm:gap-2.5">
+                  <div
+                    v-for="channel in lastVisitedChannels"
+                    :key="channel.name"
+                    class="group/chip inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1.5 rounded-xl text-xs font-semibold transition-all duration-200 border cursor-pointer select-none"
+                    :class="[
+                      (currentChannelName && currentChannelName.toLowerCase() === channel.name.toLowerCase().replace(/^@/, ''))
+                        ? 'bg-teal-50 dark:bg-teal-950/70 border-teal-400 dark:border-teal-500 text-teal-700 dark:text-teal-300 shadow-xs ring-2 ring-teal-500/20 dark:ring-teal-400/30'
+                        : channel.isPinned
+                          ? 'bg-amber-50/80 dark:bg-amber-950/40 border-amber-200/90 dark:border-amber-700/70 text-amber-900 dark:text-amber-200 hover:border-amber-400 dark:hover:border-amber-500 hover:shadow-xs'
+                          : 'bg-white dark:bg-gray-800 border-gray-200/80 dark:border-gray-700 text-gray-750 dark:text-gray-200 hover:border-teal-400 dark:hover:border-teal-500 hover:bg-teal-50/40 dark:hover:bg-teal-950/40 hover:text-teal-700 dark:hover:text-teal-300 hover:shadow-xs'
+                    ]"
+                    @click="selectVisitedChannel(channel)"
+                    :title="`@${channel.name}`"
+                  >
+                    <!-- Pin button -->
+                    <button
+                      type="button"
+                      @click.stop.prevent="togglePin(channel.name)"
+                      class="p-0.5 rounded-md transition-all cursor-pointer"
+                      :class="[
+                        channel.isPinned
+                          ? 'text-amber-500 hover:text-amber-600 dark:hover:text-amber-400'
+                          : 'text-gray-300 dark:text-gray-500 hover:text-amber-500 dark:hover:text-amber-400 opacity-60 group-hover/chip:opacity-100'
+                      ]"
+                      :title="channel.isPinned ? t('explorer.unpinChannel') : t('explorer.pinChannel')"
+                      :aria-label="channel.isPinned ? t('explorer.unpinChannel') : t('explorer.pinChannel')"
+                    >
+                      <Pin class="h-3 w-3" :class="{ 'fill-amber-500 text-amber-500': channel.isPinned }" />
+                    </button>
+
+                    <!-- Channel Name -->
+                    <span class="font-mono tracking-tight text-xs">
+                      @{{ channel.name }}
+                    </span>
+
+                    <!-- Remove visited channel button -->
+                    <button
+                      type="button"
+                      @click.stop.prevent="removeVisitedChannel(channel.name)"
+                      class="p-0.5 text-gray-300 dark:text-gray-500 hover:text-red-500 dark:hover:text-red-400 rounded-md transition-colors opacity-50 group-hover/chip:opacity-100 cursor-pointer"
+                      :title="t('common.delete')"
+                      :aria-label="t('common.delete')"
+                    >
+                      <X class="h-3 w-3" />
+                    </button>
+                  </div>
+                </div>
+              </div>
 
           </div>
 
@@ -14664,16 +14802,6 @@ onUnmounted(() => {
                     <button @click="addToWorkspace" class="flex items-center gap-1.5 px-3 py-1.5 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/50 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 rounded-xl border border-teal-200 dark:border-teal-800/60 text-xs font-bold transition-all cursor-pointer shadow-3xs" :title="t('explorer.workspace')">
                       <Layout class="h-3.5 w-3.5 text-teal-500" />
                       <span>{{ t('explorer.workspace') }}</span>
-                    </button>
-                    <button
-                      @click="addChannelToListenDirectory(metadata.title || channelName, metadata.username || channelName)"
-                      @mouseenter="checkExplorerListenDirectory"
-                      @mousemove="checkExplorerListenDirectory"
-                      class="flex items-center gap-1.5 px-3 py-1.5 bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/50 dark:hover:bg-purple-900/60 text-purple-700 dark:text-purple-300 rounded-xl border border-purple-200 dark:border-purple-800/60 text-xs font-bold transition-all cursor-pointer shadow-3xs"
-                      :title="explorerListenHint"
-                    >
-                      <Radio class="h-3.5 w-3.5 text-purple-500" />
-                      <span>{{ t('nav.listen') }}</span>
                     </button>
                     <button @click="searchOnGoogle(metadata.username || metadata.name || channelName)" class="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/50 dark:hover:bg-blue-900/60 text-blue-700 dark:text-blue-300 rounded-xl border border-blue-200 dark:border-blue-800/60 text-xs font-bold transition-all cursor-pointer shadow-3xs" title="Google">
                       <Globe class="h-3.5 w-3.5 text-blue-500" />
@@ -14884,8 +15012,9 @@ onUnmounted(() => {
                         type="button"
                         @click="openAddChannelModalWithDetails(metadata.title || channelName, metadata.username || channelName)"
                         class="text-teal-600 dark:text-teal-400 hover:underline font-bold cursor-pointer"
+                        :title="t('explorer.addToListenManually')"
                       >
-                        {{ t('listen.addWatchDirectory') }}
+                        {{ t('explorer.addToListenManually') }}
                       </button>
                     </div>
                   </div>
@@ -15071,7 +15200,7 @@ onUnmounted(() => {
                   >
                     <span class="truncate mr-2 flex items-center gap-1">
                       <span class="opacity-40 text-[11px] font-normal">@</span>
-                      <span class="group-hover/user:underline decoration-teal-400/50 underline-offset-2">{{ username.replace(/^@/, '') }}</span>
+                      <span class="group-hover/user:underline decoration-teal-400/50 underline-offset-2">{{ String(username).replace(/^@/, '') }}</span>
                     </span>
                     <div class="flex items-center gap-1.5 shrink-0">
                       <!-- Cached indicator dot -->
@@ -16753,7 +16882,7 @@ onUnmounted(() => {
                 >
                   <span class="truncate mr-2 flex items-center gap-1">
                     <span class="opacity-40 text-[11px] font-normal">@</span>
-                    <span>{{ username.replace(/^@/, '') }}</span>
+                    <span>{{ String(username).replace(/^@/, '') }}</span>
                   </span>
                   <div class="flex items-center gap-1.5 shrink-0">
                     <span
