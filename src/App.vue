@@ -2534,6 +2534,9 @@ const tabScrollPositions = ref<Record<string, number>>({});
 const lastListenScrollY = ref(0);
 const lastListenPostKey = ref("");
 const rearrangePostsContainer = ref<HTMLElement | null>(null);
+const listenTreeContainer = ref<HTMLElement | null>(null);
+const highlightedListenNodeId = ref<string | null>(null);
+let highlightNodeTimer: any = null;
 const lastRearrangePostsScrollTop = ref<number>(0);
 let isProgrammaticScrollResetting = false;
 
@@ -7505,29 +7508,125 @@ const expandParentFoldersForNode = (targetId: string) => {
   findAndExpand(listenDirectory.value, []);
 };
 
+const positionListenNodeInView = (nodeId: string) => {
+  highlightedListenNodeId.value = nodeId;
+  if (highlightNodeTimer) clearTimeout(highlightNodeTimer);
+  highlightNodeTimer = setTimeout(() => {
+    highlightedListenNodeId.value = null;
+  }, 2600);
+
+  const attemptScroll = (): boolean => {
+    const el = document.getElementById(`listen-node-${nodeId}`);
+    const container = listenTreeContainer.value || document.getElementById('listen-tree-container');
+    if (el && container) {
+      const containerRect = container.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const relativeTop = elRect.top - containerRect.top;
+      const targetScrollTop = container.scrollTop + relativeTop - (container.clientHeight / 2) + (el.clientHeight / 2);
+      container.scrollTo({
+        top: Math.max(0, targetScrollTop),
+        behavior: 'smooth'
+      });
+      return true;
+    } else if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return true;
+    }
+    return false;
+  };
+
+  nextTick(() => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (!attemptScroll()) {
+      requestAnimationFrame(() => {
+        if (!attemptScroll()) {
+          setTimeout(attemptScroll, 80);
+        }
+      });
+    } else {
+      setTimeout(attemptScroll, 120);
+    }
+  });
+};
+
 const openListenItemFromExplorer = (item: ListenItem) => {
-  activeTab.value = "listen";
-  selectedListenNode.value = item;
-  selectedListenTagFilter.value = null;
+  const previousNodeId = selectedListenNode.value?.id;
+  const isSameNode = previousNodeId === item.id;
+
+  // Clear search and tag filters so that the target node is always visible in the directory tree
   listenSearchQuery.value = "";
+  selectedListenTagFilter.value = null;
+
+  // Expand all parent folders so node is visible in visibleDirectoryNodes
   expandParentFoldersForNode(item.id);
-  fetchListenPosts(item);
+
+  // Clear unread badge for target item
+  if (newlyFetchedPostsCountMap.value[item.id]) {
+    const updated = { ...newlyFetchedPostsCountMap.value };
+    delete updated[item.id];
+    newlyFetchedPostsCountMap.value = updated;
+  }
+  newlyFetchedListenKeys.value.clear();
+
+  // Reset scroll state anchors so tab switch doesn't restore old positions
+  lastListenScrollY.value = 0;
+  tabScrollPositions.value['listen'] = 0;
+  lastListenPostKey.value = "";
+  lastRearrangePostsScrollTop.value = 0;
+  resetRecentPostsWidgetScroll();
+  listenPostsRenderLimit.value = 30;
+
+  // Handle post list refreshing properly:
+  // If there was an item displayed before jumping and it's different from the target:
+  // Immediately reset listenPosts to prevent showing stale posts from the previous channel.
+  if (!isSameNode) {
+    listenPosts.value = [];
+    selectedChannelMetadata.value = null;
+  }
+
+  // Set the selected node
+  selectedListenNode.value = item;
+
+  // Switch to the Listen tab
+  activeTab.value = "listen";
+
+  // Trigger post fetching with isNewSelection = true (loads cache immediately, fetches fresh posts, resets scroll)
+  fetchListenPosts(item, true);
+
+  if (item.type === 'channel') {
+    fetchSelectedChannelMetadata(item);
+  }
+
+  // Position the listen item in the directory tree clearly in view
+  positionListenNodeInView(item.id);
 };
 
 const openListenFolderFromExplorer = (folderId: string) => {
+  lastListenScrollY.value = 0;
+  tabScrollPositions.value['listen'] = 0;
+  lastListenPostKey.value = "";
+  lastRearrangePostsScrollTop.value = 0;
+  listenSearchQuery.value = "";
+  selectedListenTagFilter.value = null;
   activeTab.value = "listen";
   expandedFolders.value[folderId] = true;
   expandParentFoldersForNode(folderId);
   findNodeAndPerform(listenDirectory.value, folderId, (nodes, idx) => {
     selectedListenNode.value = nodes[idx];
-    fetchListenPosts(nodes[idx]);
+    fetchListenPosts(nodes[idx], true);
   });
+  positionListenNodeInView(folderId);
 };
 
 const filterListenByTagFromExplorer = (tag: string) => {
+  lastListenScrollY.value = 0;
+  tabScrollPositions.value['listen'] = 0;
+  lastListenPostKey.value = "";
+  lastRearrangePostsScrollTop.value = 0;
   activeTab.value = "listen";
   selectedListenTagFilter.value = tag;
   listenSearchQuery.value = "";
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 };
 
 const openAddChannelModalWithDetails = (name: string, username: string, parentId: string = "") => {
@@ -18874,6 +18973,8 @@ onUnmounted(() => {
 
             <!-- Scrollable Directories Stream -->
             <div 
+              ref="listenTreeContainer"
+              id="listen-tree-container"
               class="p-3 overflow-y-auto space-y-1 select-none"
               :class="[
                 listenLayoutMode === 'rearrange'
@@ -18890,13 +18991,19 @@ onUnmounted(() => {
               <div
                 v-for="node in visibleDirectoryNodes"
                 :key="node.item.id"
+                :id="'listen-node-' + node.item.id"
                 class="group text-sm font-medium rounded-xl transition-all duration-200 flex items-center justify-between px-3 py-2 border relative"
                 draggable="true"
                 @dragstart="onDragStart($event, node)"
                 @dragover="onDragOver($event, node)"
                 @dragend="onDragEnd"
                 @drop="onDrop($event, node)"
-                :class="getListenItemLineClasses(node)"
+                :class="[
+                  getListenItemLineClasses(node),
+                  highlightedListenNodeId === node.item.id
+                    ? '!ring-2 !ring-teal-500 !border-teal-500 shadow-md scale-[1.015] z-20'
+                    : ''
+                ]"
                 :title="getListenItemLineTitle(node.item)"
                 :style="{ paddingLeft: `calc(0.5rem + ${node.depth * 1.25}rem)` }"
               >
