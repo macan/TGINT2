@@ -66,6 +66,8 @@ import {
   FolderOpen,
   FolderPlus,
   FolderTree,
+  FolderX,
+  CornerDownLeft,
   Eye,
   BookOpen,
   Move,
@@ -2602,10 +2604,22 @@ const handleRearrangePostsScroll = () => {
   }
 };
 
-// Move Item/Folder Modal State
+// Move Item/Folder Fast Relocation State
 const isMoveModalOpen = ref(false);
 const itemToMove = ref<ListenItem | null>(null);
 const selectedMoveTargetFolderId = ref<string | null>(null);
+const moveFolderSearchQuery = ref("");
+const moveModalFocusedIndex = ref(0);
+const moveSearchInputRef = ref<HTMLInputElement | null>(null);
+const recentMoveFolderIds = ref<string[]>([]);
+try {
+  const savedRecents = localStorage.getItem("recent_move_folder_ids");
+  if (savedRecents) {
+    recentMoveFolderIds.value = JSON.parse(savedRecents);
+  }
+} catch (e) {
+  console.warn("Failed to load recent_move_folder_ids", e);
+}
 
 const isListenModalOpen = ref(false);
 const isImportModalOpen = ref(false);
@@ -3774,21 +3788,41 @@ const getParentFolderId = (
   return { found: false, parentId: null };
 };
 
+const currentParentFolderId = computed<string | null>(() => {
+  if (!itemToMove.value) return null;
+  const parentInfo = getParentFolderId(listenDirectory.value, itemToMove.value.id);
+  return parentInfo.parentId;
+});
+
 const openMoveModal = (item: ListenItem) => {
   if (!item) return;
   itemToMove.value = item;
+  moveFolderSearchQuery.value = "";
+  moveModalFocusedIndex.value = 0;
   const parentInfo = getParentFolderId(listenDirectory.value, item.id);
   selectedMoveTargetFolderId.value = parentInfo.parentId;
   isMoveModalOpen.value = true;
+  nextTick(() => {
+    moveSearchInputRef.value?.focus();
+    moveSearchInputRef.value?.select();
+  });
 };
 
-const confirmMoveItem = () => {
+const executeMoveItem = (targetFolderId: string | null) => {
   if (!itemToMove.value) {
     isMoveModalOpen.value = false;
     return;
   }
   const idToMove = itemToMove.value.id;
-  const targetFolderId = selectedMoveTargetFolderId.value;
+  const itemName = itemToMove.value.name;
+
+  // Check if moving to current parent
+  const parentInfo = getParentFolderId(listenDirectory.value, idToMove);
+  if (parentInfo.parentId === targetFolderId) {
+    isMoveModalOpen.value = false;
+    itemToMove.value = null;
+    return;
+  }
 
   // Detach from current parent
   let extractedItem: ListenItem | null = null;
@@ -3815,12 +3849,29 @@ const confirmMoveItem = () => {
         }
         folder.children.push(extractedItem!);
         expandedFolders.value[folder.id] = true;
+        expandParentFoldersForNode(folder.id);
       }
     });
+
+    // Update recent destinations
+    const nextRecents = [targetFolderId, ...recentMoveFolderIds.value.filter(id => id !== targetFolderId)].slice(0, 4);
+    recentMoveFolderIds.value = nextRecents;
+    try {
+      localStorage.setItem("recent_move_folder_ids", JSON.stringify(nextRecents));
+    } catch (e) {
+      console.warn("Failed to persist recent_move_folder_ids", e);
+    }
   }
 
   saveListenDirectory();
-  toastMessage.value = t("listen.toastMoveSuccess", { name: (extractedItem as ListenItem).name });
+
+  // Highlight and position in view
+  nextTick(() => {
+    expandParentFoldersForNode(idToMove);
+    positionListenNodeInView(idToMove);
+  });
+
+  toastMessage.value = t("listen.toastMoveSuccess", { name: itemName });
   toastType.value = "success";
   setTimeout(() => {
     toastMessage.value = "";
@@ -3830,58 +3881,165 @@ const confirmMoveItem = () => {
   itemToMove.value = null;
 };
 
+const confirmMoveItem = () => {
+  executeMoveItem(selectedMoveTargetFolderId.value);
+};
+
+const createFolderAndMove = (newFolderName: string) => {
+  const trimmed = newFolderName.trim();
+  if (!itemToMove.value || !trimmed) return;
+  const newFolderId = `folder-${Date.now()}`;
+  const newFolder: ListenItem = {
+    id: newFolderId,
+    name: trimmed,
+    isFolder: true,
+    children: []
+  };
+  listenDirectory.value.push(newFolder);
+  expandedFolders.value[newFolderId] = true;
+  executeMoveItem(newFolderId);
+};
+
 const availableFolderOptions = computed(() => {
   const options: Array<{
     id: string | null;
     name: string;
+    path: string;
     depth: number;
     disabled: boolean;
     isCurrent: boolean;
     itemCount: number;
   }> = [];
 
-  const parentInfo = itemToMove.value
-    ? getParentFolderId(listenDirectory.value, itemToMove.value.id)
-    : { found: false, parentId: null };
-  const currentParentId = parentInfo.parentId;
+  const currentParentId = currentParentFolderId.value;
 
   // Root level option
   options.push({
     id: null,
     name: t("listen.rootDirectory"),
+    path: "",
     depth: 0,
     disabled: itemToMove.value ? currentParentId === null : false,
     isCurrent: currentParentId === null,
     itemCount: totalListenItemsCount.value
   });
 
-  const traverse = (nodes: ListenItem[], depth = 1) => {
+  const traverse = (nodes: ListenItem[], depth = 1, currentPath: string[] = []) => {
     for (const node of nodes) {
       if (node.isFolder) {
         const isSelf = !!(itemToMove.value && itemToMove.value.id === node.id);
         const isChildDescendant = !!(itemToMove.value && isDescendant(itemToMove.value, node.id));
         const isCurrent = currentParentId === node.id;
         const disabled = isSelf || isChildDescendant || isCurrent;
+        const pathString = currentPath.length > 0 ? currentPath.join(" › ") : "";
 
         options.push({
           id: node.id,
           name: node.name,
+          path: pathString,
           depth,
           disabled,
           isCurrent,
           itemCount: getFolderItemsCount(node)
         });
 
-        if (node.children) {
-          traverse(node.children, depth + 1);
+        if (node.children && node.children.length > 0) {
+          traverse(node.children, depth + 1, [...currentPath, node.name]);
         }
       }
     }
   };
 
-  traverse(listenDirectory.value, 1);
+  traverse(listenDirectory.value, 1, []);
   return options;
 });
+
+const filteredFolderOptions = computed(() => {
+  const query = moveFolderSearchQuery.value.trim().toLowerCase();
+  if (!query) {
+    return availableFolderOptions.value;
+  }
+  return availableFolderOptions.value.filter(opt => {
+    if (opt.id === null) {
+      return opt.name.toLowerCase().includes(query) || "root".includes(query) || "top".includes(query);
+    }
+    const nameMatch = opt.name.toLowerCase().includes(query);
+    const pathMatch = opt.path.toLowerCase().includes(query);
+    return nameMatch || pathMatch;
+  });
+});
+
+const recentFolderOptions = computed(() => {
+  if (!recentMoveFolderIds.value || recentMoveFolderIds.value.length === 0) return [];
+  const map = new Map<string, (typeof availableFolderOptions.value)[0]>();
+  for (const opt of availableFolderOptions.value) {
+    if (opt.id) map.set(opt.id, opt);
+  }
+  const result: (typeof availableFolderOptions.value)[0][] = [];
+  for (const id of recentMoveFolderIds.value) {
+    const opt = map.get(id);
+    if (opt && !opt.disabled) {
+      result.push(opt);
+    }
+  }
+  return result;
+});
+
+watch(moveFolderSearchQuery, () => {
+  moveModalFocusedIndex.value = 0;
+});
+
+const onMoveModalKeydown = (e: KeyboardEvent) => {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    isMoveModalOpen.value = false;
+  } else if (e.key === "ArrowDown") {
+    e.preventDefault();
+    const len = filteredFolderOptions.value.length;
+    if (len > 0) {
+      let next = (moveModalFocusedIndex.value + 1) % len;
+      for (let i = 0; i < len; i++) {
+        if (!filteredFolderOptions.value[next].disabled) {
+          moveModalFocusedIndex.value = next;
+          break;
+        }
+        next = (next + 1) % len;
+      }
+      scrollFocusedFolderIntoView();
+    }
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    const len = filteredFolderOptions.value.length;
+    if (len > 0) {
+      let prev = (moveModalFocusedIndex.value - 1 + len) % len;
+      for (let i = 0; i < len; i++) {
+        if (!filteredFolderOptions.value[prev].disabled) {
+          moveModalFocusedIndex.value = prev;
+          break;
+        }
+        prev = (prev - 1 + len) % len;
+      }
+      scrollFocusedFolderIntoView();
+    }
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    const opt = filteredFolderOptions.value[moveModalFocusedIndex.value];
+    if (opt && !opt.disabled) {
+      executeMoveItem(opt.id);
+    } else if (filteredFolderOptions.value.length === 0 && moveFolderSearchQuery.value.trim()) {
+      createFolderAndMove(moveFolderSearchQuery.value.trim());
+    }
+  }
+};
+
+const scrollFocusedFolderIntoView = () => {
+  nextTick(() => {
+    const el = document.getElementById(`move-folder-opt-${moveModalFocusedIndex.value}`);
+    if (el) {
+      el.scrollIntoView({ block: "nearest" });
+    }
+  });
+};
 
 const expandAllFolders = () => {
   const expandRecursive = (nodes: ListenItem[]) => {
@@ -20488,86 +20646,202 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Move Item/Folder Modal Popup -->
+      <!-- Optimized Fast Move Picker Modal -->
       <div 
         v-if="isMoveModalOpen" 
-        class="fixed inset-0 z-[115] flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm"
+        class="fixed inset-0 z-[120] flex items-start sm:items-center justify-center p-3 sm:p-6 bg-gray-900/60 dark:bg-black/75 backdrop-blur-sm animate-in fade-in duration-150"
         @click.self="isMoveModalOpen = false"
+        @keydown="onMoveModalKeydown"
       >
-        <div class="w-full max-w-md bg-white dark:bg-gray-800 rounded-3xl overflow-hidden shadow-2xl border border-gray-150 dark:border-gray-700 animate-in fade-in zoom-in duration-200">
-          <div class="p-6">
-            <div class="flex items-center justify-between mb-4 border-b border-gray-150 dark:border-gray-700 pb-3">
-              <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white flex items-center gap-2">
-                <ArrowRightLeft class="h-5 w-5 text-teal-500" />
-                <span>{{ t('listen.moveItemTitle') }}</span>
-              </h3>
-              <button @click="isMoveModalOpen = false" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg p-1 cursor-pointer">
+        <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-3xl overflow-hidden shadow-2xl border border-gray-200 dark:border-gray-700 flex flex-col max-h-[88vh] animate-in zoom-in-95 duration-150">
+          <!-- Header -->
+          <div class="p-5 sm:p-6 pb-3 border-b border-gray-150 dark:border-gray-700/80">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3 min-w-0">
+                <div class="p-2.5 rounded-2xl bg-teal-50 dark:bg-teal-950/60 text-teal-600 dark:text-teal-400 border border-teal-200/60 dark:border-teal-800/60 shrink-0">
+                  <ArrowRightLeft class="h-5 w-5" />
+                </div>
+                <div class="min-w-0">
+                  <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white truncate">
+                    {{ t('listen.moveItemTitle') }}
+                  </h3>
+                  <p class="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5">
+                    {{ t('listen.moveItemPrompt', { name: itemToMove?.name || '' }) }}
+                  </p>
+                </div>
+              </div>
+              <button 
+                @click="isMoveModalOpen = false" 
+                class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/60 rounded-xl p-2 cursor-pointer transition-colors"
+                :title="t('common.cancel')"
+              >
                 <X class="h-5 w-5" />
               </button>
             </div>
 
-            <div class="space-y-4">
-              <p class="text-xs text-gray-600 dark:text-gray-300 leading-relaxed">
-                {{ t('listen.moveItemPrompt', { name: itemToMove?.name || '' }) }}
+            <!-- Instant Search Bar -->
+            <div class="relative mt-4">
+              <Search class="h-4 w-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500 pointer-events-none" />
+              <input
+                ref="moveSearchInputRef"
+                v-model="moveFolderSearchQuery"
+                type="text"
+                :placeholder="t('listen.searchDestinationFolder')"
+                class="w-full pl-10 pr-9 py-2.5 bg-gray-50 dark:bg-gray-900/70 border border-gray-200 dark:border-gray-700 rounded-2xl text-xs sm:text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-hidden focus:ring-2 focus:ring-teal-500/50 focus:border-teal-500 transition-all font-medium"
+                @keydown="onMoveModalKeydown"
+              />
+              <button
+                v-if="moveFolderSearchQuery"
+                @click="moveFolderSearchQuery = ''"
+                class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-0.5 cursor-pointer"
+              >
+                <X class="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            <!-- Quick Jump / Recent Bar -->
+            <div class="flex items-center flex-wrap gap-1.5 mt-3 pt-2 border-t border-gray-100 dark:border-gray-700/50 text-[11px]">
+              <!-- Root Directory Pill -->
+              <button
+                type="button"
+                @click="executeMoveItem(null)"
+                class="px-2.5 py-1 rounded-xl font-bold flex items-center gap-1.5 transition-all text-xs"
+                :class="[
+                  currentParentFolderId === null
+                    ? 'bg-gray-150 dark:bg-gray-700/70 text-gray-400 dark:text-gray-500 cursor-not-allowed'
+                    : 'bg-teal-50 dark:bg-teal-950/50 text-teal-700 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900/60 border border-teal-200/60 dark:border-teal-800/60 cursor-pointer'
+                ]"
+                :disabled="currentParentFolderId === null"
+                :title="currentParentFolderId === null ? t('listen.currentLocation') : t('listen.moveToRoot')"
+              >
+                <Database class="h-3.5 w-3.5 text-teal-500" />
+                <span>{{ t('listen.moveToRoot') }}</span>
+                <span v-if="currentParentFolderId === null" class="text-[9px] opacity-75 font-normal">({{ t('listen.currentLocation') }})</span>
+              </button>
+
+              <!-- Recent Destinations -->
+              <template v-if="recentFolderOptions.length > 0">
+                <span class="text-gray-400 dark:text-gray-500 font-semibold ml-1 mr-0.5">{{ t('listen.recentDestinations') }}</span>
+                <button
+                  v-for="recentOpt in recentFolderOptions"
+                  :key="'rec-' + recentOpt.id"
+                  type="button"
+                  @click="executeMoveItem(recentOpt.id)"
+                  class="px-2 py-0.5 rounded-lg bg-gray-100 dark:bg-gray-700/70 hover:bg-teal-50 dark:hover:bg-teal-950/40 text-gray-700 dark:text-gray-200 hover:text-teal-700 dark:hover:text-teal-300 font-medium flex items-center gap-1 transition-all cursor-pointer border border-transparent hover:border-teal-200 dark:hover:border-teal-800/60 truncate max-w-[130px]"
+                  :title="recentOpt.path ? `${recentOpt.path} › ${recentOpt.name}` : recentOpt.name"
+                >
+                  <Folder class="h-3 w-3 text-amber-500 shrink-0" />
+                  <span class="truncate">{{ recentOpt.name }}</span>
+                </button>
+              </template>
+            </div>
+          </div>
+
+          <!-- Destination Folder Picker Stream -->
+          <div class="flex-1 overflow-y-auto p-3 space-y-1 min-h-[160px] max-h-[380px]">
+            <!-- Empty state when search matches nothing -->
+            <div 
+              v-if="filteredFolderOptions.length === 0" 
+              class="flex flex-col items-center justify-center py-10 px-4 text-center"
+            >
+              <div class="w-12 h-12 rounded-2xl bg-gray-100 dark:bg-gray-700/60 flex items-center justify-center text-gray-400 dark:text-gray-500 mb-3">
+                <FolderX class="h-6 w-6" />
+              </div>
+              <p class="text-xs font-bold text-gray-700 dark:text-gray-300">
+                {{ t('listen.noMatchingFolders') }}
+              </p>
+              <p v-if="moveFolderSearchQuery.trim()" class="text-[11px] text-gray-400 dark:text-gray-500 mt-1">
+                "{{ moveFolderSearchQuery.trim() }}"
               </p>
 
-              <!-- Destination Folder Picker List -->
-              <div class="max-h-[300px] overflow-y-auto space-y-1 rounded-2xl border border-gray-200 dark:border-gray-700 p-2 bg-gray-50/50 dark:bg-gray-900/40">
-                <div
-                  v-for="folderOpt in availableFolderOptions"
-                  :key="folderOpt.id ?? 'root'"
-                  @click="!folderOpt.disabled && (selectedMoveTargetFolderId = folderOpt.id)"
-                  class="flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition-colors"
-                  :class="[
-                    folderOpt.disabled
-                      ? 'opacity-40 cursor-not-allowed bg-transparent text-gray-400 dark:text-gray-600'
-                      : selectedMoveTargetFolderId === folderOpt.id
-                        ? 'bg-teal-50 dark:bg-teal-950/40 border border-teal-200 dark:border-teal-800/60 text-teal-700 dark:text-teal-300 shadow-2xs cursor-pointer'
-                        : 'hover:bg-white dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300 cursor-pointer'
-                  ]"
-                  :style="{ paddingLeft: `calc(0.75rem + ${folderOpt.depth * 1.25}rem)` }"
-                >
+              <!-- One-click Create Folder & Move button -->
+              <button
+                v-if="moveFolderSearchQuery.trim()"
+                type="button"
+                @click="createFolderAndMove(moveFolderSearchQuery.trim())"
+                class="mt-4 px-4 py-2 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-sm transition-all cursor-pointer"
+              >
+                <FolderPlus class="h-4 w-4" />
+                <span>{{ t('listen.createAndMoveToFolder', { name: moveFolderSearchQuery.trim() }) }}</span>
+              </button>
+            </div>
+
+            <!-- Folder Options List -->
+            <template v-else>
+              <div
+                v-for="(folderOpt, idx) in filteredFolderOptions"
+                :key="folderOpt.id ?? 'root'"
+                :id="'move-folder-opt-' + idx"
+                @click="!folderOpt.disabled && executeMoveItem(folderOpt.id)"
+                @mouseenter="!folderOpt.disabled && (moveModalFocusedIndex = idx)"
+                class="group flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-semibold transition-all duration-150 border"
+                :class="[
+                  folderOpt.disabled
+                    ? 'opacity-40 cursor-not-allowed bg-transparent border-transparent text-gray-400 dark:text-gray-600'
+                    : moveModalFocusedIndex === idx
+                      ? 'bg-teal-50 dark:bg-teal-950/50 border-teal-200 dark:border-teal-800/80 text-teal-900 dark:text-teal-200 shadow-2xs cursor-pointer'
+                      : 'hover:bg-gray-50 dark:hover:bg-gray-750/70 border-transparent text-gray-800 dark:text-gray-200 cursor-pointer'
+                ]"
+              >
+                <div class="flex flex-col min-w-0 pr-2">
+                  <!-- Breadcrumb path if nested -->
+                  <div 
+                    v-if="folderOpt.path" 
+                    class="text-[10px] font-mono text-gray-400 dark:text-gray-500 truncate flex items-center gap-1 mb-0.5"
+                  >
+                    <span>{{ folderOpt.path }}</span>
+                  </div>
+
+                  <!-- Folder Name and Icon -->
                   <div class="flex items-center gap-2 min-w-0">
                     <component
                       :is="folderOpt.id === null ? Database : Folder"
-                      class="h-4 w-4 shrink-0"
-                      :class="folderOpt.id === null ? 'text-teal-500' : 'text-yellow-500'"
+                      class="h-4 w-4 shrink-0 transition-transform group-hover:scale-110"
+                      :class="folderOpt.id === null ? 'text-teal-500' : 'text-amber-500'"
                     />
-                    <span class="truncate">{{ folderOpt.name }}</span>
-                  </div>
-
-                  <div class="flex items-center gap-1.5 shrink-0">
-                    <span v-if="folderOpt.isCurrent" class="text-[10px] font-bold text-gray-400">
-                      {{ t('listen.currentLocation') }}
-                    </span>
-                    <span v-else-if="folderOpt.disabled" class="text-[10px] text-gray-400 italic">
-                      {{ t('listen.cannotMoveDescendant') }}
-                    </span>
-                    <span v-else class="text-[10px] font-mono text-gray-400 px-1.5 py-0.5 rounded bg-gray-200/60 dark:bg-gray-700/60">
-                      {{ folderOpt.itemCount }}
+                    <span class="truncate font-bold text-gray-900 dark:text-gray-100">
+                      {{ folderOpt.name }}
                     </span>
                   </div>
                 </div>
-              </div>
 
-              <div class="flex items-center justify-end gap-3 pt-3 border-t border-gray-150 dark:border-gray-700">
-                <button
-                  type="button"
-                  @click="isMoveModalOpen = false"
-                  class="px-4 py-2 rounded-xl text-xs font-bold text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors cursor-pointer"
-                >
-                  {{ t('common.cancel') }}
-                </button>
-                <button
-                  type="button"
-                  @click="confirmMoveItem"
-                  class="px-4 py-2 bg-teal-600 hover:bg-teal-700 active:bg-teal-800 text-white rounded-xl text-xs font-bold shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
-                >
-                  <CheckCircle2 class="h-4 w-4" />
-                  <span>{{ t('listen.confirmMove') }}</span>
-                </button>
+                <!-- Right Side Info / Quick Action -->
+                <div class="flex items-center gap-2 shrink-0">
+                  <span v-if="folderOpt.isCurrent" class="text-[10px] font-bold text-gray-400 px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-700/60">
+                    {{ t('listen.currentLocation') }}
+                  </span>
+                  <span v-else-if="folderOpt.disabled" class="text-[10px] text-gray-400 italic">
+                    {{ t('listen.cannotMoveDescendant') }}
+                  </span>
+                  <template v-else>
+                    <!-- Item count badge (hidden when row is hovered/focused to show move prompt) -->
+                    <span class="text-[10px] font-mono text-gray-400 dark:text-gray-500 px-1.5 py-0.5 rounded bg-gray-150 dark:bg-gray-700/60 group-hover:hidden">
+                      {{ folderOpt.itemCount }}
+                    </span>
+                    <!-- Instant Move Action indicator on hover / focus -->
+                    <span class="hidden group-hover:flex items-center gap-1 text-[11px] font-extrabold text-teal-600 dark:text-teal-400 animate-in fade-in duration-150">
+                      <span>{{ t('listen.clickToMoveHere') }}</span>
+                      <CornerDownLeft class="h-3.5 w-3.5" />
+                    </span>
+                  </template>
+                </div>
               </div>
-            </div>
+            </template>
+          </div>
+
+          <!-- Footer with Tips -->
+          <div class="px-5 py-3 border-t border-gray-150 dark:border-gray-700 flex items-center justify-between text-[11px] text-gray-400 dark:text-gray-500 bg-gray-50/50 dark:bg-gray-800/50">
+            <span class="flex items-center gap-1.5">
+              <kbd class="px-1.5 py-0.5 rounded bg-gray-200/80 dark:bg-gray-700 font-mono text-[10px] text-gray-600 dark:text-gray-300">↑↓</kbd>
+              <span>{{ t('listen.keyboardNavTip') }}</span>
+            </span>
+            <button
+              type="button"
+              @click="isMoveModalOpen = false"
+              class="px-3 py-1 rounded-lg text-xs font-bold text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+            >
+              {{ t('common.cancel') }}
+            </button>
           </div>
         </div>
       </div>
