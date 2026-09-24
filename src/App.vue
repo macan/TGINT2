@@ -80,6 +80,7 @@ import {
   Edit,
   SlidersHorizontal,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   ZoomIn,
   ZoomOut,
@@ -2515,17 +2516,23 @@ const isFetchingListenPosts = ref(false);
 const listenAutoRefreshActive = ref(false);
 let listenRefreshInterval: any = null;
 
-// Listen Layout Modes: 'view' (Reading focus) vs 'rearrange' (Reorganization focus)
-const listenLayoutMode = ref<'view' | 'rearrange'>(
-  (localStorage.getItem("listen_layout_mode") as 'view' | 'rearrange') || 'view'
+// Listen Layout Modes: 'view' (Reading focus) vs 'rearrange' (Reorganization focus) vs 'flexible' (Multi-stream workdesk)
+const listenLayoutMode = ref<'view' | 'rearrange' | 'flexible'>(
+  (localStorage.getItem("listen_layout_mode") as 'view' | 'rearrange' | 'flexible') || 'view'
 );
 
-const setListenLayoutMode = (mode: 'view' | 'rearrange') => {
+const setListenLayoutMode = (mode: 'view' | 'rearrange' | 'flexible') => {
   listenLayoutMode.value = mode;
   localStorage.setItem("listen_layout_mode", mode);
-  nextTick(() => {
-    initRelationsGraph();
-  });
+  if (mode === 'flexible') {
+    nextTick(() => {
+      initFlexibleWorkdesk();
+    });
+  } else {
+    nextTick(() => {
+      initRelationsGraph();
+    });
+  }
 };
 
 // Rearrange Decision Tab: 'both' | 'graph' | 'posts'
@@ -3793,6 +3800,569 @@ const currentParentFolderId = computed<string | null>(() => {
   const parentInfo = getParentFolderId(listenDirectory.value, itemToMove.value.id);
   return parentInfo.parentId;
 });
+
+interface FolderBreadcrumb {
+  id: string | null;
+  name: string;
+}
+
+const getNodeFolderBreadcrumbs = (targetId: string): FolderBreadcrumb[] => {
+  const findPath = (
+    nodes: ListenItem[],
+    currentAncestors: FolderBreadcrumb[]
+  ): FolderBreadcrumb[] | null => {
+    for (const node of nodes) {
+      if (node.id === targetId) {
+        return currentAncestors;
+      }
+      if (node.isFolder && node.children && node.children.length > 0) {
+        const res = findPath(node.children, [
+          ...currentAncestors,
+          { id: node.id, name: node.name }
+        ]);
+        if (res) return res;
+      }
+    }
+    return null;
+  };
+
+  const path = findPath(listenDirectory.value, []);
+  if (path === null) return [];
+  if (path.length === 0) {
+    return [{ id: null, name: t("listen.rootDirectory") }];
+  }
+  return path;
+};
+
+const selectedItemFolderBreadcrumbs = computed<FolderBreadcrumb[]>(() => {
+  if (!selectedListenNode.value) return [];
+  return getNodeFolderBreadcrumbs(selectedListenNode.value.id);
+});
+
+// ==========================================
+// Flexible Mode (Multi-Stream Workdesk) State & Actions
+// ==========================================
+interface DeskWidgetState {
+  posts: any[];
+  displayLimit: number;
+  isLoading: boolean;
+  isSyncing: boolean;
+  isLoadingOlder?: boolean;
+  allLoaded?: boolean;
+  lastSync: number | null;
+}
+
+const flexibleActiveItemIds = ref<string[]>([]);
+const deskWidgetsState = ref<Record<string, DeskWidgetState>>({});
+const flexibleGridCols = ref<'auto' | '2' | '3' | '4'>(
+  (localStorage.getItem('flexible_grid_cols') as any) || 'auto'
+);
+const setFlexibleGridCols = (cols: 'auto' | '2' | '3' | '4') => {
+  flexibleGridCols.value = cols;
+  localStorage.setItem('flexible_grid_cols', cols);
+};
+
+const flexibleGridClass = computed(() => {
+  switch (flexibleGridCols.value) {
+    case '2':
+      return 'grid grid-cols-1 md:grid-cols-2 gap-4.5 items-start';
+    case '3':
+      return 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4.5 items-start';
+    case '4':
+      return 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4.5 items-start';
+    default:
+      return 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-4.5 items-start';
+  }
+});
+
+// Quick Item Selector & Filter State
+const isFlexibleSelectorOpen = ref(false);
+const flexibleSearchQuery = ref('');
+const flexibleTypeFilter = ref<'all' | 'channel' | 'keyword'>('all');
+const flexibleFolderFilter = ref<string>('all');
+const quickDeskSearch = ref('');
+const isQuickDeskSearchFocused = ref(false);
+const isSyncingAllWorkdesk = ref(false);
+
+// Drag & drop state for workdesk widgets
+const deskDragSourceIndex = ref<number | null>(null);
+const deskDragTargetIndex = ref<number | null>(null);
+
+// Flatten all directory non-folder items
+const allDirectoryLeafItems = computed<ListenItem[]>(() => {
+  const result: ListenItem[] = [];
+  const collect = (nodes: ListenItem[]) => {
+    for (const node of nodes) {
+      if (!node.isFolder) {
+        result.push(node);
+      }
+      if (node.isFolder && node.children && node.children.length > 0) {
+        collect(node.children);
+      }
+    }
+  };
+  collect(listenDirectory.value);
+  return result;
+});
+
+// Filtered items in the selector
+const filteredDirectoryLeafItems = computed(() => {
+  const q = flexibleSearchQuery.value.trim().toLowerCase();
+  const type = flexibleTypeFilter.value;
+  const folder = flexibleFolderFilter.value;
+
+  return allDirectoryLeafItems.value.filter((item) => {
+    if (type !== 'all' && item.type !== type) return false;
+    if (folder !== 'all') {
+      const parent = getParentFolderId(listenDirectory.value, item.id);
+      if (parent.parentId !== folder) return false;
+    }
+    if (!q) return true;
+    const matchName = item.name.toLowerCase().includes(q);
+    const matchArg = item.argument?.toLowerCase().includes(q);
+    const matchDesc = item.description?.toLowerCase().includes(q);
+    const matchTag = item.tags?.some((t) => t.toLowerCase().includes(q));
+    return matchName || matchArg || matchDesc || matchTag;
+  });
+});
+
+// Instant matches for top quick search bar
+const quickSearchResults = computed(() => {
+  const q = quickDeskSearch.value.trim().toLowerCase();
+  if (!q) return [];
+  return allDirectoryLeafItems.value
+    .filter((item) => {
+      const matchName = item.name.toLowerCase().includes(q);
+      const matchArg = item.argument?.toLowerCase().includes(q);
+      const matchDesc = item.description?.toLowerCase().includes(q);
+      const matchTag = item.tags?.some((t) => t.toLowerCase().includes(q));
+      return matchName || matchArg || matchDesc || matchTag;
+    })
+    .slice(0, 8);
+});
+
+// Find node by ID
+const findDirectoryNodeById = (nodes: ListenItem[], id: string): ListenItem | null => {
+  for (const n of nodes) {
+    if (n.id === id) return n;
+    if (n.isFolder && n.children && n.children.length > 0) {
+      const found = findDirectoryNodeById(n.children, id);
+      if (found) return found;
+    }
+  }
+  return null;
+};
+
+// Active items mapped to ListenItem objects
+const flexibleWorkdeskItems = computed<ListenItem[]>(() => {
+  const items: ListenItem[] = [];
+  for (const id of flexibleActiveItemIds.value) {
+    const node = findDirectoryNodeById(listenDirectory.value, id);
+    if (node && !node.isFolder) {
+      items.push(node);
+    }
+  }
+  return items;
+});
+
+// Save / Load active items in localStorage
+const saveFlexibleActiveItems = () => {
+  try {
+    localStorage.setItem(
+      'listen_flexible_active_ids',
+      JSON.stringify(flexibleActiveItemIds.value)
+    );
+  } catch (e) {
+    console.error('Failed to save flexible items:', e);
+  }
+};
+
+const loadFlexibleActiveItems = () => {
+  try {
+    const raw = localStorage.getItem('listen_flexible_active_ids');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        flexibleActiveItemIds.value = parsed;
+        return;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load flexible active items:', e);
+  }
+
+  // Fallback defaults: pick first 3-4 items from directory
+  const defaults: string[] = [];
+  for (const item of allDirectoryLeafItems.value) {
+    defaults.push(item.id);
+    if (defaults.length >= 4) break;
+  }
+  flexibleActiveItemIds.value = defaults;
+  saveFlexibleActiveItems();
+};
+
+const getWidgetState = (nodeId: string): DeskWidgetState => {
+  if (!deskWidgetsState.value[nodeId]) {
+    deskWidgetsState.value[nodeId] = {
+      posts: [],
+      displayLimit: 15,
+      isLoading: false,
+      isSyncing: false,
+      lastSync: null,
+    };
+  }
+  return deskWidgetsState.value[nodeId];
+};
+
+const getWidgetNewestPostDate = (nodeId: string): string | null => {
+  const posts = deskWidgetsState.value[nodeId]?.posts;
+  if (!posts || posts.length === 0) return null;
+  let maxDate: any = null;
+  let maxTs = 0;
+  for (const p of posts) {
+    const rawDate = p?.data?.date || p?.date;
+    if (rawDate) {
+      const ts = typeof rawDate === 'number'
+        ? (rawDate < 10000000000 ? rawDate * 1000 : rawDate)
+        : new Date(rawDate).getTime();
+      if (!isNaN(ts) && ts > maxTs) {
+        maxTs = ts;
+        maxDate = rawDate;
+      }
+    }
+  }
+  if (!maxDate) return null;
+  return typeof formatDate === 'function' ? formatDate(maxDate) : String(maxDate);
+};
+
+const initWidgetForNode = async (node: ListenItem) => {
+  const state = getWidgetState(node.id);
+  if (state.posts.length > 0) return;
+  state.isLoading = true;
+  try {
+    const cached = await getCachedPostsIndexedDB(node.id);
+    if (cached && cached.length > 0) {
+      state.posts = cached;
+      state.lastSync = Date.now();
+      updateItemFreshness(node.id, cached);
+    } else {
+      // Sync from server if not cached
+      await syncWidgetNode(node);
+    }
+  } catch (e) {
+    console.error('Failed to load widget posts for:', node.name, e);
+  } finally {
+    state.isLoading = false;
+  }
+};
+
+const syncNodePosts = async (node: ListenItem) => {
+  if (!node || node.isFolder) return;
+  try {
+    if (selectedListenNode.value && selectedListenNode.value.id === node.id) {
+      await fetchListenPosts(node, false);
+    } else {
+      await syncSingleListenItem(node);
+    }
+  } catch (err) {
+    console.error("Failed to sync node posts for:", node.name, err);
+  }
+};
+
+const syncWidgetNode = async (node: ListenItem) => {
+  const state = getWidgetState(node.id);
+  state.isSyncing = true;
+  try {
+    await syncNodePosts(node);
+    const updated = await getCachedPostsIndexedDB(node.id);
+    if (updated) {
+      state.posts = updated;
+      state.lastSync = Date.now();
+    }
+  } catch (e) {
+    console.error('Failed to sync widget node:', node.name, e);
+  } finally {
+    state.isSyncing = false;
+  }
+};
+
+const initFlexibleWorkdesk = async () => {
+  loadFlexibleActiveItems();
+  const items = flexibleWorkdeskItems.value;
+  for (const item of items) {
+    initWidgetForNode(item);
+  }
+};
+
+// Toggle item on/off workdesk
+const isItemOnWorkdesk = (id: string): boolean => {
+  return flexibleActiveItemIds.value.includes(id);
+};
+
+const toggleItemOnWorkdesk = (node: ListenItem) => {
+  const idx = flexibleActiveItemIds.value.indexOf(node.id);
+  if (idx >= 0) {
+    flexibleActiveItemIds.value.splice(idx, 1);
+  } else {
+    flexibleActiveItemIds.value.push(node.id);
+    initWidgetForNode(node);
+  }
+  saveFlexibleActiveItems();
+};
+
+const addAllItemsInFolderToDesk = (folderId: string) => {
+  const collectChildLeafs = (nodes: ListenItem[]): ListenItem[] => {
+    let leaves: ListenItem[] = [];
+    for (const n of nodes) {
+      if (!n.isFolder) leaves.push(n);
+      if (n.isFolder && n.children) leaves = leaves.concat(collectChildLeafs(n.children));
+    }
+    return leaves;
+  };
+
+  const folder = findDirectoryNodeById(listenDirectory.value, folderId);
+  if (folder && folder.children) {
+    const leafs = collectChildLeafs(folder.children);
+    for (const leaf of leafs) {
+      if (!flexibleActiveItemIds.value.includes(leaf.id)) {
+        flexibleActiveItemIds.value.push(leaf.id);
+        initWidgetForNode(leaf);
+      }
+    }
+    saveFlexibleActiveItems();
+  }
+};
+
+const addAllChannelsToDesk = () => {
+  for (const item of allDirectoryLeafItems.value) {
+    if (item.type === 'channel' && !flexibleActiveItemIds.value.includes(item.id)) {
+      flexibleActiveItemIds.value.push(item.id);
+      initWidgetForNode(item);
+    }
+  }
+  saveFlexibleActiveItems();
+};
+
+const addAllKeywordsToDesk = () => {
+  for (const item of allDirectoryLeafItems.value) {
+    if (item.type === 'keyword' && !flexibleActiveItemIds.value.includes(item.id)) {
+      flexibleActiveItemIds.value.push(item.id);
+      initWidgetForNode(item);
+    }
+  }
+  saveFlexibleActiveItems();
+};
+
+const clearWorkdesk = () => {
+  if (flexibleActiveItemIds.value.length === 0) return;
+  if (confirm(t('listen.confirmClearWorkdesk') || 'Clear all items from current workdesk?')) {
+    flexibleActiveItemIds.value = [];
+    saveFlexibleActiveItems();
+  }
+};
+
+const fetchOlderPostsForWidget = async (nodeId: string) => {
+  const state = getWidgetState(nodeId);
+  if (state.isLoadingOlder || state.allLoaded) return;
+  const node = allDirectoryLeafItems.value.find(n => n.id === nodeId);
+  if (!node || node.isFolder) return;
+
+  state.isLoadingOlder = true;
+  try {
+    let olderPosts: any[] = [];
+    if (node.type === 'channel') {
+      let username = node.argument?.trim();
+      if (!username) return;
+      if (username.startsWith('@')) username = username.slice(1);
+      if (listenResolveCache.has(username)) {
+        username = listenResolveCache.get(username)!;
+      }
+
+      let minPostNumber = Infinity;
+      for (const p of state.posts) {
+        const id = p.key || p.id || (p.data && p.data.id) || '';
+        if (id) {
+          const parts = id.split('.');
+          if (parts.length > 1) {
+            const num = parseInt(parts[1], 10);
+            if (!isNaN(num) && num < minPostNumber) {
+              minPostNumber = num;
+            }
+          }
+        }
+      }
+
+      if (minPostNumber > 1 && minPostNumber !== Infinity) {
+        const res = await fetch(`https://i.gogingko.net/api/v1/last/${username}?n=50&b=${minPostNumber}`, {
+          headers: { "x-gos-rawcontent": "1" }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          olderPosts = Array.isArray(data) ? data : (data.data || data.posts || data.items || []);
+        }
+      }
+    }
+
+    if (olderPosts.length > 0) {
+      const existingIds = new Set(state.posts.map(p => p.key || p.id || (p.data && p.data.id)));
+      const newItems = olderPosts.filter(p => {
+        const id = p.key || p.id || (p.data && p.data.id);
+        return id && !existingIds.has(id);
+      });
+
+      if (newItems.length > 0) {
+        const merged = [...state.posts, ...newItems];
+        const getPostTimestamp = (dateVal: any) => {
+          if (!dateVal) return 0;
+          if (typeof dateVal === "number" && dateVal < 10000000000) return dateVal * 1000;
+          const parsed = new Date(dateVal).getTime();
+          return isNaN(parsed) ? 0 : parsed;
+        };
+        merged.sort((a, b) => getPostTimestamp(b.data?.date) - getPostTimestamp(a.data?.date));
+        state.posts = merged;
+        state.displayLimit = Math.min(merged.length, state.displayLimit + 15);
+        try {
+          await setCachedPostsIndexedDB(node.id, merged);
+        } catch (e) {
+          console.error("Failed to update cache on fetchOlder:", e);
+        }
+      } else {
+        state.allLoaded = true;
+      }
+    } else {
+      state.allLoaded = true;
+    }
+  } catch (err) {
+    console.error("Failed to fetch older posts for widget:", err);
+  } finally {
+    state.isLoadingOlder = false;
+  }
+};
+
+const triggerLoadOlderForWidget = async (nodeId: string) => {
+  const state = getWidgetState(nodeId);
+  if (state.displayLimit < state.posts.length) {
+    state.displayLimit = Math.min(state.posts.length, state.displayLimit + 15);
+  } else {
+    await fetchOlderPostsForWidget(nodeId);
+  }
+};
+
+// Infinite scroll in a single widget
+const handleDeskWidgetScroll = (nodeId: string, event: Event) => {
+  const target = event.target as HTMLElement;
+  if (!target) return;
+  const state = getWidgetState(nodeId);
+  const threshold = 120;
+  if (target.scrollTop + target.clientHeight >= target.scrollHeight - threshold) {
+    if (state.displayLimit < state.posts.length) {
+      state.displayLimit = Math.min(state.posts.length, state.displayLimit + 15);
+    } else if (!state.isLoadingOlder && !state.allLoaded) {
+      fetchOlderPostsForWidget(nodeId);
+    }
+  }
+};
+
+// Sync all active widgets in parallel
+const syncAllWorkdeskWidgets = async () => {
+  if (isSyncingAllWorkdesk.value) return;
+  isSyncingAllWorkdesk.value = true;
+  const items = flexibleWorkdeskItems.value;
+  try {
+    await Promise.allSettled(
+      items.map(async (item) => {
+        await syncWidgetNode(item);
+      })
+    );
+  } finally {
+    isSyncingAllWorkdesk.value = false;
+  }
+};
+
+// Drag and drop reordering
+const handleDeskCardDragStart = (idx: number, e: DragEvent) => {
+  deskDragSourceIndex.value = idx;
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(idx));
+  }
+};
+
+const handleDeskCardDragOver = (idx: number, e: DragEvent) => {
+  e.preventDefault();
+  if (deskDragSourceIndex.value === null || deskDragSourceIndex.value === idx) return;
+  deskDragTargetIndex.value = idx;
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = 'move';
+  }
+};
+
+const handleDeskCardDragLeave = (idx: number) => {
+  if (deskDragTargetIndex.value === idx) {
+    deskDragTargetIndex.value = null;
+  }
+};
+
+const handleDeskCardDrop = (idx: number) => {
+  if (deskDragSourceIndex.value !== null && deskDragSourceIndex.value !== idx) {
+    const moved = flexibleActiveItemIds.value[deskDragSourceIndex.value];
+    const copy = [...flexibleActiveItemIds.value];
+    copy.splice(deskDragSourceIndex.value, 1);
+    copy.splice(idx, 0, moved);
+    flexibleActiveItemIds.value = copy;
+    saveFlexibleActiveItems();
+  }
+  deskDragSourceIndex.value = null;
+  deskDragTargetIndex.value = null;
+};
+
+const handleDeskCardDragEnd = () => {
+  deskDragSourceIndex.value = null;
+  deskDragTargetIndex.value = null;
+};
+
+const moveWidgetPosition = (currentIndex: number, direction: 'left' | 'right') => {
+  const targetIndex = direction === 'left' ? currentIndex - 1 : currentIndex + 1;
+  if (targetIndex < 0 || targetIndex >= flexibleActiveItemIds.value.length) return;
+  const copy = [...flexibleActiveItemIds.value];
+  const item = copy[currentIndex];
+  copy.splice(currentIndex, 1);
+  copy.splice(targetIndex, 0, item);
+  flexibleActiveItemIds.value = copy;
+  saveFlexibleActiveItems();
+};
+
+const openWidgetInViewMode = (node: ListenItem) => {
+  selectedListenNode.value = node;
+  setListenLayoutMode('view');
+  fetchListenPosts(node, true);
+};
+
+const scrollToDeskWidget = (nodeId: string) => {
+  const el = document.getElementById(`desk-widget-${nodeId}`);
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('ring-2', 'ring-teal-500', 'ring-offset-2');
+    setTimeout(() => {
+      el.classList.remove('ring-2', 'ring-teal-500', 'ring-offset-2');
+    }, 1500);
+  }
+};
+
+const jumpToFolderFromBreadcrumb = (folderId: string | null) => {
+  if (folderId === null) {
+    const container = listenTreeContainer.value || document.getElementById('listen-tree-container');
+    if (container) {
+      container.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  } else {
+    expandParentFoldersForNode(folderId);
+    expandedFolders.value[folderId] = true;
+    nextTick(() => {
+      positionListenNodeInView(folderId);
+    });
+  }
+};
 
 const openMoveModal = (item: ListenItem) => {
   if (!item) return;
@@ -7392,6 +7962,9 @@ onMounted(() => {
     loadListenDirectory();
     loadAllListenPostsFreshnessFromIndexedDB();
     setupListenBackgroundSyncTimer();
+    if (listenLayoutMode.value === 'flexible') {
+      initFlexibleWorkdesk();
+    }
     fetchIndexedProfilesCount();
   }
 });
@@ -18737,7 +19310,7 @@ onUnmounted(() => {
         <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/70 dark:border-gray-700/70 shadow-sm p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div class="flex items-center gap-3.5 min-w-0">
             <div class="h-10 w-10 sm:h-11 sm:w-11 rounded-2xl bg-teal-50 dark:bg-teal-950/50 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 shrink-0 shadow-xs">
-              <component :is="listenLayoutMode === 'view' ? Eye : FolderTree" class="h-5 w-5" />
+              <component :is="listenLayoutMode === 'view' ? Eye : (listenLayoutMode === 'rearrange' ? FolderTree : LayoutGrid)" class="h-5 w-5" />
             </div>
             <div class="min-w-0">
               <div class="flex items-center gap-2 flex-wrap">
@@ -18752,7 +19325,7 @@ onUnmounted(() => {
                 </span>
               </div>
               <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5 truncate max-w-2xl">
-                {{ listenLayoutMode === 'view' ? t('listen.modeViewHint') : t('listen.modeRearrangeHint') }}
+                {{ listenLayoutMode === 'view' ? t('listen.modeViewHint') : (listenLayoutMode === 'rearrange' ? t('listen.modeRearrangeHint') : t('listen.modeFlexibleHint')) }}
               </p>
             </div>
           </div>
@@ -18851,10 +19424,572 @@ onUnmounted(() => {
                 <FolderTree class="h-3.5 w-3.5" />
                 <span>{{ t('listen.modeRearrange') }}</span>
               </button>
+              <button
+                @click="setListenLayoutMode('flexible')"
+                class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer select-none"
+                :class="[
+                  listenLayoutMode === 'flexible'
+                    ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
+                    : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+                ]"
+              >
+                <LayoutGrid class="h-3.5 w-3.5" />
+                <span>{{ t('listen.modeFlexible') }}</span>
+              </button>
             </div>
           </div>
         </div>
 
+        <!-- Flexible Mode (Multi-Stream Workdesk Canvas) -->
+        <template v-if="listenLayoutMode === 'flexible'">
+          <div class="space-y-6 w-full">
+            <!-- Workdesk Toolbar: Quick Item Filter & Selector, Active Chips, Columns, Batch Actions -->
+            <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 shadow-sm p-4 sm:p-5 flex flex-col gap-4">
+              <!-- Top Row: Quick search & filter bar, Quick Selector button, Column switchers, Batch actions -->
+              <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3.5">
+                <!-- Left: Quick filter & selector input -->
+                <div class="flex flex-1 items-center gap-2 max-w-xl relative">
+                  <div class="relative flex-1">
+                    <Search class="h-4 w-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500 pointer-events-none" />
+                    <input
+                      v-model="quickDeskSearch"
+                      @focus="isQuickDeskSearchFocused = true"
+                      type="text"
+                      :placeholder="t('listen.searchItemsToTrace')"
+                      class="w-full pl-10 pr-8 py-2.5 bg-gray-50 dark:bg-gray-900/70 border border-gray-200 dark:border-gray-700 rounded-2xl text-xs sm:text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-hidden focus:ring-2 focus:ring-teal-500/50 focus:border-teal-500 transition-all font-medium"
+                    />
+                    <button
+                      v-if="quickDeskSearch"
+                      @click="quickDeskSearch = ''"
+                      class="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-0.5 cursor-pointer"
+                    >
+                      <X class="h-3.5 w-3.5" />
+                    </button>
+
+                    <!-- Quick Instant Search Dropdown Results -->
+                    <div
+                      v-if="quickDeskSearch && quickSearchResults.length > 0"
+                      class="absolute top-full left-0 right-0 mt-2 z-50 bg-white dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-xl max-h-72 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-700/60"
+                    >
+                      <div
+                        v-for="item in quickSearchResults"
+                        :key="'quick-res-' + item.id"
+                        @click="toggleItemOnWorkdesk(item)"
+                        class="p-2.5 hover:bg-gray-50 dark:hover:bg-gray-700/50 flex items-center justify-between gap-3 cursor-pointer transition-colors"
+                      >
+                        <div class="flex items-center gap-2.5 min-w-0">
+                          <div class="w-6 h-6 rounded-lg bg-teal-50 dark:bg-teal-950/60 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-[10px] shrink-0">
+                            <Radio v-if="item.type === 'channel'" class="h-3 w-3" />
+                            <Tag v-else class="h-3 w-3" />
+                          </div>
+                          <div class="min-w-0">
+                            <div class="text-xs font-bold text-gray-900 dark:text-gray-100 truncate flex items-center gap-1.5">
+                              <span>{{ item.name }}</span>
+                              <span v-if="item.argument" class="font-mono text-[10px] text-gray-400 dark:text-gray-500 truncate">{{ item.argument }}</span>
+                            </div>
+                            <div class="text-[10px] text-gray-400 dark:text-gray-500 truncate flex items-center gap-1">
+                              <span>{{ getNodeFolderBreadcrumbs(item.id).map(b => b.name).join(' › ') }}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          class="px-2.5 py-1 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer"
+                          :class="[
+                            isItemOnWorkdesk(item.id)
+                              ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800'
+                              : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-teal-50 hover:text-teal-600 dark:hover:bg-teal-900/40'
+                          ]"
+                        >
+                          <span v-if="isItemOnWorkdesk(item.id)" class="flex items-center gap-1">
+                            <Check class="h-3 w-3 text-teal-500" />
+                            {{ t('listen.activeOnDesk') }}
+                          </span>
+                          <span v-else class="flex items-center gap-1">
+                            <Plus class="h-3 w-3" />
+                            {{ t('listen.addToDesk') }}
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Quick Selector Dialog Trigger Button -->
+                  <button
+                    @click="isFlexibleSelectorOpen = true"
+                    class="flex items-center gap-1.5 px-3.5 py-2.5 rounded-2xl bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs transition-all shadow-xs shrink-0 cursor-pointer active:scale-95"
+                  >
+                    <Filter class="h-3.5 w-3.5" />
+                    <span class="hidden sm:inline">{{ t('listen.quickSelector') }}</span>
+                    <span class="sm:hidden">{{ t('listen.traceItems') }}</span>
+                  </button>
+                </div>
+
+                <!-- Right: Controls (Active counter, Column selector, Sync All, Clear Desk) -->
+                <div class="flex items-center gap-2 flex-wrap">
+                  <!-- Tracing count badge -->
+                  <span class="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl text-xs font-bold bg-teal-50 dark:bg-teal-950/40 text-teal-700 dark:text-teal-300 border border-teal-200/60 dark:border-teal-800/40 tabular-nums">
+                    <LayoutGrid class="h-3 w-3" />
+                    {{ t('listen.tracingCount', { count: flexibleWorkdeskItems.length }) }}
+                  </span>
+
+                  <!-- Grid Columns Switcher: Auto, 2, 3, 4 -->
+                  <div class="flex items-center bg-gray-100 dark:bg-gray-900/60 p-1 rounded-xl border border-gray-200/60 dark:border-gray-700/60 text-xs">
+                    <button
+                      @click="setFlexibleGridCols('auto')"
+                      :class="[flexibleGridCols === 'auto' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-2xs font-bold' : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white']"
+                      class="px-2.5 py-1 rounded-lg transition-all cursor-pointer"
+                      :title="t('listen.columnsAuto')"
+                    >
+                      {{ t('listen.columnsAuto') }}
+                    </button>
+                    <button
+                      @click="setFlexibleGridCols('2')"
+                      :class="[flexibleGridCols === '2' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-2xs font-bold' : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white']"
+                      class="px-2.5 py-1 rounded-lg transition-all cursor-pointer"
+                      :title="t('listen.columns2')"
+                    >
+                      {{ t('listen.columns2') }}
+                    </button>
+                    <button
+                      @click="setFlexibleGridCols('3')"
+                      :class="[flexibleGridCols === '3' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-2xs font-bold' : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white']"
+                      class="px-2.5 py-1 rounded-lg transition-all cursor-pointer"
+                      :title="t('listen.columns3')"
+                    >
+                      {{ t('listen.columns3') }}
+                    </button>
+                    <button
+                      @click="setFlexibleGridCols('4')"
+                      :class="[flexibleGridCols === '4' ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-2xs font-bold' : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white']"
+                      class="px-2.5 py-1 rounded-lg transition-all cursor-pointer"
+                      :title="t('listen.columns4')"
+                    >
+                      {{ t('listen.columns4') }}
+                    </button>
+                  </div>
+
+                  <!-- Sync All Button -->
+                  <button
+                    @click="syncAllWorkdeskWidgets"
+                    :disabled="isSyncingAllWorkdesk || flexibleWorkdeskItems.length === 0"
+                    class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-700/80 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 text-xs font-bold transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-2xs"
+                    :title="t('listen.syncAllActive')"
+                  >
+                    <RefreshCw class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" :class="{ 'animate-spin': isSyncingAllWorkdesk }" />
+                    <span>{{ isSyncingAllWorkdesk ? t('listen.syncingAll') : t('listen.syncAllActive') }}</span>
+                  </button>
+
+                  <!-- Clear Desk Button -->
+                  <button
+                    v-if="flexibleWorkdeskItems.length > 0"
+                    @click="clearWorkdesk"
+                    class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-colors cursor-pointer"
+                    :title="t('listen.clearWorkdesk')"
+                  >
+                    <Trash2 class="h-3.5 w-3.5" />
+                    <span class="hidden sm:inline">{{ t('listen.clearWorkdesk') }}</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Bottom Row: Active Items Chips Strip with drag reorder hint & jump to widget -->
+              <div v-if="flexibleWorkdeskItems.length > 0" class="pt-3 border-t border-gray-150 dark:border-gray-700/60 flex items-center justify-between gap-3 flex-wrap">
+                <div class="flex items-center gap-1.5 flex-wrap overflow-x-auto py-0.5">
+                  <span class="text-[11px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mr-1">
+                    {{ t('listen.activeOnDesk') }}:
+                  </span>
+                  <div
+                    v-for="item in flexibleWorkdeskItems"
+                    :key="'active-pill-' + item.id"
+                    class="group/pill inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-medium bg-gray-50 dark:bg-gray-900/60 border border-gray-200/80 dark:border-gray-700 hover:border-teal-400 dark:hover:border-teal-500 text-gray-800 dark:text-gray-200 transition-all select-none"
+                  >
+                    <span
+                      @click="scrollToDeskWidget(item.id)"
+                      class="cursor-pointer font-semibold hover:text-teal-600 dark:hover:text-teal-400 truncate max-w-[130px]"
+                      :title="item.name"
+                    >
+                      {{ item.name }}
+                    </span>
+                    <button
+                      @click="toggleItemOnWorkdesk(item)"
+                      class="text-gray-400 hover:text-rose-500 dark:hover:text-rose-400 p-0.5 rounded cursor-pointer transition-colors"
+                      :title="t('listen.removeFromDesk')"
+                    >
+                      <X class="h-3 w-3" />
+                    </button>
+                  </div>
+                </div>
+                
+                <div class="flex items-center gap-1.5 text-[11px] text-gray-400 dark:text-gray-500">
+                  <Move class="h-3 w-3 text-teal-500" />
+                  <span>{{ t('listen.dragToReorderDesk') }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Workdesk Canvas Grid: Draggable Infinite Widgets placed Left-to-Right, Row-by-Row -->
+            <div v-if="flexibleWorkdeskItems.length > 0" :class="flexibleGridClass">
+              <div
+                v-for="(node, wIdx) in flexibleWorkdeskItems"
+                :key="'desk-widget-' + node.id"
+                :id="'desk-widget-' + node.id"
+                draggable="true"
+                @dragstart="handleDeskCardDragStart(wIdx, $event)"
+                @dragover="handleDeskCardDragOver(wIdx, $event)"
+                @dragleave="handleDeskCardDragLeave(wIdx)"
+                @drop="handleDeskCardDrop(wIdx)"
+                @dragend="handleDeskCardDragEnd"
+                class="bg-white dark:bg-gray-800 rounded-2xl border transition-all duration-200 flex flex-col h-[650px] shadow-2xs hover:shadow-md overflow-hidden relative group"
+                :class="[
+                  deskDragSourceIndex === wIdx
+                    ? 'opacity-40 border-dashed border-teal-400 dark:border-teal-500'
+                    : deskDragTargetIndex === wIdx
+                      ? 'border-2 border-teal-500 dark:border-teal-400 ring-4 ring-teal-500/20'
+                      : 'border-gray-200/90 dark:border-gray-700/80 hover:border-gray-300 dark:hover:border-gray-600'
+                ]"
+              >
+                <!-- Compact Header Region -->
+                <div class="p-3.5 bg-gray-50/90 dark:bg-gray-800/90 border-b border-gray-200/80 dark:border-gray-700/80 flex flex-col gap-2 shrink-0 select-none">
+                  <!-- Row 1: Drag handle, Avatar/Icon, Title, Actions -->
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="flex items-center gap-2 min-w-0">
+                      <!-- Drag Handle -->
+                      <div
+                        class="cursor-grab active:cursor-grabbing p-1 -ml-1 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
+                        :title="t('listen.dragCardHint')"
+                      >
+                        <GripVertical class="h-4 w-4" />
+                      </div>
+
+                      <!-- Avatar / Icon -->
+                      <div class="w-7 h-7 rounded-lg overflow-hidden bg-teal-50 dark:bg-teal-950/60 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-xs shrink-0">
+                        <Radio v-if="node.type === 'channel'" class="h-3.5 w-3.5" />
+                        <Tag v-else class="h-3.5 w-3.5" />
+                      </div>
+
+                      <!-- Name & Category -->
+                      <div class="min-w-0">
+                        <h4 class="text-xs sm:text-sm font-bold text-gray-900 dark:text-white truncate" :title="node.name">
+                          {{ node.name }}
+                        </h4>
+                        <div class="text-[10px] text-gray-400 dark:text-gray-500 truncate flex items-center gap-1 font-mono">
+                          <span v-if="node.argument">{{ node.argument }}</span>
+                          <span v-if="node.argument && getNodeFolderBreadcrumbs(node.id).length > 0">•</span>
+                          <span v-if="getNodeFolderBreadcrumbs(node.id).length > 0" class="truncate">
+                            {{ getNodeFolderBreadcrumbs(node.id).map(b => b.name).join(' › ') }}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Card Header Actions -->
+                    <div class="flex items-center gap-1 shrink-0">
+                      <!-- Move Left / Right buttons for accessible reordering -->
+                      <button
+                        v-if="wIdx > 0"
+                        @click="moveWidgetPosition(wIdx, 'left')"
+                        class="p-1 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-200/60 dark:hover:bg-gray-700/60 rounded-md transition-colors cursor-pointer"
+                        :title="t('listen.moveLeft')"
+                      >
+                        <ChevronLeft class="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        v-if="wIdx < flexibleWorkdeskItems.length - 1"
+                        @click="moveWidgetPosition(wIdx, 'right')"
+                        class="p-1 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-200/60 dark:hover:bg-gray-700/60 rounded-md transition-colors cursor-pointer"
+                        :title="t('listen.moveRight')"
+                      >
+                        <ChevronRight class="h-3.5 w-3.5" />
+                      </button>
+
+                      <!-- Sync This Card Button -->
+                      <button
+                        @click="syncWidgetNode(node)"
+                        :disabled="getWidgetState(node.id).isSyncing"
+                        class="p-1.5 text-gray-400 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40 rounded-lg transition-colors cursor-pointer"
+                        :title="t('listen.syncNow')"
+                      >
+                        <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin text-teal-500': getWidgetState(node.id).isSyncing }" />
+                      </button>
+
+                      <!-- Open in Reader View Mode -->
+                      <button
+                        @click="openWidgetInViewMode(node)"
+                        class="p-1.5 text-gray-400 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40 rounded-lg transition-colors cursor-pointer"
+                        :title="t('listen.modeView')"
+                      >
+                        <Maximize2 class="h-3.5 w-3.5" />
+                      </button>
+
+                      <!-- Remove Widget from Desk -->
+                      <button
+                        @click="toggleItemOnWorkdesk(node)"
+                        class="p-1.5 text-gray-400 hover:text-rose-600 dark:text-gray-400 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
+                        :title="t('listen.removeFromDesk')"
+                      >
+                        <X class="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <!-- Row 2: Metadata Strip (Freshness, Count, Tag badges) -->
+                  <div class="flex items-center justify-between gap-2 text-[10px] text-gray-500 dark:text-gray-400 flex-wrap">
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                      <!-- Freshness Badge -->
+                      <span
+                        v-if="getItemOrFolderFreshness(node.id)"
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border font-medium tabular-nums"
+                        :class="getFreshnessBadgeClasses(getItemOrFolderFreshness(node.id)?.level)"
+                      >
+                        <span class="w-1.5 h-1.5 rounded-full" :class="getFreshnessDotColor(getItemOrFolderFreshness(node.id)?.level)"></span>
+                        {{ getItemOrFolderFreshness(node.id)?.relativeText }}
+                      </span>
+
+                      <!-- Posts Count Badge -->
+                      <span
+                        class="font-mono text-gray-400 dark:text-gray-500 tabular-nums"
+                        :title="getWidgetState(node.id).displayLimit < getWidgetState(node.id).posts.length
+                          ? `${Math.min(getWidgetState(node.id).displayLimit, getWidgetState(node.id).posts.length)} / ${getWidgetState(node.id).posts.length} ${t('listen.posts')}`
+                          : `${getWidgetState(node.id).posts.length} ${t('listen.posts')}`"
+                      >
+                        <template v-if="getWidgetState(node.id).posts.length > 0 && getWidgetState(node.id).displayLimit < getWidgetState(node.id).posts.length">
+                          {{ Math.min(getWidgetState(node.id).displayLimit, getWidgetState(node.id).posts.length) }}/{{ getWidgetState(node.id).posts.length }} {{ t('listen.posts') }}
+                        </template>
+                        <template v-else>
+                          {{ getWidgetState(node.id).posts.length }} {{ t('listen.posts') }}
+                        </template>
+                      </span>
+
+                      <!-- Newest Fetched Post Date Badge -->
+                      <span
+                        v-if="getWidgetNewestPostDate(node.id)"
+                        class="inline-flex items-center gap-1 font-mono text-[10px] text-teal-700 dark:text-teal-300 bg-teal-50/80 dark:bg-teal-950/40 px-1.5 py-0.5 rounded-md border border-teal-200/60 dark:border-teal-800/50 tabular-nums"
+                        :title="t('listen.newestPostDate')"
+                      >
+                        <Calendar class="h-2.5 w-2.5 text-teal-500 shrink-0" />
+                        <span class="truncate max-w-[140px] sm:max-w-[180px]">{{ getWidgetNewestPostDate(node.id) }}</span>
+                      </span>
+
+                      <!-- Syncing Indicator -->
+                      <span v-if="getWidgetState(node.id).isSyncing" class="inline-flex items-center gap-1 text-teal-600 dark:text-teal-400 font-bold animate-pulse">
+                        <Loader2 class="h-2.5 w-2.5 animate-spin" />
+                        {{ t('listen.syncing') || 'Syncing...' }}
+                      </span>
+                    </div>
+
+                    <div v-if="node.tags && node.tags.length > 0" class="flex items-center gap-1">
+                      <span
+                        v-for="tag in node.tags.slice(0, 2)"
+                        :key="tag"
+                        class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-700/80 text-gray-600 dark:text-gray-300 rounded text-[9px] font-mono"
+                      >
+                        #{{ tag }}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Scrollable Post Region (Infinite stream) -->
+                <div
+                  @scroll="handleDeskWidgetScroll(node.id, $event)"
+                  class="flex-1 min-h-0 overflow-y-auto p-3 space-y-3 scrollbar-thin bg-gray-50/40 dark:bg-gray-900/40"
+                >
+                  <!-- Loading Skeleton State -->
+                  <div v-if="getWidgetState(node.id).isLoading" class="space-y-3 py-4">
+                    <div v-for="i in 3" :key="i" class="p-3.5 rounded-xl border border-gray-200/60 dark:border-gray-700/60 bg-white/80 dark:bg-gray-800/80 animate-pulse space-y-2">
+                      <div class="flex items-center gap-2">
+                        <div class="w-7 h-7 rounded-lg bg-gray-200 dark:bg-gray-700"></div>
+                        <div class="h-3 w-28 bg-gray-200 dark:bg-gray-700 rounded"></div>
+                      </div>
+                      <div class="h-3 w-full bg-gray-200 dark:bg-gray-700 rounded"></div>
+                      <div class="h-3 w-3/4 bg-gray-200 dark:bg-gray-700 rounded"></div>
+                    </div>
+                  </div>
+
+                  <!-- Empty State inside Widget -->
+                  <div
+                    v-else-if="getWidgetState(node.id).posts.length === 0"
+                    class="py-16 text-center flex flex-col items-center justify-center gap-2"
+                  >
+                    <Radio class="h-8 w-8 text-gray-300 dark:text-gray-600 mb-1" />
+                    <p class="text-xs font-semibold text-gray-500 dark:text-gray-400">
+                      {{ t('listen.noPostsYet') }}
+                    </p>
+                    <button
+                      @click="syncWidgetNode(node)"
+                      class="mt-2 px-3 py-1.5 rounded-xl bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800 font-bold text-xs hover:bg-teal-100 transition-colors cursor-pointer flex items-center gap-1.5"
+                    >
+                      <RefreshCw class="h-3 w-3" />
+                      <span>{{ t('listen.syncNow') }}</span>
+                    </button>
+                  </div>
+
+                  <!-- Posts List -->
+                  <div
+                    v-for="(post, pIdx) in getWidgetState(node.id).posts.slice(0, getWidgetState(node.id).displayLimit)"
+                    :key="post.key || pIdx"
+                    class="p-3.5 rounded-xl sm:rounded-2xl border border-gray-200/80 dark:border-gray-700/70 bg-white dark:bg-gray-800/95 hover:border-teal-400/60 dark:hover:border-teal-500/50 hover:shadow-sm transition-all duration-200 space-y-2.5"
+                  >
+                    <!-- Post Header -->
+                    <div class="flex items-start justify-between gap-2">
+                      <div class="flex items-center gap-2 min-w-0">
+                        <div class="w-6 h-6 rounded-lg overflow-hidden border border-gray-200 dark:border-gray-700 shrink-0 bg-teal-50 dark:bg-teal-950/50 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-[10px]">
+                          <img
+                            :src="getPostAvatarUrl(post)"
+                            @error="handleImageError"
+                            class="w-full h-full object-cover"
+                            alt="Avatar"
+                            referrerpolicy="no-referrer"
+                          />
+                        </div>
+                        <div class="min-w-0">
+                          <span class="text-xs font-bold text-gray-900 dark:text-gray-100 truncate block">
+                            {{ post.data?.author || post.data?.user || node.name }}
+                          </span>
+                          <span class="text-[10px] text-gray-400 dark:text-gray-500">
+                            {{ post.data?.date ? formatDate(post.data.date) : '' }}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div class="flex items-center gap-1 shrink-0">
+                        <a
+                          v-if="post.url || post.link"
+                          :href="post.url || post.link"
+                          target="_blank"
+                          class="p-1 text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
+                          :title="t('listen.viewTg')"
+                        >
+                          <ExternalLink class="h-3 w-3" />
+                        </a>
+                      </div>
+                    </div>
+
+                    <!-- Forward quote banner (if any) -->
+                    <div
+                      v-if="post.data?.forward_url"
+                      class="border-l-2 border-purple-400 dark:border-purple-500 bg-purple-50/50 dark:bg-purple-950/30 px-2.5 py-1.5 rounded-r-lg text-[11px] text-gray-600 dark:text-gray-300 italic"
+                    >
+                      <div class="flex items-center gap-1 text-[9px] font-black uppercase text-purple-600 dark:text-purple-400">
+                        <Forward class="h-2.5 w-2.5" />
+                        <span>{{ t('listen.forward') }}</span>
+                      </div>
+                      <div class="line-clamp-1 mt-0.5">{{ getForwardInfo(post)?.text || post.data.forward_url }}</div>
+                    </div>
+
+                    <!-- Post Content Text with highlights -->
+                    <div v-if="getSafePostContent(post) || post.data?.message" class="space-y-1.5">
+                      <div
+                        v-html="highlightTextByKeywords(getSafePostContent(post) || post.data?.message || '')"
+                        class="text-xs text-gray-800 dark:text-gray-200 leading-relaxed whitespace-pre-wrap break-words max-h-48 overflow-y-auto pr-1 select-text scrollbar-thin"
+                      ></div>
+                      <div class="flex items-center gap-2 pt-0.5">
+                        <button
+                          @click="translatePost(post)"
+                          class="inline-flex items-center gap-1 text-[10px] text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors cursor-pointer"
+                        >
+                          <Languages v-if="!isTranslating[post.key]" class="h-2.5 w-2.5" />
+                          <Loader2 v-else class="h-2.5 w-2.5 animate-spin" />
+                          <span>{{ t('listen.translateContents') }}</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    <!-- Media preview (photo) -->
+                    <div
+                      v-if="post.data?.photos && post.data.photos.length > 0"
+                      class="rounded-xl overflow-hidden border border-gray-200/80 dark:border-gray-700/80 bg-black/5 dark:bg-black/40 group cursor-zoom-in relative shadow-2xs"
+                      @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`)"
+                    >
+                      <img
+                        :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`"
+                        class="w-full h-auto max-h-[180px] object-cover transition-transform duration-300 group-hover:scale-[1.01]"
+                        alt="Post Photo"
+                        referrerpolicy="no-referrer"
+                      />
+                      <div
+                        v-if="post.data.photos.length > 1"
+                        class="absolute bottom-2 right-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-black/75 text-white backdrop-blur-xs flex items-center gap-1"
+                      >
+                        <ImageIcon class="h-2.5 w-2.5 text-teal-400" />
+                        <span>+{{ post.data.photos.length - 1 }}</span>
+                      </div>
+                    </div>
+
+                    <!-- Bottom Meta: ID & Views -->
+                    <div class="pt-2 border-t border-gray-150 dark:border-gray-700/60 flex items-center justify-between text-[10px] text-gray-400 dark:text-gray-500">
+                      <span v-if="post.key || post.id" class="font-mono">
+                        #{{ post.key || post.id }}
+                      </span>
+                      <span v-if="post.data?.views" class="flex items-center gap-1 font-mono">
+                        <Eye class="h-2.5 w-2.5" />
+                        {{ formatViews(post.data.views) }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <!-- Infinite scroll trigger / end marker -->
+                  <div
+                    v-if="getWidgetState(node.id).displayLimit < getWidgetState(node.id).posts.length || (!getWidgetState(node.id).allLoaded && node.type === 'channel')"
+                    class="py-3 text-center"
+                  >
+                    <button
+                      @click="triggerLoadOlderForWidget(node.id)"
+                      :disabled="getWidgetState(node.id).isLoadingOlder"
+                      class="px-3 py-1.5 rounded-xl text-[11px] font-semibold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 transition-colors cursor-pointer shadow-2xs inline-flex items-center gap-1.5"
+                    >
+                      <Loader2 v-if="getWidgetState(node.id).isLoadingOlder" class="h-3 w-3 animate-spin text-teal-500" />
+                      <ChevronDown v-else class="h-3 w-3" />
+                      <span>{{ t('listen.loadOlderPosts') }} ({{ Math.min(getWidgetState(node.id).displayLimit, getWidgetState(node.id).posts.length) }} / {{ getWidgetState(node.id).posts.length }})</span>
+                    </button>
+                  </div>
+                  <div
+                    v-else-if="getWidgetState(node.id).posts.length > 0"
+                    class="py-2 text-center text-[10px] text-gray-400 dark:text-gray-500 font-medium"
+                  >
+                    {{ t('listen.allCaughtUp') }}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Empty Workdesk Canvas State -->
+            <div
+              v-else
+              class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm p-12 py-20 text-center flex flex-col items-center justify-center max-w-2xl mx-auto my-8"
+            >
+              <div class="h-16 w-16 bg-teal-50 dark:bg-teal-950/40 rounded-3xl flex items-center justify-center text-teal-600 dark:text-teal-400 mb-5 border border-teal-200/60 dark:border-teal-800/40 shadow-xs">
+                <LayoutGrid class="h-8 w-8 text-teal-600 dark:text-teal-400 animate-pulse" />
+              </div>
+              <h3 class="text-base sm:text-lg font-black text-gray-900 dark:text-white tracking-tight">
+                {{ t('listen.noItemsOnDesk') }}
+              </h3>
+              <p class="text-xs sm:text-sm text-gray-400 dark:text-gray-500 mt-2 max-w-md leading-relaxed">
+                {{ t('listen.noItemsOnDeskDesc') }}
+              </p>
+              <div class="mt-6 flex flex-wrap gap-2.5 justify-center">
+                <button
+                  @click="isFlexibleSelectorOpen = true"
+                  class="px-4 py-2 rounded-2xl bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs transition-all shadow-xs cursor-pointer flex items-center gap-1.5"
+                >
+                  <Plus class="h-4 w-4" />
+                  <span>{{ t('listen.selectItemsToTrace') }}</span>
+                </button>
+                <button
+                  @click="addAllChannelsToDesk"
+                  class="px-4 py-2 rounded-2xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200 font-bold text-xs transition-all cursor-pointer flex items-center gap-1.5"
+                >
+                  <Radio class="h-4 w-4 text-teal-500" />
+                  <span>{{ t('listen.allChannels') }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- View & Rearrange Modes (Split Directory & Content) -->
+        <template v-else>
         <!-- Main Panel Split Grid -->
         <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start w-full">
           
@@ -19548,7 +20683,49 @@ onUnmounted(() => {
             <div v-else class="space-y-6 select-text min-h-[920px]">
               <!-- Active Info Header -->
               <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                <div class="space-y-1">
+                <div class="space-y-2.5 min-w-0 flex-1">
+                  <!-- Folder / Sub-folder Breadcrumbs Path -->
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-gray-50 dark:bg-gray-900/60 border border-gray-200/70 dark:border-gray-700/60 text-xs font-medium text-gray-600 dark:text-gray-300">
+                      <FolderTree class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 shrink-0" />
+                      <span class="text-[11px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">{{ t('listen.folderPath') }}:</span>
+                      <nav class="inline-flex items-center gap-1 flex-wrap" aria-label="Breadcrumb">
+                        <template v-for="(crumb, idx) in selectedItemFolderBreadcrumbs" :key="crumb.id ?? 'root'">
+                          <ChevronRight v-if="idx > 0" class="h-3 w-3 text-gray-300 dark:text-gray-600 shrink-0" />
+                          <button
+                            type="button"
+                            @click="jumpToFolderFromBreadcrumb(crumb.id)"
+                            class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-semibold transition-all duration-150 cursor-pointer"
+                            :class="[
+                              crumb.id === null
+                                ? 'hover:bg-gray-200/70 dark:hover:bg-gray-700/80 text-gray-600 dark:text-gray-300'
+                                : 'hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 hover:text-teal-800 dark:hover:text-teal-200'
+                            ]"
+                            :title="crumb.id === null ? t('listen.rootDirectory') : t('listen.locateInTree')"
+                          >
+                            <component
+                              :is="crumb.id === null ? Database : (idx === selectedItemFolderBreadcrumbs.length - 1 ? FolderOpen : Folder)"
+                              class="h-3 w-3 shrink-0"
+                              :class="crumb.id === null ? 'text-teal-500' : 'text-amber-500'"
+                            />
+                            <span>{{ crumb.name }}</span>
+                          </button>
+                        </template>
+                      </nav>
+                    </div>
+
+                    <!-- Quick Move to Folder shortcut button in View Mode -->
+                    <button
+                      type="button"
+                      @click="openMoveModal(selectedListenNode)"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold text-gray-500 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 hover:bg-teal-50/70 dark:hover:bg-teal-950/40 border border-transparent hover:border-teal-200/60 dark:border-teal-800/60 transition-all cursor-pointer"
+                      :title="t('listen.moveTo')"
+                    >
+                      <ArrowRightLeft class="h-3 w-3 text-teal-500" />
+                      <span>{{ t('listen.moveTo') }}</span>
+                    </button>
+                  </div>
+
                   <div class="flex items-center gap-2">
                     <span 
                       class="text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full"
@@ -20133,7 +21310,7 @@ onUnmounted(() => {
                             <Hash v-else class="h-2.5 w-2.5 text-white" />
                           </span>
                         </div>
-                        <div class="min-w-0">
+                        <div class="min-w-0 flex-1">
                           <div class="flex items-center gap-2 flex-wrap">
                             <h3 class="text-sm sm:text-base font-bold text-gray-900 dark:text-white truncate">
                               {{ selectedListenNode.name }}
@@ -20157,6 +21334,36 @@ onUnmounted(() => {
                               <RefreshCw class="h-2.5 w-2.5 animate-spin" />
                               <span>{{ t('listen.syncing') || 'Refreshing...' }}</span>
                             </span>
+                          </div>
+                          <!-- Category / Folder Breadcrumbs Path in Rearrange Mode -->
+                          <div class="flex items-center gap-1.5 mt-1.5 flex-wrap text-xs">
+                            <span class="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider flex items-center gap-1">
+                              <FolderTree class="h-3 w-3 text-teal-600 dark:text-teal-400" />
+                              <span>{{ t('listen.folderPath') }}:</span>
+                            </span>
+                            <nav class="inline-flex items-center gap-1 flex-wrap" aria-label="Breadcrumb">
+                              <template v-for="(crumb, idx) in selectedItemFolderBreadcrumbs" :key="crumb.id ?? 'root'">
+                                <ChevronRight v-if="idx > 0" class="h-3 w-3 text-gray-300 dark:text-gray-600 shrink-0" />
+                                <button
+                                  type="button"
+                                  @click="jumpToFolderFromBreadcrumb(crumb.id)"
+                                  class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold transition-all duration-150 cursor-pointer"
+                                  :class="[
+                                    crumb.id === null
+                                      ? 'bg-gray-150 hover:bg-gray-200 dark:bg-gray-700/80 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300'
+                                      : 'bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/50 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 border border-teal-200/60 dark:border-teal-800/60'
+                                  ]"
+                                  :title="crumb.id === null ? t('listen.rootDirectory') : t('listen.locateInTree')"
+                                >
+                                  <component
+                                    :is="crumb.id === null ? Database : (idx === selectedItemFolderBreadcrumbs.length - 1 ? FolderOpen : Folder)"
+                                    class="h-2.5 w-2.5 shrink-0"
+                                    :class="crumb.id === null ? 'text-teal-500' : 'text-amber-500'"
+                                  />
+                                  <span class="truncate max-w-[160px]">{{ crumb.name }}</span>
+                                </button>
+                              </template>
+                            </nav>
                           </div>
                           <div class="flex items-center gap-3 mt-1 text-xs text-gray-500 dark:text-gray-400 flex-wrap">
                             <span class="font-mono text-teal-600 dark:text-teal-400 font-semibold truncate max-w-[200px]">
@@ -20643,6 +21850,182 @@ onUnmounted(() => {
           </template>
           </div>
 
+        </div>
+        </template>
+      </div>
+
+      <!-- Flexible Mode: Quick Items Selector Modal -->
+      <div
+        v-if="isFlexibleSelectorOpen"
+        class="fixed inset-0 z-[120] flex items-start sm:items-center justify-center p-3 sm:p-6 bg-gray-900/60 dark:bg-black/75 backdrop-blur-sm animate-in fade-in duration-150"
+        @click.self="isFlexibleSelectorOpen = false"
+      >
+        <div class="w-full max-w-2xl bg-white dark:bg-gray-800 rounded-3xl overflow-hidden shadow-2xl border border-gray-200 dark:border-gray-700 flex flex-col max-h-[85vh] animate-in zoom-in-95 duration-150">
+          <!-- Header -->
+          <div class="p-5 pb-3 border-b border-gray-150 dark:border-gray-700/80 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <div class="p-2.5 rounded-2xl bg-teal-50 dark:bg-teal-950/60 text-teal-600 dark:text-teal-400 border border-teal-200/60 dark:border-teal-800/60 shrink-0">
+                <Filter class="h-5 w-5" />
+              </div>
+              <div>
+                <h3 class="text-base sm:text-lg font-extrabold text-gray-900 dark:text-white">
+                  {{ t('listen.quickSelector') }}
+                </h3>
+                <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
+                  {{ t('listen.tracingCount', { count: flexibleActiveItemIds.length }) }}
+                </p>
+              </div>
+            </div>
+            <button
+              @click="isFlexibleSelectorOpen = false"
+              class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/60 rounded-xl p-2 cursor-pointer transition-colors"
+            >
+              <X class="h-5 w-5" />
+            </button>
+          </div>
+
+          <!-- Filter Controls: Search + Type toggle + Batch presets -->
+          <div class="p-4 border-b border-gray-150 dark:border-gray-700/80 bg-gray-50/50 dark:bg-gray-900/40 space-y-3">
+            <!-- Search Input -->
+            <div class="relative">
+              <Search class="h-4 w-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500 pointer-events-none" />
+              <input
+                v-model="flexibleSearchQuery"
+                type="text"
+                :placeholder="t('listen.searchItemsToTrace')"
+                class="w-full pl-10 pr-9 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl text-xs sm:text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-hidden focus:ring-2 focus:ring-teal-500/50 focus:border-teal-500 transition-all font-medium"
+              />
+              <button
+                v-if="flexibleSearchQuery"
+                @click="flexibleSearchQuery = ''"
+                class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-0.5 cursor-pointer"
+              >
+                <X class="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            <!-- Quick Category / Filter Row -->
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <!-- Type Pill Selector -->
+              <div class="flex items-center bg-gray-200/70 dark:bg-gray-800 p-0.5 rounded-xl text-xs">
+                <button
+                  @click="flexibleTypeFilter = 'all'"
+                  :class="[flexibleTypeFilter === 'all' ? 'bg-white dark:bg-gray-700 text-teal-600 dark:text-teal-400 font-bold shadow-2xs' : 'text-gray-500 dark:text-gray-400']"
+                  class="px-2.5 py-1 rounded-lg transition-all cursor-pointer"
+                >
+                  {{ t('listen.allTypes') }}
+                </button>
+                <button
+                  @click="flexibleTypeFilter = 'channel'"
+                  :class="[flexibleTypeFilter === 'channel' ? 'bg-white dark:bg-gray-700 text-teal-600 dark:text-teal-400 font-bold shadow-2xs' : 'text-gray-500 dark:text-gray-400']"
+                  class="px-2.5 py-1 rounded-lg transition-all cursor-pointer"
+                >
+                  {{ t('listen.channelsOnly') }}
+                </button>
+                <button
+                  @click="flexibleTypeFilter = 'keyword'"
+                  :class="[flexibleTypeFilter === 'keyword' ? 'bg-white dark:bg-gray-700 text-teal-600 dark:text-teal-400 font-bold shadow-2xs' : 'text-gray-500 dark:text-gray-400']"
+                  class="px-2.5 py-1 rounded-lg transition-all cursor-pointer"
+                >
+                  {{ t('listen.keywordsOnly') }}
+                </button>
+              </div>
+
+              <!-- Batch Add Presets -->
+              <div class="flex items-center gap-1.5 text-xs">
+                <button
+                  @click="addAllChannelsToDesk"
+                  class="px-2.5 py-1 rounded-xl bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/40 text-teal-700 dark:text-teal-300 border border-teal-200/60 dark:border-teal-800/60 font-semibold transition-colors cursor-pointer"
+                >
+                  + {{ t('listen.allChannels') }}
+                </button>
+                <button
+                  @click="addAllKeywordsToDesk"
+                  class="px-2.5 py-1 rounded-xl bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/40 text-teal-700 dark:text-teal-300 border border-teal-200/60 dark:border-teal-800/60 font-semibold transition-colors cursor-pointer"
+                >
+                  + {{ t('listen.allKeywords') }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Items List -->
+          <div class="flex-1 overflow-y-auto p-4 space-y-2 scrollbar-thin">
+            <div v-if="filteredDirectoryLeafItems.length === 0" class="py-12 text-center text-xs text-gray-400 dark:text-gray-500">
+              {{ t('listen.noLogsFound') }}
+            </div>
+
+            <div
+              v-for="item in filteredDirectoryLeafItems"
+              :key="'leaf-sel-' + item.id"
+              @click="toggleItemOnWorkdesk(item)"
+              class="p-3 rounded-2xl border transition-all duration-150 flex items-center justify-between gap-3 cursor-pointer group"
+              :class="[
+                isItemOnWorkdesk(item.id)
+                  ? 'bg-teal-50/50 dark:bg-teal-950/20 border-teal-300 dark:border-teal-800/80 shadow-2xs'
+                  : 'bg-white dark:bg-gray-800/90 border-gray-200/80 dark:border-gray-700/80 hover:border-gray-300 dark:hover:border-gray-600'
+              ]"
+            >
+              <div class="flex items-center gap-3 min-w-0">
+                <!-- Checkbox circle indicator -->
+                <div
+                  class="w-5 h-5 rounded-full border flex items-center justify-center transition-all shrink-0"
+                  :class="[
+                    isItemOnWorkdesk(item.id)
+                      ? 'bg-teal-600 border-teal-600 text-white shadow-2xs'
+                      : 'border-gray-300 dark:border-gray-600 group-hover:border-teal-500'
+                  ]"
+                >
+                  <Check v-if="isItemOnWorkdesk(item.id)" class="h-3 w-3 stroke-[3]" />
+                </div>
+
+                <!-- Type icon -->
+                <div class="w-7 h-7 rounded-lg bg-teal-50 dark:bg-teal-950/50 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-xs shrink-0">
+                  <Radio v-if="item.type === 'channel'" class="h-3.5 w-3.5" />
+                  <Tag v-else class="h-3.5 w-3.5" />
+                </div>
+
+                <!-- Title and breadcrumb trail -->
+                <div class="min-w-0">
+                  <div class="text-xs sm:text-sm font-bold text-gray-900 dark:text-white truncate flex items-center gap-2">
+                    <span>{{ item.name }}</span>
+                    <span v-if="item.argument" class="font-mono text-[10px] text-gray-400 dark:text-gray-500">{{ item.argument }}</span>
+                  </div>
+                  <div class="text-[10px] text-gray-400 dark:text-gray-500 truncate flex items-center gap-1.5 mt-0.5">
+                    <span>{{ getNodeFolderBreadcrumbs(item.id).map(b => b.name).join(' › ') }}</span>
+                    <span v-if="getItemOrFolderFreshness(item.id)" class="text-teal-600 dark:text-teal-400">
+                      • {{ getItemOrFolderFreshness(item.id)?.relativeText }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                class="px-2.5 py-1 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer"
+                :class="[
+                  isItemOnWorkdesk(item.id)
+                    ? 'bg-teal-100 dark:bg-teal-900/60 text-teal-800 dark:text-teal-200'
+                    : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 group-hover:bg-teal-50 group-hover:text-teal-600'
+                ]"
+              >
+                {{ isItemOnWorkdesk(item.id) ? t('listen.activeOnDesk') : t('listen.addToDesk') }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Footer -->
+          <div class="p-4 border-t border-gray-150 dark:border-gray-700/80 bg-gray-50/50 dark:bg-gray-900/40 flex items-center justify-between">
+            <span class="text-xs text-gray-500 dark:text-gray-400 font-medium">
+              {{ t('listen.tracingCount', { count: flexibleActiveItemIds.length }) }}
+            </span>
+            <button
+              @click="isFlexibleSelectorOpen = false"
+              class="px-5 py-2 rounded-2xl bg-teal-600 hover:bg-teal-700 text-white font-bold text-xs transition-all shadow-xs cursor-pointer"
+            >
+              {{ t('common.done') || 'Done' }}
+            </button>
+          </div>
         </div>
       </div>
 
