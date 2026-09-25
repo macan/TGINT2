@@ -44,3 +44,10 @@
 .prose tr:nth-child(even) {
   @apply bg-gray-50/50 dark:bg-gray-800/20;
 }
+
+/* High-performance virtualized rendering for large lists */
+.listen-tree-node-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 42px;
+  contain: layout style;
+}

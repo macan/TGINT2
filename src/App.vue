@@ -3509,62 +3509,130 @@ const confirmDeleteListenItem = () => {
 
 const listenSearchQuery = ref("");
 
-const nodeMatchesSearch = (node: ListenItem, term: string): boolean => {
-  if (!term && !selectedListenTagFilter.value) return true;
+const getMatchingNodeIds = (
+  nodes: ListenItem[],
+  term: string,
+  tagFilter: string | null
+): Set<string> => {
+  const matched = new Set<string>();
+  if (!term && !tagFilter) return matched;
 
-  // 1. Tag filter matching (exact tag on item or inside folder)
-  if (selectedListenTagFilter.value) {
-    if (node.isFolder) {
-      const hasChildMatching = node.children && node.children.some(child => nodeMatchesSearch(child, term));
-      if (!hasChildMatching) return false;
-    } else {
-      if (!Array.isArray(node.tags) || !node.tags.includes(selectedListenTagFilter.value)) {
-        return false;
+  const lowerTerm = term ? term.toLowerCase() : "";
+  const cleanTerm = lowerTerm.startsWith("#") ? lowerTerm.substring(1) : lowerTerm;
+
+  const check = (node: ListenItem): boolean => {
+    let selfMatch = false;
+
+    if (tagFilter) {
+      if (!node.isFolder && Array.isArray(node.tags) && node.tags.includes(tagFilter)) {
+        selfMatch = true;
       }
+    }
+
+    if (term) {
+      const textMatch =
+        (node.name && node.name.toLowerCase().includes(lowerTerm)) ||
+        (node.argument && node.argument.toLowerCase().includes(lowerTerm)) ||
+        (!node.isFolder && Array.isArray(node.tags) && node.tags.some(t => {
+          const lt = t.toLowerCase();
+          return lt.includes(lowerTerm) || lt.includes(cleanTerm);
+        }));
+      if (tagFilter) {
+        selfMatch = selfMatch && !!textMatch;
+      } else {
+        selfMatch = !!textMatch;
+      }
+    }
+
+    let anyChildMatched = false;
+    if (node.isFolder && node.children && Array.isArray(node.children)) {
+      for (const child of node.children) {
+        if (check(child)) {
+          anyChildMatched = true;
+        }
+      }
+    }
+
+    const isMatch = selfMatch || anyChildMatched;
+    if (isMatch) {
+      matched.add(node.id);
+    }
+    return isMatch;
+  };
+
+  if (Array.isArray(nodes)) {
+    for (const node of nodes) {
+      check(node);
     }
   }
 
-  // 2. Text query matching (matches name, argument, or tag search)
-  if (!term) return true;
-  const lowerTerm = term.toLowerCase();
-  const cleanTerm = lowerTerm.startsWith('#') ? lowerTerm.substring(1) : lowerTerm;
-  
-  const selfMatches = (node.name && node.name.toLowerCase().includes(lowerTerm)) ||
-                      (node.argument && node.argument.toLowerCase().includes(lowerTerm)) ||
-                      (!node.isFolder && Array.isArray(node.tags) && node.tags.some(t => {
-                        const lt = t.toLowerCase();
-                        return lt.includes(lowerTerm) || lt.includes(cleanTerm);
-                      }));
-  
-  if (selfMatches) return true;
-  
-  if (node.isFolder && node.children) {
-    return node.children.some(child => nodeMatchesSearch(child, term));
-  }
-  
-  return false;
+  return matched;
 };
 
-const getFilteredVisibleNodes = (nodes: ListenItem[], term: string, depth = 0, parentId: string | null = null): any[] => {
+const getFilteredVisibleNodes = (
+  nodes: ListenItem[],
+  term: string,
+  depth = 0,
+  parentId: string | null = null,
+  matchingIds: Set<string> | null = null,
+  folderStats: any = null,
+  freshnessMap: any = null,
+  newPostsMap: any = null
+): any[] => {
   const list: any[] = [];
   const isFiltering = !!(term || selectedListenTagFilter.value);
+  if (!nodes || !Array.isArray(nodes)) return list;
+
   for (const node of nodes) {
-    if (isFiltering && !nodeMatchesSearch(node, term)) {
+    if (isFiltering && matchingIds && !matchingIds.has(node.id)) {
       continue;
     }
     const hasChildren = !!(node.isFolder && node.children && node.children.length > 0);
     const isExpanded = isFiltering ? true : !!expandedFolders.value[node.id];
-    
+
+    const isFolder = !!node.isFolder;
+    const freshness = isFolder
+      ? (folderStats?.freshnessMap?.[node.id] || null)
+      : (freshnessMap?.[node.id] || null);
+
+    const newPostsCount = isFolder
+      ? (folderStats?.newPostsMap?.[node.id] || 0)
+      : (newPostsMap?.[node.id] || 0);
+
+    const folderItemsCount = isFolder
+      ? (folderStats?.itemsCountMap?.[node.id] || 0)
+      : 0;
+
+    const isPrivateChannel = !isFolder && node.type === "channel" && !!node.argument?.startsWith("-100");
+
+    const title = isFolder
+      ? (node.name || "Folder")
+      : (node.argument ? `${node.name} (${node.argument})` : (node.name || ""));
+
     list.push({
       item: node,
       depth,
       parentId,
       hasChildren,
-      isExpanded
+      isExpanded,
+      freshness,
+      newPostsCount,
+      folderItemsCount,
+      isPrivateChannel,
+      title
     });
-    
+
     if (node.isFolder && isExpanded && node.children) {
-      list.push(...getFilteredVisibleNodes(node.children, term, depth + 1, node.id));
+      list.push(...getFilteredVisibleNodes(
+        node.children,
+        term,
+        depth + 1,
+        node.id,
+        matchingIds,
+        folderStats,
+        freshnessMap,
+        newPostsMap
+      ));
     }
   }
   return list;
@@ -3594,7 +3662,23 @@ const getFolderItemsCount = (item: ListenItem): number => {
 };
 
 const visibleDirectoryNodes = computed(() => {
-  return getFilteredVisibleNodes(listenDirectory.value, listenSearchQuery.value.trim());
+  const term = listenSearchQuery.value.trim();
+  const tagFilter = selectedListenTagFilter.value;
+  const isFiltering = !!(term || tagFilter);
+  const matchingIds = isFiltering ? getMatchingNodeIds(listenDirectory.value, term, tagFilter) : null;
+  const folderStats = folderStatsMap.value;
+  const freshnessMap = listenItemsFreshnessMap.value;
+  const newPostsMap = newlyFetchedPostsCountMap.value;
+  return getFilteredVisibleNodes(
+    listenDirectory.value,
+    term,
+    0,
+    null,
+    matchingIds,
+    folderStats,
+    freshnessMap,
+    newPostsMap
+  );
 });
 
 // Total count of listen items (non-folder leaves) across the entire directory, including all folders and sub-folders
@@ -3640,7 +3724,12 @@ const totalListenFoldersCount = computed<number>(() => {
 
 // Count of currently visible/filtered non-folder listen items
 const visibleListenItemsCount = computed<number>(() => {
-  return visibleDirectoryNodes.value.filter((n: any) => !n.item.isFolder).length;
+  let count = 0;
+  const nodes = visibleDirectoryNodes.value;
+  for (let i = 0; i < nodes.length; i++) {
+    if (!nodes[i].item.isFolder) count++;
+  }
+  return count;
 });
 
 // Drag and drop states for Listen Directory items
@@ -4338,6 +4427,15 @@ const openWidgetInViewMode = (node: ListenItem) => {
   fetchListenPosts(node, true);
 };
 
+const openWidgetChannelInExplorer = (node: ListenItem) => {
+  if (!node) return;
+  const targetChannel = (node.argument && node.argument.trim())
+    ? node.argument.trim()
+    : (node.name ? node.name.trim() : '');
+  if (!targetChannel) return;
+  jumpToExplorerFromListen(targetChannel);
+};
+
 const scrollToDeskWidget = (nodeId: string) => {
   const el = document.getElementById(`desk-widget-${nodeId}`);
   if (el) {
@@ -4934,11 +5032,11 @@ const getItemOrFolderNewPostsCount = (nodeItem: ListenItem): number => {
   return folderStatsMap.value?.newPostsMap[nodeItem.id] || 0;
 };
 
-const getListenItemLineClasses = (node: { item: ListenItem; depth: number }): string => {
-  const isSelected = !!(selectedListenNode.value && selectedListenNode.value.id === node.item.id);
-  const freshness = getItemOrFolderFreshness(node.item);
-  const isPrivateChannel = node.item.type === 'channel' && node.item.argument?.startsWith('-100');
-  const newPostsCount = getItemOrFolderNewPostsCount(node.item);
+const getListenItemLineClasses = (node: any): string => {
+  const isSelected = !!(selectedListenNode.value && selectedListenNode.value.id === node.item?.id);
+  const freshness = node.freshness !== undefined ? node.freshness : getItemOrFolderFreshness(node.item);
+  const isPrivateChannel = node.isPrivateChannel !== undefined ? node.isPrivateChannel : (node.item?.type === 'channel' && node.item?.argument?.startsWith('-100'));
+  const newPostsCount = node.newPostsCount !== undefined ? node.newPostsCount : getItemOrFolderNewPostsCount(node.item);
 
   // Drag-and-drop feedback classes
   if (dragOverNode.value && dragOverNode.value.item.id === node.item.id && dragOverPosition.value === 'inside') {
@@ -10747,11 +10845,14 @@ const searchChannel = async () => {
             `https://i.gogingko.net/api/v1/v/telegram-user/${name}`
           );
           if (userRes.ok) {
+            loading.value = false;
             // this means we found the name in USER, just notify user
             toastMessage.value = `The name you input ${name} is a Telegram User!`;
             toastType.value = "info";
             setTimeout(() => {
               toastMessage.value = "";
+              jumpToChannelsLookup(name);
+              window.scrollTo({ top: 0, behavior: "smooth" });
             }, 4000);
             return;
           }
@@ -19331,7 +19432,7 @@ onUnmounted(() => {
           </div>
 
           <!-- Actions & Controls Group -->
-          <div class="flex flex-wrap items-center gap-2.5 self-start md:self-auto shrink-0">
+          <div class="flex flex-wrap items-center gap-2.5 w-full md:w-auto max-w-full">
             <!-- Global Background Fetch Switch -->
             <div 
               class="flex items-center gap-2.5 px-3 py-1.5 rounded-2xl border transition-all select-none shadow-2xs"
@@ -19399,7 +19500,7 @@ onUnmounted(() => {
             </button>
 
             <!-- Mode Segmented Control -->
-            <div class="flex items-center gap-1 bg-gray-100/80 dark:bg-gray-900/60 p-1 rounded-2xl border border-gray-200/60 dark:border-gray-700/60">
+            <div class="flex items-center gap-1 bg-gray-100/80 dark:bg-gray-900/60 p-1 rounded-2xl border border-gray-200/60 dark:border-gray-700/60 max-w-full overflow-x-auto">
               <button
                 @click="setListenLayoutMode('view')"
                 class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer select-none"
@@ -19663,18 +19764,39 @@ onUnmounted(() => {
                       </div>
 
                       <!-- Avatar / Icon -->
-                      <div class="w-7 h-7 rounded-lg overflow-hidden bg-teal-50 dark:bg-teal-950/60 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-xs shrink-0">
+                      <button
+                        type="button"
+                        @click="openWidgetChannelInExplorer(node)"
+                        class="w-7 h-7 rounded-lg overflow-hidden bg-teal-50 dark:bg-teal-950/60 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-xs shrink-0 hover:bg-teal-100 hover:border-teal-300 dark:hover:bg-teal-900/40 dark:hover:border-teal-700 transition-colors cursor-pointer"
+                        :title="t('listen.viewChannel') || t('explorer.viewChannel') || 'View in Explorer'"
+                      >
                         <Radio v-if="node.type === 'channel'" class="h-3.5 w-3.5" />
                         <Tag v-else class="h-3.5 w-3.5" />
-                      </div>
+                      </button>
 
                       <!-- Name & Category -->
                       <div class="min-w-0">
-                        <h4 class="text-xs sm:text-sm font-bold text-gray-900 dark:text-white truncate" :title="node.name">
-                          {{ node.name }}
-                        </h4>
+                        <button
+                          type="button"
+                          @click="openWidgetChannelInExplorer(node)"
+                          class="group/channel-btn flex items-center gap-1 text-left font-bold text-gray-900 dark:text-white hover:text-teal-600 dark:hover:text-teal-400 transition-colors cursor-pointer max-w-full"
+                          :title="t('listen.viewChannel') || t('explorer.viewChannel') || 'View in Explorer'"
+                        >
+                          <span class="truncate hover:underline decoration-teal-500/50 underline-offset-2 text-xs sm:text-sm font-bold">
+                            {{ node.name }}
+                          </span>
+                          <ExternalLink class="h-3 w-3 opacity-0 group-hover/channel-btn:opacity-100 text-teal-600 dark:text-teal-400 shrink-0 transition-opacity" />
+                        </button>
                         <div class="text-[10px] text-gray-400 dark:text-gray-500 truncate flex items-center gap-1 font-mono">
-                          <span v-if="node.argument">{{ node.argument }}</span>
+                          <button
+                            v-if="node.argument"
+                            type="button"
+                            @click="openWidgetChannelInExplorer(node)"
+                            class="truncate hover:text-teal-600 dark:hover:text-teal-400 hover:underline transition-colors cursor-pointer"
+                            :title="t('listen.viewChannel') || t('explorer.viewChannel') || 'View in Explorer'"
+                          >
+                            {{ node.argument }}
+                          </button>
                           <span v-if="node.argument && getNodeFolderBreadcrumbs(node.id).length > 0">•</span>
                           <span v-if="getNodeFolderBreadcrumbs(node.id).length > 0" class="truncate">
                             {{ getNodeFolderBreadcrumbs(node.id).map(b => b.name).join(' › ') }}
@@ -20012,16 +20134,16 @@ onUnmounted(() => {
               ]"
             >
             <!-- Watchlist Header -->
-            <div class="p-4 border-b border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shrink-0">
-              <div>
-                <div class="flex items-center gap-2 flex-wrap">
-                  <h3 class="text-sm font-black uppercase tracking-wider text-gray-700 dark:text-gray-300 flex items-center gap-2">
+            <div class="p-3.5 sm:p-4 border-b border-gray-100 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0 w-full max-w-full box-border">
+              <div class="min-w-0 max-w-full">
+                <div class="flex items-center gap-2 flex-wrap max-w-full">
+                  <h3 class="text-sm font-black uppercase tracking-wider text-gray-700 dark:text-gray-300 flex items-center gap-2 shrink-0">
                     <Radio class="h-4 w-4 text-teal-500 animate-pulse" />
                     <span>{{ t('listen.listenDirectory') }}</span>
                   </h3>
                   <!-- Badge for total items count including items in folders and sub-folders -->
                   <span
-                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold transition-all tabular-nums shadow-2xs select-none"
+                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold transition-all tabular-nums shadow-2xs select-none shrink-0"
                     :class="[
                       listenSearchQuery.trim()
                         ? 'bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/70 dark:border-amber-800/50'
@@ -20049,57 +20171,61 @@ onUnmounted(() => {
                   </template>
                 </p>
               </div>
-              <div class="flex items-center gap-1.5 self-end sm:self-auto">
-                <!-- Clear unread new badges button if any new posts are highlighted -->
-                <button
-                  v-if="totalNewlyFetchedPostsCount > 0"
-                  @click="clearAllNewlyFetchedBadges"
-                  class="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/40 border border-emerald-300/80 dark:border-emerald-700/60 rounded-lg text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1 transition-all shadow-2xs cursor-pointer select-none"
-                  :title="t('listen.clearNewBadges')"
-                >
-                  <Sparkles class="h-3 w-3 text-emerald-500 animate-pulse" />
-                  <span class="font-mono tabular-nums">+{{ totalNewlyFetchedPostsCount }}</span>
-                  <X class="h-2.5 w-2.5 opacity-60 hover:opacity-100" />
-                </button>
-                <button
-                  @click="isBackgroundSyncRunning ? cancelBackgroundSync() : startManualBackgroundSync(false)"
-                  class="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors cursor-pointer"
-                  :class="isBackgroundSyncRunning ? 'text-teal-600 dark:text-teal-400' : 'text-gray-500 dark:text-gray-400 hover:text-teal-600 dark:hover:text-teal-400'"
-                  :title="isBackgroundSyncRunning ? t('listen.stopSync') : t('listen.syncAll')"
-                >
-                  <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isBackgroundSyncRunning }" />
-                </button>
-                <button
-                  @click="expandAllFolders"
-                  class="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
-                  :title="t('listen.expandAll')"
-                >
-                  <ChevronDown class="h-3.5 w-3.5" />
-                </button>
-                <button
-                  @click="collapseAllFolders"
-                  class="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
-                  :title="t('listen.collapseAll')"
-                >
-                  <ChevronUp class="h-3.5 w-3.5" />
-                </button>
-                <div class="h-4 w-px bg-gray-200 dark:bg-gray-700 mx-0.5"></div>
-                <button
-                  @click="openAddModal('', true)"
-                  class="px-2 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 rounded-lg text-xs font-bold text-gray-600 dark:text-gray-300 flex items-center gap-1 transition-colors"
-                  :title="t('listen.addRootFolder')"
-                >
-                  <FolderPlus class="h-3 w-3 text-yellow-500" />
-                  <span>{{ t('listen.folder') }}</span>
-                </button>
-                <button
-                  @click="openAddModal('', false)"
-                  class="px-2 py-1 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/30 dark:hover:bg-teal-900/30 rounded-lg text-xs font-bold text-teal-600 dark:text-teal-400 flex items-center gap-1 transition-colors"
-                  :title="t('listen.addRootListen')"
-                >
-                  <Plus class="h-3 w-3" />
-                  <span>{{ t('listen.listen') }}</span>
-                </button>
+              <div class="flex flex-wrap items-center justify-between sm:justify-end gap-1.5 w-full sm:w-auto max-w-full pt-1 sm:pt-0">
+                <div class="flex items-center gap-1 shrink-0">
+                  <!-- Clear unread new badges button if any new posts are highlighted -->
+                  <button
+                    v-if="totalNewlyFetchedPostsCount > 0"
+                    @click="clearAllNewlyFetchedBadges"
+                    class="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/40 border border-emerald-300/80 dark:border-emerald-700/60 rounded-lg text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1 transition-all shadow-2xs cursor-pointer select-none"
+                    :title="t('listen.clearNewBadges')"
+                  >
+                    <Sparkles class="h-3 w-3 text-emerald-500 animate-pulse" />
+                    <span class="font-mono tabular-nums">+{{ totalNewlyFetchedPostsCount }}</span>
+                    <X class="h-2.5 w-2.5 opacity-60 hover:opacity-100" />
+                  </button>
+                  <button
+                    @click="isBackgroundSyncRunning ? cancelBackgroundSync() : startManualBackgroundSync(false)"
+                    class="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors cursor-pointer"
+                    :class="isBackgroundSyncRunning ? 'text-teal-600 dark:text-teal-400' : 'text-gray-500 dark:text-gray-400 hover:text-teal-600 dark:hover:text-teal-400'"
+                    :title="isBackgroundSyncRunning ? t('listen.stopSync') : t('listen.syncAll')"
+                  >
+                    <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isBackgroundSyncRunning }" />
+                  </button>
+                  <button
+                    @click="expandAllFolders"
+                    class="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors cursor-pointer"
+                    :title="t('listen.expandAll')"
+                  >
+                    <ChevronDown class="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    @click="collapseAllFolders"
+                    class="p-1.5 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-500 dark:text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors cursor-pointer"
+                    :title="t('listen.collapseAll')"
+                  >
+                    <ChevronUp class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div class="h-4 w-px bg-gray-200 dark:bg-gray-700 mx-0.5 hidden sm:block"></div>
+                <div class="flex items-center gap-1.5 shrink-0">
+                  <button
+                    @click="openAddModal('', true)"
+                    class="px-2 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 rounded-lg text-xs font-bold text-gray-600 dark:text-gray-300 flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
+                    :title="t('listen.addRootFolder')"
+                  >
+                    <FolderPlus class="h-3 w-3 text-yellow-500 shrink-0" />
+                    <span>{{ t('listen.folder') }}</span>
+                  </button>
+                  <button
+                    @click="openAddModal('', false)"
+                    class="px-2 py-1 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/30 dark:hover:bg-teal-900/30 rounded-lg text-xs font-bold text-teal-600 dark:text-teal-400 flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
+                    :title="t('listen.addRootListen')"
+                  >
+                    <Plus class="h-3 w-3 shrink-0" />
+                    <span>{{ t('listen.listen') }}</span>
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -20285,7 +20411,7 @@ onUnmounted(() => {
                 v-for="node in visibleDirectoryNodes"
                 :key="node.item.id"
                 :id="'listen-node-' + node.item.id"
-                class="group text-sm font-medium rounded-xl transition-all duration-200 flex items-center justify-between px-3 py-2 border relative"
+                class="listen-tree-node-row group text-sm font-medium rounded-xl transition-colors duration-150 flex items-center justify-between px-3 py-2 border relative"
                 draggable="true"
                 @dragstart="onDragStart($event, node)"
                 @dragover="onDragOver($event, node)"
@@ -20297,7 +20423,7 @@ onUnmounted(() => {
                     ? '!ring-2 !ring-teal-500 !border-teal-500 shadow-md scale-[1.015] z-20'
                     : ''
                 ]"
-                :title="getListenItemLineTitle(node.item)"
+                :title="node.title"
                 :style="{ paddingLeft: `calc(0.5rem + ${node.depth * 1.25}rem)` }"
               >
                 <!-- Drop indicator lines -->
@@ -20318,9 +20444,9 @@ onUnmounted(() => {
 
                 <!-- Freshness vertical accent pill -->
                 <span 
-                  v-if="getItemOrFolderFreshness(node.item)" 
+                  v-if="node.freshness" 
                   class="w-1 h-3.5 rounded-full shrink-0 mr-1.5 transition-colors"
-                  :class="getFreshnessAccentColor(getItemOrFolderFreshness(node.item)!.level)"
+                  :class="getFreshnessAccentColor(node.freshness.level)"
                 ></span>
 
                 <!-- Interaction click targets -->
@@ -20337,10 +20463,10 @@ onUnmounted(() => {
                     <span 
                       class="h-1.5 w-1.5 rounded-full transition-colors"
                       :class="[
-                        getItemOrFolderFreshness(node.item)
-                          ? getFreshnessDotColor(getItemOrFolderFreshness(node.item)!.level)
+                        node.freshness
+                          ? getFreshnessDotColor(node.freshness.level)
                           : (node.item.type === 'channel' 
-                              ? (node.item.argument?.startsWith('-100') ? 'bg-amber-500' : 'bg-orange-400') 
+                              ? (node.isPrivateChannel ? 'bg-amber-500' : 'bg-orange-400') 
                               : 'bg-cyan-400')
                       ]"
                     ></span>
@@ -20348,12 +20474,12 @@ onUnmounted(() => {
 
                   <!-- Folder / File icon indicators -->
                   <component 
-                    :is="node.item.isFolder ? Folder : (node.item.type === 'channel' && node.item.argument?.startsWith('-100') ? Lock : Radio)" 
+                    :is="node.item.isFolder ? Folder : (node.item.type === 'channel' && node.isPrivateChannel ? Lock : Radio)" 
                     class="h-4 w-4 shrink-0"
                     :class="[
                       node.item.isFolder 
                         ? 'text-yellow-500 dark:text-yellow-600 fill-yellow-500/10'
-                        : (node.item.type === 'channel' && node.item.argument?.startsWith('-100'))
+                        : (node.item.type === 'channel' && node.isPrivateChannel)
                           ? 'text-amber-500 dark:text-amber-400'
                           : selectedListenNode && selectedListenNode.id === node.item.id
                             ? 'text-teal-500' 
@@ -20370,7 +20496,7 @@ onUnmounted(() => {
                     class="ml-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-extrabold tracking-normal bg-gray-100 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400 border border-gray-200/50 dark:border-gray-700/40 flex items-center justify-center shrink-0"
                     :title="t('listen.totalItemsFolder')"
                   >
-                    {{ getFolderItemsCount(node.item) }}
+                    {{ node.folderItemsCount }}
                   </span>
 
                   <!-- Item Tags in Rearrange Mode (Proper style) -->
@@ -20409,19 +20535,19 @@ onUnmounted(() => {
 
                 <!-- Newly Fetched Posts Visual Indicator Badge (Prominent Pulse Badge) -->
                 <span
-                  v-if="getItemOrFolderNewPostsCount(node.item) > 0"
+                  v-if="node.newPostsCount > 0"
                   class="ml-auto mr-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-extrabold tracking-tight bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow-xs shadow-emerald-500/40 flex items-center gap-1 shrink-0 select-none animate-bounce"
-                  :title="t('listen.hasNewPostsTip', { count: getItemOrFolderNewPostsCount(node.item) })"
+                  :title="t('listen.hasNewPostsTip', { count: node.newPostsCount })"
                 >
                   <Sparkles class="h-2.5 w-2.5 text-emerald-100 shrink-0" />
-                  <span class="whitespace-nowrap font-mono tabular-nums">+{{ getItemOrFolderNewPostsCount(node.item) }}</span>
+                  <span class="whitespace-nowrap font-mono tabular-nums">+{{ node.newPostsCount }}</span>
                 </span>
 
                 <!-- Active Background Syncing Indicator -->
                 <span
                   v-if="activeBackgroundSyncItemId === node.item.id"
                   class="mr-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-teal-50 dark:bg-teal-950/80 text-teal-700 dark:text-teal-300 border border-teal-300/90 dark:border-teal-700/80 flex items-center gap-1 shrink-0 select-none animate-pulse shadow-2xs"
-                  :class="{ 'ml-auto': getItemOrFolderNewPostsCount(node.item) === 0 }"
+                  :class="{ 'ml-auto': node.newPostsCount === 0 }"
                 >
                   <RefreshCw class="h-2.5 w-2.5 animate-spin text-teal-600 dark:text-teal-400" />
                   <span class="font-mono uppercase text-[8px] tracking-wider">Syncing</span>
@@ -20429,15 +20555,15 @@ onUnmounted(() => {
 
                 <!-- Freshness Relative Timestamp Badge -->
                 <span 
-                  v-else-if="getItemOrFolderFreshness(node.item)"
+                  v-else-if="node.freshness"
                   class="mr-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold tracking-tight border flex items-center gap-1 shrink-0 select-none transition-colors"
                   :class="[
-                    getFreshnessBadgeClasses(getItemOrFolderFreshness(node.item)!.level),
-                    { 'ml-auto': getItemOrFolderNewPostsCount(node.item) === 0 }
+                    getFreshnessBadgeClasses(node.freshness.level),
+                    { 'ml-auto': node.newPostsCount === 0 }
                   ]"
                 >
-                  <span class="h-1.5 w-1.5 rounded-full" :class="getFreshnessDotColor(getItemOrFolderFreshness(node.item)!.level)"></span>
-                  <span class="whitespace-nowrap font-mono">{{ getItemOrFolderFreshness(node.item)!.relativeTime }}</span>
+                  <span class="h-1.5 w-1.5 rounded-full" :class="getFreshnessDotColor(node.freshness.level)"></span>
+                  <span class="whitespace-nowrap font-mono">{{ node.freshness.relativeTime }}</span>
                 </span>
 
                 <!-- Action Button Hover Overlay -->
