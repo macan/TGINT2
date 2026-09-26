@@ -4428,12 +4428,26 @@ const openWidgetInViewMode = (node: ListenItem) => {
 };
 
 const openWidgetChannelInExplorer = (node: ListenItem) => {
-  if (!node) return;
+  if (!node || node.type !== 'channel') return;
   const targetChannel = (node.argument && node.argument.trim())
     ? node.argument.trim()
     : (node.name ? node.name.trim() : '');
   if (!targetChannel) return;
   jumpToExplorerFromListen(targetChannel);
+};
+
+const getPostChannelName = (post: any): string => {
+  const full = String(post?.key || post?.id || '').trim();
+  if (!full) return '';
+  const dotIndex = full.indexOf('.');
+  return dotIndex !== -1 ? full.slice(0, dotIndex) : full;
+};
+
+const getPostIdSuffix = (post: any): string => {
+  const full = String(post?.key || post?.id || '').trim();
+  if (!full) return '';
+  const dotIndex = full.indexOf('.');
+  return dotIndex !== -1 ? full.slice(dotIndex + 1) : '';
 };
 
 const scrollToDeskWidget = (nodeId: string) => {
@@ -19765,18 +19779,25 @@ onUnmounted(() => {
 
                       <!-- Avatar / Icon -->
                       <button
+                        v-if="node.type === 'channel'"
                         type="button"
                         @click="openWidgetChannelInExplorer(node)"
                         class="w-7 h-7 rounded-lg overflow-hidden bg-teal-50 dark:bg-teal-950/60 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-xs shrink-0 hover:bg-teal-100 hover:border-teal-300 dark:hover:bg-teal-900/40 dark:hover:border-teal-700 transition-colors cursor-pointer"
                         :title="t('listen.viewChannel') || t('explorer.viewChannel') || 'View in Explorer'"
                       >
-                        <Radio v-if="node.type === 'channel'" class="h-3.5 w-3.5" />
-                        <Tag v-else class="h-3.5 w-3.5" />
+                        <Radio class="h-3.5 w-3.5" />
                       </button>
+                      <div
+                        v-else
+                        class="w-7 h-7 rounded-lg overflow-hidden bg-teal-50 dark:bg-teal-950/60 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-xs shrink-0"
+                      >
+                        <Tag class="h-3.5 w-3.5" />
+                      </div>
 
                       <!-- Name & Category -->
                       <div class="min-w-0">
                         <button
+                          v-if="node.type === 'channel'"
                           type="button"
                           @click="openWidgetChannelInExplorer(node)"
                           class="group/channel-btn flex items-center gap-1 text-left font-bold text-gray-900 dark:text-white hover:text-teal-600 dark:hover:text-teal-400 transition-colors cursor-pointer max-w-full"
@@ -19787,9 +19808,16 @@ onUnmounted(() => {
                           </span>
                           <ExternalLink class="h-3 w-3 opacity-0 group-hover/channel-btn:opacity-100 text-teal-600 dark:text-teal-400 shrink-0 transition-opacity" />
                         </button>
+                        <h4
+                          v-else
+                          class="text-xs sm:text-sm font-bold text-gray-900 dark:text-white truncate"
+                          :title="node.name"
+                        >
+                          {{ node.name }}
+                        </h4>
                         <div class="text-[10px] text-gray-400 dark:text-gray-500 truncate flex items-center gap-1 font-mono">
                           <button
-                            v-if="node.argument"
+                            v-if="node.argument && node.type === 'channel'"
                             type="button"
                             @click="openWidgetChannelInExplorer(node)"
                             class="truncate hover:text-teal-600 dark:hover:text-teal-400 hover:underline transition-colors cursor-pointer"
@@ -19797,6 +19825,7 @@ onUnmounted(() => {
                           >
                             {{ node.argument }}
                           </button>
+                          <span v-else-if="node.argument">{{ node.argument }}</span>
                           <span v-if="node.argument && getNodeFolderBreadcrumbs(node.id).length > 0">•</span>
                           <span v-if="getNodeFolderBreadcrumbs(node.id).length > 0" class="truncate">
                             {{ getNodeFolderBreadcrumbs(node.id).map(b => b.name).join(' › ') }}
@@ -20041,8 +20070,18 @@ onUnmounted(() => {
 
                     <!-- Bottom Meta: ID & Views -->
                     <div class="pt-2 border-t border-gray-150 dark:border-gray-700/60 flex items-center justify-between text-[10px] text-gray-400 dark:text-gray-500">
-                      <span v-if="post.key || post.id" class="font-mono">
-                        #{{ post.key || post.id }}
+                      <span v-if="post.key || post.id" class="font-mono inline-flex items-center">
+                        <template v-if="node.type !== 'channel' && getPostChannelName(post)">
+                          <span class="text-gray-400 dark:text-gray-500 mr-px">#</span><button
+                            type="button"
+                            @click="jumpToExplorerFromListen(getPostChannelName(post), post.key || post.id)"
+                            class="text-teal-600 dark:text-teal-400 hover:text-teal-700 dark:hover:text-teal-300 hover:underline font-semibold cursor-pointer transition-colors"
+                            :title="t('listen.viewChannel') || t('explorer.viewChannel') || 'View in Explorer'"
+                          >{{ getPostChannelName(post) }}</button><span v-if="getPostIdSuffix(post)">.{{ getPostIdSuffix(post) }}</span>
+                        </template>
+                        <template v-else>
+                          #{{ post.key || post.id }}
+                        </template>
                       </span>
                       <span v-if="post.data?.views" class="flex items-center gap-1 font-mono">
                         <Eye class="h-2.5 w-2.5" />
@@ -21373,7 +21412,7 @@ onUnmounted(() => {
                       </button>
                     </div>
                     <div v-else-if="listenPosts.length > 0" class="text-[11px] text-gray-400 dark:text-gray-500 font-medium py-2">
-                      {{ t('listen.allPostsLoaded') || 'All posts loaded' }} ({{ listenPosts.length }})
+                      {{ t('listen.allCaughtUp') || 'All posts loaded' }} ({{ listenPosts.length }})
                     </div>
                   </div>
                 </div>
@@ -21965,7 +22004,7 @@ onUnmounted(() => {
                           </button>
                         </div>
                         <div v-else-if="listenPosts.length > 0" class="text-[10px] text-gray-400 dark:text-gray-500 font-medium py-1">
-                          {{ t('listen.allPostsLoaded') || 'All posts loaded' }} ({{ listenPosts.length }})
+                          {{ t('listen.allCaughtUp') || 'All posts loaded' }} ({{ listenPosts.length }})
                         </div>
                       </div>
                     </div>
