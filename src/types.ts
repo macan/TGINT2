@@ -60,3 +60,24 @@ export interface ListenItemFreshness {
   relativeTime: string;
   formattedDate: string;
 }
+
+export type SystemOneState = Record<string, any> | any[] | string;
+export type SystemOneQuestions = Record<string, any>;
+
+export interface SystemOnePayload {
+  state: SystemOneState;
+  model: 'kev-latest';
+  questions: SystemOneQuestions;
+}
+
+export interface SystemOneOptions {
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+export interface SystemOneParams {
+  state: SystemOneState;
+  questions: SystemOneQuestions;
+  model?: string;
+}

@@ -23,6 +23,13 @@ import {
   FileText,
   User,
   Key,
+  Cpu,
+  DollarSign,
+  Gamepad2,
+  Landmark,
+  Shield,
+  GraduationCap,
+  Newspaper,
   Mail,
   PenTool,
   Link,
@@ -105,7 +112,7 @@ import markdownItMark from "markdown-it-mark";
 // @ts-ignore
 import clm from "country-locale-map";
 import { ListenItem, AutoFindingCell, GraphNode, GraphEdge, ListenItemFreshness, FreshnessLevel } from "./types";
-import { getInitials, truncateString, getSha1HexDigest } from "./utils/helpers";
+import { getInitials, truncateString, getSha1HexDigest, callSystemOne, querySystemOne } from "./utils/helpers";
 import {
   useI18n,
   currentLocale,
@@ -8163,6 +8170,182 @@ const selectedPost = ref<any>(null);
 const selectedUsernamesExplorer = ref<string[]>([]);
 const postsRenderLimit = ref(50);
 
+// SystemOne Channel Classification State & Helpers
+const isClassifyingChannel = ref(false);
+const classificationRequestId = ref(0);
+const channelClassification = ref<{
+  category: string;
+  confidence?: number;
+  probabilities?: Record<string, number>;
+  channelName: string;
+  raw?: any;
+} | null>(null);
+
+const SYSTEM_ONE_CLASSIFICATION_QUESTIONS = {
+  L1: {
+    type: "choice",
+    instructions: "Classify this text into its single primary topic.",
+    criteria: {
+      game: "video games, gaming, esports, PC games, console games, mobile games, gameplay, RPG, multiplayer, Steam, PlayStation, Xbox, game walkthroughs, game mods",
+      technology: "computers, software development, programming, coding, artificial intelligence, machine learning, algorithms, IT infrastructure, hardware, cybersecurity, developer tools",
+      blog: "personal reflections, diary entries, individual essays, personal life updates, opinions, subjective commentary, casual journaling",
+      political: "government, elections, congress, parliament, legislation, politicians, diplomacy, state affairs, geopolitical policy",
+      financial: "money, economics, stocks, banking, currency, trading, inflation, revenue, funding, commerce, business investments",
+      military: "warfare, weapons, army, navy, air force, combat operations, defense forces, artillery, defense strategy",
+      university: "campus, academics, tuition, students, professors, degree, college education, scientific research papers, university labs",
+      general_news: "lifestyle, local events, weather, general media reporting, entertainment, pop culture, sports"
+    }
+  }
+};
+
+const formatPostsForSystemOne = (rawPosts: any[]) => {
+  const result: Array<{ sender: string; text: string }> = [];
+  if (!Array.isArray(rawPosts)) return result;
+
+  for (const post of rawPosts) {
+    const rawContent = post?.data?.content;
+    if (
+      rawContent === null ||
+      rawContent === undefined ||
+      rawContent === "None" ||
+      rawContent === "none" ||
+      rawContent === "null" ||
+      rawContent === "This media is not supported in your browser" ||
+      rawContent === "Please open Telegram to view this post"
+    ) {
+      continue;
+    }
+
+    const text = typeof rawContent === "string" ? rawContent.trim() : String(rawContent).trim();
+    if (
+      !text ||
+      text === "None" ||
+      text === "none" ||
+      text === "null" ||
+      text === "This media is not supported in your browser" ||
+      text === "Please open Telegram to view this post"
+    ) {
+      continue;
+    }
+
+    let sender = "";
+    if (post?.data?.author !== null && post?.data?.author !== undefined && String(post.data.author).trim() !== "") {
+      sender = String(post.data.author).trim();
+    } else if (post?.data?.user) {
+      const parts = String(post.data.user).split("/");
+      sender = parts[parts.length - 1] || "";
+    }
+
+    result.push({
+      sender,
+      text
+    });
+  }
+
+  return result;
+};
+
+const classifyChannelWithSystemOne = async (targetChannelName?: string) => {
+  const target = targetChannelName || currentChannelName.value || channelName.value;
+  if (!target) return;
+  if (posts.value.length <= 10) return;
+
+  const state = formatPostsForSystemOne(posts.value);
+  if (state.length === 0) return;
+
+  isClassifyingChannel.value = true;
+  const requestId = ++classificationRequestId.value;
+
+  try {
+    const response = await callSystemOne<any>(state, SYSTEM_ONE_CLASSIFICATION_QUESTIONS, {
+      timeoutMs: 150000
+    });
+
+    if (requestId !== classificationRequestId.value) return;
+
+    if (response?.answers?.L1) {
+      const l1 = response.answers.L1;
+      const category = l1.choice || l1.category || "";
+      const confidence = typeof l1.confidence === "number" ? l1.confidence : undefined;
+      const probabilities = l1.probabilities || undefined;
+
+      channelClassification.value = {
+        category,
+        confidence,
+        probabilities,
+        channelName: target,
+        raw: response
+      };
+    }
+  } catch (err) {
+    console.error("SystemOne channel classification error:", err);
+  } finally {
+    if (requestId === classificationRequestId.value) {
+      isClassifyingChannel.value = false;
+    }
+  }
+};
+
+const getChannelCategoryMeta = (cat: string) => {
+  const c = (cat || "").toLowerCase();
+  switch (c) {
+    case "technology":
+      return {
+        label: "Technology",
+        icon: Cpu,
+        colorClass: "bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800/60",
+      };
+    case "financial":
+      return {
+        label: "Financial",
+        icon: DollarSign,
+        colorClass: "bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/60",
+      };
+    case "game":
+      return {
+        label: "Gaming",
+        icon: Gamepad2,
+        colorClass: "bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800/60",
+      };
+    case "political":
+      return {
+        label: "Politics",
+        icon: Landmark,
+        colorClass: "bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800/60",
+      };
+    case "military":
+      return {
+        label: "Military",
+        icon: Shield,
+        colorClass: "bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800/60",
+      };
+    case "university":
+      return {
+        label: "University",
+        icon: GraduationCap,
+        colorClass: "bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800/60",
+      };
+    case "blog":
+      return {
+        label: "Blog",
+        icon: BookOpen,
+        colorClass: "bg-pink-50 dark:bg-pink-950/50 text-pink-700 dark:text-pink-300 border-pink-200 dark:border-pink-800/60",
+      };
+    case "general_news":
+      return {
+        label: "General News",
+        icon: Newspaper,
+        colorClass: "bg-cyan-50 dark:bg-cyan-950/50 text-cyan-700 dark:text-cyan-300 border-cyan-200 dark:border-cyan-800/60",
+      };
+    default:
+      return {
+        label: cat ? cat.charAt(0).toUpperCase() + cat.slice(1).replace(/_/g, " ") : "Topic",
+        icon: Sparkles,
+        colorClass: "bg-teal-50 dark:bg-teal-950/50 text-teal-700 dark:text-teal-300 border-teal-200 dark:border-teal-800/60",
+      };
+  }
+};
+
 const fetchChannelProfile = async (channel?: string) => {
   const targetChannel = channel || currentChannelName.value;
   if (!targetChannel) return;
@@ -10786,6 +10969,9 @@ const searchChannel = async () => {
   forwardsChannels.value = [];
   ftoChannels.value = [];
   hasMorePosts.value = true;
+  channelClassification.value = null;
+  isClassifyingChannel.value = false;
+  classificationRequestId.value++;
   
   let name = channelName.value.trim().replace(/^@/, "");
   let binit = null;
@@ -10969,6 +11155,11 @@ const searchChannel = async () => {
       posts.value = Array.isArray(postsData)
         ? postsData
         : postsData.data || postsData.posts || postsData.items || [];
+
+      // When there are more than 10 posts in feed, try to use callSystemOne() to classify the channel into types
+      if (posts.value.length > 10) {
+        classifyChannelWithSystemOne();
+      }
 
       await nextTick();
       if (
@@ -11397,6 +11588,9 @@ const loadMorePosts = async () => {
         } else {
           posts.value = [...posts.value, ...newPosts];
           postsRenderLimit.value += 50;
+          if (posts.value.length > 10 && !channelClassification.value && !isClassifyingChannel.value) {
+            classifyChannelWithSystemOne();
+          }
         }
         break;
       } else {
@@ -15736,11 +15930,38 @@ onUnmounted(() => {
                   </h2>
                   
                   <p
-                    class="font-bold text-xs mb-4 flex items-center gap-2 tracking-wide"
+                    class="font-bold text-xs mb-3 flex items-center gap-2 tracking-wide"
                     :class="currentChannelName.startsWith('-100') ? 'text-amber-600 dark:text-amber-400' : 'text-teal-600 dark:text-teal-400'"
                   >
                     <span>@{{ metadata.username || metadata.name || channelName }}</span>
                   </p>
+
+                  <!-- Channel Classification Badge (SystemOne AI) -->
+                  <div v-if="channelClassification || isClassifyingChannel" class="mb-4 flex items-center gap-2 flex-wrap">
+                    <div
+                      v-if="channelClassification"
+                      class="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold border shadow-3xs transition-all"
+                      :class="getChannelCategoryMeta(channelClassification.category).colorClass"
+                      :title="channelClassification.confidence ? `Primary Topic: ${getChannelCategoryMeta(channelClassification.category).label} (${Math.round(channelClassification.confidence * 100)}% confidence) • Classified with SystemOne` : `Primary Topic: ${getChannelCategoryMeta(channelClassification.category).label} • Classified with SystemOne`"
+                    >
+                      <component :is="getChannelCategoryMeta(channelClassification.category).icon" class="h-3.5 w-3.5 shrink-0" />
+                      <span>{{ getChannelCategoryMeta(channelClassification.category).label }}</span>
+                      <span
+                        v-if="channelClassification.confidence"
+                        class="text-[10px] opacity-75 font-mono ml-0.5"
+                      >
+                        {{ Math.round(channelClassification.confidence * 100) }}%
+                      </span>
+                    </div>
+                    <div
+                      v-else-if="isClassifyingChannel"
+                      class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold bg-gray-50 dark:bg-gray-800/60 text-gray-500 dark:text-gray-400 border border-gray-200/60 dark:border-gray-700/60 animate-pulse"
+                      title="Classifying channel topic via SystemOne..."
+                    >
+                      <Loader2 class="h-3 w-3 animate-spin text-teal-500" />
+                      <span class="text-[11px]">Classifying topic...</span>
+                    </div>
+                  </div>
 
                   <!-- Action Buttons Toolbar: Workspace, Listen, Google, Versions -->
                   <div class="flex items-center gap-2 flex-wrap mb-5">
@@ -16498,6 +16719,28 @@ onUnmounted(() => {
                       :class="explorerLatestPostFreshness ? explorerLatestPostFreshness.iconClasses : 'text-emerald-600 dark:text-emerald-400'"
                     />
                     <span>{{ t('explorer.latestPost', { time: latestPostTimeDelta }) }}</span>
+                  </span>
+
+                  <!-- Channel Classification Badge in Feed Header (SystemOne) -->
+                  <span
+                    v-if="channelClassification"
+                    class="ml-2 sm:ml-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-bold shadow-xs transition-colors select-none"
+                    :class="getChannelCategoryMeta(channelClassification.category).colorClass"
+                    :title="channelClassification.confidence ? `Primary Topic: ${getChannelCategoryMeta(channelClassification.category).label} (${Math.round(channelClassification.confidence * 100)}% confidence) • Classified with SystemOne` : `Primary Topic: ${getChannelCategoryMeta(channelClassification.category).label}`"
+                  >
+                    <component :is="getChannelCategoryMeta(channelClassification.category).icon" class="h-3 w-3 shrink-0" />
+                    <span>{{ getChannelCategoryMeta(channelClassification.category).label }}</span>
+                    <span v-if="channelClassification.confidence" class="text-[9px] opacity-75 font-mono">
+                      {{ Math.round(channelClassification.confidence * 100) }}%
+                    </span>
+                  </span>
+                  <span
+                    v-else-if="isClassifyingChannel"
+                    class="ml-2 sm:ml-3 inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border border-gray-200/60 dark:border-gray-700/60 bg-gray-50 dark:bg-gray-800/60 text-gray-500 dark:text-gray-400 text-[10px] font-semibold animate-pulse select-none"
+                    title="Classifying channel topic via SystemOne..."
+                  >
+                    <Loader2 class="h-2.5 w-2.5 animate-spin text-teal-500" />
+                    <span>Classifying topic...</span>
                   </span>
                 </h3>
 
