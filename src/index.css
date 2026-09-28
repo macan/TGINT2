@@ -6,6 +6,9 @@
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-gray-150: #eceef2;
+  --color-gray-750: #27303f;
+  --color-gray-850: #171f2b;
 }
 
 @layer base {

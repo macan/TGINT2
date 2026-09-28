@@ -3859,19 +3859,67 @@ const visibleListenItemsCount = computed<number>(() => {
   return count;
 });
 
+// Virtual Scrolling Configuration for Listen Directory Stream (Ensures 60FPS for 500+ items)
+const LISTEN_ROW_HEIGHT = 44;
+const LISTEN_OVERSCAN = 12;
+
+const listenTreeScrollTop = ref(0);
+const listenTreeContainerHeight = ref(800);
+let treeScrollRaf: number | null = null;
+let treeResizeObserver: ResizeObserver | null = null;
+
+const onListenTreeScroll = (e: Event) => {
+  const target = e.target as HTMLElement;
+  if (!target) return;
+  const top = target.scrollTop;
+  if (treeScrollRaf) cancelAnimationFrame(treeScrollRaf);
+  treeScrollRaf = requestAnimationFrame(() => {
+    listenTreeScrollTop.value = top;
+  });
+};
+
+const virtualDirectoryWindow = computed(() => {
+  const total = visibleDirectoryNodes.value.length;
+  // If total items is small (<= 45), avoid virtualization overhead and render directly
+  if (total <= 45) {
+    return {
+      startIndex: 0,
+      endIndex: total,
+      offsetTop: 0,
+      totalHeight: 0,
+      isVirtualized: false,
+      nodes: visibleDirectoryNodes.value
+    };
+  }
+
+  const scrollTop = listenTreeScrollTop.value;
+  const containerHeight = listenTreeContainerHeight.value || 800;
+
+  const rawStart = Math.floor(scrollTop / LISTEN_ROW_HEIGHT);
+  const rawEnd = Math.ceil((scrollTop + containerHeight) / LISTEN_ROW_HEIGHT);
+
+  const startIndex = Math.max(0, rawStart - LISTEN_OVERSCAN);
+  const endIndex = Math.min(total, rawEnd + LISTEN_OVERSCAN);
+  const offsetTop = startIndex * LISTEN_ROW_HEIGHT;
+  const totalHeight = total * LISTEN_ROW_HEIGHT;
+
+  return {
+    startIndex,
+    endIndex,
+    offsetTop,
+    totalHeight,
+    isVirtualized: true,
+    nodes: visibleDirectoryNodes.value.slice(startIndex, endIndex)
+  };
+});
+
 // Drag and drop states for Listen Directory items
 const draggedNode = ref<any | null>(null);
 const dragOverNode = ref<any | null>(null);
 const dragOverPosition = ref<"before" | "after" | "inside" | null>(null);
 
-const isDescendant = (parent: ListenItem, childId: string): boolean => {
-  if (!parent.isFolder || !parent.children) return false;
-  for (const child of parent.children) {
-    if (child.id === childId) return true;
-    if (isDescendant(child, childId)) return true;
-  }
-  return false;
-};
+// O(1) set lookup for descendant IDs of the dragged node
+const draggedDescendantIds = new Set<string>();
 
 const onDragStart = (event: DragEvent, node: any) => {
   if (listenSortOrder.value !== 'original') {
@@ -3881,53 +3929,91 @@ const onDragStart = (event: DragEvent, node: any) => {
     setTimeout(() => { toastMessage.value = ""; }, 2500);
   }
   draggedNode.value = node;
+
+  // Pre-calculate descendant IDs once on dragstart for O(1) checks during drag
+  draggedDescendantIds.clear();
+  const collectDescendants = (item: ListenItem) => {
+    if (!item.isFolder || !item.children) return;
+    for (const child of item.children) {
+      draggedDescendantIds.add(child.id);
+      collectDescendants(child);
+    }
+  };
+  collectDescendants(node.item);
+
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", node.item.id);
   }
 };
 
+const handleDragContainerAutoscroll = (clientY: number) => {
+  const container = listenTreeContainer.value || document.getElementById('listen-tree-container');
+  if (!container) return;
+  const rect = container.getBoundingClientRect();
+  const threshold = 55;
+  const speed = 12;
+
+  if (clientY < rect.top + threshold) {
+    const intensity = Math.max(0.2, (rect.top + threshold - clientY) / threshold);
+    container.scrollTop -= speed * intensity;
+  } else if (clientY > rect.bottom - threshold) {
+    const intensity = Math.max(0.2, (clientY - (rect.bottom - threshold)) / threshold);
+    container.scrollTop += speed * intensity;
+  }
+};
+
 const onDragOver = (event: DragEvent, node: any) => {
   event.preventDefault();
   if (!draggedNode.value || draggedNode.value.item.id === node.item.id) {
-    dragOverNode.value = null;
-    dragOverPosition.value = null;
+    if (dragOverNode.value) dragOverNode.value = null;
+    if (dragOverPosition.value) dragOverPosition.value = null;
     return;
   }
 
-  if (isDescendant(draggedNode.value.item, node.item.id)) {
-    dragOverNode.value = null;
-    dragOverPosition.value = null;
+  // O(1) check instead of recursive traversal
+  if (draggedDescendantIds.has(node.item.id)) {
+    if (dragOverNode.value) dragOverNode.value = null;
+    if (dragOverPosition.value) dragOverPosition.value = null;
     return;
   }
+
+  const clientY = event.clientY;
+  handleDragContainerAutoscroll(clientY);
 
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-  const relativeY = event.clientY - rect.top;
-  const height = rect.height;
+  const relativeY = clientY - rect.top;
+  const height = rect.height || LISTEN_ROW_HEIGHT;
 
+  let newPos: "before" | "after" | "inside";
   if (node.item.isFolder) {
     if (relativeY < height * 0.25) {
-      dragOverPosition.value = "before";
+      newPos = "before";
     } else if (relativeY > height * 0.75) {
-      dragOverPosition.value = "after";
+      newPos = "after";
     } else {
-      dragOverPosition.value = "inside";
+      newPos = "inside";
     }
   } else {
     if (relativeY < height * 0.5) {
-      dragOverPosition.value = "before";
+      newPos = "before";
     } else {
-      dragOverPosition.value = "after";
+      newPos = "after";
     }
   }
 
-  dragOverNode.value = node;
+  // Only mutate reactive refs if target or position actually changed
+  if (dragOverNode.value?.item.id !== node.item.id || dragOverPosition.value !== newPos) {
+    dragOverNode.value = node;
+    dragOverPosition.value = newPos;
+  }
 };
 
 const onDragEnd = () => {
   draggedNode.value = null;
   dragOverNode.value = null;
   dragOverPosition.value = null;
+  draggedDescendantIds.clear();
 };
 
 const onDrop = (event: DragEvent, targetNode: any) => {
@@ -3942,7 +4028,7 @@ const onDrop = (event: DragEvent, targetNode: any) => {
     return;
   }
 
-  if (isDescendant(draggedNode.value.item, targetId)) {
+  if (draggedDescendantIds.has(targetId)) {
     onDragEnd();
     return;
   }
@@ -4808,14 +4894,14 @@ const visibleFolderOptions = computed(() => {
 });
 
 // Scroll & Hover performance throttling for the Move Modal stream
-let isScrollingMoveList = false;
+const isScrollingMoveList = ref(false);
 let moveListScrollTimer: any = null;
 
 const onMoveListScroll = (e: Event) => {
-  isScrollingMoveList = true;
+  isScrollingMoveList.value = true;
   if (moveListScrollTimer) clearTimeout(moveListScrollTimer);
   moveListScrollTimer = setTimeout(() => {
-    isScrollingMoveList = false;
+    isScrollingMoveList.value = false;
   }, 100);
 
   const el = e.target as HTMLElement | null;
@@ -4834,7 +4920,7 @@ const onMoveListScroll = (e: Event) => {
 
 const onFolderRowHover = (idx: number, disabled: boolean) => {
   // Prevent thrashing reactive state during mouse wheel or kinetic scrolling
-  if (disabled || isScrollingMoveList) return;
+  if (disabled || isScrollingMoveList.value) return;
   moveModalFocusedIndex.value = idx;
 };
 
@@ -5238,16 +5324,16 @@ const getItemOrFolderNewPostsCount = (nodeItem: ListenItem): number => {
 };
 
 const getListenItemLineClasses = (node: any): string => {
-  const isSelected = !!(selectedListenNode.value && selectedListenNode.value.id === node.item?.id);
-  const freshness = node.freshness !== undefined ? node.freshness : getItemOrFolderFreshness(node.item);
-  const isPrivateChannel = node.isPrivateChannel !== undefined ? node.isPrivateChannel : (node.item?.type === 'channel' && node.item?.argument?.startsWith('-100'));
-  const newPostsCount = node.newPostsCount !== undefined ? node.newPostsCount : getItemOrFolderNewPostsCount(node.item);
+  const isSelected = selectedListenNode.value?.id === node.item?.id;
+  const freshness = node.freshness;
+  const isPrivateChannel = node.isPrivateChannel;
+  const newPostsCount = node.newPostsCount || 0;
 
   // Drag-and-drop feedback classes
-  if (dragOverNode.value && dragOverNode.value.item.id === node.item.id && dragOverPosition.value === 'inside') {
+  if (dragOverNode.value?.item?.id === node.item.id && dragOverPosition.value === 'inside') {
     return 'border-dashed border-teal-500 bg-teal-50/40 dark:bg-teal-950/30 scale-[0.98] text-teal-800 dark:text-teal-300';
   }
-  if (draggedNode.value && draggedNode.value.item.id === node.item.id) {
+  if (draggedNode.value?.item?.id === node.item.id) {
     return 'opacity-40 border-dashed border-gray-300 dark:border-gray-600';
   }
 
@@ -8270,12 +8356,37 @@ onMounted(() => {
     }
     fetchIndexedProfilesCount();
     document.addEventListener("click", handleDocumentClickForSortMenu);
+
+    nextTick(() => {
+      const container = listenTreeContainer.value || document.getElementById('listen-tree-container');
+      if (container) {
+        listenTreeContainerHeight.value = container.clientHeight || 800;
+        if (typeof ResizeObserver !== 'undefined') {
+          treeResizeObserver = new ResizeObserver((entries) => {
+            for (const entry of entries) {
+              if (entry.contentRect.height > 0) {
+                listenTreeContainerHeight.value = entry.contentRect.height;
+              }
+            }
+          });
+          treeResizeObserver.observe(container);
+        }
+      }
+    });
   }
 });
 
 let graphIntersectionObserver: IntersectionObserver | null = null;
 
 onUnmounted(() => {
+  if (treeResizeObserver) {
+    treeResizeObserver.disconnect();
+    treeResizeObserver = null;
+  }
+  if (treeScrollRaf) {
+    cancelAnimationFrame(treeScrollRaf);
+    treeScrollRaf = null;
+  }
   document.removeEventListener("click", handleDocumentClickForSortMenu);
   window.removeEventListener("scroll", handleScroll);
   if (systemClockTimer) clearInterval(systemClockTimer);
@@ -8726,6 +8837,16 @@ const positionListenNodeInView = (nodeId: string) => {
   highlightNodeTimer = setTimeout(() => {
     highlightedListenNodeId.value = null;
   }, 2600);
+
+  const container = listenTreeContainer.value || document.getElementById('listen-tree-container');
+  if (container) {
+    const nodeIndex = visibleDirectoryNodes.value.findIndex(n => n.item?.id === nodeId);
+    if (nodeIndex !== -1) {
+      const containerH = container.clientHeight || 800;
+      const targetScroll = Math.max(0, (nodeIndex * LISTEN_ROW_HEIGHT) - (containerH / 2) + (LISTEN_ROW_HEIGHT / 2));
+      container.scrollTo({ top: targetScroll, behavior: 'smooth' });
+    }
+  }
 
   const attemptScroll = (): boolean => {
     const el = document.getElementById(`listen-node-${nodeId}`);
@@ -21265,7 +21386,8 @@ onUnmounted(() => {
             <div 
               ref="listenTreeContainer"
               id="listen-tree-container"
-              class="p-3 overflow-y-auto space-y-1 select-none"
+              @scroll.passive="onListenTreeScroll"
+              class="p-3 overflow-y-auto select-none"
               :class="[
                 listenLayoutMode === 'rearrange'
                   ? 'flex-1 min-h-0'
@@ -21278,25 +21400,34 @@ onUnmounted(() => {
                 <p class="text-[10px] opacity-75 mt-1">{{ t('listen.clickActionsToStart') }}</p>
               </div>
 
+              <!-- Virtual Windowing Wrapper for High Performance at 500+ Items -->
               <div
-                v-for="node in visibleDirectoryNodes"
-                :key="node.item.id"
-                :id="'listen-node-' + node.item.id"
-                class="listen-tree-node-row group text-sm font-medium rounded-xl transition-colors duration-150 flex items-center justify-between px-3 py-2 border relative"
-                draggable="true"
-                @dragstart="onDragStart($event, node)"
-                @dragover="onDragOver($event, node)"
-                @dragend="onDragEnd"
-                @drop="onDrop($event, node)"
-                :class="[
-                  getListenItemLineClasses(node),
-                  highlightedListenNodeId === node.item.id
-                    ? '!ring-2 !ring-teal-500 !border-teal-500 shadow-md scale-[1.015] z-20'
-                    : ''
-                ]"
-                :title="node.title"
-                :style="{ paddingLeft: `calc(0.5rem + ${node.depth * 1.25}rem)` }"
+                v-else
+                :style="virtualDirectoryWindow.isVirtualized ? { height: `${virtualDirectoryWindow.totalHeight}px`, position: 'relative' } : {}"
               >
+                <div
+                  :style="virtualDirectoryWindow.isVirtualized ? { transform: `translateY(${virtualDirectoryWindow.offsetTop}px)` } : {}"
+                  class="space-y-1"
+                >
+                  <div
+                    v-for="node in virtualDirectoryWindow.nodes"
+                    :key="node.item.id"
+                    :id="'listen-node-' + node.item.id"
+                    class="listen-tree-node-row group text-sm font-medium rounded-xl transition-colors duration-75 flex items-center justify-between px-3 py-2 border relative"
+                    draggable="true"
+                    @dragstart="onDragStart($event, node)"
+                    @dragover="onDragOver($event, node)"
+                    @dragend="onDragEnd"
+                    @drop="onDrop($event, node)"
+                    :class="[
+                      getListenItemLineClasses(node),
+                      highlightedListenNodeId === node.item.id
+                        ? '!ring-2 !ring-teal-500 !border-teal-500 shadow-md scale-[1.015] z-20'
+                        : ''
+                    ]"
+                    :title="node.title"
+                    :style="{ paddingLeft: `calc(0.5rem + ${node.depth * 1.25}rem)` }"
+                  >
                 <!-- Drop indicator lines -->
                 <div v-if="dragOverNode && dragOverNode.item.id === node.item.id && dragOverPosition === 'before'" class="absolute top-0 left-0 right-0 h-0.5 bg-teal-500 z-50 pointer-events-none"></div>
                 <div v-if="dragOverNode && dragOverNode.item.id === node.item.id && dragOverPosition === 'after'" class="absolute bottom-0 left-0 right-0 h-0.5 bg-teal-500 z-50 pointer-events-none"></div>
@@ -21486,6 +21617,8 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
+          </div>
+        </div>
 
             <!-- Bottom Panel: Copy / Export / Import / Sync -->
             <div class="px-4 py-3 bg-gray-50/80 dark:bg-gray-900/40 border-t border-gray-150 dark:border-gray-700 flex items-center justify-between gap-2.5 shrink-0">
@@ -23163,8 +23296,8 @@ onUnmounted(() => {
                   folderOpt.disabled
                     ? 'opacity-40 cursor-not-allowed bg-transparent border-transparent text-gray-400 dark:text-gray-600'
                     : moveModalFocusedIndex === idx
-                      ? 'bg-teal-50 dark:bg-teal-950/50 border-teal-200 dark:border-teal-800/80 text-teal-900 dark:text-teal-200 shadow-2xs cursor-pointer'
-                      : 'hover:bg-gray-50 dark:hover:bg-gray-750/70 border-transparent text-gray-800 dark:text-gray-200 cursor-pointer'
+                      ? 'bg-teal-50 dark:bg-teal-950/60 border-teal-200 dark:border-teal-800/80 text-teal-900 dark:text-teal-200 shadow-2xs cursor-pointer'
+                      : 'hover:bg-gray-100/80 dark:hover:bg-gray-700/60 border-transparent text-gray-800 dark:text-gray-200 cursor-pointer'
                 ]"
               >
                 <div class="flex flex-col min-w-0 pr-2">
@@ -23186,7 +23319,10 @@ onUnmounted(() => {
                       v-else
                       class="h-4 w-4 shrink-0 text-amber-500"
                     />
-                    <span class="truncate font-bold text-gray-900 dark:text-gray-100">
+                    <span 
+                      class="truncate font-bold"
+                      :class="moveModalFocusedIndex === idx ? 'text-teal-950 dark:text-teal-100' : 'text-gray-900 dark:text-gray-100'"
+                    >
                       {{ folderOpt.name }}
                     </span>
                   </div>
@@ -23202,11 +23338,17 @@ onUnmounted(() => {
                   </span>
                   <div v-else class="relative flex items-center justify-end min-w-[36px]">
                     <!-- Item count badge -->
-                    <span class="text-[10px] font-mono text-gray-400 dark:text-gray-500 px-1.5 py-0.5 rounded bg-gray-150 dark:bg-gray-700/60 group-hover:opacity-0 transition-opacity">
+                    <span 
+                      class="text-[10px] font-mono text-gray-400 dark:text-gray-500 px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700/60 transition-opacity"
+                      :class="moveModalFocusedIndex === idx ? 'opacity-0' : 'group-hover:opacity-0'"
+                    >
                       {{ folderOpt.itemCount }}
                     </span>
                     <!-- Instant Move Action indicator on hover / focus -->
-                    <span class="absolute right-0 opacity-0 group-hover:opacity-100 pointer-events-none flex items-center gap-1 text-[11px] font-extrabold text-teal-600 dark:text-teal-400 transition-opacity whitespace-nowrap">
+                    <span 
+                      class="absolute right-0 pointer-events-none flex items-center gap-1 text-[11px] font-extrabold text-teal-600 dark:text-teal-400 transition-opacity whitespace-nowrap"
+                      :class="moveModalFocusedIndex === idx ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'"
+                    >
                       <span>{{ t('listen.clickToMoveHere') }}</span>
                       <CornerDownLeft class="h-3.5 w-3.5" />
                     </span>
