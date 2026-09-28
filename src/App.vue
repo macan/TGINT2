@@ -79,6 +79,11 @@ import {
   BookOpen,
   Move,
   ArrowRightLeft,
+  ArrowUpDown,
+  ArrowDownWideNarrow,
+  ArrowUpNarrowWide,
+  ArrowDownAZ,
+  ArrowUpZA,
   Split,
   Columns2,
   Plus,
@@ -2528,6 +2533,46 @@ const listenLayoutMode = ref<'view' | 'rearrange' | 'flexible'>(
   (localStorage.getItem("listen_layout_mode") as 'view' | 'rearrange' | 'flexible') || 'view'
 );
 
+// Directory Display Sorting (Without modifying low-level JSON data order)
+export type ListenSortOrder = 'original' | 'freshness-desc' | 'freshness-asc' | 'name-asc' | 'name-desc';
+
+const listenSortOrder = ref<ListenSortOrder>(
+  (localStorage.getItem("listen_sort_order") as ListenSortOrder) || 'original'
+);
+const isListenSortMenuOpen = ref(false);
+
+const setListenSortOrder = (order: ListenSortOrder) => {
+  listenSortOrder.value = order;
+  isListenSortMenuOpen.value = false;
+  try {
+    localStorage.setItem("listen_sort_order", order);
+  } catch (e) {
+    console.warn("Failed to save listen_sort_order", e);
+  }
+};
+
+const getSortOrderLabel = (order: ListenSortOrder): string => {
+  switch (order) {
+    case 'freshness-desc':
+      return t('listen.sortFreshnessDesc') || 'Freshness: Newest First (DSC)';
+    case 'freshness-asc':
+      return t('listen.sortFreshnessAsc') || 'Freshness: Oldest First (ASC)';
+    case 'name-asc':
+      return t('listen.sortNameAsc') || 'Name: A → Z';
+    case 'name-desc':
+      return t('listen.sortNameDesc') || 'Name: Z → A';
+    case 'original':
+    default:
+      return t('listen.sortOriginal') || 'Original Order';
+  }
+};
+
+const handleDocumentClickForSortMenu = () => {
+  if (isListenSortMenuOpen.value) {
+    isListenSortMenuOpen.value = false;
+  }
+};
+
 const setListenLayoutMode = (mode: 'view' | 'rearrange' | 'flexible') => {
   listenLayoutMode.value = mode;
   localStorage.setItem("listen_layout_mode", mode);
@@ -3576,6 +3621,74 @@ const getMatchingNodeIds = (
   return matched;
 };
 
+const getNodeFreshnessTimestamp = (
+  node: ListenItem,
+  folderStats: any = null,
+  freshnessMap: any = null
+): number => {
+  if (!node) return 0;
+  const f = node.isFolder
+    ? (folderStats?.freshnessMap?.[node.id] || null)
+    : (freshnessMap?.[node.id] || listenItemsFreshnessMap.value[node.id] || null);
+
+  if (f && typeof f.timestamp === "number" && f.timestamp > 0) {
+    return f.timestamp;
+  }
+  if (node.create_time) {
+    const parsed = new Date(node.create_time).getTime();
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+  return 0;
+};
+
+const sortListenNodes = (
+  nodes: ListenItem[],
+  sortOrder: ListenSortOrder,
+  folderStats: any = null,
+  freshnessMap: any = null
+): ListenItem[] => {
+  if (sortOrder === "original" || !Array.isArray(nodes) || nodes.length <= 1) {
+    return nodes;
+  }
+
+  // Create a shallow copy so the original JSON data array and object structure is never modified
+  const copy = [...nodes];
+
+  copy.sort((a, b) => {
+    if (sortOrder === "freshness-desc") {
+      const timeA = getNodeFreshnessTimestamp(a, folderStats, freshnessMap);
+      const timeB = getNodeFreshnessTimestamp(b, folderStats, freshnessMap);
+      if (timeB !== timeA) {
+        return timeB - timeA;
+      }
+      return (a.name || "").localeCompare(b.name || "");
+    }
+
+    if (sortOrder === "freshness-asc") {
+      const timeA = getNodeFreshnessTimestamp(a, folderStats, freshnessMap);
+      const timeB = getNodeFreshnessTimestamp(b, folderStats, freshnessMap);
+      if (timeA !== timeB) {
+        return timeA - timeB;
+      }
+      return (a.name || "").localeCompare(b.name || "");
+    }
+
+    if (sortOrder === "name-asc") {
+      return (a.name || "").localeCompare(b.name || "");
+    }
+
+    if (sortOrder === "name-desc") {
+      return (b.name || "").localeCompare(a.name || "");
+    }
+
+    return 0;
+  });
+
+  return copy;
+};
+
 const getFilteredVisibleNodes = (
   nodes: ListenItem[],
   term: string,
@@ -3590,7 +3703,12 @@ const getFilteredVisibleNodes = (
   const isFiltering = !!(term || selectedListenTagFilter.value);
   if (!nodes || !Array.isArray(nodes)) return list;
 
-  for (const node of nodes) {
+  // Use sorted copy for display without altering the original low-level JSON data order
+  const displayNodes = listenSortOrder.value !== "original"
+    ? sortListenNodes(nodes, listenSortOrder.value, folderStats, freshnessMap)
+    : nodes;
+
+  for (const node of displayNodes) {
     if (isFiltering && matchingIds && !matchingIds.has(node.id)) {
       continue;
     }
@@ -3676,6 +3794,8 @@ const visibleDirectoryNodes = computed(() => {
   const folderStats = folderStatsMap.value;
   const freshnessMap = listenItemsFreshnessMap.value;
   const newPostsMap = newlyFetchedPostsCountMap.value;
+  // Ensure reactive dependency tracking on sort order
+  const _currentSort = listenSortOrder.value;
   return getFilteredVisibleNodes(
     listenDirectory.value,
     term,
@@ -3754,6 +3874,12 @@ const isDescendant = (parent: ListenItem, childId: string): boolean => {
 };
 
 const onDragStart = (event: DragEvent, node: any) => {
+  if (listenSortOrder.value !== 'original') {
+    setListenSortOrder('original');
+    toastMessage.value = t('listen.switchedToOriginalForDrag') || "Switched to Original Order for manual drag and drop";
+    toastType.value = "info";
+    setTimeout(() => { toastMessage.value = ""; }, 2500);
+  }
   draggedNode.value = node;
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = "move";
@@ -8143,12 +8269,14 @@ onMounted(() => {
       initFlexibleWorkdesk();
     }
     fetchIndexedProfilesCount();
+    document.addEventListener("click", handleDocumentClickForSortMenu);
   }
 });
 
 let graphIntersectionObserver: IntersectionObserver | null = null;
 
 onUnmounted(() => {
+  document.removeEventListener("click", handleDocumentClickForSortMenu);
   window.removeEventListener("scroll", handleScroll);
   if (systemClockTimer) clearInterval(systemClockTimer);
   if (counterTimer) clearInterval(counterTimer);
@@ -9038,6 +9166,57 @@ const searchFields = ref({
   url: false,
 });
 const searchResults = ref<any[]>([]);
+const recentGlobalSearches = ref<string[]>([]);
+try {
+  const savedSearches = localStorage.getItem("recentGlobalSearches");
+  if (savedSearches) {
+    const parsed = JSON.parse(savedSearches);
+    if (Array.isArray(parsed)) {
+      recentGlobalSearches.value = parsed.filter((item) => typeof item === "string" && item.trim()).slice(0, 5);
+    }
+  }
+} catch (e) {
+  console.warn("Failed to load recentGlobalSearches", e);
+}
+
+const addToRecentSearches = (keyword: string) => {
+  const trimmed = (keyword || "").trim();
+  if (!trimmed) return;
+  const filtered = recentGlobalSearches.value.filter(
+    (item) => item.toLowerCase() !== trimmed.toLowerCase()
+  );
+  recentGlobalSearches.value = [trimmed, ...filtered].slice(0, 5);
+  try {
+    localStorage.setItem("recentGlobalSearches", JSON.stringify(recentGlobalSearches.value));
+  } catch (e) {
+    console.warn("Failed to persist recentGlobalSearches", e);
+  }
+};
+
+const removeRecentSearch = (keyword: string) => {
+  recentGlobalSearches.value = recentGlobalSearches.value.filter(
+    (item) => item.toLowerCase() !== keyword.toLowerCase()
+  );
+  try {
+    localStorage.setItem("recentGlobalSearches", JSON.stringify(recentGlobalSearches.value));
+  } catch (e) {
+    console.warn("Failed to update recentGlobalSearches", e);
+  }
+};
+
+const clearRecentSearches = () => {
+  recentGlobalSearches.value = [];
+  try {
+    localStorage.removeItem("recentGlobalSearches");
+  } catch (e) {
+    console.warn("Failed to clear recentGlobalSearches", e);
+  }
+};
+
+const applyRecentSearch = (keyword: string) => {
+  globalSearchQuery.value = keyword;
+  performGlobalSearch();
+};
 const selectedUsernames = ref<string[]>([]);
 const selectedChannels = ref<string[]>([]);
 const lastVisitedChannels = ref<{ name: string; isPinned: boolean }[]>([]);
@@ -11333,7 +11512,10 @@ const searchChannel = async () => {
 };
 
 const performGlobalSearch = async () => {
-  if (!globalSearchQuery.value.trim()) return;
+  const query = globalSearchQuery.value.trim();
+  if (!query) return;
+
+  addToRecentSearches(query);
 
   lastSearchScrollY.value = 0;
   lastSearchPostKey.value = "";
@@ -18005,6 +18187,54 @@ onUnmounted(() => {
               </div>
             </div>
 
+            <!-- Recent Searches Quick Access Bar -->
+            <div
+              v-if="recentGlobalSearches.length > 0"
+              class="flex items-center flex-wrap gap-2 text-xs -mt-2 pt-1"
+            >
+              <div class="flex items-center gap-1.5 text-gray-400 dark:text-gray-500 font-bold text-[11px] shrink-0 mr-0.5 select-none">
+                <Clock class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 shrink-0" />
+                <span>{{ t('search.recentSearches') }}</span>
+              </div>
+
+              <!-- Keyword Chips -->
+              <div
+                v-for="kw in recentGlobalSearches"
+                :key="kw"
+                class="group/chip inline-flex items-center rounded-xl bg-gray-50 dark:bg-gray-900/80 hover:bg-teal-50 dark:hover:bg-teal-950/60 border border-gray-200/80 dark:border-gray-700/80 hover:border-teal-300 dark:hover:border-teal-700 text-gray-700 dark:text-gray-300 hover:text-teal-700 dark:hover:text-teal-300 transition-all text-xs font-semibold overflow-hidden shadow-2xs"
+                :class="globalSearchQuery.trim().toLowerCase() === kw.toLowerCase() ? 'bg-teal-50 dark:bg-teal-950/80 border-teal-300 dark:border-teal-700 text-teal-850 dark:text-teal-200 ring-1 ring-teal-500/20' : ''"
+              >
+                <button
+                  type="button"
+                  @click="applyRecentSearch(kw)"
+                  class="pl-2.5 pr-1.5 py-1 flex items-center gap-1.5 cursor-pointer max-w-[180px] truncate"
+                  :title="kw"
+                >
+                  <Search class="h-3 w-3 text-gray-400 group-hover/chip:text-teal-500 transition-colors shrink-0" />
+                  <span class="truncate">{{ kw }}</span>
+                </button>
+                <button
+                  type="button"
+                  @click.stop="removeRecentSearch(kw)"
+                  class="px-1.5 py-1 text-gray-400 hover:text-rose-500 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
+                  :title="t('common.delete') || 'Remove'"
+                  :aria-label="'Remove ' + kw"
+                >
+                  <X class="h-3 w-3" />
+                </button>
+              </div>
+
+              <!-- Clear All Button -->
+              <button
+                type="button"
+                @click="clearRecentSearches"
+                class="text-[11px] font-semibold text-gray-400 hover:text-rose-500 dark:hover:text-rose-400 transition-colors cursor-pointer ml-1 select-none"
+                :title="t('search.clearRecentSearches')"
+              >
+                {{ t('common.clear') || 'Clear' }}
+              </button>
+            </div>
+
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-gray-100 dark:border-gray-700/50">
               <!-- Target Fields -->
               <div class="space-y-2.5">
@@ -20672,6 +20902,116 @@ onUnmounted(() => {
                   >
                     <ChevronUp class="h-3.5 w-3.5" />
                   </button>
+
+                  <!-- Sort Dropdown Menu Button -->
+                  <div class="relative">
+                    <button
+                      type="button"
+                      @click.stop="isListenSortMenuOpen = !isListenSortMenuOpen"
+                      class="p-1.5 rounded-lg transition-colors cursor-pointer relative"
+                      :class="[
+                        listenSortOrder !== 'original'
+                          ? 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 hover:bg-amber-100 dark:hover:bg-amber-900/60 ring-1 ring-amber-300 dark:ring-amber-700/60 font-bold'
+                          : 'text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 hover:text-teal-600 dark:hover:text-teal-400'
+                      ]"
+                      :title="t('listen.sortDirectory') + ': ' + getSortOrderLabel(listenSortOrder)"
+                    >
+                      <ArrowUpDown class="h-3.5 w-3.5" />
+                      <span
+                        v-if="listenSortOrder !== 'original'"
+                        class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-amber-500 ring-2 ring-white dark:ring-gray-800"
+                      ></span>
+                    </button>
+
+                    <!-- Sort Popover Menu -->
+                    <div
+                      v-if="isListenSortMenuOpen"
+                      @click.stop
+                      class="absolute right-0 top-full mt-1.5 w-64 bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-200/80 dark:border-gray-700 py-1.5 z-50 text-xs select-none animate-in fade-in zoom-in-95 duration-100"
+                    >
+                      <div class="px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500 border-b border-gray-100 dark:border-gray-700/50 flex items-center justify-between">
+                        <span>{{ t('listen.sortDirectory') }}</span>
+                        <span class="text-[9px] font-mono text-teal-600 dark:text-teal-400 lowercase">{{ t('listen.jsonOrderUnchanged') }}</span>
+                      </div>
+
+                      <div class="p-1 space-y-0.5">
+                        <!-- Original Order -->
+                        <button
+                          type="button"
+                          @click="setListenSortOrder('original')"
+                          class="w-full text-left px-2.5 py-2 rounded-xl flex items-start gap-2.5 transition-colors cursor-pointer"
+                          :class="listenSortOrder === 'original' ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-800 dark:text-teal-200 font-bold' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-750'"
+                        >
+                          <RotateCcw class="h-4 w-4 shrink-0 mt-0.5" :class="listenSortOrder === 'original' ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400'" />
+                          <div class="flex-1 min-w-0">
+                            <div class="flex items-center justify-between">
+                              <span>{{ t('listen.sortOriginal') }}</span>
+                              <Check v-if="listenSortOrder === 'original'" class="h-3 w-3 text-teal-600 dark:text-teal-400" />
+                            </div>
+                            <div class="text-[10px] font-normal text-gray-400 dark:text-gray-500 truncate">{{ t('listen.sortOriginalDesc') }}</div>
+                          </div>
+                        </button>
+
+                        <!-- Freshness: Newest First (DSC) -->
+                        <button
+                          type="button"
+                          @click="setListenSortOrder('freshness-desc')"
+                          class="w-full text-left px-2.5 py-2 rounded-xl flex items-start gap-2.5 transition-colors cursor-pointer"
+                          :class="listenSortOrder === 'freshness-desc' ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-800 dark:text-teal-200 font-bold' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-750'"
+                        >
+                          <ArrowDownWideNarrow class="h-4 w-4 shrink-0 mt-0.5" :class="listenSortOrder === 'freshness-desc' ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400'" />
+                          <div class="flex-1 min-w-0">
+                            <div class="flex items-center justify-between">
+                              <span>{{ t('listen.sortFreshnessDesc') }}</span>
+                              <Check v-if="listenSortOrder === 'freshness-desc'" class="h-3 w-3 text-teal-600 dark:text-teal-400" />
+                            </div>
+                            <div class="text-[10px] font-normal text-gray-400 dark:text-gray-500 truncate">{{ t('listen.sortFreshnessDescSub') }}</div>
+                          </div>
+                        </button>
+
+                        <!-- Freshness: Oldest First (ASC) -->
+                        <button
+                          type="button"
+                          @click="setListenSortOrder('freshness-asc')"
+                          class="w-full text-left px-2.5 py-2 rounded-xl flex items-start gap-2.5 transition-colors cursor-pointer"
+                          :class="listenSortOrder === 'freshness-asc' ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-800 dark:text-teal-200 font-bold' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-750'"
+                        >
+                          <ArrowUpNarrowWide class="h-4 w-4 shrink-0 mt-0.5" :class="listenSortOrder === 'freshness-asc' ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400'" />
+                          <div class="flex-1 min-w-0">
+                            <div class="flex items-center justify-between">
+                              <span>{{ t('listen.sortFreshnessAsc') }}</span>
+                              <Check v-if="listenSortOrder === 'freshness-asc'" class="h-3 w-3 text-teal-600 dark:text-teal-400" />
+                            </div>
+                            <div class="text-[10px] font-normal text-gray-400 dark:text-gray-500 truncate">{{ t('listen.sortFreshnessAscSub') }}</div>
+                          </div>
+                        </button>
+
+                        <!-- Name: A → Z -->
+                        <button
+                          type="button"
+                          @click="setListenSortOrder('name-asc')"
+                          class="w-full text-left px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 transition-colors cursor-pointer"
+                          :class="listenSortOrder === 'name-asc' ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-800 dark:text-teal-200 font-bold' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-750'"
+                        >
+                          <ArrowDownAZ class="h-4 w-4 shrink-0" :class="listenSortOrder === 'name-asc' ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400'" />
+                          <span class="flex-1 min-w-0">{{ t('listen.sortNameAsc') }}</span>
+                          <Check v-if="listenSortOrder === 'name-asc'" class="h-3 w-3 text-teal-600 dark:text-teal-400" />
+                        </button>
+
+                        <!-- Name: Z → A -->
+                        <button
+                          type="button"
+                          @click="setListenSortOrder('name-desc')"
+                          class="w-full text-left px-2.5 py-1.5 rounded-xl flex items-center gap-2.5 transition-colors cursor-pointer"
+                          :class="listenSortOrder === 'name-desc' ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-800 dark:text-teal-200 font-bold' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-750'"
+                        >
+                          <ArrowUpZA class="h-4 w-4 shrink-0" :class="listenSortOrder === 'name-desc' ? 'text-teal-600 dark:text-teal-400' : 'text-gray-400'" />
+                          <span class="flex-1 min-w-0">{{ t('listen.sortNameDesc') }}</span>
+                          <Check v-if="listenSortOrder === 'name-desc'" class="h-3 w-3 text-teal-600 dark:text-teal-400" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
                 <div class="h-4 w-px bg-gray-200 dark:bg-gray-700 mx-0.5 hidden sm:block"></div>
                 <div class="flex items-center gap-1.5 shrink-0">
@@ -20831,6 +21171,25 @@ onUnmounted(() => {
               <div class="flex items-center gap-1.5 font-bold shrink-0">
                 <Sparkles class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 shrink-0" />
                 <span class="text-teal-900 dark:text-teal-200 tracking-wide font-sans">{{ t('listen.freshness') }}</span>
+                <!-- Quick Sort Toggle button inside freshness guide -->
+                <button
+                  type="button"
+                  @click="setListenSortOrder(listenSortOrder === 'freshness-desc' ? 'freshness-asc' : 'freshness-desc')"
+                  class="ml-1 text-[9px] px-1.5 py-0.5 rounded-md font-mono font-bold transition-all cursor-pointer flex items-center gap-1 border"
+                  :class="[
+                    listenSortOrder === 'freshness-desc'
+                      ? 'bg-emerald-500 text-white border-emerald-600 shadow-2xs'
+                      : listenSortOrder === 'freshness-asc'
+                        ? 'bg-amber-500 text-white border-amber-600 shadow-2xs'
+                        : 'bg-white/90 dark:bg-gray-800/90 text-teal-700 dark:text-teal-300 border-teal-200/80 dark:border-teal-800/60 hover:bg-teal-50 dark:hover:bg-teal-950/50'
+                  ]"
+                  :title="listenSortOrder === 'freshness-desc' ? t('listen.sortFreshnessAsc') : t('listen.sortFreshnessDesc')"
+                >
+                  <ArrowDownWideNarrow v-if="listenSortOrder === 'freshness-desc'" class="h-2.5 w-2.5" />
+                  <ArrowUpNarrowWide v-else-if="listenSortOrder === 'freshness-asc'" class="h-2.5 w-2.5" />
+                  <ArrowUpDown v-else class="h-2.5 w-2.5" />
+                  <span>{{ listenSortOrder === 'freshness-desc' ? (t('listen.sortFreshnessDescShort') || 'Newest') : listenSortOrder === 'freshness-asc' ? (t('listen.sortFreshnessAscShort') || 'Oldest') : (t('listen.sort') || 'Sort') }}</span>
+                </button>
               </div>
               <div class="flex items-center gap-1.5 font-mono text-[9px] shrink-0">
                 <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold bg-emerald-100/80 text-emerald-800 border border-emerald-300/70 dark:bg-emerald-950/80 dark:text-emerald-300 dark:border-emerald-700/60 shadow-2xs">
@@ -20853,6 +21212,52 @@ onUnmounted(() => {
                   <span class="h-1.5 w-1.5 rounded-full bg-slate-400 dark:bg-slate-400"></span>
                   {{ t('listen.freshnessLegendStale') }}
                 </span>
+              </div>
+            </div>
+
+            <!-- Active Sort State Quick Actions Banner -->
+            <div
+              v-if="listenSortOrder !== 'original'"
+              class="px-3.5 py-1.5 bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-transparent border-b border-amber-500/20 flex items-center justify-between text-[11px] text-amber-900 dark:text-amber-200 shrink-0 select-none animate-fadeIn gap-2"
+            >
+              <div class="flex items-center gap-1.5 min-w-0">
+                <ArrowUpDown class="h-3 w-3 text-amber-600 dark:text-amber-400 shrink-0" />
+                <span class="font-bold shrink-0">{{ t('listen.sortedBy') }}:</span>
+                <span class="font-semibold truncate">{{ getSortOrderLabel(listenSortOrder) }}</span>
+                <span class="text-[9.5px] opacity-75 hidden sm:inline">({{ t('listen.jsonOrderUnchanged') }})</span>
+              </div>
+              <div class="flex items-center gap-1 shrink-0">
+                <!-- Quick Toggle between Newest and Oldest -->
+                <button
+                  v-if="listenSortOrder === 'freshness-desc'"
+                  type="button"
+                  @click="setListenSortOrder('freshness-asc')"
+                  class="px-1.5 py-0.5 rounded bg-white/80 dark:bg-gray-800/80 hover:bg-amber-100 dark:hover:bg-amber-900/60 border border-amber-200 dark:border-amber-800 text-[10px] font-bold text-amber-700 dark:text-amber-300 transition-colors cursor-pointer flex items-center gap-1"
+                  :title="t('listen.sortFreshnessAsc')"
+                >
+                  <ArrowUpNarrowWide class="h-2.5 w-2.5" />
+                  <span>{{ t('listen.sortFreshnessAscShort') || 'Oldest' }}</span>
+                </button>
+                <button
+                  v-else-if="listenSortOrder === 'freshness-asc'"
+                  type="button"
+                  @click="setListenSortOrder('freshness-desc')"
+                  class="px-1.5 py-0.5 rounded bg-white/80 dark:bg-gray-800/80 hover:bg-amber-100 dark:hover:bg-amber-900/60 border border-amber-200 dark:border-amber-800 text-[10px] font-bold text-amber-700 dark:text-amber-300 transition-colors cursor-pointer flex items-center gap-1"
+                  :title="t('listen.sortFreshnessDesc')"
+                >
+                  <ArrowDownWideNarrow class="h-2.5 w-2.5" />
+                  <span>{{ t('listen.sortFreshnessDescShort') || 'Newest' }}</span>
+                </button>
+                <!-- Quick Reset to Original Order -->
+                <button
+                  type="button"
+                  @click="setListenSortOrder('original')"
+                  class="px-2 py-0.5 rounded bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-bold transition-colors cursor-pointer flex items-center gap-1 shadow-2xs"
+                  :title="t('listen.backToOriginalOrder')"
+                >
+                  <RotateCcw class="h-2.5 w-2.5" />
+                  <span>{{ t('listen.originalOrder') }}</span>
+                </button>
               </div>
             </div>
 
