@@ -286,6 +286,8 @@ export default {
     searchResults: "Resultados de búsqueda",
     resultsFound: "{count} resultados encontrados",
     addToListenDirectory: "Añadir a directorio de escucha",
+    inListen: "En escucha",
+    savedInListen: "Guardado en directorio de escucha",
     listen: "Escuchar",
     postPhoto: "Foto de publicación",
     linkPreviewImage: "Imagen de vista previa del enlace",

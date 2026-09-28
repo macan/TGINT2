@@ -301,6 +301,8 @@ export default {
     searchResults: "搜索结果",
     resultsFound: "找到 {count} 条结果",
     addToListenDirectory: "添加到监听目录",
+    inListen: "已监听",
+    savedInListen: "已保存在监听目录",
     listen: "监听",
     postPhoto: "帖子图片",
     linkPreviewImage: "链接预览图片",

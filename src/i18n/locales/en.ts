@@ -301,6 +301,8 @@ export default {
     searchResults: "Search Results",
     resultsFound: "{count} results found",
     addToListenDirectory: "Add to Listen Directory",
+    inListen: "In Listen",
+    savedInListen: "Saved in Listen Directory",
     listen: "Listen",
     postPhoto: "Post photo",
     linkPreviewImage: "Link preview image",

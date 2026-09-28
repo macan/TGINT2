@@ -286,6 +286,8 @@ export default {
     searchResults: "Результаты поиска",
     resultsFound: "Найдено результатов: {count}",
     addToListenDirectory: "Добавить в каталог мониторинга",
+    inListen: "В мониторинге",
+    savedInListen: "Сохранено в каталоге мониторинга",
     listen: "Мониторинг",
     postPhoto: "Фото поста",
     linkPreviewImage: "Изображение предпросмотра",

@@ -286,6 +286,8 @@ export default {
     searchResults: "搜尋結果",
     resultsFound: "找到 {count} 筆結果",
     addToListenDirectory: "新增至監聽目錄",
+    inListen: "已監聽",
+    savedInListen: "已儲存於監聽目錄",
     listen: "監聽",
     postPhoto: "貼文圖片",
     linkPreviewImage: "連結預覽圖片",

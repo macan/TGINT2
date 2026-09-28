@@ -4488,6 +4488,7 @@ const openMoveModal = (item: ListenItem) => {
   itemToMove.value = item;
   moveFolderSearchQuery.value = "";
   moveModalFocusedIndex.value = 0;
+  moveFolderDisplayLimit.value = 60;
   const parentInfo = getParentFolderId(listenDirectory.value, item.id);
   selectedMoveTargetFolderId.value = parentInfo.parentId;
   isMoveModalOpen.value = true;
@@ -4613,11 +4614,27 @@ const availableFolderOptions = computed(() => {
     itemCount: totalListenItemsCount.value
   });
 
+  // Pre-calculate all descendant IDs of the item to move once using a Set for O(1) lookups
+  const descendantIds = new Set<string>();
+  if (itemToMove.value && itemToMove.value.isFolder && itemToMove.value.children) {
+    const collectDescendants = (children: ListenItem[]) => {
+      for (const child of children) {
+        descendantIds.add(child.id);
+        if (child.isFolder && child.children) {
+          collectDescendants(child.children);
+        }
+      }
+    };
+    collectDescendants(itemToMove.value.children);
+  }
+
+  const movingItemId = itemToMove.value?.id;
+
   const traverse = (nodes: ListenItem[], depth = 1, currentPath: string[] = []) => {
     for (const node of nodes) {
       if (node.isFolder) {
-        const isSelf = !!(itemToMove.value && itemToMove.value.id === node.id);
-        const isChildDescendant = !!(itemToMove.value && isDescendant(itemToMove.value, node.id));
+        const isSelf = movingItemId === node.id;
+        const isChildDescendant = descendantIds.has(node.id);
         const isCurrent = currentParentId === node.id;
         const disabled = isSelf || isChildDescendant || isCurrent;
         const pathString = currentPath.length > 0 ? currentPath.join(" › ") : "";
@@ -4658,6 +4675,43 @@ const filteredFolderOptions = computed(() => {
   });
 });
 
+const moveFolderDisplayLimit = ref(60);
+
+const visibleFolderOptions = computed(() => {
+  return filteredFolderOptions.value.slice(0, moveFolderDisplayLimit.value);
+});
+
+// Scroll & Hover performance throttling for the Move Modal stream
+let isScrollingMoveList = false;
+let moveListScrollTimer: any = null;
+
+const onMoveListScroll = (e: Event) => {
+  isScrollingMoveList = true;
+  if (moveListScrollTimer) clearTimeout(moveListScrollTimer);
+  moveListScrollTimer = setTimeout(() => {
+    isScrollingMoveList = false;
+  }, 100);
+
+  const el = e.target as HTMLElement | null;
+  if (el) {
+    // If scrolled within 160px of the bottom, load the next chunk of folders
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 160) {
+      if (moveFolderDisplayLimit.value < filteredFolderOptions.value.length) {
+        moveFolderDisplayLimit.value = Math.min(
+          filteredFolderOptions.value.length,
+          moveFolderDisplayLimit.value + 60
+        );
+      }
+    }
+  }
+};
+
+const onFolderRowHover = (idx: number, disabled: boolean) => {
+  // Prevent thrashing reactive state during mouse wheel or kinetic scrolling
+  if (disabled || isScrollingMoveList) return;
+  moveModalFocusedIndex.value = idx;
+};
+
 const recentFolderOptions = computed(() => {
   if (!recentMoveFolderIds.value || recentMoveFolderIds.value.length === 0) return [];
   const map = new Map<string, (typeof availableFolderOptions.value)[0]>();
@@ -4676,6 +4730,7 @@ const recentFolderOptions = computed(() => {
 
 watch(moveFolderSearchQuery, () => {
   moveModalFocusedIndex.value = 0;
+  moveFolderDisplayLimit.value = 60;
 });
 
 const onMoveModalKeydown = (e: KeyboardEvent) => {
@@ -4693,6 +4748,9 @@ const onMoveModalKeydown = (e: KeyboardEvent) => {
           break;
         }
         next = (next + 1) % len;
+      }
+      if (moveModalFocusedIndex.value >= moveFolderDisplayLimit.value - 10) {
+        moveFolderDisplayLimit.value = Math.min(len, moveFolderDisplayLimit.value + 60);
       }
       scrollFocusedFolderIntoView();
     }
@@ -9245,6 +9303,94 @@ const getToolName = (post: any) => {
   }
   return "TG";
 };
+
+// Global Search hit item Listen directory check and hint resolution
+const searchPostListenHitsCache = ref<Record<string, ListenHit | null>>({});
+const searchPostListenHints = ref<Record<string, string>>({});
+
+const getPostChannelIdentifier = (post: any): { username: string; title: string } => {
+  if (!post) return { username: "", title: "" };
+  const keyPart = post.key ? String(post.key).split(".")[0].trim() : "";
+  let userPart = "";
+  if (typeof post.data?.user === "string") {
+    const raw = post.data.user.trim();
+    userPart = raw.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").split("/").pop() || "";
+  }
+  const authorPart = typeof post.data?.author === "string" ? post.data.author.trim() : "";
+  const ownerPart = typeof post.data?.owner === "string" ? post.data.owner.trim() : "";
+
+  const username = keyPart || userPart || authorPart || ownerPart || "";
+  const title = ownerPart || authorPart || keyPart || userPart || "";
+  return { username, title };
+};
+
+const getPostListenHit = (post: any): ListenHit | null => {
+  if (!post) return null;
+  const postKey = String(post.key || post.id || "");
+  if (searchPostListenHitsCache.value[postKey] !== undefined) {
+    return searchPostListenHitsCache.value[postKey];
+  }
+  const { username, title } = getPostChannelIdentifier(post);
+  const hit = findListenDirectoryHit(username, title);
+  searchPostListenHitsCache.value[postKey] = hit;
+  return hit;
+};
+
+const getPostListenFolderTitle = (post: any): string => {
+  const hit = getPostListenHit(post);
+  if (!hit) return "";
+  const folderPath = hit.folders && hit.folders.length > 0 ? hit.folders.join(" / ") : (t("listen.rootDirectory") || "Root Directory");
+  return `${t("search.savedInListen") || "Saved in Listen Directory"}: ${folderPath}`;
+};
+
+const checkSearchPostListenHit = (post: any) => {
+  if (!post) return;
+  const postKey = String(post.key || post.id || "");
+  const hit = getPostListenHit(post);
+
+  if (hit) {
+    if (hit.folders && hit.folders.length > 0) {
+      searchPostListenHints.value[postKey] = hit.folders.join(" / ");
+    } else {
+      searchPostListenHints.value[postKey] = t("listen.rootDirectory") || "Root Directory";
+    }
+  } else {
+    searchPostListenHints.value[postKey] = t("search.addToListenDirectory") || "Add to Listen Directory";
+  }
+};
+
+const getSearchPostListenHint = (post: any): string => {
+  if (!post) return t("search.addToListenDirectory") || "Add to Listen Directory";
+  const postKey = String(post.key || post.id || "");
+  if (searchPostListenHints.value[postKey]) {
+    return searchPostListenHints.value[postKey];
+  }
+  const hit = getPostListenHit(post);
+  if (hit) {
+    const hint = hit.folders && hit.folders.length > 0 ? hit.folders.join(" / ") : (t("listen.rootDirectory") || "Root Directory");
+    searchPostListenHints.value[postKey] = hint;
+    return hint;
+  }
+  return t("search.addToListenDirectory") || "Add to Listen Directory";
+};
+
+watch(
+  listenDirectory,
+  () => {
+    searchPostListenHints.value = {};
+    searchPostListenHitsCache.value = {};
+  },
+  { deep: true }
+);
+
+watch(
+  searchResults,
+  () => {
+    searchPostListenHitsCache.value = {};
+    searchPostListenHints.value = {};
+  }
+);
+
 const isSearching = ref(false);
 const searchError = ref("");
 const searchLimit = ref(25);
@@ -18217,9 +18363,23 @@ onUnmounted(() => {
                     ? `${getGroupStyles(post.data.grouped.root).bg} ${
                         getGroupStyles(post.data.grouped.root).border
                       }`
-                    : 'bg-white dark:bg-gray-800 border-gray-200/60 dark:border-gray-700/60',
+                    : getPostListenHit(post)
+                      ? 'bg-white dark:bg-gray-800 border-purple-200/90 dark:border-purple-800/70 ring-1 ring-purple-400/20'
+                      : 'bg-white dark:bg-gray-800 border-gray-200/60 dark:border-gray-700/60',
                 ]"
               >
+                <!-- Saved in Listen Directory Card Tag Badge -->
+                <div
+                  v-if="getPostListenHit(post)"
+                  class="absolute -top-2.5 left-6 flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[9px] font-extrabold tracking-wide bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-xs z-10 select-none cursor-default"
+                  :title="getPostListenFolderTitle(post)"
+                >
+                  <Folder class="h-2.5 w-2.5 shrink-0 text-purple-200" />
+                  <span class="max-w-[180px] truncate">
+                    {{ getPostListenHit(post)?.folders?.length ? getPostListenHit(post)!.folders.join(' › ') : (t('listen.rootDirectory') || 'Root') }}
+                  </span>
+                </div>
+
                 <!-- Decorative Corner Glow -->
                 <div
                   class="absolute -top-10 -right-10 w-24 h-24 bg-teal-500/5 dark:bg-teal-500/5 rounded-full blur-2xl pointer-events-none"
@@ -18259,6 +18419,21 @@ onUnmounted(() => {
                         <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full bg-teal-50 dark:bg-teal-950/30 text-teal-650 dark:text-teal-400 border border-teal-100/40 dark:border-teal-900/20">
                           {{ getUsername(post) }}
                         </span>
+                        <!-- Saved in Listen Directory Inline Badge -->
+                        <span
+                          v-if="getPostListenHit(post)"
+                          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800/60 shadow-3xs cursor-default select-none transition-all"
+                          :title="getPostListenFolderTitle(post)"
+                        >
+                          <CheckCircle2 class="h-2.5 w-2.5 text-purple-600 dark:text-purple-400 shrink-0" />
+                          <span>{{ t('search.inListen') }}</span>
+                          <span
+                            v-if="getPostListenHit(post)?.folders && getPostListenHit(post)!.folders.length > 0"
+                            class="font-mono text-[8.5px] opacity-75 max-w-[110px] truncate"
+                          >
+                            • {{ getPostListenHit(post)!.folders.join('/') }}
+                          </span>
+                        </span>
                       </div>
                       <p
                         class="flex items-center gap-2 text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
@@ -18275,11 +18450,20 @@ onUnmounted(() => {
                   <div class="flex items-center gap-1.5 sm:self-center">
                     <button
                       @click.stop="addChannelToListenDirectory(post.data?.owner || (post.key ? post.key.split('.')[0] : 'Channel'), post.key ? post.key.split('.')[0] : '')"
-                      class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-purple-600 dark:text-purple-400 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
-                      :title="t('search.addToListenDirectory')"
+                      @mouseenter="checkSearchPostListenHit(post)"
+                      @mousemove="checkSearchPostListenHit(post)"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[10px] font-extrabold transition-all cursor-pointer"
+                      :class="
+                        getPostListenHit(post)
+                          ? 'bg-purple-100/90 hover:bg-purple-200/90 dark:bg-purple-950/80 dark:hover:bg-purple-900/80 text-purple-700 dark:text-purple-250 border-purple-300 dark:border-purple-700/80 shadow-xs ring-1 ring-purple-400/20'
+                          : 'bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-purple-600 dark:text-purple-400 border-gray-200/50 dark:border-gray-700/50'
+                      "
+                      :title="getSearchPostListenHint(post)"
                     >
-                      <Radio class="h-3 w-3 text-purple-500" />
+                      <CheckCircle2 v-if="getPostListenHit(post)" class="h-3 w-3 text-purple-600 dark:text-purple-400" />
+                      <Radio v-else class="h-3 w-3 text-purple-500" />
                       <span>{{ t('search.listen') }}</span>
+                      <span v-if="getPostListenHit(post)" class="text-[9px] font-mono opacity-80">✓</span>
                     </button>
                     <button
                       @click.stop="addToWorkspaceFromPost(post)"
@@ -22529,7 +22713,10 @@ onUnmounted(() => {
           </div>
 
           <!-- Destination Folder Picker Stream -->
-          <div class="flex-1 overflow-y-auto p-3 space-y-1 min-h-[160px] max-h-[380px]">
+          <div 
+            @scroll.passive="onMoveListScroll"
+            class="flex-1 overflow-y-auto p-3 space-y-1 min-h-[160px] max-h-[380px] overscroll-contain will-change-scroll"
+          >
             <!-- Empty state when search matches nothing -->
             <div 
               v-if="filteredFolderOptions.length === 0" 
@@ -22560,12 +22747,13 @@ onUnmounted(() => {
             <!-- Folder Options List -->
             <template v-else>
               <div
-                v-for="(folderOpt, idx) in filteredFolderOptions"
+                v-for="(folderOpt, idx) in visibleFolderOptions"
                 :key="folderOpt.id ?? 'root'"
                 :id="'move-folder-opt-' + idx"
                 @click="!folderOpt.disabled && executeMoveItem(folderOpt.id)"
-                @mouseenter="!folderOpt.disabled && (moveModalFocusedIndex = idx)"
-                class="group flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-semibold transition-all duration-150 border"
+                @pointerenter="onFolderRowHover(idx, folderOpt.disabled)"
+                class="group flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-semibold border transition-colors duration-75 select-none"
+                style="content-visibility: auto; contain-intrinsic-size: 0 44px;"
                 :class="[
                   folderOpt.disabled
                     ? 'opacity-40 cursor-not-allowed bg-transparent border-transparent text-gray-400 dark:text-gray-600'
@@ -22585,10 +22773,13 @@ onUnmounted(() => {
 
                   <!-- Folder Name and Icon -->
                   <div class="flex items-center gap-2 min-w-0">
-                    <component
-                      :is="folderOpt.id === null ? Database : Folder"
-                      class="h-4 w-4 shrink-0 transition-transform group-hover:scale-110"
-                      :class="folderOpt.id === null ? 'text-teal-500' : 'text-amber-500'"
+                    <Database
+                      v-if="folderOpt.id === null"
+                      class="h-4 w-4 shrink-0 text-teal-500"
+                    />
+                    <Folder
+                      v-else
+                      class="h-4 w-4 shrink-0 text-amber-500"
                     />
                     <span class="truncate font-bold text-gray-900 dark:text-gray-100">
                       {{ folderOpt.name }}
@@ -22604,18 +22795,26 @@ onUnmounted(() => {
                   <span v-else-if="folderOpt.disabled" class="text-[10px] text-gray-400 italic">
                     {{ t('listen.cannotMoveDescendant') }}
                   </span>
-                  <template v-else>
-                    <!-- Item count badge (hidden when row is hovered/focused to show move prompt) -->
-                    <span class="text-[10px] font-mono text-gray-400 dark:text-gray-500 px-1.5 py-0.5 rounded bg-gray-150 dark:bg-gray-700/60 group-hover:hidden">
+                  <div v-else class="relative flex items-center justify-end min-w-[36px]">
+                    <!-- Item count badge -->
+                    <span class="text-[10px] font-mono text-gray-400 dark:text-gray-500 px-1.5 py-0.5 rounded bg-gray-150 dark:bg-gray-700/60 group-hover:opacity-0 transition-opacity">
                       {{ folderOpt.itemCount }}
                     </span>
                     <!-- Instant Move Action indicator on hover / focus -->
-                    <span class="hidden group-hover:flex items-center gap-1 text-[11px] font-extrabold text-teal-600 dark:text-teal-400 animate-in fade-in duration-150">
+                    <span class="absolute right-0 opacity-0 group-hover:opacity-100 pointer-events-none flex items-center gap-1 text-[11px] font-extrabold text-teal-600 dark:text-teal-400 transition-opacity whitespace-nowrap">
                       <span>{{ t('listen.clickToMoveHere') }}</span>
                       <CornerDownLeft class="h-3.5 w-3.5" />
                     </span>
-                  </template>
+                  </div>
                 </div>
+              </div>
+
+              <!-- More folders loading indicator if chunked -->
+              <div 
+                v-if="visibleFolderOptions.length < filteredFolderOptions.length" 
+                class="py-2 text-center text-[10px] text-gray-400 dark:text-gray-500 font-mono"
+              >
+                {{ t('common.showing') || 'Showing' }} {{ visibleFolderOptions.length }} / {{ filteredFolderOptions.length }} {{ t('listen.folders') || 'folders' }}
               </div>
             </template>
           </div>

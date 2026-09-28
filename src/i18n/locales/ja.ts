@@ -286,6 +286,8 @@ export default {
     searchResults: "検索結果",
     resultsFound: "{count} 件見つかりました",
     addToListenDirectory: "監視ディレクトリに追加",
+    inListen: "監視中",
+    savedInListen: "監視ディレクトリに保存済み",
     listen: "監視",
     postPhoto: "投稿画像",
     linkPreviewImage: "リンクプレビュー画像",
