@@ -222,6 +222,7 @@ export default {
     notInListenDirectory: "Нет в каталоге Listen",
     addToListenManually: "Добавить в Listen вручную",
     directoryLocation: "Расположение в каталоге",
+    moveFolder: "Переместить",
     folder: "Папка",
     subfolder: "Подпапка",
     rootDirectory: "Корень (без папки)",

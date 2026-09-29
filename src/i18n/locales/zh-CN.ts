@@ -237,6 +237,7 @@ export default {
     notInListenDirectory: "未加入监听目录",
     addToListenManually: "手动添加到监听",
     directoryLocation: "目录位置",
+    moveFolder: "移动目录",
     folder: "文件夹",
     subfolder: "子文件夹",
     rootDirectory: "根目录 (未归类)",

@@ -222,6 +222,7 @@ export default {
     notInListenDirectory: "監視ディレクトリ未登録",
     addToListenManually: "手動で監視に追加",
     directoryLocation: "ディレクトリの場所",
+    moveFolder: "移動",
     folder: "フォルダ",
     subfolder: "サブフォルダ",
     rootDirectory: "ルート (未分類)",

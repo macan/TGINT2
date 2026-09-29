@@ -237,6 +237,7 @@ export default {
     notInListenDirectory: "Not in Listen Directory",
     addToListenManually: "Add to Listen Manually",
     directoryLocation: "Directory Folder",
+    moveFolder: "Move Folder",
     folder: "Folder",
     subfolder: "Subfolder",
     rootDirectory: "Root (No folder)",

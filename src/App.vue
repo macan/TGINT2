@@ -16476,6 +16476,14 @@ onUnmounted(() => {
                         <template v-if="explorerListenHit">
                           <button
                             type="button"
+                            @click="openMoveModal(explorerListenHit.item)"
+                            class="p-1 rounded-lg text-gray-500 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-300 hover:bg-teal-100/60 dark:hover:bg-gray-800 transition-colors cursor-pointer"
+                            :title="t('listen.moveItemTitle')"
+                          >
+                            <ArrowRightLeft class="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
                             @click="openEditModal(explorerListenHit.item)"
                             class="p-1 rounded-lg text-gray-500 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-300 hover:bg-teal-100/60 dark:hover:bg-gray-800 transition-colors cursor-pointer"
                             :title="t('explorer.editItemConfig')"
@@ -16523,39 +16531,52 @@ onUnmounted(() => {
                         </div>
 
                         <!-- Breadcrumb chips row -->
-                        <div class="flex items-center gap-1.5 flex-wrap">
-                          <!-- If in Root (no folders) -->
-                          <div
-                            v-if="!explorerListenHit.folders || explorerListenHit.folders.length === 0"
-                            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-gray-100/80 dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700/80 text-gray-600 dark:text-gray-300 font-medium text-[11px]"
-                          >
-                            <Folder class="h-3 w-3 text-gray-400 dark:text-gray-400" />
-                            <span>{{ t('explorer.rootDirectory') }}</span>
+                        <div class="flex items-center justify-between gap-2 flex-wrap">
+                          <div class="flex items-center gap-1.5 flex-wrap min-w-0">
+                            <!-- If in Root (no folders) -->
+                            <div
+                              v-if="!explorerListenHit.folders || explorerListenHit.folders.length === 0"
+                              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-gray-100/80 dark:bg-gray-800/80 border border-gray-200 dark:border-gray-700/80 text-gray-600 dark:text-gray-300 font-medium text-[11px]"
+                            >
+                              <Folder class="h-3 w-3 text-gray-400 dark:text-gray-400" />
+                              <span>{{ t('explorer.rootDirectory') }}</span>
+                            </div>
+
+                            <!-- If in Folder / Subfolder hierarchy -->
+                            <template v-else>
+                              <template v-for="(crumb, idx) in (explorerListenHit.folderCrumbs || [])" :key="crumb.id || idx">
+                                <!-- Folder Chip (clickable to navigate to that folder in Listen tab) -->
+                                <button
+                                  type="button"
+                                  @click="openListenFolderFromExplorer(crumb.id)"
+                                  class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl font-bold text-[11px] transition-all cursor-pointer border shadow-3xs"
+                                  :class="[
+                                    idx === 0
+                                      ? 'bg-amber-50/90 dark:bg-amber-950/40 border-amber-200/80 dark:border-amber-700/50 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50'
+                                      : 'bg-teal-50/90 dark:bg-teal-950/40 border-teal-200/80 dark:border-teal-700/50 text-teal-800 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900/50'
+                                  ]"
+                                  :title="idx === 0 ? `${t('explorer.folder')}: ${crumb.name}` : `${t('explorer.subfolder')}: ${crumb.name}`"
+                                >
+                                  <component :is="idx === 0 ? Folder : FolderOpen" class="h-3 w-3 text-yellow-500 shrink-0" />
+                                  <span class="truncate max-w-[120px]">{{ crumb.name }}</span>
+                                </button>
+
+                                <!-- Separator Chevron -->
+                                <ChevronRight v-if="idx < (explorerListenHit.folderCrumbs?.length || 1) - 1" class="h-3 w-3 text-gray-300 dark:text-gray-500 shrink-0" />
+                              </template>
+                            </template>
                           </div>
 
-                          <!-- If in Folder / Subfolder hierarchy -->
-                          <template v-else>
-                            <template v-for="(crumb, idx) in (explorerListenHit.folderCrumbs || [])" :key="crumb.id || idx">
-                              <!-- Folder Chip (clickable to navigate to that folder in Listen tab) -->
-                              <button
-                                type="button"
-                                @click="openListenFolderFromExplorer(crumb.id)"
-                                class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl font-bold text-[11px] transition-all cursor-pointer border shadow-3xs"
-                                :class="[
-                                  idx === 0
-                                    ? 'bg-amber-50/90 dark:bg-amber-950/40 border-amber-200/80 dark:border-amber-700/50 text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50'
-                                    : 'bg-teal-50/90 dark:bg-teal-950/40 border-teal-200/80 dark:border-teal-700/50 text-teal-800 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900/50'
-                                ]"
-                                :title="idx === 0 ? `${t('explorer.folder')}: ${crumb.name}` : `${t('explorer.subfolder')}: ${crumb.name}`"
-                              >
-                                <component :is="idx === 0 ? Folder : FolderOpen" class="h-3 w-3 text-yellow-500 shrink-0" />
-                                <span class="truncate max-w-[120px]">{{ crumb.name }}</span>
-                              </button>
-
-                              <!-- Separator Chevron -->
-                              <ChevronRight v-if="idx < (explorerListenHit.folderCrumbs?.length || 1) - 1" class="h-3 w-3 text-gray-300 dark:text-gray-500 shrink-0" />
-                            </template>
-                          </template>
+                          <!-- Move to Folder button (visually similar to 'Add Tag' button, right-aligned with the border) -->
+                          <button
+                            type="button"
+                            @click="openMoveModal(explorerListenHit.item)"
+                            class="ml-auto shrink-0 px-2 py-0.5 rounded-lg text-[11px] font-bold text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-gray-800 border border-dashed border-teal-300 dark:border-teal-700/80 flex items-center gap-1 transition-colors cursor-pointer"
+                            :title="t('listen.moveItemTitle')"
+                          >
+                            <ArrowRightLeft class="h-2.5 w-2.5" />
+                            <span>{{ t('explorer.moveFolder') }}</span>
+                          </button>
                         </div>
                       </div>
 

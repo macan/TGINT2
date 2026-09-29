@@ -222,6 +222,7 @@ export default {
     notInListenDirectory: "No está en el Directorio Listen",
     addToListenManually: "Agregar a Listen manualmente",
     directoryLocation: "Ubicación en directorio",
+    moveFolder: "Mover",
     folder: "Carpeta",
     subfolder: "Subcarpeta",
     rootDirectory: "Raíz (sin carpeta)",

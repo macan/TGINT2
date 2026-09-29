@@ -222,6 +222,7 @@ export default {
     notInListenDirectory: "未加入監聽目錄",
     addToListenManually: "手動新增至監聽",
     directoryLocation: "目錄位置",
+    moveFolder: "移動目錄",
     folder: "資料夾",
     subfolder: "子資料夾",
     rootDirectory: "根目錄 (未分類)",
