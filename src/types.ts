@@ -1,3 +1,8 @@
+export interface ListenAutoClass {
+  class: string;
+  confidence: number;
+}
+
 export interface ListenItem {
   id: string;
   name: string;
@@ -8,6 +13,7 @@ export interface ListenItem {
   description?: string;
   children?: ListenItem[];
   tags?: string[];
+  auto_class?: ListenAutoClass;
 }
 
 export interface AutoFindingCell {

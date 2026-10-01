@@ -2486,7 +2486,11 @@ const listenDirectory = ref<ListenItem[]>([
         type: "channel",
         argument: "durov",
         description: "Official channel of Telegram founder Pavel Durov",
-        tags: ["founder", "telegram", "official"]
+        tags: ["founder", "telegram", "official"],
+        auto_class: {
+          class: "technology",
+          confidence: 0.94
+        }
       },
       {
         id: "item-ai-keywords",
@@ -2496,7 +2500,11 @@ const listenDirectory = ref<ListenItem[]>([
         type: "keyword",
         argument: "artificial intelligence, deepmind, gemini",
         description: "Post stream containing key AI phrases",
-        tags: ["ai", "deepmind", "research"]
+        tags: ["ai", "deepmind", "research"],
+        auto_class: {
+          class: "technology",
+          confidence: 0.98
+        }
       }
     ]
   },
@@ -2508,7 +2516,11 @@ const listenDirectory = ref<ListenItem[]>([
     type: "channel",
     argument: "toncoin",
     description: "Updates about TON network",
-    tags: ["crypto", "ton", "web3"]
+    tags: ["crypto", "ton", "web3"],
+    auto_class: {
+      class: "financial",
+      confidence: 0.91
+    }
   }
 ]);
 
@@ -3559,6 +3571,212 @@ const confirmDeleteListenItem = () => {
   itemToDeleteName.value = "";
 };
 
+// SystemOne Channel / Item Topic Classification Questions & Criteria
+const SYSTEM_ONE_CLASSIFICATION_QUESTIONS = {
+  L1: {
+    type: "choice",
+    instructions: "Classify this text into its single primary topic.",
+    criteria: {
+      game: "video games, gaming, esports, PC games, console games, mobile games, gameplay, RPG, multiplayer, Steam, PlayStation, Xbox, game walkthroughs, game mods",
+      technology: "computers, software development, programming, coding, artificial intelligence, machine learning, algorithms, IT infrastructure, hardware, cybersecurity, developer tools",
+      blog: "personal reflections, diary entries, individual essays, personal life updates, opinions, subjective commentary, casual journaling",
+      political: "government, elections, congress, parliament, legislation, politicians, diplomacy, state affairs, geopolitical policy",
+      financial: "money, economics, stocks, banking, currency, trading, inflation, revenue, funding, commerce, business investments",
+      military: "warfare, weapons, army, navy, air force, combat operations, defense forces, artillery, defense strategy",
+      university: "campus, academics, tuition, students, professors, degree, college education, scientific research papers, university labs",
+      general_news: "lifestyle, local events, weather, general media reporting, entertainment, pop culture, sports"
+    }
+  }
+};
+
+const formatPostsForSystemOne = (rawPosts: any[], maxPosts: number = 50) => {
+  const result: Array<{ sender: string; text: string }> = [];
+  if (!Array.isArray(rawPosts)) return result;
+
+  for (const post of rawPosts) {
+    if (result.length >= maxPosts) {
+      break;
+    }
+
+    const rawContent = post?.data?.content;
+    if (
+      rawContent === null ||
+      rawContent === undefined ||
+      rawContent === "None" ||
+      rawContent === "none" ||
+      rawContent === "null" ||
+      rawContent === "This media is not supported in your browser" ||
+      rawContent === "Please open Telegram to view this post"
+    ) {
+      continue;
+    }
+
+    const text = typeof rawContent === "string" ? rawContent.trim() : String(rawContent).trim();
+    if (
+      !text ||
+      text === "None" ||
+      text === "none" ||
+      text === "null" ||
+      text === "This media is not supported in your browser" ||
+      text === "Please open Telegram to view this post"
+    ) {
+      continue;
+    }
+
+    let sender = "";
+    if (post?.data?.author !== null && post?.data?.author !== undefined && String(post.data.author).trim() !== "") {
+      sender = String(post.data.author).trim();
+    } else if (post?.data?.user) {
+      const parts = String(post.data.user).split("/");
+      sender = parts[parts.length - 1] || "";
+    }
+
+    result.push({
+      sender,
+      text
+    });
+
+    if (result.length >= maxPosts) {
+      break;
+    }
+  }
+
+  return result;
+};
+
+const getChannelCategoryMeta = (cat: string) => {
+  const c = (cat || "").toLowerCase();
+  switch (c) {
+    case "technology":
+      return {
+        label: "Technology",
+        icon: Cpu,
+        colorClass: "bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800/60",
+      };
+    case "financial":
+      return {
+        label: "Financial",
+        icon: DollarSign,
+        colorClass: "bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/60",
+      };
+    case "game":
+      return {
+        label: "Gaming",
+        icon: Gamepad2,
+        colorClass: "bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800/60",
+      };
+    case "political":
+      return {
+        label: "Politics",
+        icon: Landmark,
+        colorClass: "bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800/60",
+      };
+    case "military":
+      return {
+        label: "Military",
+        icon: Shield,
+        colorClass: "bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800/60",
+      };
+    case "university":
+      return {
+        label: "University",
+        icon: GraduationCap,
+        colorClass: "bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800/60",
+      };
+    case "blog":
+      return {
+        label: "Blog",
+        icon: BookOpen,
+        colorClass: "bg-pink-50 dark:bg-pink-950/50 text-pink-700 dark:text-pink-300 border-pink-200 dark:border-pink-800/60",
+      };
+    case "general_news":
+      return {
+        label: "General News",
+        icon: Newspaper,
+        colorClass: "bg-cyan-50 dark:bg-cyan-950/50 text-cyan-700 dark:text-cyan-300 border-cyan-200 dark:border-cyan-800/60",
+      };
+    default:
+      return {
+        label: cat ? cat.charAt(0).toUpperCase() + cat.slice(1).replace(/_/g, " ") : "Topic",
+        icon: Sparkles,
+        colorClass: "bg-teal-50 dark:bg-teal-950/50 text-teal-700 dark:text-teal-300 border-teal-200 dark:border-teal-800/60",
+      };
+  }
+};
+
+// SystemOne Automatic Topic Classification for Listen Directory Items
+const isClassifyingListenItemMap = ref<Record<string, boolean>>({});
+
+const triggerListenItemSystemOneClassification = async (
+  nodeId: string,
+  formattedPosts: Array<{ sender: string; text: string }>
+) => {
+  if (!nodeId || !Array.isArray(formattedPosts) || formattedPosts.length <= 10) return;
+  if (isClassifyingListenItemMap.value[nodeId]) return;
+
+  isClassifyingListenItemMap.value = {
+    ...isClassifyingListenItemMap.value,
+    [nodeId]: true
+  };
+
+  try {
+    const response = await callSystemOne<any>(formattedPosts, SYSTEM_ONE_CLASSIFICATION_QUESTIONS, {
+      timeoutMs: 120000
+    });
+
+    const l1 = response?.answers?.L1 || response?.answers?.choice || response?.answers;
+    let inferredClass = "";
+    let confidence = 1.0;
+
+    if (l1) {
+      if (typeof l1 === "string") {
+        inferredClass = l1.trim();
+      } else if (typeof l1 === "object") {
+        inferredClass = (l1.choice || l1.category || l1.class || "").trim();
+        if (typeof l1.confidence === "number") {
+          confidence = l1.confidence;
+        } else if (l1.probabilities && typeof l1.probabilities[inferredClass] === "number") {
+          confidence = l1.probabilities[inferredClass];
+        }
+      }
+    }
+
+    if (inferredClass) {
+      confidence = Math.round(confidence * 100) / 100;
+
+      findNodeAndPerform(listenDirectory.value, nodeId, (nodes, idx) => {
+        const original = nodes[idx];
+        nodes[idx] = {
+          ...original,
+          auto_class: {
+            class: inferredClass,
+            confidence
+          }
+        };
+        if (selectedListenNode.value && selectedListenNode.value.id === nodeId) {
+          selectedListenNode.value = nodes[idx];
+        }
+        const deskItem = flexibleWorkdeskItems.value.find(i => i.id === nodeId);
+        if (deskItem) {
+          deskItem.auto_class = {
+            class: inferredClass,
+            confidence
+          };
+        }
+      });
+
+      listenDirectory.value = [...listenDirectory.value];
+      saveListenDirectory();
+    }
+  } catch (err) {
+    console.error(`SystemOne auto classification failed for listen item ${nodeId}:`, err);
+  } finally {
+    const updated = { ...isClassifyingListenItemMap.value };
+    delete updated[nodeId];
+    isClassifyingListenItemMap.value = updated;
+  }
+};
+
 const listenSearchQuery = ref("");
 
 const getMatchingNodeIds = (
@@ -3570,7 +3788,8 @@ const getMatchingNodeIds = (
   if (!term && !tagFilter) return matched;
 
   const lowerTerm = term ? term.toLowerCase() : "";
-  const cleanTerm = lowerTerm.startsWith("#") ? lowerTerm.substring(1) : lowerTerm;
+  const cleanTerm = lowerTerm.replace(/^[#@]/, "").trim();
+  const classPrefixTerm = lowerTerm.replace(/^(class|category|type|auto_class|auto):/, "").trim();
 
   const check = (node: ListenItem): boolean => {
     let selfMatch = false;
@@ -3582,13 +3801,27 @@ const getMatchingNodeIds = (
     }
 
     if (term) {
+      const autoClassClass = !node.isFolder && node.auto_class?.class ? node.auto_class.class.toLowerCase() : "";
+      const autoClassLabel = autoClassClass ? getChannelCategoryMeta(autoClassClass).label.toLowerCase() : "";
+
       const textMatch =
         (node.name && node.name.toLowerCase().includes(lowerTerm)) ||
         (node.argument && node.argument.toLowerCase().includes(lowerTerm)) ||
         (!node.isFolder && Array.isArray(node.tags) && node.tags.some(t => {
           const lt = t.toLowerCase();
           return lt.includes(lowerTerm) || lt.includes(cleanTerm);
-        }));
+        })) ||
+        (autoClassClass && (
+          autoClassClass.includes(lowerTerm) ||
+          autoClassClass.includes(cleanTerm) ||
+          (classPrefixTerm && autoClassClass.includes(classPrefixTerm))
+        )) ||
+        (autoClassLabel && (
+          autoClassLabel.includes(lowerTerm) ||
+          autoClassLabel.includes(cleanTerm) ||
+          (classPrefixTerm && autoClassLabel.includes(classPrefixTerm))
+        ));
+
       if (tagFilter) {
         selfMatch = selfMatch && !!textMatch;
       } else {
@@ -5808,6 +6041,15 @@ const syncSingleListenItem = async (
           }
         }
       }
+
+      // Trigger SystemOne auto topic classification when new posts were fetched
+      // and there are > 10 valid posts in merged posts sorted descending by date
+      if (newlyAddedCount > 0) {
+        const validSystemOnePosts = formatPostsForSystemOne(merged);
+        if (validSystemOnePosts.length > 10) {
+          triggerListenItemSystemOneClassification(node.id, validSystemOnePosts);
+        }
+      }
     }
 
     lastItemSyncTimeMap.value[node.id] = Date.now();
@@ -6240,6 +6482,15 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
 
       freshlyAdded.forEach(id => newlyFetchedListenKeys.value.add(id));
       listenPosts.value = finalPosts;
+
+      // Trigger SystemOne auto topic classification when new posts were fetched
+      // and there are > 10 valid posts in merged posts sorted descending by date
+      if (freshlyAdded.length > 0) {
+        const validSystemOnePosts = formatPostsForSystemOne(merged);
+        if (validSystemOnePosts.length > 10) {
+          triggerListenItemSystemOneClassification(node.id, validSystemOnePosts);
+        }
+      }
       if (isNewSelection) {
         nextTick(() => {
           if (rearrangePostsContainer.value) {
@@ -8478,70 +8729,6 @@ const channelClassification = ref<{
   raw?: any;
 } | null>(null);
 
-const SYSTEM_ONE_CLASSIFICATION_QUESTIONS = {
-  L1: {
-    type: "choice",
-    instructions: "Classify this text into its single primary topic.",
-    criteria: {
-      game: "video games, gaming, esports, PC games, console games, mobile games, gameplay, RPG, multiplayer, Steam, PlayStation, Xbox, game walkthroughs, game mods",
-      technology: "computers, software development, programming, coding, artificial intelligence, machine learning, algorithms, IT infrastructure, hardware, cybersecurity, developer tools",
-      blog: "personal reflections, diary entries, individual essays, personal life updates, opinions, subjective commentary, casual journaling",
-      political: "government, elections, congress, parliament, legislation, politicians, diplomacy, state affairs, geopolitical policy",
-      financial: "money, economics, stocks, banking, currency, trading, inflation, revenue, funding, commerce, business investments",
-      military: "warfare, weapons, army, navy, air force, combat operations, defense forces, artillery, defense strategy",
-      university: "campus, academics, tuition, students, professors, degree, college education, scientific research papers, university labs",
-      general_news: "lifestyle, local events, weather, general media reporting, entertainment, pop culture, sports"
-    }
-  }
-};
-
-const formatPostsForSystemOne = (rawPosts: any[]) => {
-  const result: Array<{ sender: string; text: string }> = [];
-  if (!Array.isArray(rawPosts)) return result;
-
-  for (const post of rawPosts) {
-    const rawContent = post?.data?.content;
-    if (
-      rawContent === null ||
-      rawContent === undefined ||
-      rawContent === "None" ||
-      rawContent === "none" ||
-      rawContent === "null" ||
-      rawContent === "This media is not supported in your browser" ||
-      rawContent === "Please open Telegram to view this post"
-    ) {
-      continue;
-    }
-
-    const text = typeof rawContent === "string" ? rawContent.trim() : String(rawContent).trim();
-    if (
-      !text ||
-      text === "None" ||
-      text === "none" ||
-      text === "null" ||
-      text === "This media is not supported in your browser" ||
-      text === "Please open Telegram to view this post"
-    ) {
-      continue;
-    }
-
-    let sender = "";
-    if (post?.data?.author !== null && post?.data?.author !== undefined && String(post.data.author).trim() !== "") {
-      sender = String(post.data.author).trim();
-    } else if (post?.data?.user) {
-      const parts = String(post.data.user).split("/");
-      sender = parts[parts.length - 1] || "";
-    }
-
-    result.push({
-      sender,
-      text
-    });
-  }
-
-  return result;
-};
-
 const classifyChannelWithSystemOne = async (targetChannelName?: string) => {
   const target = targetChannelName || currentChannelName.value || channelName.value;
   if (!target) return;
@@ -8580,66 +8767,6 @@ const classifyChannelWithSystemOne = async (targetChannelName?: string) => {
     if (requestId === classificationRequestId.value) {
       isClassifyingChannel.value = false;
     }
-  }
-};
-
-const getChannelCategoryMeta = (cat: string) => {
-  const c = (cat || "").toLowerCase();
-  switch (c) {
-    case "technology":
-      return {
-        label: "Technology",
-        icon: Cpu,
-        colorClass: "bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800/60",
-      };
-    case "financial":
-      return {
-        label: "Financial",
-        icon: DollarSign,
-        colorClass: "bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/60",
-      };
-    case "game":
-      return {
-        label: "Gaming",
-        icon: Gamepad2,
-        colorClass: "bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800/60",
-      };
-    case "political":
-      return {
-        label: "Politics",
-        icon: Landmark,
-        colorClass: "bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800/60",
-      };
-    case "military":
-      return {
-        label: "Military",
-        icon: Shield,
-        colorClass: "bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800/60",
-      };
-    case "university":
-      return {
-        label: "University",
-        icon: GraduationCap,
-        colorClass: "bg-indigo-50 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800/60",
-      };
-    case "blog":
-      return {
-        label: "Blog",
-        icon: BookOpen,
-        colorClass: "bg-pink-50 dark:bg-pink-950/50 text-pink-700 dark:text-pink-300 border-pink-200 dark:border-pink-800/60",
-      };
-    case "general_news":
-      return {
-        label: "General News",
-        icon: Newspaper,
-        colorClass: "bg-cyan-50 dark:bg-cyan-950/50 text-cyan-700 dark:text-cyan-300 border-cyan-200 dark:border-cyan-800/60",
-      };
-    default:
-      return {
-        label: cat ? cat.charAt(0).toUpperCase() + cat.slice(1).replace(/_/g, " ") : "Topic",
-        icon: Sparkles,
-        colorClass: "bg-teal-50 dark:bg-teal-950/50 text-teal-700 dark:text-teal-300 border-teal-200 dark:border-teal-800/60",
-      };
   }
 };
 
@@ -20399,6 +20526,14 @@ onUnmounted(() => {
                           <div class="min-w-0">
                             <div class="text-xs font-bold text-gray-900 dark:text-gray-100 truncate flex items-center gap-1.5">
                               <span>{{ item.name }}</span>
+                              <span
+                                v-if="item.auto_class?.class"
+                                class="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-bold border shrink-0"
+                                :class="getChannelCategoryMeta(item.auto_class.class).colorClass"
+                              >
+                                <component :is="getChannelCategoryMeta(item.auto_class.class).icon" class="h-2.5 w-2.5 shrink-0" />
+                                <span>{{ getChannelCategoryMeta(item.auto_class.class).label }}</span>
+                              </span>
                               <span v-if="item.argument" class="font-mono text-[10px] text-gray-400 dark:text-gray-500 truncate">{{ item.argument }}</span>
                             </div>
                             <div class="text-[10px] text-gray-400 dark:text-gray-500 truncate flex items-center gap-1">
@@ -20694,6 +20829,28 @@ onUnmounted(() => {
                       >
                         <span class="w-1.5 h-1.5 rounded-full" :class="getFreshnessDotColor(getItemOrFolderFreshness(node.id)?.level)"></span>
                         {{ getItemOrFolderFreshness(node.id)?.relativeText }}
+                      </span>
+
+                      <!-- Auto Class Badge in Flexible Mode Workdesk Card -->
+                      <span
+                        v-if="node.auto_class?.class"
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-bold border transition-colors shadow-3xs"
+                        :class="getChannelCategoryMeta(node.auto_class.class).colorClass"
+                        :title="`Auto Class: ${getChannelCategoryMeta(node.auto_class.class).label} (${Math.round((node.auto_class.confidence || 1) * 100)}%)`"
+                      >
+                        <component :is="getChannelCategoryMeta(node.auto_class.class).icon" class="h-2.5 w-2.5 shrink-0" />
+                        <span>{{ getChannelCategoryMeta(node.auto_class.class).label }}</span>
+                        <span v-if="typeof node.auto_class.confidence === 'number'" class="opacity-75 font-mono text-[9px]">
+                          {{ Math.round(node.auto_class.confidence * 100) }}%
+                        </span>
+                      </span>
+
+                      <span
+                        v-else-if="isClassifyingListenItemMap[node.id]"
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-teal-50 dark:bg-teal-950/60 text-teal-600 dark:text-teal-400 border border-teal-200/60 dark:border-teal-800/60 animate-pulse"
+                      >
+                        <Loader2 class="h-2.5 w-2.5 animate-spin" />
+                        <span>Classifying...</span>
                       </span>
 
                       <!-- Posts Count Badge -->
@@ -21522,6 +21679,25 @@ onUnmounted(() => {
                     {{ node.folderItemsCount }}
                   </span>
 
+                  <!-- Auto Class Badge in Directory Tree Node -->
+                  <span
+                    v-if="!node.item.isFolder && node.item.auto_class?.class"
+                    class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold border transition-colors inline-flex items-center gap-1 select-none shrink-0"
+                    :class="getChannelCategoryMeta(node.item.auto_class.class).colorClass"
+                    :title="`Auto Class: ${getChannelCategoryMeta(node.item.auto_class.class).label} (${Math.round((node.item.auto_class.confidence || 1) * 100)}%)`"
+                  >
+                    <component :is="getChannelCategoryMeta(node.item.auto_class.class).icon" class="h-2.5 w-2.5 shrink-0" />
+                    <span class="truncate max-w-[65px]">{{ getChannelCategoryMeta(node.item.auto_class.class).label }}</span>
+                  </span>
+                  <span
+                    v-else-if="!node.item.isFolder && isClassifyingListenItemMap[node.item.id]"
+                    class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-teal-50 dark:bg-teal-950/60 text-teal-600 dark:text-teal-400 border border-teal-200/60 dark:border-teal-800/60 inline-flex items-center gap-1 animate-pulse select-none shrink-0"
+                    :title="'SystemOne is analyzing channel topic...'"
+                  >
+                    <Loader2 class="h-2.5 w-2.5 animate-spin" />
+                    <span class="hidden sm:inline">Classifying...</span>
+                  </span>
+
                   <!-- Item Tags in Rearrange Mode (Proper style) -->
                   <div 
                     v-if="listenLayoutMode === 'rearrange' && !node.item.isFolder && node.item.tags && node.item.tags.length > 0"
@@ -21888,6 +22064,28 @@ onUnmounted(() => {
                     >
                       {{ t('listen.telegramType', { type: selectedListenNode.type }) }}
                     </span>
+
+                    <!-- Auto Class Inferred Topic Pill in View Mode -->
+                    <span
+                      v-if="selectedListenNode.auto_class?.class"
+                      class="text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 border transition-colors shadow-3xs"
+                      :class="getChannelCategoryMeta(selectedListenNode.auto_class.class).colorClass"
+                      :title="`Auto Class: ${getChannelCategoryMeta(selectedListenNode.auto_class.class).label} (${Math.round((selectedListenNode.auto_class.confidence || 1) * 100)}%)`"
+                    >
+                      <component :is="getChannelCategoryMeta(selectedListenNode.auto_class.class).icon" class="h-3 w-3 shrink-0" />
+                      <span>{{ getChannelCategoryMeta(selectedListenNode.auto_class.class).label }}</span>
+                      <span v-if="typeof selectedListenNode.auto_class.confidence === 'number'" class="opacity-75 font-mono text-[9px]">
+                        {{ Math.round(selectedListenNode.auto_class.confidence * 100) }}%
+                      </span>
+                    </span>
+                    <span
+                      v-else-if="isClassifyingListenItemMap[selectedListenNode.id]"
+                      class="text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 border border-teal-200/60 dark:border-teal-800/60 bg-teal-50 dark:bg-teal-950/60 text-teal-600 dark:text-teal-400 animate-pulse shadow-3xs"
+                    >
+                      <Loader2 class="h-3 w-3 animate-spin" />
+                      <span>Classifying...</span>
+                    </span>
+
                     <span v-if="listenAutoRefreshActive" class="text-[10px] bg-green-500/10 text-green-500 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider animate-pulse flex items-center gap-1">
                       <span class="h-1.5 w-1.5 bg-green-500 rounded-full"></span>
                       {{ t('listen.listeningLive') }}
@@ -22468,6 +22666,26 @@ onUnmounted(() => {
                             </h3>
                             <span class="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
                               {{ selectedListenNode.type === 'channel' ? t('listen.channelListening') : t('listen.keywordFiltering') }}
+                            </span>
+                            <!-- Auto Class Inferred Topic Badge in Rearrange Mode Top Card -->
+                            <span
+                              v-if="selectedListenNode.auto_class?.class"
+                              class="px-2 py-0.5 rounded-md text-[10px] font-bold border inline-flex items-center gap-1 transition-colors select-none shadow-3xs"
+                              :class="getChannelCategoryMeta(selectedListenNode.auto_class.class).colorClass"
+                              :title="`Auto Class: ${getChannelCategoryMeta(selectedListenNode.auto_class.class).label} (${Math.round((selectedListenNode.auto_class.confidence || 1) * 100)}%)`"
+                            >
+                              <component :is="getChannelCategoryMeta(selectedListenNode.auto_class.class).icon" class="h-3 w-3 shrink-0" />
+                              <span>{{ getChannelCategoryMeta(selectedListenNode.auto_class.class).label }}</span>
+                              <span v-if="typeof selectedListenNode.auto_class.confidence === 'number'" class="opacity-75 font-mono text-[9px]">
+                                {{ Math.round(selectedListenNode.auto_class.confidence * 100) }}%
+                              </span>
+                            </span>
+                            <span
+                              v-else-if="isClassifyingListenItemMap[selectedListenNode.id]"
+                              class="px-2 py-0.5 rounded-md text-[10px] font-bold border border-teal-200 dark:border-teal-800 bg-teal-50 dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 inline-flex items-center gap-1 animate-pulse"
+                            >
+                              <Loader2 class="h-3 w-3 animate-spin" />
+                              <span>Classifying...</span>
                             </span>
                             <span 
                               v-if="getItemOrFolderFreshness(selectedListenNode)"
