@@ -6028,6 +6028,8 @@ const syncSingleListenItem = async (
     }
 
     let newlyAddedCount = 0;
+    let allAvailablePosts: any[] = cached;
+
     if (fetchedPosts.length > 0) {
       const cachedKeys = new Set(cached.map(p => getPostId(p)).filter(Boolean));
       const hasPreviousCache = cached.length > 0;
@@ -6048,6 +6050,7 @@ const syncSingleListenItem = async (
 
       const merged = Array.from(mergedMap.values());
       merged.sort((a, b) => getPostTimestamp(b.data?.date) - getPostTimestamp(a.data?.date));
+      allAvailablePosts = merged;
 
       const cacheLimit = getListenPostsCacheLimit();
       const finalPosts = merged.slice(0, cacheLimit);
@@ -6073,14 +6076,18 @@ const syncSingleListenItem = async (
           }
         }
       }
+    }
 
-      // Trigger SystemOne auto topic classification when new posts were fetched
-      // and there are > 10 valid posts in merged posts sorted descending by date
-      if (newlyAddedCount > 0) {
-        const validSystemOnePosts = formatPostsForSystemOne(merged);
-        if (validSystemOnePosts.length > 10) {
-          triggerListenItemSystemOneClassification(node.id, validSystemOnePosts);
-        }
+    // Trigger SystemOne auto topic classification when:
+    // 1) New posts were fetched (newlyAddedCount > 0), OR
+    // 2) The listen item has NOT been auto_class yet (!hasAutoClass)
+    // AND totally (fetched + cached) formatted more than 10 valid posts through formatPostsForSystemOne
+    const targetNode = allListenLeafItems.value.find(i => i.id === node.id) || node;
+    const hasAutoClass = !!(targetNode.auto_class?.class || node.auto_class?.class);
+    if (newlyAddedCount > 0 || !hasAutoClass) {
+      const validSystemOnePosts = formatPostsForSystemOne(allAvailablePosts);
+      if (validSystemOnePosts.length > 10) {
+        triggerListenItemSystemOneClassification(node.id, validSystemOnePosts);
       }
     }
 
@@ -6516,8 +6523,11 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
       listenPosts.value = finalPosts;
 
       // Trigger SystemOne auto topic classification when new posts were fetched
+      // or when the listen item has NOT been auto_class yet
       // and there are > 10 valid posts in merged posts sorted descending by date
-      if (freshlyAdded.length > 0) {
+      const targetLeaf = allListenLeafItems.value.find(i => i.id === node.id) || node;
+      const hasAutoClass = !!(targetLeaf.auto_class?.class || node.auto_class?.class);
+      if (freshlyAdded.length > 0 || !hasAutoClass) {
         const validSystemOnePosts = formatPostsForSystemOne(merged);
         if (validSystemOnePosts.length > 10) {
           triggerListenItemSystemOneClassification(node.id, validSystemOnePosts);
