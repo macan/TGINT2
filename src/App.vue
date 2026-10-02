@@ -110,6 +110,7 @@ import {
   Play,
   Tag,
   Check,
+  PieChart,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -118,6 +119,7 @@ import markdownItMark from "markdown-it-mark";
 import clm from "country-locale-map";
 import { ListenItem, AutoFindingCell, GraphNode, GraphEdge, ListenItemFreshness, FreshnessLevel } from "./types";
 import { getInitials, truncateString, getSha1HexDigest, callSystemOne, querySystemOne } from "./utils/helpers";
+import AutoClassDistributionChart from "./components/AutoClassDistributionChart.vue";
 import {
   useI18n,
   currentLocale,
@@ -3589,6 +3591,13 @@ const SYSTEM_ONE_CLASSIFICATION_QUESTIONS = {
   }
 };
 
+const INVALID_SYSTEM_ONE_POST_TEXTS = new Set([
+  "none",
+  "null",
+  "this media is not supported in your browser",
+  "please open telegram to view this post"
+]);
+
 const formatPostsForSystemOne = (rawPosts: any[], maxPosts: number = 50) => {
   const result: Array<{ sender: string; text: string }> = [];
   if (!Array.isArray(rawPosts)) return result;
@@ -3599,27 +3608,12 @@ const formatPostsForSystemOne = (rawPosts: any[], maxPosts: number = 50) => {
     }
 
     const rawContent = post?.data?.content;
-    if (
-      rawContent === null ||
-      rawContent === undefined ||
-      rawContent === "None" ||
-      rawContent === "none" ||
-      rawContent === "null" ||
-      rawContent === "This media is not supported in your browser" ||
-      rawContent === "Please open Telegram to view this post"
-    ) {
+    if (rawContent === null || rawContent === undefined) {
       continue;
     }
 
     const text = typeof rawContent === "string" ? rawContent.trim() : String(rawContent).trim();
-    if (
-      !text ||
-      text === "None" ||
-      text === "none" ||
-      text === "null" ||
-      text === "This media is not supported in your browser" ||
-      text === "Please open Telegram to view this post"
-    ) {
+    if (!text || INVALID_SYSTEM_ONE_POST_TEXTS.has(text.toLowerCase())) {
       continue;
     }
 
@@ -5793,6 +5787,44 @@ const getAllListenLeafItems = (nodes: ListenItem[]): ListenItem[] => {
     traverse(node);
   }
   return leaves;
+};
+
+const allListenLeafItems = computed(() => getAllListenLeafItems(listenDirectory.value));
+
+const categorizedListenItemsCount = computed(() => {
+  return allListenLeafItems.value.filter(i => !i.isFolder && !!i.auto_class?.class).length;
+});
+
+const isCategoryChartVisible = ref<boolean>(
+  localStorage.getItem("listen_category_chart_visible") !== "false"
+);
+
+const toggleCategoryChartVisible = () => {
+  isCategoryChartVisible.value = !isCategoryChartVisible.value;
+  localStorage.setItem("listen_category_chart_visible", String(isCategoryChartVisible.value));
+};
+
+const selectedAutoClassFilter = computed(() => {
+  const q = listenSearchQuery.value.trim().toLowerCase();
+  if (!q) return null;
+  const clean = q.replace(/^(class|category|type|auto_class|auto):/, "").replace(/^[#@]/, "").trim();
+  const known = ["technology", "financial", "game", "political", "military", "university", "blog", "general_news"];
+  if (known.includes(clean)) return clean;
+  return null;
+});
+
+const handleAutoClassCategorySelect = (category: string | null) => {
+  if (!category) {
+    if (selectedAutoClassFilter.value) {
+      listenSearchQuery.value = "";
+    }
+  } else {
+    if (selectedAutoClassFilter.value === category) {
+      listenSearchQuery.value = "";
+    } else {
+      listenSearchQuery.value = category;
+    }
+  }
 };
 
 const getItemSyncPriorityScore = (item: ListenItem): number => {
@@ -20439,6 +20471,25 @@ onUnmounted(() => {
               <span>{{ t('listen.syncAll') }}</span>
             </button>
 
+            <!-- Topic Distribution Toggle Button -->
+            <button
+              type="button"
+              @click="toggleCategoryChartVisible"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-bold transition-all cursor-pointer select-none shadow-2xs border"
+              :class="[
+                isCategoryChartVisible
+                  ? 'bg-teal-50 hover:bg-teal-100/80 dark:bg-teal-950/60 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 border-teal-300/80 dark:border-teal-700/70'
+                  : 'bg-white hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 border-gray-200/80 dark:border-gray-700/80'
+              ]"
+              :title="t('listen.toggleTopicDistribution') || 'Toggle Topic Distribution'"
+            >
+              <PieChart class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+              <span class="hidden sm:inline">{{ t('listen.topicDistribution') || 'Topics' }}</span>
+              <span class="font-mono text-[10px] text-teal-700 dark:text-teal-300 bg-teal-100/70 dark:bg-teal-900/60 px-1.5 py-0.2 rounded-md tabular-nums">
+                {{ categorizedListenItemsCount }}/{{ allListenLeafItems.length }}
+              </span>
+            </button>
+
             <!-- Mode Segmented Control -->
             <div class="flex items-center gap-1 bg-gray-100/80 dark:bg-gray-900/60 p-1 rounded-2xl border border-gray-200/60 dark:border-gray-700/60 max-w-full overflow-x-auto">
               <button
@@ -20480,6 +20531,14 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+
+        <!-- Topic / Category Distribution Summary Component -->
+        <AutoClassDistributionChart
+          v-if="isCategoryChartVisible && allListenLeafItems.length > 0"
+          :items="allListenLeafItems"
+          :active-category="selectedAutoClassFilter"
+          @select-category="handleAutoClassCategorySelect"
+        />
 
         <!-- Flexible Mode (Multi-Stream Workdesk Canvas) -->
         <template v-if="listenLayoutMode === 'flexible'">
