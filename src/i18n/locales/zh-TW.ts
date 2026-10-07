@@ -631,6 +631,7 @@ export default {
     noItemsOnDeskDesc: "使用上方快捷篩選器選擇想要關注的頻道或關鍵詞，開啟多看板無限流對比監控。",
     selectItemsToTrace: "選擇待追蹤項",
     loadOlderPosts: "載入更早貼文",
+    loadMore: "載入更多貼文",
     posts: "則貼文",
     newestPostDate: "最新貼文時間",
     noPostsYet: "暫無快取貼文",

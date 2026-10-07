@@ -631,6 +631,7 @@ export default {
     noItemsOnDeskDesc: "上のクイックフィルターから追跡したいチャンネルやキーワードを選択して、無限スクロールウィジェットで並行監視を開始できます。",
     selectItemsToTrace: "追跡項目を選択",
     loadOlderPosts: "さらに古い投稿を読み込む",
+    loadMore: "さらに投稿を読み込む",
     posts: "件の投稿",
     newestPostDate: "最新投稿日時",
     noPostsYet: "キャッシュされた投稿はありません",

@@ -646,6 +646,7 @@ export default {
     noItemsOnDeskDesc: "使用上方快捷筛选器选择想要关注的频道或关键词，开启多看板无限流对比监控。",
     selectItemsToTrace: "选择待追踪项",
     loadOlderPosts: "加载更早帖子",
+    loadMore: "加载更多帖子",
     posts: "条消息",
     newestPostDate: "最新消息时间",
     noPostsYet: "暂无快取帖子",

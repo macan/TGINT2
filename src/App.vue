@@ -3595,6 +3595,7 @@ const INVALID_SYSTEM_ONE_POST_TEXTS = new Set([
   "none",
   "null",
   "this media is not supported in your browser",
+  "service message",
   "please open telegram to view this post"
 ]);
 
@@ -18872,7 +18873,7 @@ onUnmounted(() => {
               >
                 <span>{{ searchTimelineStats.start }}</span>
                 <span class="px-2.5 py-1 bg-gray-50 dark:bg-gray-900 rounded-md text-[9px] font-mono normal-case"
-                  >{{ t('explorer.spanStarts') }} {{ searchTimelineStats.spanText }}</span
+                  >{{ t('explorer.spanStarts', { span: searchTimelineStats.spanText }) }}</span
                 >
                 <span>{{ searchTimelineStats.end }}</span>
               </div>
@@ -18981,7 +18982,7 @@ onUnmounted(() => {
                       >
                         <span>{{ formatDate(post.data?.date) }}</span>
                         <span v-if="post.mtime" class="text-[9px] text-teal-600 dark:text-teal-400">
-                          ({{ t('explorer.scraped') }} {{ formatScrapedDate(post.mtime) }})
+                          ({{ t('explorer.scraped', { date: formatScrapedDate(post.mtime) }) }})
                         </span>
                       </p>
                     </div>

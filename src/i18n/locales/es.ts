@@ -631,6 +631,7 @@ export default {
     noItemsOnDeskDesc: "Seleccione canales o palabras clave del filtro rápido superior para rastrearlos lado a lado en widgets de desplazamiento infinito.",
     selectItemsToTrace: "Seleccionar Elementos para Rastrear",
     loadOlderPosts: "Cargar Publicaciones Anteriores",
+    loadMore: "Cargar más publicaciones",
     posts: "publicaciones",
     newestPostDate: "Fecha del post más reciente",
     noPostsYet: "No hay publicaciones en caché",

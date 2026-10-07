@@ -646,6 +646,7 @@ export default {
     noItemsOnDeskDesc: "Choose channels or keywords from the quick filter above to trace them side by side in infinite scroll widgets.",
     selectItemsToTrace: "Select Items to Trace",
     loadOlderPosts: "Load Older Posts",
+    loadMore: "Load more posts",
     posts: "posts",
     newestPostDate: "Newest post date",
     noPostsYet: "No cached posts yet",
