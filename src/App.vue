@@ -8473,19 +8473,210 @@ const scrollToTop = () => {
   window.scrollTo({ top: 0, behavior: "smooth" });
 };
 
-const scrollToPost = (key: string) => {
+const findSearchPostElement = (target: any): HTMLElement | null => {
+  if (!target && target !== 0) return null;
+
+  let post: any = null;
+  let keyStr = "";
+  let targetIndex = -1;
+
+  if (typeof target === "object" && target !== null) {
+    if (Array.isArray(target.posts) && target.posts.length > 0) {
+      post = target.posts[0];
+    } else if (target.post) {
+      post = target.post;
+    } else if (target.data || target.key || target.id) {
+      post = target;
+    } else if (target.startTime && target.endTime && filteredSearchResults.value) {
+      post = filteredSearchResults.value.find((p: any) => {
+        const d =
+          p.data?.date ||
+          p.date ||
+          p.datetime ||
+          p.data?.datetime ||
+          p.timestamp ||
+          p.data?.timestamp ||
+          p.data?.time;
+        const t = d ? new Date(d).getTime() : NaN;
+        return !isNaN(t) && t >= target.startTime && t <= target.endTime;
+      });
+    }
+  } else if (typeof target === "string" || typeof target === "number") {
+    keyStr = String(target).trim();
+  }
+
+  if (post) {
+    keyStr = String(post.key || post.id || post.data?.id || "").trim();
+    if (filteredSearchResults.value) {
+      targetIndex = filteredSearchResults.value.findIndex(
+        (p: any) =>
+          p === post ||
+          (keyStr && (String(p.key) === keyStr || String(p.id) === keyStr || String(p.data?.id) === keyStr))
+      );
+    }
+  } else if (keyStr && filteredSearchResults.value) {
+    targetIndex = filteredSearchResults.value.findIndex((p: any) => {
+      const pKey = String(p.key || p.id || p.data?.id || "");
+      return (
+        pKey === keyStr ||
+        (pKey && (pKey.endsWith(`.${keyStr}`) || keyStr.endsWith(`.${pKey}`)))
+      );
+    });
+    if (targetIndex !== -1) {
+      post = filteredSearchResults.value[targetIndex];
+    }
+  }
+
+  // 1. Try search-post-${keyStr}
+  if (keyStr) {
+    const el = document.getElementById(`search-post-${keyStr}`);
+    if (el) return el;
+  }
+
+  // 2. Try [data-search-post-key]
+  if (keyStr) {
+    try {
+      const safeKey = CSS.escape(keyStr);
+      const el = document.querySelector(`[data-search-post-key="${safeKey}"]`) as HTMLElement;
+      if (el) return el;
+    } catch {
+      const allSearchPosts = document.querySelectorAll("[data-search-post-key]");
+      for (const sp of Array.from(allSearchPosts)) {
+        if (sp.getAttribute("data-search-post-key") === keyStr) {
+          return sp as HTMLElement;
+        }
+      }
+    }
+  }
+
+  // 3. Try by search-post-${index} or [data-search-post-index]
+  if (targetIndex !== -1) {
+    const elByIdx = document.getElementById(`search-post-${targetIndex}`);
+    if (elByIdx) return elByIdx;
+
+    try {
+      const elByAttr = document.querySelector(`[data-search-post-index="${targetIndex}"]`) as HTMLElement;
+      if (elByAttr) return elByAttr;
+    } catch {}
+  }
+
+  // 4. Try post-${keyStr}
+  if (keyStr) {
+    const elPost = document.getElementById(`post-${keyStr}`);
+    if (elPost) return elPost;
+  }
+
+  // 5. Alternate identifiers
+  if (post) {
+    const altIds = [post.id, post.data?.id, post.key].filter(Boolean);
+    for (const altId of altIds) {
+      const el =
+        document.getElementById(`search-post-${altId}`) ||
+        document.getElementById(`post-${altId}`);
+      if (el) return el;
+    }
+  }
+
+  return null;
+};
+
+const scrollToSearchTimelineBucket = (target: any) => {
+  console.log("Scrolling to search post/bucket:", target);
+
+  let attempts = 0;
+  const maxAttempts = 6;
+
+  const tryScroll = () => {
+    const el = findSearchPostElement(target);
+    if (el) {
+      console.log("Target post element found for search scrolling:", el.id || el);
+      
+      const rect = el.getBoundingClientRect();
+      const currentScrollTop = window.pageYOffset || document.documentElement.scrollTop;
+      const targetY = Math.max(0, rect.top + currentScrollTop - 95);
+
+      window.scrollTo({
+        top: targetY,
+        behavior: "smooth",
+      });
+
+      try {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        setTimeout(() => {
+          const r = el.getBoundingClientRect();
+          if (r.top < 85) {
+            window.scrollBy({ top: r.top - 95, behavior: "smooth" });
+          }
+        }, 250);
+      } catch {}
+
+      el.classList.add(
+        "ring-4",
+        "ring-teal-500",
+        "ring-offset-2",
+        "dark:ring-teal-400",
+        "transition-all",
+        "duration-500"
+      );
+      setTimeout(() => {
+        el.classList.remove(
+          "ring-4",
+          "ring-teal-500",
+          "ring-offset-2",
+          "dark:ring-teal-400"
+        );
+      }, 2500);
+
+      return true;
+    }
+
+    attempts++;
+    if (attempts < maxAttempts) {
+      setTimeout(tryScroll, attempts * 50);
+    } else {
+      console.log("Search post element not found for target:", target);
+    }
+    return false;
+  };
+
+  nextTick(() => {
+    if (!tryScroll()) {
+      requestAnimationFrame(tryScroll);
+    }
+  });
+};
+
+const scrollToPost = (key: any) => {
   console.log("Scrolling to:", key);
+
+  if (activeTab.value === "search") {
+    scrollToSearchTimelineBucket(key);
+    return;
+  }
+
   viewMode.value = "list";
   
-  const idx = filteredPosts.value.findIndex((p) => p.key === key);
+  const keyStr =
+    typeof key === "object"
+      ? key?.key || key?.posts?.[0]?.key || key?.post?.key
+      : String(key || "");
+
+  const idx = filteredPosts.value.findIndex((p) => p.key === keyStr);
   if (idx !== -1 && idx >= postsRenderLimit.value) {
     postsRenderLimit.value = idx + 10;
   }
 
   nextTick(() => {
-    const el = document.getElementById(`post-${key}`);
+    const el =
+      document.getElementById(`post-${keyStr}`) ||
+      document.getElementById(`search-post-${keyStr}`) ||
+      (typeof key === "object" ? findSearchPostElement(key) : null);
     if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      const rect = el.getBoundingClientRect();
+      const currentScrollTop = window.pageYOffset || document.documentElement.scrollTop;
+      const targetY = Math.max(0, rect.top + currentScrollTop - 95);
+      window.scrollTo({ top: targetY, behavior: "smooth" });
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
     } else {
       console.log("Post element not found for key:", key);
     }
@@ -8909,7 +9100,15 @@ const timelineBucketClassifications = ref<Record<string, {
 const isClassifyingTimelineBucket = ref<Record<string, boolean>>({});
 const hoveredTimelineBucket = ref<any>(null);
 
-const getBucketCacheKey = (bucketKey: string) => {
+const getBucketCacheKey = (bucketKey: string, bucket?: any) => {
+  if (bucket?.cacheKey) return bucket.cacheKey;
+  if (activeTab.value === "search") {
+    const searchPrefix =
+      searchWords.value && searchWords.value.length > 0
+        ? searchWords.value.join("_")
+        : "all";
+    return `search_${searchPrefix}_${bucketKey}`;
+  }
   const targetChannel = currentChannelName.value || channelName.value || "default";
   return `${targetChannel}_${bucketKey}`;
 };
@@ -8945,14 +9144,14 @@ const saveTimelineBucketClassificationsToStorage = () => {
 const getBucketClassification = (item: any) => {
   if (!item) return null;
   const key = item.key || item.hour;
-  const cacheKey = getBucketCacheKey(key);
+  const cacheKey = item.cacheKey || getBucketCacheKey(key, item);
   return timelineBucketClassifications.value[cacheKey] || null;
 };
 
 const isBucketLoading = (item: any) => {
   if (!item) return false;
   const key = item.key || item.hour;
-  const cacheKey = getBucketCacheKey(key);
+  const cacheKey = item.cacheKey || getBucketCacheKey(key, item);
   return (
     isClassifyingTimelineBucket.value[cacheKey] === true ||
     timelineBucketClassifications.value[cacheKey]?.loading === true
@@ -9002,7 +9201,7 @@ const getBucketSegments = (item: any) => {
 
 const classifySingleTimelineBucket = async (bucket: any) => {
   if (!bucket || !bucket.key) return;
-  const cacheKey = getBucketCacheKey(bucket.key);
+  const cacheKey = bucket.cacheKey || getBucketCacheKey(bucket.key, bucket);
 
   if (timelineBucketClassifications.value[cacheKey] || isClassifyingTimelineBucket.value[cacheKey]) {
     return;
@@ -9099,7 +9298,7 @@ const classifyTimelineBuckets = async (buckets: any[]) => {
   if (!buckets || buckets.length === 0) return;
 
   const pending = buckets.filter((b) => {
-    const k = getBucketCacheKey(b.key);
+    const k = b.cacheKey || getBucketCacheKey(b.key, b);
     return !timelineBucketClassifications.value[k] && !isClassifyingTimelineBucket.value[k];
   });
 
@@ -10188,11 +10387,22 @@ const searchTimelineStats = computed(() => {
     return null;
 
   const validResults = filteredSearchResults.value
-    .map((p) => ({
-      post: p,
-      date: new Date(p.data?.date),
-      time: new Date(p.data?.date).getTime(),
-    }))
+    .map((p) => {
+      const rawDate =
+        p?.data?.date ||
+        p?.date ||
+        p?.datetime ||
+        p?.data?.datetime ||
+        p?.timestamp ||
+        p?.data?.timestamp ||
+        p?.data?.time;
+      const d = rawDate ? new Date(rawDate) : new Date(NaN);
+      return {
+        post: p,
+        date: d,
+        time: d.getTime(),
+      };
+    })
     .filter((item) => !isNaN(item.time) && item.date.getFullYear() >= 2013)
     .sort((a, b) => b.time - a.time); // Newest first
 
@@ -10200,14 +10410,73 @@ const searchTimelineStats = computed(() => {
 
   const newest = validResults[0].time;
   const oldest = validResults[validResults.length - 1].time;
-  const span = newest - oldest;
+  const spanMs = newest - oldest;
+  const spanHours = spanMs / (1000 * 60 * 60);
+  const bucketHours = Math.max(1, Math.ceil(spanHours / 20));
 
+  const queryKey =
+    searchWords.value && searchWords.value.length > 0
+      ? searchWords.value.join("_")
+      : "all";
+
+  interface TimelineHourlyBucket {
+    key: string;
+    hour: string;
+    dateRangeLabel: string;
+    count: number;
+    posts: any[];
+    startTime: number;
+    endTime: number;
+    cacheKey: string;
+  }
+
+  const bucketMap: Record<string, TimelineHourlyBucket> = {};
+  for (const item of validResults) {
+    const hoursFromEpoch = Math.floor(item.time / (1000 * 60 * 60));
+    const bucketStartHour = Math.floor(hoursFromEpoch / bucketHours) * bucketHours;
+    const bucketStartMs = bucketStartHour * 1000 * 60 * 60;
+    const bucketEndMs = (bucketStartHour + bucketHours) * 1000 * 60 * 60;
+    const bucketStartDate = new Date(bucketStartMs);
+    const bucketEndDate = new Date(bucketEndMs);
+    const bucketKey = format(bucketStartDate, "yyyy-MM-dd HH:00");
+
+    if (!bucketMap[bucketKey]) {
+      const dateRangeLabel =
+        bucketHours === 1
+          ? format(bucketStartDate, "MMM d, HH:00")
+          : `${format(bucketStartDate, "MMM d, HH:00")} – ${format(bucketEndDate, "HH:00")}`;
+
+      bucketMap[bucketKey] = {
+        key: bucketKey,
+        hour: bucketKey,
+        dateRangeLabel,
+        count: 0,
+        posts: [],
+        startTime: bucketStartMs,
+        endTime: bucketEndMs,
+        cacheKey: `search_${queryKey}_${bucketKey}`,
+      };
+    }
+    bucketMap[bucketKey].count += 1;
+    bucketMap[bucketKey].posts.push(item.post);
+  }
+  const hourlyData = Object.values(bucketMap).sort((a, b) => b.startTime - a.startTime);
+
+  const span = spanMs;
   const items = validResults.map((item) => ({
     position:
       span === 0
         ? 50
         : Math.max(0, Math.min(100, ((newest - item.time) / span) * 100)),
     post: item.post,
+    date: item.date,
+    dateLabel: (() => {
+      try {
+        return format(item.date, "MMM d, HH:mm");
+      } catch {
+        return "";
+      }
+    })(),
   }));
 
   return {
@@ -10218,6 +10487,7 @@ const searchTimelineStats = computed(() => {
     }),
     count: validResults.length,
     items,
+    hourlyData,
   };
 });
 
@@ -10342,6 +10612,16 @@ const postsTimelineStats = computed(() => {
 
 watch(
   () => postsTimelineStats.value?.hourlyData,
+  (newHourlyData) => {
+    if (newHourlyData && newHourlyData.length > 0) {
+      classifyTimelineBuckets(newHourlyData);
+    }
+  },
+  { immediate: true, deep: true }
+);
+
+watch(
+  () => searchTimelineStats.value?.hourlyData,
   (newHourlyData) => {
     if (newHourlyData && newHourlyData.length > 0) {
       classifyTimelineBuckets(newHourlyData);
@@ -12291,7 +12571,17 @@ const performGlobalSearch = async () => {
     }
 
     const postsData = await mgetResponse.json();
-    const results = Array.isArray(postsData) ? postsData : postsData.data || [];
+    let results = Array.isArray(postsData) ? postsData : postsData.data || [];
+
+    // Ensure every search result has a consistent key from keys[0] or its own ID
+    results = results.map((item: any, idx: number) => {
+      const fullKey = keys[0]?.[idx];
+      const postKey = item.key || fullKey || item.id || item.data?.id || `search-${idx}`;
+      return {
+        ...item,
+        key: postKey,
+      };
+    });
 
     // Sort by date descending
     results.sort((a: any, b: any) => {
@@ -19326,38 +19616,189 @@ onUnmounted(() => {
               v-if="searchTimelineStats"
               class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/60 dark:border-gray-700/60 p-6 shadow-sm mb-8"
             >
-              <div class="flex items-center justify-between mb-4">
+              <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
                 <h4
                   class="text-sm font-bold text-gray-900 dark:text-white flex items-center"
                 >
-                  <Calendar class="h-4 w-4 mr-2 text-teal-600 dark:text-teal-450" />
-                  {{ t('search.activityTimeline') }}
+                  <Calendar class="h-4 w-4 mr-2 text-teal-600 dark:text-teal-450 shrink-0" />
+                  <span>{{ t('search.activityTimeline') }}</span>
                 </h4>
-                <span
-                  class="text-xs font-semibold text-gray-400 dark:text-gray-500 font-mono"
-                >
-                  {{ t('search.datesMapped', { count: searchTimelineStats.count }) }}
-                </span>
+                <div class="flex flex-wrap items-center gap-2 sm:gap-3">
+                  <!-- Histogram Container with Auto-Class Coloring & Tooltip Hint -->
+                  <div
+                    v-if="searchTimelineStats.hourlyData && searchTimelineStats.hourlyData.length > 0"
+                    class="relative z-30 group/hist"
+                    @mouseleave="hoveredTimelineBucket = null"
+                  >
+                    <div class="h-7 sm:h-8 min-w-[7.5rem] sm:min-w-[9.5rem] max-w-[18rem] flex items-end gap-1 sm:gap-1.5 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded-lg border-0 shadow-none">
+                      <div
+                        v-for="(item, idx) in searchTimelineStats.hourlyData"
+                        :key="item.key || idx"
+                        class="relative flex flex-col justify-end h-full flex-1 min-w-[4px] max-w-[12px] cursor-pointer group/bar transition-all duration-200"
+                        :style="{
+                          height: `${Math.max(15, (item.count / Math.max(...searchTimelineStats.hourlyData.map((d: any) => d.count))) * 100)}%`
+                        }"
+                        @mouseenter="hoveredTimelineBucket = item"
+                        @click.stop="scrollToSearchTimelineBucket(item)"
+                      >
+                        <!-- Auto-Class Segments or Fallback -->
+                        <div class="w-full h-full rounded-t-sm overflow-hidden flex flex-col-reverse shadow-xs transition-transform duration-200 group-hover/bar:scale-y-110 group-hover/bar:brightness-125">
+                          <template v-if="getBucketSegments(item).length > 0">
+                            <div
+                              v-for="(seg, sIdx) in getBucketSegments(item)"
+                              :key="sIdx"
+                              class="w-full transition-colors"
+                              :style="{ height: `${seg.pct}%`, backgroundColor: seg.hex }"
+                            />
+                          </template>
+                          <div
+                            v-else-if="isBucketLoading(item)"
+                            class="w-full h-full bg-teal-400/60 dark:bg-teal-500/60 animate-pulse rounded-t-sm"
+                          />
+                          <div
+                            v-else
+                            class="w-full h-full bg-teal-500 dark:bg-teal-600 rounded-t-sm"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Tooltip Hint Popup -->
+                    <Transition
+                      enter-active-class="transition duration-150 ease-out"
+                      enter-from-class="opacity-0 translate-y-1 scale-95"
+                      enter-to-class="opacity-100 translate-y-0 scale-100"
+                      leave-active-class="transition duration-100 ease-in"
+                      leave-from-class="opacity-100 translate-y-0 scale-100"
+                      leave-to-class="opacity-0 translate-y-1 scale-95"
+                    >
+                      <div
+                        v-if="hoveredTimelineBucket"
+                        class="absolute top-full left-0 sm:left-auto sm:right-0 mt-2 z-50 pointer-events-none w-64 max-w-[calc(100vw-3rem)] p-3 bg-gray-900/95 dark:bg-gray-850/95 text-white backdrop-blur-md rounded-xl shadow-2xl border border-gray-700/60 text-left"
+                      >
+                        <!-- Date Range & Count -->
+                        <div class="flex items-center justify-between pb-2 border-b border-gray-750">
+                          <div class="flex items-center gap-1.5 text-xs font-semibold text-gray-200">
+                            <Clock class="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                            <span>{{ hoveredTimelineBucket.dateRangeLabel || hoveredTimelineBucket.hour }}</span>
+                          </div>
+                          <span class="text-[10px] font-mono font-bold bg-white/10 px-1.5 py-0.5 rounded text-gray-300">
+                            {{ hoveredTimelineBucket.count }} {{ hoveredTimelineBucket.count === 1 ? 'post' : 'posts' }}
+                          </span>
+                        </div>
+
+                        <!-- Auto-Class Classification Content -->
+                        <div class="mt-2.5 space-y-2">
+                          <!-- Loading state -->
+                          <div
+                            v-if="isBucketLoading(hoveredTimelineBucket)"
+                            class="flex items-center gap-2 text-xs text-teal-400 py-1"
+                          >
+                            <LoaderCircle class="w-3.5 h-3.5 animate-spin shrink-0" />
+                            <span>{{ t('explorer.classifyingDateRange') || 'Analyzing with SystemOne...' }}</span>
+                          </div>
+
+                          <!-- Classified state -->
+                          <template v-else-if="getBucketClassification(hoveredTimelineBucket)?.category">
+                            <div>
+                              <div class="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1 flex items-center justify-between">
+                                <span>{{ t('explorer.autoClassTopic') || 'Auto Class' }}</span>
+                                <span
+                                  v-if="typeof getBucketClassification(hoveredTimelineBucket)?.confidence === 'number'"
+                                  class="font-mono text-gray-400 normal-case"
+                                >
+                                  {{ Math.round((getBucketClassification(hoveredTimelineBucket)?.confidence || 1) * 100) }}% match
+                                </span>
+                              </div>
+
+                              <!-- Primary Topic Pill -->
+                              <div
+                                class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold shadow-xs"
+                                :style="{
+                                  backgroundColor: getAutoClassMeta(getBucketClassification(hoveredTimelineBucket)?.category).hex + '25',
+                                  color: getAutoClassMeta(getBucketClassification(hoveredTimelineBucket)?.category).hex,
+                                  border: `1px solid ${getAutoClassMeta(getBucketClassification(hoveredTimelineBucket)?.category).hex}60`
+                                }"
+                              >
+                                <component
+                                  :is="getAutoClassMeta(getBucketClassification(hoveredTimelineBucket)?.category).icon"
+                                  class="w-3.5 h-3.5 shrink-0"
+                                />
+                                <span>{{ getAutoClassMeta(getBucketClassification(hoveredTimelineBucket)?.category).label }}</span>
+                              </div>
+                            </div>
+
+                            <!-- Distribution Breakdown (if multiple classes detected) -->
+                            <div
+                              v-if="getBucketSegments(hoveredTimelineBucket).length > 1"
+                              class="pt-2 border-t border-gray-750/70 space-y-1.5"
+                            >
+                              <div class="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">
+                                {{ t('explorer.topicBreakdown') || 'Topic Breakdown' }}
+                              </div>
+                              <div
+                                v-for="seg in getBucketSegments(hoveredTimelineBucket)"
+                                :key="seg.category"
+                                class="flex items-center justify-between text-xs"
+                              >
+                                <div class="flex items-center gap-1.5">
+                                  <span
+                                    class="w-2 h-2 rounded-full shrink-0"
+                                    :style="{ backgroundColor: seg.hex }"
+                                  />
+                                  <span class="text-gray-300 font-medium">{{ seg.label }}</span>
+                                </div>
+                                <span class="font-mono text-[11px] text-gray-400">
+                                  {{ Math.round(seg.pct) }}%
+                                </span>
+                              </div>
+                            </div>
+                          </template>
+
+                          <!-- Unclassified fallback -->
+                          <div v-else class="text-xs text-gray-400 py-0.5 flex items-center gap-1.5">
+                            <Sparkles class="w-3.5 h-3.5 text-gray-500 shrink-0" />
+                            <span>{{ t('explorer.noAutoClass') || 'Unclassified date range' }}</span>
+                          </div>
+                        </div>
+
+                        <!-- Click Hint Footer -->
+                        <div
+                          class="mt-2.5 pt-2 border-t border-gray-750 text-[10px] text-gray-400 text-center pointer-events-auto cursor-pointer hover:text-teal-300 transition-colors"
+                          @click.stop="scrollToSearchTimelineBucket(hoveredTimelineBucket)"
+                        >
+                          {{ t('explorer.clickToJumpToDate') || 'Click to scroll to posts' }}
+                        </div>
+                      </div>
+                    </Transition>
+                  </div>
+
+                  <span
+                    class="text-xs font-semibold text-gray-400 dark:text-gray-500 font-mono shrink-0"
+                  >
+                    {{ t('search.datesMapped', { count: searchTimelineStats.count }) }}
+                  </span>
+                </div>
               </div>
 
-              <div class="relative pt-4 pb-2">
+              <div class="relative pt-6 pb-2 mx-1 sm:mx-2">
                 <!-- Timeline track -->
                 <div
-                  class="absolute w-full h-1.5 bg-gray-100 dark:bg-gray-700 rounded-full top-1/2 -translate-y-1/2"
+                  class="absolute inset-x-0 h-1.5 bg-gray-100 dark:bg-gray-700 rounded-full top-1/2 -translate-y-1/2"
                 ></div>
 
                 <!-- Timeline points -->
                 <div
                   v-for="(item, idx) in searchTimelineStats.items"
                   :key="idx"
-                  class="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-teal-500 border-2 border-white dark:border-gray-800 shadow-[0_0_8px_rgba(20,184,166,0.5)] transition-all duration-355 hover:scale-150 cursor-pointer group"
+                  class="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-teal-500 border-2 border-white dark:border-gray-800 shadow-[0_0_8px_rgba(20,184,166,0.5)] transition-all duration-355 hover:scale-150 cursor-pointer group"
                   :style="{ left: `${item.position}%` }"
-                  @click="scrollToPost(item.post.key)"
+                  @click.stop="scrollToSearchTimelineBucket(item.post)"
                 >
                   <div
-                    class="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-900 text-white text-[10px] rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none"
+                    class="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-1 bg-gray-900 text-white text-[10px] rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none z-30 shadow-md"
                   >
-                    {{ format(new Date(item.post.data.date), "MMM d, HH:mm") }}
+                    {{ item.dateLabel || format(new Date(item.post.data.date), "MMM d, HH:mm") }}
                   </div>
                 </div>
               </div>
@@ -19393,6 +19834,7 @@ onUnmounted(() => {
                 v-for="(post, index) in filteredSearchResults"
                 :id="'search-post-' + (post.key || index)"
                 :data-search-post-key="post.key"
+                :data-search-post-index="index"
                 :key="post.key || index"
                 :class="[
                   'relative rounded-3xl shadow-sm border p-6 hover:shadow-md transition-all duration-350',
