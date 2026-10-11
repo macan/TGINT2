@@ -87,3 +87,11 @@ export interface SystemOneParams {
   questions: SystemOneQuestions;
   model?: string;
 }
+
+export type {
+  PostViewStats,
+  ExpectedReadTimeBreakdown,
+  ExpectedReadTimeResult,
+  VisibilityFactorResult,
+  MostViewedQueryOptions
+} from './utils/postEngagement';

@@ -118,7 +118,19 @@ import markdownItMark from "markdown-it-mark";
 // @ts-ignore
 import clm from "country-locale-map";
 import { ListenItem, AutoFindingCell, GraphNode, GraphEdge, ListenItemFreshness, FreshnessLevel } from "./types";
-import { getInitials, truncateString, getSha1HexDigest, callSystemOne, querySystemOne } from "./utils/helpers";
+import {
+  getInitials,
+  truncateString,
+  getSha1HexDigest,
+  callSystemOne,
+  querySystemOne,
+  postEngagementTracker,
+  findMostViewedPosts,
+  calculateExpectedReadTime,
+  calculateVisibilityFactor,
+  calculatePostEngagementScore,
+  type PostViewStats
+} from "./utils";
 import AutoClassDistributionChart from "./components/AutoClassDistributionChart.vue";
 import {
   useI18n,
@@ -2377,7 +2389,10 @@ const activeChannelOrUser = ref<"channel" | "user">("channel");
 const isLoadingChannels = ref(false);
 const langCode = ref("");
 const channelSearchQuery = ref("");
-const channelViewMode = ref<"grid" | "list">("grid");
+const channelViewMode = ref<"grid" | "list">((localStorage.getItem("channelViewMode") as "grid" | "list") || "grid");
+watch(channelViewMode, (newVal) => {
+  localStorage.setItem("channelViewMode", newVal);
+});
 const hoveredChannelId = ref<string | null>(null);
 let channelHoverTimer: ReturnType<typeof setTimeout> | null = null;
 let channelLeaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -8097,6 +8112,96 @@ const jumpToExplorerFromSearch = (channel: string, postKey?: string) => {
   searchChannel();
 };
 
+const lastChannelScrollY = ref(0);
+const lastChannelIdentifier = ref("");
+
+const getChannelCardIdentifier = (channel: any): string => {
+  if (!channel) return "";
+  return String(channel.username || channel.name || channel.id || channel.key || "").trim();
+};
+
+const findChannelElement = (targetIdentifier: string): HTMLElement | null => {
+  if (!targetIdentifier) return null;
+  const cleanId = targetIdentifier.replace(/^@/, "").trim();
+  const byId = document.getElementById(`channel-card-${cleanId}`) ||
+               document.getElementById(`channel-card-${targetIdentifier}`);
+  if (byId) return byId;
+
+  try {
+    const escaped = window.CSS && CSS.escape ? CSS.escape(cleanId) : cleanId;
+    const el = document.querySelector(`[data-channel-identifier="${escaped}"]`) as HTMLElement | null;
+    if (el) return el;
+    if (cleanId !== targetIdentifier) {
+      const escapedRaw = window.CSS && CSS.escape ? CSS.escape(targetIdentifier) : targetIdentifier;
+      return document.querySelector(`[data-channel-identifier="${escapedRaw}"]`) as HTMLElement | null;
+    }
+  } catch {
+    // fallback
+  }
+  return null;
+};
+
+const restoreChannelScrollPosition = () => {
+  const targetScroll = lastChannelScrollY.value || tabScrollPositions.value['channel'] || 0;
+  const targetIdentifier = lastChannelIdentifier.value;
+
+  if (targetScroll <= 0 && !targetIdentifier) return;
+
+  let isRestored = false;
+
+  const applyScroll = () => {
+    if (activeTab.value !== 'channel' || isRestored) return;
+
+    if (targetIdentifier) {
+      const el = findChannelElement(targetIdentifier);
+      if (el) {
+        if (targetScroll > 0 && document.documentElement.scrollHeight >= targetScroll) {
+          window.scrollTo(0, targetScroll);
+          isRestored = Math.abs(window.scrollY - targetScroll) < 50;
+        } else {
+          el.scrollIntoView({ block: 'center', behavior: 'auto' });
+          isRestored = true;
+        }
+        return;
+      }
+    }
+
+    if (targetScroll > 0) {
+      window.scrollTo(0, targetScroll);
+      if (document.documentElement.scrollHeight >= targetScroll) {
+        isRestored = Math.abs(window.scrollY - targetScroll) < 50;
+      }
+    }
+  };
+
+  nextTick(() => {
+    applyScroll();
+    requestAnimationFrame(() => {
+      applyScroll();
+      setTimeout(applyScroll, 50);
+      setTimeout(applyScroll, 150);
+      setTimeout(applyScroll, 300);
+      setTimeout(applyScroll, 500);
+      setTimeout(applyScroll, 800);
+    });
+  });
+};
+
+const jumpToExplorerFromChannel = (channel: string, channelObj?: any) => {
+  const currentY = window.scrollY;
+  lastChannelScrollY.value = currentY;
+  tabScrollPositions.value['channel'] = currentY;
+
+  const targetId = channelObj ? getChannelCardIdentifier(channelObj) : (channel || "");
+  if (targetId) {
+    lastChannelIdentifier.value = targetId;
+  }
+
+  activeTab.value = 'explorer';
+  channelName.value = channel;
+  searchChannel();
+};
+
 watch(activeTab, (newTab, oldTab) => {
   // Save current scroll position
   if (oldTab) {
@@ -8112,6 +8217,11 @@ watch(activeTab, (newTab, oldTab) => {
       if (window.scrollY > 0 || !tabScrollPositions.value['search']) {
         tabScrollPositions.value['search'] = window.scrollY;
         lastSearchScrollY.value = window.scrollY;
+      }
+    } else if (oldTab === 'channel') {
+      if (window.scrollY > 0 || !tabScrollPositions.value['channel']) {
+        tabScrollPositions.value['channel'] = window.scrollY;
+        lastChannelScrollY.value = window.scrollY;
       }
     } else {
       tabScrollPositions.value[oldTab] = window.scrollY;
@@ -8139,6 +8249,8 @@ watch(activeTab, (newTab, oldTab) => {
     loadAllListenPostsFreshnessFromIndexedDB();
   } else if (newTab === 'search') {
     restoreSearchScrollPosition();
+  } else if (newTab === 'channel') {
+    restoreChannelScrollPosition();
   } else {
     nextTick(() => {
       const savedScroll = tabScrollPositions.value[newTab] || 0;
@@ -8466,6 +8578,9 @@ const handleScroll = () => {
   } else if (activeTab.value === 'search') {
     lastSearchScrollY.value = window.scrollY;
     tabScrollPositions.value['search'] = window.scrollY;
+  } else if (activeTab.value === 'channel') {
+    lastChannelScrollY.value = window.scrollY;
+    tabScrollPositions.value['channel'] = window.scrollY;
   }
 };
 
@@ -8817,6 +8932,23 @@ onMounted(() => {
 
   window.addEventListener("scroll", handleScroll);
 
+  // Start background post engagement and viewing time tracking
+  postEngagementTracker.setOcclusionPredicate(() => {
+    return (
+      isEngagementModalVisible.value ||
+      isPostModalVisible.value ||
+      Boolean(lightboxPhoto.value) ||
+      isAnalysisModalVisible.value ||
+      showLoginModal.value ||
+      showOldVersionsModal.value ||
+      isMoveModalOpen.value ||
+      isListenModalOpen.value ||
+      isImportModalOpen.value
+    );
+  });
+  postEngagementTracker.start(250);
+  postEngagementTracker.sweepAndBindElements();
+
   if (!isShareCardView.value) {
     fetchCounters();
     counterTimer = setInterval(fetchCounters, 30000);
@@ -8893,6 +9025,7 @@ onUnmounted(() => {
     graphIntersectionObserver.disconnect();
     graphIntersectionObserver = null;
   }
+  postEngagementTracker.stop();
 });
 const isProfileVisible = ref(true);
 
@@ -8951,6 +9084,135 @@ const isPostModalVisible = ref(false);
 const selectedPost = ref<any>(null);
 const selectedUsernamesExplorer = ref<string[]>([]);
 const postsRenderLimit = ref(50);
+
+// ==========================================
+// Post Engagement Analytics & Attention Tracking
+// ==========================================
+const isEngagementModalVisible = ref(false);
+const engagementSortBy = ref<'engagementScore' | 'effectiveTime' | 'dwellTime' | 'viewSessions'>('engagementScore');
+const engagementMinTimeFilter = ref(0);
+const engagementSearchQuery = ref('');
+const engagementPostsList = ref<PostViewStats[]>([]);
+
+const openEngagementModal = () => {
+  refreshEngagementData();
+  isEngagementModalVisible.value = true;
+};
+
+const closeEngagementModal = () => {
+  isEngagementModalVisible.value = false;
+};
+
+const refreshEngagementData = () => {
+  postEngagementTracker.sweepAndBindElements();
+  if (posts.value && posts.value.length > 0) {
+    postEngagementTracker.registerPosts(posts.value);
+  }
+  engagementPostsList.value = postEngagementTracker.getMostEngagedPosts({
+    sortBy: engagementSortBy.value,
+    limit: 150,
+    minEffectiveTime: engagementMinTimeFilter.value,
+  });
+};
+
+const filteredEngagementPosts = computed(() => {
+  let list = engagementPostsList.value;
+  if (engagementSearchQuery.value.trim()) {
+    const q = engagementSearchQuery.value.trim().toLowerCase();
+    list = list.filter((p) =>
+      (p.author && p.author.toLowerCase().includes(q)) ||
+      (p.textSnippet && p.textSnippet.toLowerCase().includes(q)) ||
+      (p.channelName && p.channelName.toLowerCase().includes(q)) ||
+      (p.postKey && p.postKey.toLowerCase().includes(q))
+    );
+  }
+  return list;
+});
+
+const engagementSummary = computed(() => {
+  return postEngagementTracker.exportSummary();
+});
+
+const resetEngagementStats = () => {
+  if (window.confirm('Are you sure you want to reset all tracked engagement metrics?')) {
+    postEngagementTracker.reset();
+    refreshEngagementData();
+  }
+};
+
+const exportEngagementDataJson = () => {
+  try {
+    const data = postEngagementTracker.exportSummary();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `post-engagement-analytics-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error('Failed to export analytics JSON:', err);
+  }
+};
+
+const jumpToEngagedPost = (postKey: string) => {
+  isEngagementModalVisible.value = false;
+  if (!postKey) return;
+
+  const dotIdx = postKey.indexOf('.');
+  const targetChannel = dotIdx !== -1 ? postKey.slice(0, dotIdx) : '';
+
+  // If the post belongs to a different channel than the currently loaded explorer channel,
+  // load that channel first then scroll to the post
+  if (targetChannel && currentChannelName.value && targetChannel.toLowerCase() !== currentChannelName.value.toLowerCase()) {
+    activeTab.value = 'explorer';
+    channelName.value = targetChannel;
+    searchChannel().then(() => {
+      nextTick(() => {
+        setTimeout(() => {
+          scrollToPost(postKey);
+        }, 300);
+      });
+    });
+    return;
+  }
+
+  if (activeTab.value !== 'explorer') {
+    activeTab.value = 'explorer';
+  }
+  nextTick(() => {
+    scrollToPost(postKey);
+  });
+};
+
+// Listen to background tracker updates
+postEngagementTracker.subscribe(() => {
+  if (isEngagementModalVisible.value) {
+    refreshEngagementData();
+  }
+});
+
+watch([engagementSortBy, engagementMinTimeFilter], () => {
+  refreshEngagementData();
+});
+
+watch(posts, (newPosts) => {
+  if (Array.isArray(newPosts) && newPosts.length > 0) {
+    postEngagementTracker.registerPosts(newPosts);
+    nextTick(() => {
+      postEngagementTracker.sweepAndBindElements();
+    });
+  }
+}, { immediate: true });
+
+watch(listenPosts, (newPosts) => {
+  if (Array.isArray(newPosts) && newPosts.length > 0) {
+    postEngagementTracker.registerPosts(newPosts);
+    nextTick(() => {
+      postEngagementTracker.sweepAndBindElements();
+    });
+  }
+});
 
 // SystemOne Channel Classification State & Helpers
 const isClassifyingChannel = ref(false);
@@ -9956,6 +10218,14 @@ const searchFields = ref({
   url: false,
 });
 const searchResults = ref<any[]>([]);
+watch(searchResults, (newPosts) => {
+  if (Array.isArray(newPosts) && newPosts.length > 0) {
+    postEngagementTracker.registerPosts(newPosts);
+    nextTick(() => {
+      postEngagementTracker.sweepAndBindElements();
+    });
+  }
+});
 const recentGlobalSearches = ref<string[]>([]);
 try {
   const savedSearches = localStorage.getItem("recentGlobalSearches");
@@ -12416,6 +12686,14 @@ const searchChannel = async () => {
         classifyChannelWithSystemOne();
       }
 
+      // Explicitly register newly fetched channel posts and sweep DOM cards for engagement tracking
+      if (Array.isArray(posts.value) && posts.value.length > 0) {
+        postEngagementTracker.registerPosts(posts.value);
+        nextTick(() => {
+          postEngagementTracker.sweepAndBindElements();
+        });
+      }
+
       await nextTick();
       if (
         posts.value.length > 0 &&
@@ -12856,6 +13134,10 @@ const loadMorePosts = async () => {
         } else {
           posts.value = [...posts.value, ...newPosts];
           postsRenderLimit.value += 50;
+          postEngagementTracker.registerPosts(newPosts);
+          nextTick(() => {
+            postEngagementTracker.sweepAndBindElements();
+          });
           if (posts.value.length > 10 && !channelClassification.value && !isClassifyingChannel.value) {
             classifyChannelWithSystemOne();
           }
@@ -13040,8 +13322,27 @@ const visibleFilteredPosts = computed(() => {
   return filteredPosts.value.slice(0, postsRenderLimit.value);
 });
 
+// Continuously register and bind newly rendered posts when switching channels or loading more posts
+watch(visibleFilteredPosts, (newVisiblePosts) => {
+  if (Array.isArray(newVisiblePosts) && newVisiblePosts.length > 0) {
+    postEngagementTracker.registerPosts(newVisiblePosts);
+    nextTick(() => {
+      postEngagementTracker.sweepAndBindElements();
+    });
+  }
+}, { immediate: true });
+
 const visibleMediaPosts = computed(() => {
   return mediaPosts.value.slice(0, postsRenderLimit.value);
+});
+
+watch(visibleMediaPosts, (newMediaPosts) => {
+  if (Array.isArray(newMediaPosts) && newMediaPosts.length > 0) {
+    postEngagementTracker.registerPosts(newMediaPosts);
+    nextTick(() => {
+      postEngagementTracker.sweepAndBindElements();
+    });
+  }
 });
 
 const colors = ['blue', 'red', 'green', 'purple', 'indigo', 'emerald', 'rose', 'cyan'];
@@ -16743,6 +17044,8 @@ onUnmounted(() => {
           <!-- Grid View Mode -->
           <div v-if="channelViewMode === 'grid'" class="columns-1 sm:columns-2 md:columns-3 lg:columns-4 xl:columns-5 2xl:columns-6 gap-6">
             <div v-for="channel in channels" :key="channel.name || channel.id || channel.username"
+                 :id="'channel-card-' + getChannelCardIdentifier(channel)"
+                 :data-channel-identifier="getChannelCardIdentifier(channel)"
                  class="break-inside-avoid bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/75 dark:border-gray-750 shadow-sm hover:shadow-xl hover:border-teal-500/20 dark:hover:border-teal-500/15 transition-all duration-300 mb-6 relative overflow-hidden group">
               <!-- Subtle Hover Gradient Accent -->
               <div class="absolute -right-12 -top-12 w-24 h-24 bg-teal-500/[0.03] dark:bg-teal-500/[0.04] rounded-full blur-xl group-hover:scale-150 transition-transform duration-500 pointer-events-none"></div>
@@ -16808,7 +17111,7 @@ onUnmounted(() => {
               <!-- View Action button -->
               <button 
                 v-if="activeChannelOrUser === 'channel'" 
-                @click="activeTab = 'explorer'; channelName = channel.username || channel.name || channel.key; searchChannel()" 
+                @click="jumpToExplorerFromChannel(channel.username || channel.name || channel.key, channel)" 
                 class="w-full mt-2 py-2 bg-gray-50 hover:bg-teal-650 text-teal-600 hover:text-white dark:bg-gray-900/80 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black tracking-wide rounded-xl border border-gray-150 dark:border-gray-800/80 hover:border-transparent cursor-pointer transition-all duration-300 hover:shadow-md hover:shadow-teal-500/10 text-center flex items-center justify-center gap-1.5"
               >
                 <span>{{ t('channels.viewChannelArchive') }}</span>
@@ -16822,6 +17125,8 @@ onUnmounted(() => {
             <div 
               v-for="channel in channels" 
               :key="channel.name || channel.id || channel.username"
+              :id="'channel-card-' + getChannelCardIdentifier(channel)"
+              :data-channel-identifier="getChannelCardIdentifier(channel)"
               class="group relative bg-white dark:bg-gray-800 p-3.5 sm:p-4 rounded-2xl border border-gray-200/80 dark:border-gray-750 shadow-sm hover:shadow-md hover:border-teal-500/30 dark:hover:border-teal-500/30 transition-all duration-200 flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4"
             >
               <!-- Left Section: Avatar + Title/Name + Username/ID -->
@@ -16883,7 +17188,7 @@ onUnmounted(() => {
                 <!-- Action Button -->
                 <button 
                   v-if="activeChannelOrUser === 'channel'" 
-                  @click="activeTab = 'explorer'; channelName = channel.username || channel.name; searchChannel()" 
+                  @click="jumpToExplorerFromChannel(channel.username || channel.name || channel.key, channel)" 
                   class="px-3 py-1.5 bg-gray-50 hover:bg-teal-600 text-teal-600 hover:text-white dark:bg-gray-900 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black rounded-xl border border-gray-200 dark:border-gray-700 hover:border-transparent transition-all cursor-pointer flex items-center gap-1 shadow-xs"
                 >
                   <span>{{ t('channels.archive') }}</span>
@@ -18088,6 +18393,14 @@ onUnmounted(() => {
                       isRepeatScheduleMode ? t('explorer.scheduleRepeatly') : (isScrapingDisabled ? t('explorer.scheduled') : t('explorer.scheduleOnce'))
                     }}
                   </button>
+                  <button
+                    @click="openEngagementModal"
+                    class="px-3 py-1.5 bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-700 hover:to-emerald-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-all flex items-center gap-1.5 cursor-pointer hover:shadow-md"
+                    :title="t('explorer.readingAnalytics') || 'Reading Analytics & Most Viewed Posts'"
+                  >
+                    <Activity class="h-3 w-3" />
+                    <span>{{ t('explorer.readingAnalytics') || 'Reading Analytics' }}</span>
+                  </button>
                 </div>
               </div>
 
@@ -18372,6 +18685,7 @@ onUnmounted(() => {
                   <div
                     v-for="(post, index) in visibleFilteredPosts"
                     :id="`post-${post.key}`"
+                    :data-post-key="post.key"
                     :key="post.key || index"
                     :class="[
                       'rounded-2xl border p-5 hover:shadow-md transition-all duration-300 relative overflow-hidden',
@@ -18826,6 +19140,8 @@ onUnmounted(() => {
                 >
                   <div
                     v-for="(post, index) in visibleMediaPosts"
+                    :id="`post-${post.key}`"
+                    :data-post-key="post.key"
                     :key="post.key || index"
                     :class="[
                       'break-inside-avoid rounded-3xl shadow-sm border overflow-hidden group hover:shadow-2xl hover:-translate-y-1 transition-all duration-500',
@@ -18964,6 +19280,8 @@ onUnmounted(() => {
                 >
                   <div
                     v-for="(post, index) in visibleMediaPosts"
+                    :id="`post-${post.key}`"
+                    :data-post-key="post.key"
                     :key="post.key || index"
                     class="relative flex flex-col md:flex-row items-start md:justify-between group"
                     :style="{ 'content-visibility': 'auto', 'contain-intrinsic-size': '400px' }"
@@ -19834,6 +20152,7 @@ onUnmounted(() => {
                 v-for="(post, index) in filteredSearchResults"
                 :id="'search-post-' + (post.key || index)"
                 :data-search-post-key="post.key"
+                :data-post-key="post.key"
                 :data-search-post-index="index"
                 :key="post.key || index"
                 :class="[
@@ -20544,6 +20863,356 @@ onUnmounted(() => {
                 :alt="t('search.linkPreviewImage')"
                 @click.stop
               />
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- Reading Analytics & Post Attention Modal -->
+      <Transition
+        enter-active-class="transition duration-300 ease-out"
+        enter-from-class="opacity-0 scale-95"
+        enter-to-class="opacity-100 scale-100"
+        leave-active-class="transition duration-200 ease-in"
+        leave-from-class="opacity-100 scale-100"
+        leave-to-class="opacity-0 scale-95"
+      >
+        <div
+          v-if="isEngagementModalVisible"
+          class="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 sm:p-6"
+          @click="closeEngagementModal"
+        >
+          <div
+            class="bg-white dark:bg-gray-850 rounded-3xl shadow-2xl border border-gray-150 dark:border-gray-750 max-w-6xl w-full max-h-[92vh] flex flex-col overflow-hidden relative"
+            @click.stop
+          >
+            <!-- Modal Header -->
+            <div class="px-6 py-5 border-b border-gray-150 dark:border-gray-750 flex items-center justify-between shrink-0 bg-gray-50/50 dark:bg-gray-900/40">
+              <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-2xl bg-teal-50 dark:bg-teal-950/60 border border-teal-200/50 dark:border-teal-800/50 flex items-center justify-center text-teal-600 dark:text-teal-400 shadow-xs">
+                  <Activity class="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 class="text-base sm:text-lg font-black text-gray-900 dark:text-white flex items-center gap-2">
+                    <span>Reading Attention &amp; Post Engagement</span>
+                    <span class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-teal-100 dark:bg-teal-900/50 text-teal-800 dark:text-teal-300 border border-teal-200 dark:border-teal-800">
+                      Live Background Tracker
+                    </span>
+                  </h3>
+                  <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                    Find out which posts consume more viewing time, weighted by viewport visibility, div layout height &amp; content length.
+                  </p>
+                </div>
+              </div>
+              <button
+                @click="closeEngagementModal"
+                class="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors cursor-pointer"
+                :title="t('common.close') || 'Close'"
+              >
+                <X class="h-5 w-5" />
+              </button>
+            </div>
+
+            <!-- Modal Scrollable Content Body -->
+            <div class="flex-1 overflow-y-auto p-6 space-y-6">
+              <!-- Formula Explanation Banner -->
+              <div class="p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-teal-500/[0.07] via-emerald-500/[0.04] to-cyan-500/[0.05] dark:from-teal-950/40 dark:via-emerald-950/30 dark:to-cyan-950/30 border border-teal-200/60 dark:border-teal-800/60 shadow-xs">
+                <div class="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+                  <div class="text-[11px] font-mono font-black uppercase tracking-wider text-teal-700 dark:text-teal-400 flex items-center gap-1.5">
+                    <Sparkles class="w-3.5 h-3.5 text-teal-500" />
+                    <span>Scientific Attention Formula</span>
+                  </div>
+                  <span class="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-white/70 dark:bg-gray-800/70 text-teal-800 dark:text-teal-300 border border-teal-200/50 dark:border-teal-800/50">
+                    &Delta;t = 250ms active sampling
+                  </span>
+                </div>
+
+                <!-- LaTeX / Formula Display -->
+                <div class="py-2.5 px-4 bg-white dark:bg-gray-900 rounded-xl border border-teal-200/60 dark:border-teal-850 shadow-inner text-center font-serif text-sm sm:text-base font-bold text-gray-900 dark:text-gray-100">
+                  Engagement Score = &sum;<sub>&Delta;t</sub> (&Delta;t &times; Visibility Factor) &times; <sup>1</sup>&frasl;<sub>Expected Read Time</sub>
+                </div>
+
+                <!-- Formula Breakdown explanations -->
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mt-3 text-[11px]">
+                  <div class="p-2.5 rounded-xl bg-white/80 dark:bg-gray-800/80 border border-teal-100 dark:border-teal-900/40">
+                    <div class="font-bold text-teal-700 dark:text-teal-400 mb-0.5">&Delta;t &times; Visibility Factor</div>
+                    <div class="text-gray-600 dark:text-gray-300">
+                      Calculates vertical screen overlap, div height coverage ratio &amp; vertical center gaze focus factor.
+                    </div>
+                  </div>
+                  <div class="p-2.5 rounded-xl bg-white/80 dark:bg-gray-800/80 border border-teal-100 dark:border-teal-900/40">
+                    <div class="font-bold text-teal-700 dark:text-teal-400 mb-0.5">Expected Read Time</div>
+                    <div class="text-gray-600 dark:text-gray-300">
+                      Calculated from text length (WPM/CPM), post card div height (px) visual traversal, plus media assets (photos, videos, links).
+                    </div>
+                  </div>
+                  <div class="p-2.5 rounded-xl bg-white/80 dark:bg-gray-800/80 border border-teal-100 dark:border-teal-900/40">
+                    <div class="font-bold text-teal-700 dark:text-teal-400 mb-0.5">Score Interpretation</div>
+                    <div class="text-gray-600 dark:text-gray-300">
+                      Score &ge; 1.0 indicates deep, focused immersion exceeding expected scan time; &lt; 0.5 indicates quick skimming.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- High-level Metric KPI Cards -->
+              <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div class="p-4 rounded-2xl bg-gray-50/80 dark:bg-gray-800/60 border border-gray-200/60 dark:border-gray-700/60">
+                  <div class="text-[10px] font-mono font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1">
+                    Tracked Posts
+                  </div>
+                  <div class="text-xl sm:text-2xl font-black text-gray-900 dark:text-white font-mono">
+                    {{ engagementSummary.totalTrackedPosts }}
+                  </div>
+                  <div class="text-[10px] text-gray-500 dark:text-gray-400 mt-1">
+                    In local cache
+                  </div>
+                </div>
+
+                <div class="p-4 rounded-2xl bg-teal-50/60 dark:bg-teal-950/30 border border-teal-200/50 dark:border-teal-800/50">
+                  <div class="text-[10px] font-mono font-bold uppercase tracking-wider text-teal-600 dark:text-teal-400 mb-1">
+                    Effective View Time
+                  </div>
+                  <div class="text-xl sm:text-2xl font-black text-teal-700 dark:text-teal-300 font-mono">
+                    {{ (engagementSummary.totalEffectiveTimeSeconds / 60 >= 1) ? `${(engagementSummary.totalEffectiveTimeSeconds / 60).toFixed(1)}m` : `${engagementSummary.totalEffectiveTimeSeconds.toFixed(1)}s` }}
+                  </div>
+                  <div class="text-[10px] text-teal-600/80 dark:text-teal-400/80 mt-1">
+                    Visibility-weighted gaze time
+                  </div>
+                </div>
+
+                <div class="p-4 rounded-2xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200/50 dark:border-indigo-800/50">
+                  <div class="text-[10px] font-mono font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 mb-1">
+                    Avg Engagement
+                  </div>
+                  <div class="text-xl sm:text-2xl font-black text-indigo-700 dark:text-indigo-300 font-mono">
+                    {{ engagementSummary.averageEngagementScore.toFixed(2) }}&times;
+                  </div>
+                  <div class="text-[10px] text-indigo-600/80 dark:text-indigo-400/80 mt-1">
+                    Relative to expected time
+                  </div>
+                </div>
+
+                <div class="p-4 rounded-2xl bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200/50 dark:border-amber-800/50">
+                  <div class="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400 mb-1">
+                    Raw Dwell Time
+                  </div>
+                  <div class="text-xl sm:text-2xl font-black text-amber-700 dark:text-amber-300 font-mono">
+                    {{ (engagementSummary.totalDwellTimeSeconds / 60 >= 1) ? `${(engagementSummary.totalDwellTimeSeconds / 60).toFixed(1)}m` : `${engagementSummary.totalDwellTimeSeconds.toFixed(1)}s` }}
+                  </div>
+                  <div class="text-[10px] text-amber-600/80 dark:text-amber-400/80 mt-1">
+                    Unweighted viewport dwell
+                  </div>
+                </div>
+              </div>
+
+              <!-- Filter, Search and Sorting Controls Bar -->
+              <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-gray-50 dark:bg-gray-800/60 rounded-2xl border border-gray-200/60 dark:border-gray-700/60">
+                <!-- Sorting Pills -->
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="text-[10px] font-mono font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500 mr-1">
+                    Sort:
+                  </span>
+                  <button
+                    @click="engagementSortBy = 'engagementScore'"
+                    class="px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                    :class="engagementSortBy === 'engagementScore' ? 'bg-teal-600 text-white shadow-xs' : 'bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-650'"
+                  >
+                    🔥 Engagement Score
+                  </button>
+                  <button
+                    @click="engagementSortBy = 'effectiveTime'"
+                    class="px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                    :class="engagementSortBy === 'effectiveTime' ? 'bg-teal-600 text-white shadow-xs' : 'bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-650'"
+                  >
+                    ⏱️ Effective View Time
+                  </button>
+                  <button
+                    @click="engagementSortBy = 'dwellTime'"
+                    class="px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                    :class="engagementSortBy === 'dwellTime' ? 'bg-teal-600 text-white shadow-xs' : 'bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-650'"
+                  >
+                    👁️ Total Dwell
+                  </button>
+                  <button
+                    @click="engagementSortBy = 'viewSessions'"
+                    class="px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer"
+                    :class="engagementSortBy === 'viewSessions' ? 'bg-teal-600 text-white shadow-xs' : 'bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-650'"
+                  >
+                    🔄 Visits
+                  </button>
+                </div>
+
+                <!-- Search Input & Refresh -->
+                <div class="flex items-center gap-2">
+                  <div class="relative flex-1 sm:w-56">
+                    <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
+                    <input
+                      v-model="engagementSearchQuery"
+                      placeholder="Filter posts / authors..."
+                      class="w-full pl-8 pr-3 py-1.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-xs focus:ring-2 focus:ring-teal-500 outline-none text-gray-800 dark:text-gray-200"
+                    />
+                  </div>
+                  <button
+                    @click="refreshEngagementData"
+                    class="p-1.5 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600 border border-gray-200 dark:border-gray-600 rounded-xl text-gray-600 dark:text-gray-300 transition-colors cursor-pointer"
+                    title="Refresh data"
+                  >
+                    <RefreshCw class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              <!-- Posts Ranked List -->
+              <div v-if="filteredEngagementPosts.length === 0" class="py-12 text-center text-gray-400 dark:text-gray-500">
+                <BookOpen class="h-10 w-10 mx-auto mb-3 opacity-40 text-gray-400" />
+                <p class="text-sm font-semibold">No viewing engagement recorded yet.</p>
+                <p class="text-xs mt-1 max-w-md mx-auto text-gray-400">
+                  Scroll and read posts in the Explorer, Search, or Listen tabs. As posts come into the viewport, the background tracker will continuously record dwell times and calculate scores!
+                </p>
+              </div>
+
+              <div v-else class="space-y-3">
+                <div
+                  v-for="(postStat, idx) in filteredEngagementPosts"
+                  :key="postStat.postKey"
+                  class="p-4 sm:p-5 rounded-2xl border transition-all duration-200 hover:shadow-md bg-white dark:bg-gray-800/90 border-gray-200/70 dark:border-gray-700/70 relative group"
+                >
+                  <!-- Rank Badge & Score Header -->
+                  <div class="flex flex-wrap items-center justify-between gap-3 mb-2.5">
+                    <div class="flex items-center gap-2">
+                      <span
+                        class="w-6 h-6 rounded-lg flex items-center justify-center font-mono font-black text-xs shrink-0"
+                        :class="[
+                          idx === 0 ? 'bg-amber-500 text-white shadow-xs' :
+                          idx === 1 ? 'bg-gray-400 text-white shadow-xs' :
+                          idx === 2 ? 'bg-amber-700 text-white shadow-xs' :
+                          'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
+                        ]"
+                      >
+                        #{{ idx + 1 }}
+                      </span>
+                      <span class="text-xs font-bold text-gray-900 dark:text-white truncate max-w-xs">
+                        {{ postStat.author || postStat.channelName || 'Telegram Post' }}
+                      </span>
+                      <span v-if="postStat.date" class="text-[10px] text-gray-400 dark:text-gray-500">
+                        {{ formatDate(postStat.date) }}
+                      </span>
+                      <span class="text-[9px] font-mono px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700/60 text-gray-500 dark:text-gray-400">
+                        ID: {{ postStat.postKey }}
+                      </span>
+                    </div>
+
+                    <!-- Engagement Score Pill -->
+                    <div class="flex items-center gap-2">
+                      <div
+                        class="px-2.5 py-1 rounded-xl text-xs font-black font-mono flex items-center gap-1.5"
+                        :class="[
+                          postStat.engagementScore >= 2.0
+                            ? 'bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800'
+                            : postStat.engagementScore >= 1.0
+                            ? 'bg-teal-50 dark:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800'
+                            : postStat.engagementScore >= 0.5
+                            ? 'bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800'
+                            : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-gray-650'
+                        ]"
+                      >
+                        <span>{{ postStat.engagementScore >= 2.0 ? '🔥' : postStat.engagementScore >= 1.0 ? '📖' : postStat.engagementScore >= 0.5 ? '👀' : '⚡' }}</span>
+                        <span>{{ postStat.engagementScore.toFixed(2) }}&times;</span>
+                        <span class="text-[10px] font-sans font-semibold opacity-90 hidden sm:inline">
+                          {{
+                            postStat.engagementScore >= 2.0 ? 'Deep Read' :
+                            postStat.engagementScore >= 1.0 ? 'Thorough Read' :
+                            postStat.engagementScore >= 0.5 ? 'Moderate' : 'Skimmed'
+                          }}
+                        </span>
+                      </div>
+
+                      <!-- Jump Button -->
+                      <button
+                        @click="jumpToEngagedPost(postStat.postKey)"
+                        class="inline-flex items-center gap-1 px-2.5 py-1 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/50 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 rounded-xl border border-teal-200/60 dark:border-teal-800/60 text-xs font-bold transition-all cursor-pointer"
+                        title="Jump to this post in feed"
+                      >
+                        <span>View</span>
+                        <ChevronRight class="h-3 w-3" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <!-- Text Excerpt -->
+                  <p v-if="postStat.textSnippet" class="text-xs text-gray-700 dark:text-gray-300 line-clamp-2 mb-3 whitespace-pre-wrap break-words leading-relaxed">
+                    {{ postStat.textSnippet }}
+                  </p>
+
+                  <!-- Detailed Factor Breakdown Grid -->
+                  <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2.5 border-t border-gray-100 dark:border-gray-700/60 text-[11px]">
+                    <div class="flex flex-col">
+                      <span class="text-[10px] font-mono text-gray-400 uppercase">Effective Time</span>
+                      <span class="font-mono font-bold text-teal-600 dark:text-teal-400">
+                        {{ postStat.effectiveViewTimeSeconds.toFixed(1) }}s
+                      </span>
+                    </div>
+
+                    <div class="flex flex-col">
+                      <span class="text-[10px] font-mono text-gray-400 uppercase">Expected Time</span>
+                      <span class="font-mono font-bold text-gray-800 dark:text-gray-200" :title="`Base: ${postStat.breakdown?.baseTime || 1.5}s | Text: ${postStat.breakdown?.textTime || 0}s | Height: ${postStat.breakdown?.heightTime || 0}s | Media: ${postStat.breakdown?.mediaTime || 0}s`">
+                        {{ postStat.expectedReadTimeSeconds.toFixed(1) }}s
+                      </span>
+                    </div>
+
+                    <div class="flex flex-col">
+                      <span class="text-[10px] font-mono text-gray-400 uppercase">Div Height</span>
+                      <span class="font-mono font-bold text-gray-800 dark:text-gray-200">
+                        {{ postStat.measuredHeightPx }}px
+                      </span>
+                    </div>
+
+                    <div class="flex flex-col">
+                      <span class="text-[10px] font-mono text-gray-400 uppercase">Content Length</span>
+                      <span class="font-mono font-semibold text-gray-700 dark:text-gray-300">
+                        {{ postStat.breakdown?.wordCount || 0 }}w / {{ postStat.breakdown?.contentLengthChars || 0 }}c
+                      </span>
+                    </div>
+
+                    <div class="flex flex-col col-span-2 sm:col-span-1">
+                      <span class="text-[10px] font-mono text-gray-400 uppercase">Dwell / Visits</span>
+                      <span class="font-mono font-semibold text-gray-700 dark:text-gray-300">
+                        {{ postStat.totalDwellTimeSeconds.toFixed(1) }}s / {{ postStat.viewSessionsCount || 1 }}&times;
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Modal Footer -->
+            <div class="px-6 py-4 border-t border-gray-150 dark:border-gray-750 bg-gray-50/80 dark:bg-gray-900/60 flex flex-wrap items-center justify-between gap-3 shrink-0">
+              <div class="flex items-center gap-2">
+                <button
+                  @click="exportEngagementDataJson"
+                  class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-xl border border-gray-200 dark:border-gray-700 text-xs font-bold transition-all cursor-pointer"
+                  title="Export full analytics report as JSON"
+                >
+                  <Download class="h-3.5 w-3.5" />
+                  <span>Export JSON</span>
+                </button>
+                <button
+                  @click="resetEngagementStats"
+                  class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/40 dark:hover:bg-rose-900/40 text-rose-600 dark:text-rose-400 rounded-xl border border-rose-200 dark:border-rose-900/30 text-xs font-bold transition-all cursor-pointer"
+                  title="Reset recorded view time stats"
+                >
+                  <RotateCcw class="h-3.5 w-3.5" />
+                  <span>Reset Stats</span>
+                </button>
+              </div>
+
+              <button
+                @click="closeEngagementModal"
+                class="px-4 py-2 bg-gray-900 hover:bg-black dark:bg-white dark:hover:bg-gray-100 text-white dark:text-gray-900 rounded-xl text-xs font-bold transition-all cursor-pointer"
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>
@@ -23271,6 +23940,7 @@ onUnmounted(() => {
                     v-for="(post, index) in visibleListenPosts"
                     :key="post.key || index"
                     :id="'listen-post-' + (post.key || index)"
+                    :data-post-key="post.key"
                     class="rounded-3xl shadow-sm border p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden bg-white dark:bg-gray-800"
                     :class="[
                       newlyFetchedListenKeys.has(post.key) || (post.id && newlyFetchedListenKeys.has(post.id))
@@ -23925,6 +24595,7 @@ onUnmounted(() => {
                         v-for="(post, index) in visibleListenPosts"
                         :key="post.key || index"
                         :id="'listen-post-' + (post.key || index)"
+                        :data-post-key="post.key"
                         class="p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-gray-200/90 dark:border-gray-700/80 bg-white/95 dark:bg-gray-900/70 hover:bg-white dark:hover:bg-gray-900 hover:border-teal-400/60 dark:hover:border-teal-500/50 hover:shadow-md dark:hover:shadow-lg dark:hover:shadow-black/50 transition-all duration-200 space-y-3.5 group/post"
                       >
                         <!-- Post Header: User/Author Info, Badge & External Actions -->

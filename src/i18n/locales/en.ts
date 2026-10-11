@@ -216,6 +216,7 @@ export default {
     scheduleRepeatly: "Schedule Repeatly",
     scheduleOnce: "Schedule Once",
     scheduled: "Scheduled",
+    readingAnalytics: "Reading Analytics",
     filterPosts: "Filter Posts",
     filterAuthorPlaceholder: "Filter by author...",
     feedActivityTimeline: "Feed Activity Timeline",
