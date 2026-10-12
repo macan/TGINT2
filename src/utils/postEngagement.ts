@@ -78,6 +78,7 @@ export interface PostViewStats {
   viewSessionsCount: number;
   firstViewedAt: number;
   lastViewedAt: number;
+  slowStartExpiresAt?: number;
 }
 
 export interface ExpectedReadTimeOptions {
@@ -97,6 +98,40 @@ export interface MostViewedQueryOptions {
 }
 
 const STORAGE_KEY = '__post_engagement_stats_v1__';
+const MAX_CACHED_POSTS = 1000;
+
+function pruneStatsForStorage(allStats: PostViewStats[]): PostViewStats[] {
+  if (allStats.length <= MAX_CACHED_POSTS) return allStats;
+
+  // Hybrid retention strategy:
+  // 1. Keep top recent posts (up to 700)
+  const byRecency = [...allStats].sort((a, b) => (b.lastViewedAt || 0) - (a.lastViewedAt || 0));
+  const recentSlice = byRecency.slice(0, 700);
+
+  // 2. Keep top most viewed / engaged posts by effective view time (up to 300)
+  const byEngagement = [...allStats].sort((a, b) => (b.effectiveViewTimeSeconds || 0) - (a.effectiveViewTimeSeconds || 0));
+  const engagedSlice = byEngagement.slice(0, 300);
+
+  // Deduplicate entries by postKey
+  const map = new Map<string, PostViewStats>();
+  recentSlice.forEach(s => map.set(s.postKey, s));
+  engagedSlice.forEach(s => map.set(s.postKey, s));
+
+  let results = Array.from(map.values());
+  if (results.length > MAX_CACHED_POSTS) {
+    const now = Date.now();
+    results.sort((a, b) => {
+      const ageHoursA = Math.max(0, (now - (a.lastViewedAt || 0)) / (1000 * 3600));
+      const ageHoursB = Math.max(0, (now - (b.lastViewedAt || 0)) / (1000 * 3600));
+      const scoreA = (a.effectiveViewTimeSeconds || 0) * 1.5 + (100 / (1 + ageHoursA * 0.1));
+      const scoreB = (b.effectiveViewTimeSeconds || 0) * 1.5 + (100 / (1 + ageHoursB * 0.1));
+      return scoreB - scoreA;
+    });
+    results = results.slice(0, MAX_CACHED_POSTS);
+  }
+
+  return results;
+}
 
 /**
  * Strips HTML tags and excessive whitespace to analyze raw textual content
@@ -327,7 +362,7 @@ export class PostEngagementTracker {
   private intervalTimer: any = null;
   private lastTickTimestamp: number = 0;
   private lastUserActivityTimestamp: number = Date.now();
-  private idleThresholdMs: number = 60000; // 60s idle threshold
+  private idleThresholdMs: number = 45000; // 45s idle threshold
   private sampleIntervalMs: number = 250;   // 250ms sampling loop
 
   private listeners: Set<(stats: PostViewStats[]) => void> = new Set();
@@ -336,6 +371,17 @@ export class PostEngagementTracker {
   constructor() {
     this.loadFromStorage();
     this.setupUserActivityListeners();
+  }
+
+  private getPrunedExportObject(): Record<string, any> {
+    const allStats = Array.from(this.statsMap.values());
+    const pruned = pruneStatsForStorage(allStats);
+    const exportObj: Record<string, any> = {};
+    pruned.forEach((val) => {
+      const { postRef, ...rest } = val;
+      exportObj[val.postKey] = rest;
+    });
+    return exportObj;
   }
 
   /**
@@ -347,8 +393,12 @@ export class PostEngagementTracker {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed: Record<string, PostViewStats> = JSON.parse(raw);
-        Object.entries(parsed).forEach(([key, val]) => {
-          this.statsMap.set(key, val);
+        const entries = Object.values(parsed);
+        const pruned = pruneStatsForStorage(entries);
+        pruned.forEach((val) => {
+          if (val && val.postKey) {
+            this.statsMap.set(val.postKey, val);
+          }
         });
       }
     } catch (e) {
@@ -366,12 +416,7 @@ export class PostEngagementTracker {
     this.saveDebounceTimer = setTimeout(() => {
       this.saveDebounceTimer = null;
       try {
-        const exportObj: Record<string, PostViewStats> = {};
-        this.statsMap.forEach((val, key) => {
-          // Do not serialize circular postRef
-          const { postRef, ...rest } = val;
-          exportObj[key] = rest;
-        });
+        const exportObj = this.getPrunedExportObject();
         localStorage.setItem(STORAGE_KEY, JSON.stringify(exportObj));
       } catch (e) {
         console.warn('[PostEngagementTracker] Storage save error:', e);
@@ -390,9 +435,12 @@ export class PostEngagementTracker {
     };
 
     window.addEventListener('mousemove', onUserActive, { passive: true });
+    window.addEventListener('pointermove', onUserActive, { passive: true });
+    window.addEventListener('wheel', onUserActive, { passive: true });
     window.addEventListener('scroll', onUserActive, { passive: true });
     window.addEventListener('keydown', onUserActive, { passive: true });
     window.addEventListener('touchstart', onUserActive, { passive: true });
+    window.addEventListener('touchmove', onUserActive, { passive: true });
     window.addEventListener('click', onUserActive, { passive: true });
 
     // Handle page unload / visibility change
@@ -409,11 +457,7 @@ export class PostEngagementTracker {
   private flushImmediateSave() {
     if (typeof window === 'undefined') return;
     try {
-      const exportObj: Record<string, PostViewStats> = {};
-      this.statsMap.forEach((val, key) => {
-        const { postRef, ...rest } = val;
-        exportObj[key] = rest;
-      });
+      const exportObj = this.getPrunedExportObject();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(exportObj));
     } catch {
       // Ignore
@@ -580,7 +624,23 @@ export class PostEngagementTracker {
     const isWindowFocused = document.hasFocus ? document.hasFocus() : true;
     const isUserActive = (Date.now() - this.lastUserActivityTimestamp) < this.idleThresholdMs;
 
-    if (!isDocumentVisible || !isWindowFocused || !isUserActive) {
+    // Check if any modal or higher-layer overlay is currently open in the DOM
+    const modalOverlays = document.querySelectorAll<HTMLElement>(
+      ".fixed.inset-0, [class*='fixed'][class*='inset-0']"
+    );
+    let isModalOpen = false;
+    for (let i = 0; i < modalOverlays.length; i++) {
+      const el = modalOverlays[i];
+      if (el && el.offsetParent !== null && window.getComputedStyle(el).display !== 'none' && window.getComputedStyle(el).visibility !== 'hidden') {
+        const rect = el.getBoundingClientRect();
+        if (rect.width >= window.innerWidth * 0.4 && rect.height >= window.innerHeight * 0.4) {
+          isModalOpen = true;
+          break;
+        }
+      }
+    }
+
+    if (!isDocumentVisible || !isWindowFocused || !isUserActive || isModalOpen) {
       return;
     }
 
@@ -602,6 +662,7 @@ export class PostEngagementTracker {
       // Only accrue if element is visibly on-screen
       if (vis.visibilityFactor > 0.04) {
         let stats = this.statsMap.get(key);
+        const nowMs = Date.now();
         if (!stats) {
           const postMeta = this.postMetadataMap.get(key) || { key };
           const expected = calculateExpectedReadTime(postMeta, element);
@@ -619,22 +680,33 @@ export class PostEngagementTracker {
             measuredHeightPx: vis.elementHeightPx,
             breakdown: expected.breakdown,
             viewSessionsCount: 0,
-            firstViewedAt: Date.now(),
-            lastViewedAt: Date.now(),
+            firstViewedAt: nowMs,
+            lastViewedAt: nowMs,
+            slowStartExpiresAt: nowMs + 2500, // 2.5s slow start grace period
           };
           this.statsMap.set(key, stats);
         }
 
         // Detect new view session (if last viewed was more than 15s ago)
-        if (Date.now() - stats.lastViewedAt > 15000) {
+        if (nowMs - stats.lastViewedAt > 15000) {
           stats.viewSessionsCount += 1;
+          stats.slowStartExpiresAt = nowMs + 2500;
+        } else if (!stats.slowStartExpiresAt) {
+          stats.slowStartExpiresAt = nowMs + 2500;
+        }
+
+        // Slow start approach: pause calculation for 2.5s when newly in viewport
+        if (stats.slowStartExpiresAt && nowMs < stats.slowStartExpiresAt) {
+          stats.lastViewedAt = nowMs;
+          stats.measuredHeightPx = vis.elementHeightPx;
+          return;
         }
 
         // Apply formula step: \Delta t \times Visibility Factor
         const deltaEffective = deltaSec * vis.visibilityFactor;
         stats.effectiveViewTimeSeconds += deltaEffective;
         stats.totalDwellTimeSeconds += deltaSec;
-        stats.lastViewedAt = Date.now();
+        stats.lastViewedAt = nowMs;
         stats.measuredHeightPx = vis.elementHeightPx;
 
         // Recalculate engagement score
