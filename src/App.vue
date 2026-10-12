@@ -8933,19 +8933,6 @@ onMounted(() => {
   window.addEventListener("scroll", handleScroll);
 
   // Start background post engagement and viewing time tracking
-  postEngagementTracker.setOcclusionPredicate(() => {
-    return (
-      isEngagementModalVisible.value ||
-      isPostModalVisible.value ||
-      Boolean(lightboxPhoto.value) ||
-      isAnalysisModalVisible.value ||
-      showLoginModal.value ||
-      showOldVersionsModal.value ||
-      isMoveModalOpen.value ||
-      isListenModalOpen.value ||
-      isImportModalOpen.value
-    );
-  });
   postEngagementTracker.start(250);
   postEngagementTracker.sweepAndBindElements();
 
@@ -9093,6 +9080,7 @@ const engagementSortBy = ref<'engagementScore' | 'effectiveTime' | 'dwellTime' |
 const engagementMinTimeFilter = ref(0);
 const engagementSearchQuery = ref('');
 const engagementPostsList = ref<PostViewStats[]>([]);
+const engagementVersion = ref(0);
 
 const openEngagementModal = () => {
   refreshEngagementData();
@@ -9104,6 +9092,7 @@ const closeEngagementModal = () => {
 };
 
 const refreshEngagementData = () => {
+  engagementVersion.value++;
   postEngagementTracker.sweepAndBindElements();
   if (posts.value && posts.value.length > 0) {
     postEngagementTracker.registerPosts(posts.value);
@@ -9130,14 +9119,14 @@ const filteredEngagementPosts = computed(() => {
 });
 
 const engagementSummary = computed(() => {
+  const _v = engagementVersion.value;
   return postEngagementTracker.exportSummary();
 });
 
 const resetEngagementStats = () => {
-  if (window.confirm('Are you sure you want to reset all tracked engagement metrics?')) {
-    postEngagementTracker.reset();
-    refreshEngagementData();
-  }
+  postEngagementTracker.reset();
+  engagementVersion.value++;
+  refreshEngagementData();
 };
 
 const exportEngagementDataJson = () => {
@@ -9157,26 +9146,6 @@ const exportEngagementDataJson = () => {
 
 const jumpToEngagedPost = (postKey: string) => {
   isEngagementModalVisible.value = false;
-  if (!postKey) return;
-
-  const dotIdx = postKey.indexOf('.');
-  const targetChannel = dotIdx !== -1 ? postKey.slice(0, dotIdx) : '';
-
-  // If the post belongs to a different channel than the currently loaded explorer channel,
-  // load that channel first then scroll to the post
-  if (targetChannel && currentChannelName.value && targetChannel.toLowerCase() !== currentChannelName.value.toLowerCase()) {
-    activeTab.value = 'explorer';
-    channelName.value = targetChannel;
-    searchChannel().then(() => {
-      nextTick(() => {
-        setTimeout(() => {
-          scrollToPost(postKey);
-        }, 300);
-      });
-    });
-    return;
-  }
-
   if (activeTab.value !== 'explorer') {
     activeTab.value = 'explorer';
   }
@@ -9202,6 +9171,12 @@ watch(posts, (newPosts) => {
     nextTick(() => {
       postEngagementTracker.sweepAndBindElements();
     });
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 200);
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 600);
   }
 }, { immediate: true });
 
@@ -9211,6 +9186,9 @@ watch(listenPosts, (newPosts) => {
     nextTick(() => {
       postEngagementTracker.sweepAndBindElements();
     });
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 200);
   }
 });
 
@@ -12686,14 +12664,6 @@ const searchChannel = async () => {
         classifyChannelWithSystemOne();
       }
 
-      // Explicitly register newly fetched channel posts and sweep DOM cards for engagement tracking
-      if (Array.isArray(posts.value) && posts.value.length > 0) {
-        postEngagementTracker.registerPosts(posts.value);
-        nextTick(() => {
-          postEngagementTracker.sweepAndBindElements();
-        });
-      }
-
       await nextTick();
       if (
         posts.value.length > 0 &&
@@ -13134,10 +13104,6 @@ const loadMorePosts = async () => {
         } else {
           posts.value = [...posts.value, ...newPosts];
           postsRenderLimit.value += 50;
-          postEngagementTracker.registerPosts(newPosts);
-          nextTick(() => {
-            postEngagementTracker.sweepAndBindElements();
-          });
           if (posts.value.length > 10 && !channelClassification.value && !isClassifyingChannel.value) {
             classifyChannelWithSystemOne();
           }
@@ -13322,27 +13288,8 @@ const visibleFilteredPosts = computed(() => {
   return filteredPosts.value.slice(0, postsRenderLimit.value);
 });
 
-// Continuously register and bind newly rendered posts when switching channels or loading more posts
-watch(visibleFilteredPosts, (newVisiblePosts) => {
-  if (Array.isArray(newVisiblePosts) && newVisiblePosts.length > 0) {
-    postEngagementTracker.registerPosts(newVisiblePosts);
-    nextTick(() => {
-      postEngagementTracker.sweepAndBindElements();
-    });
-  }
-}, { immediate: true });
-
 const visibleMediaPosts = computed(() => {
   return mediaPosts.value.slice(0, postsRenderLimit.value);
-});
-
-watch(visibleMediaPosts, (newMediaPosts) => {
-  if (Array.isArray(newMediaPosts) && newMediaPosts.length > 0) {
-    postEngagementTracker.registerPosts(newMediaPosts);
-    nextTick(() => {
-      postEngagementTracker.sweepAndBindElements();
-    });
-  }
 });
 
 const colors = ['blue', 'red', 'green', 'purple', 'indigo', 'emerald', 'rose', 'cyan'];

@@ -332,7 +332,6 @@ export class PostEngagementTracker {
 
   private listeners: Set<(stats: PostViewStats[]) => void> = new Set();
   private saveDebounceTimer: any = null;
-  private occlusionPredicate: (() => boolean) | null = null;
 
   constructor() {
     this.loadFromStorage();
@@ -450,55 +449,6 @@ export class PostEngagementTracker {
   }
 
   /**
-   * Sets an explicit occlusion predicate (e.g. from reactive modal/lightbox state)
-   * returning true when modal dialogs, lightbox, or popups are active.
-   */
-  public setOcclusionPredicate(fn: (() => boolean) | null) {
-    this.occlusionPredicate = fn;
-  }
-
-  /**
-   * Checks whether the main page / lower layer posts are occluded by any
-   * active full-screen modal, popup backdrop, dialog overlay, or floating window.
-   */
-  public isPageOccluded(): boolean {
-    if (this.occlusionPredicate) {
-      try {
-        if (this.occlusionPredicate()) {
-          return true;
-        }
-      } catch (err) {
-        console.warn('[PostEngagementTracker] Occlusion predicate error:', err);
-      }
-    }
-
-    if (typeof document === 'undefined') return false;
-
-    // Detect any active modal, dialog, or backdrop overlay covering the viewport
-    const overlays = document.querySelectorAll<HTMLElement>(
-      '.fixed.inset-0, [class*="fixed inset-0"], [aria-modal="true"], [role="dialog"], dialog[open], .backdrop-blur-sm, .backdrop-blur-md, .backdrop-blur-xl'
-    );
-
-    for (let i = 0; i < overlays.length; i++) {
-      const el = overlays[i];
-      if (!el) continue;
-      // Ensure element is actually mounted, visible, and covers a substantial portion of the screen
-      if (el.offsetWidth > 150 && el.offsetHeight > 150) {
-        const style = window.getComputedStyle(el);
-        if (
-          style.display !== 'none' &&
-          style.visibility !== 'hidden' &&
-          parseFloat(style.opacity || '1') > 0.05
-        ) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
-
-  /**
    * Registers or updates a post metadata and optional DOM element
    */
   public registerPost(post: any, element?: HTMLElement | null) {
@@ -514,13 +464,10 @@ export class PostEngagementTracker {
     if (!this.statsMap.has(key)) {
       const expected = calculateExpectedReadTime(post, element);
       const text = extractCleanPostText(post);
-      const dotIdx = key.indexOf('.');
-      const fallbackChannelFromKey = dotIdx !== -1 ? key.slice(0, dotIdx) : '';
-      const channelName = post.data?.author || post.data?.user || fallbackChannelFromKey;
       const stats: PostViewStats = {
         postKey: key,
-        channelName: channelName,
-        author: post.data?.author || post.data?.user || channelName,
+        channelName: post.data?.author || post.data?.user || '',
+        author: post.data?.author || post.data?.user || '',
         date: post.data?.date,
         textSnippet: text.slice(0, 140),
         postRef: post,
@@ -628,13 +575,12 @@ export class PostEngagementTracker {
       deltaSec = Math.min(0.5, this.sampleIntervalMs / 1000);
     }
 
-    // Skip if document is hidden, window is not focused, user is idle, or page is occluded by modals
+    // Skip if document is hidden or window is not focused or user is idle
     const isDocumentVisible = !document.hidden;
     const isWindowFocused = document.hasFocus ? document.hasFocus() : true;
     const isUserActive = (Date.now() - this.lastUserActivityTimestamp) < this.idleThresholdMs;
-    const isOccluded = this.isPageOccluded();
 
-    if (!isDocumentVisible || !isWindowFocused || !isUserActive || isOccluded) {
+    if (!isDocumentVisible || !isWindowFocused || !isUserActive) {
       return;
     }
 
@@ -651,26 +597,6 @@ export class PostEngagementTracker {
         return;
       }
 
-      // Check if element is physically occluded by a higher-layer modal or popup
-      const rect = element.getBoundingClientRect();
-      if (rect.height <= 0 || rect.width <= 0) return;
-
-      const midX = Math.max(0, Math.min(window.innerWidth - 1, (rect.left + rect.right) / 2));
-      const midY = Math.max(0, Math.min(viewportH - 1, (Math.max(0, rect.top) + Math.min(viewportH, rect.bottom)) / 2));
-      const topEl = document.elementFromPoint(midX, midY);
-      if (topEl && !element.contains(topEl) && !topEl.contains(element)) {
-        const topStyle = window.getComputedStyle(topEl);
-        const z = parseInt(topStyle.zIndex, 10);
-        if (
-          topStyle.position === 'fixed' ||
-          (z && z >= 15) ||
-          topEl.closest('.fixed.inset-0, [aria-modal="true"], [role="dialog"]')
-        ) {
-          // The post is physically occluded by an overlapping modal/element
-          return;
-        }
-      }
-
       const vis = calculateVisibilityFactor(element, viewportH);
 
       // Only accrue if element is visibly on-screen
@@ -679,13 +605,10 @@ export class PostEngagementTracker {
         if (!stats) {
           const postMeta = this.postMetadataMap.get(key) || { key };
           const expected = calculateExpectedReadTime(postMeta, element);
-          const dotIdx = key.indexOf('.');
-          const fallbackChannelFromKey = dotIdx !== -1 ? key.slice(0, dotIdx) : '';
-          const channelName = postMeta.data?.author || postMeta.data?.user || fallbackChannelFromKey;
           stats = {
             postKey: key,
-            channelName: channelName,
-            author: postMeta.data?.author || postMeta.data?.user || channelName,
+            channelName: postMeta.data?.author || postMeta.data?.user || '',
+            author: postMeta.data?.author || postMeta.data?.user || '',
             date: postMeta.data?.date,
             textSnippet: extractCleanPostText(postMeta).slice(0, 140),
             postRef: postMeta,
