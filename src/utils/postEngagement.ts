@@ -38,6 +38,7 @@ export interface ExpectedReadTimeBreakdown {
     hasForward: boolean;
     hasContact: boolean;
   };
+  substanceFactor?: number;
 }
 
 export interface ExpectedReadTimeResult {
@@ -70,7 +71,8 @@ export interface PostViewStats {
   effectiveViewTimeSeconds: number; // \sum (\Delta t * Visibility Factor)
   totalDwellTimeSeconds: number;     // Raw time spent in viewport
   expectedReadTimeSeconds: number;  // Calculated expected read time
-  engagementScore: number;          // effectiveViewTime / expectedReadTime
+  engagementScore: number;          // Optimized engagement score
+  substanceFactor?: number;         // Content substance density weight (0.50 - 1.10)
 
   // Additional detail
   measuredHeightPx: number;
@@ -85,7 +87,7 @@ export interface ExpectedReadTimeOptions {
   wordsPerMinute?: number;     // Default: 220 WPM
   cjkCharsPerMinute?: number;  // Default: 360 CPM
   heightScanRatePxPerSec?: number; // Default: 250 px/s
-  minReadTimeSeconds?: number; // Default: 1.8s
+  minReadTimeSeconds?: number; // Default: 3.5s (realistic cognitive floor)
   maxReadTimeSeconds?: number; // Default: 180s
 }
 
@@ -163,7 +165,7 @@ export function calculateExpectedReadTime(
     wordsPerMinute = 220,
     cjkCharsPerMinute = 360,
     heightScanRatePxPerSec = 280,
-    minReadTimeSeconds = 1.8,
+    minReadTimeSeconds = 3.5,
     maxReadTimeSeconds = 180,
   } = options;
 
@@ -207,18 +209,18 @@ export function calculateExpectedReadTime(
 
   let mediaTime = 0;
   if (photoCount > 0) {
-    // Primary photo takes ~3.0s, subsequent photos take ~1.2s each
-    mediaTime += 3.0 + Math.min(3, photoCount - 1) * 1.2;
+    // Primary photo takes ~3.5s, subsequent photos take ~1.5s each
+    mediaTime += 3.5 + Math.min(3, photoCount - 1) * 1.5;
   }
   if (videoCount > 0) {
     // Video preview / engagement baseline
-    mediaTime += 5.5 + Math.min(2, videoCount - 1) * 2.0;
+    mediaTime += 6.0 + Math.min(2, videoCount - 1) * 2.0;
   }
   if (documentCount > 0) {
-    mediaTime += 2.0 * Math.min(3, documentCount);
+    mediaTime += 2.5 * Math.min(3, documentCount);
   }
   if (hasLinkPreview) {
-    mediaTime += 2.5;
+    mediaTime += 3.0;
   }
 
   // Interactive & Contextual structures
@@ -228,12 +230,18 @@ export function calculateExpectedReadTime(
   if (hasContact) interactiveTime += 2.0;
 
   // Base cognitive orientation time (identifying sender, avatar, timestamp, reading card boundaries)
-  const baseTime = 1.5;
+  const baseTime = 2.0;
 
   const rawExpectedTotal = baseTime + textTime + heightTime + mediaTime + interactiveTime;
   const totalExpectedSeconds = Math.max(
     minReadTimeSeconds,
     Math.min(maxReadTimeSeconds, Number(rawExpectedTotal.toFixed(2)))
+  );
+
+  // Informational units for substance factor
+  const mediaAssetUnits = photoCount + videoCount + documentCount + (hasLinkPreview ? 1 : 0);
+  const substanceFactor = Number(
+    Math.min(1.10, Math.max(0.50, 0.50 + 0.55 * Math.tanh((words + cjkChars * 0.6 + mediaAssetUnits * 25) / 35))).toFixed(3)
   );
 
   const breakdown: ExpectedReadTimeBreakdown = {
@@ -256,6 +264,7 @@ export function calculateExpectedReadTime(
       hasForward,
       hasContact,
     },
+    substanceFactor,
   };
 
   return {
@@ -339,14 +348,68 @@ export function calculateVisibilityFactor(
 }
 
 /**
- * Calculates Engagement Score = (Effective View Time) / (Expected Read Time)
+ * Calculates Content Substance Factor (0.50 to 1.10).
+ * Scales lower information density (e.g. empty or few-word posts) down appropriately
+ * so that they cannot easily gain high engagement scores over substantive articles.
+ */
+export function calculateContentSubstanceFactor(
+  breakdown?: ExpectedReadTimeBreakdown | null,
+  textSnippet?: string
+): number {
+  if (breakdown && typeof breakdown.substanceFactor === 'number') {
+    return breakdown.substanceFactor;
+  }
+
+  const words = breakdown?.wordCount ?? (textSnippet ? textSnippet.trim().split(/\s+/).filter(Boolean).length : 0);
+  const cjk = breakdown?.cjkCharCount ?? (textSnippet ? (textSnippet.match(/[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af]/g) || []).length : 0);
+  const mediaCount = (breakdown?.mediaDetails?.photoCount || 0) +
+    (breakdown?.mediaDetails?.videoCount || 0) +
+    (breakdown?.mediaDetails?.documentCount || 0) +
+    (breakdown?.mediaDetails?.hasLinkPreview ? 1 : 0);
+
+  const infoUnits = words + (cjk * 0.6) + (mediaCount * 25);
+  const substance = 0.50 + 0.55 * Math.tanh(infoUnits / 35);
+  return Number(Math.min(1.10, Math.max(0.50, substance)).toFixed(3));
+}
+
+/**
+ * Calculates Optimized Engagement Score.
+ *
+ * Solves the Short-Content / Small-Denominator Anomaly by:
+ * 1. Safe Expected Denominator Floor: Ensures baseline denominator is at least 3.5s.
+ * 2. Substance Weighting (W_substance): Low information density (0.50 to 1.10) prevents trivial posts from over-indexing.
+ * 3. Dwell Maturity Gating (M_dwell): Requires >= 2.5s of focused effective dwell to count as mature engagement.
+ * 4. Sublinear Logarithmic Saturation: Above 1.0x ratio, uses 1 + ln(ratio) diminishing returns.
  */
 export function calculatePostEngagementScore(
   effectiveViewTimeSeconds: number,
-  expectedReadTimeSeconds: number
+  expectedReadTimeSeconds: number,
+  breakdown?: ExpectedReadTimeBreakdown | null,
+  textSnippet?: string
 ): number {
-  if (!expectedReadTimeSeconds || expectedReadTimeSeconds <= 0) return 0;
-  return Number((effectiveViewTimeSeconds / expectedReadTimeSeconds).toFixed(3));
+  if (!expectedReadTimeSeconds || expectedReadTimeSeconds <= 0 || effectiveViewTimeSeconds <= 0) {
+    return 0;
+  }
+
+  // Denominator floor of 3.5s to eliminate mathematical small-denominator explosion
+  const safeExpectedTime = Math.max(3.5, expectedReadTimeSeconds);
+
+  // Raw relative ratio
+  const rawRatio = effectiveViewTimeSeconds / safeExpectedTime;
+
+  // Logarithmic damping curve for ratio > 1.0 (sublinear immersion return)
+  const dampedRatio = rawRatio <= 1.0
+    ? rawRatio
+    : 1.0 + Math.log(rawRatio);
+
+  // Content Substance Factor (0.50 for empty/trivial posts up to ~1.10 for rich posts)
+  const substanceWeight = calculateContentSubstanceFactor(breakdown, textSnippet);
+
+  // Dwell Maturity Factor: requires at least 2.5s of focused effective viewing to reach 1.0 multiplier
+  const dwellMaturity = Math.min(1.0, Math.max(0.2, effectiveViewTimeSeconds / 2.5));
+
+  const finalScore = substanceWeight * dwellMaturity * dampedRatio;
+  return Number(Math.max(0, finalScore).toFixed(3));
 }
 
 /**
@@ -397,6 +460,15 @@ export class PostEngagementTracker {
         const pruned = pruneStatsForStorage(entries);
         pruned.forEach((val) => {
           if (val && val.postKey) {
+            val.substanceFactor = calculateContentSubstanceFactor(val.breakdown, val.textSnippet);
+            if (val.effectiveViewTimeSeconds > 0 && val.expectedReadTimeSeconds > 0) {
+              val.engagementScore = calculatePostEngagementScore(
+                val.effectiveViewTimeSeconds,
+                val.expectedReadTimeSeconds,
+                val.breakdown,
+                val.textSnippet
+              );
+            }
             this.statsMap.set(val.postKey, val);
           }
         });
@@ -519,6 +591,7 @@ export class PostEngagementTracker {
         totalDwellTimeSeconds: 0,
         expectedReadTimeSeconds: expected.expectedTimeSeconds,
         engagementScore: 0,
+        substanceFactor: calculateContentSubstanceFactor(expected.breakdown, text),
         measuredHeightPx: expected.breakdown.measuredHeightPx,
         breakdown: expected.breakdown,
         viewSessionsCount: 0,
@@ -535,9 +608,12 @@ export class PostEngagementTracker {
         stats.measuredHeightPx = expected.breakdown.measuredHeightPx;
         stats.expectedReadTimeSeconds = expected.expectedTimeSeconds;
         stats.breakdown = expected.breakdown;
+        stats.substanceFactor = calculateContentSubstanceFactor(expected.breakdown, stats.textSnippet);
         stats.engagementScore = calculatePostEngagementScore(
           stats.effectiveViewTimeSeconds,
-          stats.expectedReadTimeSeconds
+          stats.expectedReadTimeSeconds,
+          stats.breakdown,
+          stats.textSnippet
         );
       }
     }
@@ -590,9 +666,12 @@ export class PostEngagementTracker {
               const recalculation = calculateExpectedReadTime(postObj, el);
               stat.expectedReadTimeSeconds = recalculation.expectedTimeSeconds;
               stat.breakdown = recalculation.breakdown;
+              stat.substanceFactor = calculateContentSubstanceFactor(recalculation.breakdown, stat.textSnippet);
               stat.engagementScore = calculatePostEngagementScore(
                 stat.effectiveViewTimeSeconds,
-                stat.expectedReadTimeSeconds
+                stat.expectedReadTimeSeconds,
+                stat.breakdown,
+                stat.textSnippet
               );
             }
           }
@@ -710,9 +789,12 @@ export class PostEngagementTracker {
         stats.measuredHeightPx = vis.elementHeightPx;
 
         // Recalculate engagement score
+        stats.substanceFactor = calculateContentSubstanceFactor(stats.breakdown, stats.textSnippet);
         stats.engagementScore = calculatePostEngagementScore(
           stats.effectiveViewTimeSeconds,
-          stats.expectedReadTimeSeconds
+          stats.expectedReadTimeSeconds,
+          stats.breakdown,
+          stats.textSnippet
         );
 
         hasChanges = true;

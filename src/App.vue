@@ -21643,36 +21643,42 @@ onUnmounted(() => {
             <div class="flex flex-wrap items-center justify-between gap-2 mb-2.5">
               <div class="text-[11px] font-mono font-black uppercase tracking-wider text-teal-700 dark:text-teal-400 flex items-center gap-1.5">
                 <Sparkles class="w-3.5 h-3.5 text-teal-500" />
-                <span>Scientific Attention Formula</span>
+                <span>Optimized Scientific Attention Formula</span>
               </div>
               <span class="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-white/70 dark:bg-gray-800/70 text-teal-800 dark:text-teal-300 border border-teal-200/50 dark:border-teal-800/50">
-                &Delta;t = 250ms active sampling
+                &Delta;t = 250ms active sampling &bull; Substance Weighted &bull; Damped
               </span>
             </div>
 
             <!-- LaTeX / Formula Display -->
             <div class="py-2.5 px-4 bg-white dark:bg-gray-900 rounded-xl border border-teal-200/60 dark:border-teal-850 shadow-inner text-center font-serif text-sm sm:text-base font-bold text-gray-900 dark:text-gray-100">
-              Engagement Score = &sum;<sub>&Delta;t</sub> (&Delta;t &times; Visibility Factor) &times; <sup>1</sup>&frasl;<sub>Expected Read Time</sub>
+              Engagement Score = W<sub>substance</sub> &times; M<sub>dwell</sub> &times; f(<sup>T<sub>effective</sub></sup>&frasl;<sub>T<sub>expected</sub></sub>)
             </div>
 
             <!-- Formula Breakdown explanations -->
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mt-3 text-[11px]">
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-2.5 mt-3 text-[11px]">
               <div class="p-2.5 rounded-xl bg-white/80 dark:bg-gray-800/80 border border-teal-100 dark:border-teal-900/40">
-                <div class="font-bold text-teal-700 dark:text-teal-400 mb-0.5">&Delta;t &times; Visibility Factor</div>
+                <div class="font-bold text-teal-700 dark:text-teal-400 mb-0.5">T<sub>eff</sub> = &sum; (&Delta;t &times; Vis)</div>
                 <div class="text-gray-600 dark:text-gray-300">
-                  Calculates vertical screen overlap, div height coverage ratio &amp; vertical center gaze focus factor.
+                  Active view duration weighted by viewport coverage ratio &amp; vertical gaze center alignment.
                 </div>
               </div>
               <div class="p-2.5 rounded-xl bg-white/80 dark:bg-gray-800/80 border border-teal-100 dark:border-teal-900/40">
-                <div class="font-bold text-teal-700 dark:text-teal-400 mb-0.5">Expected Read Time</div>
+                <div class="font-bold text-teal-700 dark:text-teal-400 mb-0.5">W<sub>substance</sub> (Content Density)</div>
                 <div class="text-gray-600 dark:text-gray-300">
-                  Calculated from text length (WPM/CPM), post card div height (px) visual traversal, plus media assets (photos, videos, links).
+                  Substance factor (0.50&ndash;1.10&times;) scales short or zero-text posts down so they cannot artificially outrank substantive articles.
+                </div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-white/80 dark:bg-gray-800/80 border border-teal-100 dark:border-teal-900/40">
+                <div class="font-bold text-teal-700 dark:text-teal-400 mb-0.5">f(&rho;) &amp; M<sub>dwell</sub> Damping</div>
+                <div class="text-gray-600 dark:text-gray-300">
+                  Sublinear curve 1+ln(&rho;) prevents small-denominator explosion. Requires &ge;2.5s dwell to count as mature engagement.
                 </div>
               </div>
               <div class="p-2.5 rounded-xl bg-white/80 dark:bg-gray-800/80 border border-teal-100 dark:border-teal-900/40">
                 <div class="font-bold text-teal-700 dark:text-teal-400 mb-0.5">Score Interpretation</div>
                 <div class="text-gray-600 dark:text-gray-300">
-                  Score &ge; 1.0 indicates deep, focused immersion exceeding expected scan time; &lt; 0.5 indicates quick skimming.
+                  &ge;1.5&times; Deep Read 🔥 &bull; 1.0&ndash;1.4&times; Thorough 📖 &bull; 0.5&ndash;0.9&times; Moderate 👀 &bull; &lt;0.5&times; Skimmed ⚡
                 </div>
               </div>
             </div>
@@ -21831,7 +21837,7 @@ onUnmounted(() => {
                   <div
                     class="px-2.5 py-1 rounded-xl text-xs font-black font-mono flex items-center gap-1.5"
                     :class="[
-                      postStat.engagementScore >= 2.0
+                      postStat.engagementScore >= 1.5
                         ? 'bg-purple-50 dark:bg-purple-950/50 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800'
                         : postStat.engagementScore >= 1.0
                         ? 'bg-teal-50 dark:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800'
@@ -21840,11 +21846,11 @@ onUnmounted(() => {
                         : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-gray-650'
                     ]"
                   >
-                    <span>{{ postStat.engagementScore >= 2.0 ? '🔥' : postStat.engagementScore >= 1.0 ? '📖' : postStat.engagementScore >= 0.5 ? '👀' : '⚡' }}</span>
+                    <span>{{ postStat.engagementScore >= 1.5 ? '🔥' : postStat.engagementScore >= 1.0 ? '📖' : postStat.engagementScore >= 0.5 ? '👀' : '⚡' }}</span>
                     <span>{{ postStat.engagementScore.toFixed(2) }}&times;</span>
                     <span class="text-[10px] font-sans font-semibold opacity-90 hidden sm:inline">
                       {{
-                        postStat.engagementScore >= 2.0 ? 'Deep Read' :
+                        postStat.engagementScore >= 1.5 ? 'Deep Read' :
                         postStat.engagementScore >= 1.0 ? 'Thorough Read' :
                         postStat.engagementScore >= 0.5 ? 'Moderate' : 'Skimmed'
                       }}
@@ -21869,7 +21875,7 @@ onUnmounted(() => {
               </p>
 
               <!-- Detailed Factor Breakdown Grid -->
-              <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2.5 border-t border-gray-200/60 dark:border-gray-700/60 text-[11px]">
+              <div class="grid grid-cols-2 sm:grid-cols-6 gap-2 pt-2.5 border-t border-gray-200/60 dark:border-gray-700/60 text-[11px]">
                 <div class="flex flex-col">
                   <span class="text-[10px] font-mono text-gray-400 uppercase">Effective Time</span>
                   <span class="font-mono font-bold text-teal-600 dark:text-teal-400">
@@ -21879,8 +21885,15 @@ onUnmounted(() => {
 
                 <div class="flex flex-col">
                   <span class="text-[10px] font-mono text-gray-400 uppercase">Expected Time</span>
-                  <span class="font-mono font-bold text-gray-800 dark:text-gray-200" :title="`Base: ${postStat.breakdown?.baseTime || 1.5}s | Text: ${postStat.breakdown?.textTime || 0}s | Height: ${postStat.breakdown?.heightTime || 0}s | Media: ${postStat.breakdown?.mediaTime || 0}s`">
+                  <span class="font-mono font-bold text-gray-800 dark:text-gray-200" :title="`Base: ${postStat.breakdown?.baseTime || 2.0}s | Text: ${postStat.breakdown?.textTime || 0}s | Height: ${postStat.breakdown?.heightTime || 0}s | Media: ${postStat.breakdown?.mediaTime || 0}s`">
                     {{ postStat.expectedReadTimeSeconds.toFixed(1) }}s
+                  </span>
+                </div>
+
+                <div class="flex flex-col">
+                  <span class="text-[10px] font-mono text-gray-400 uppercase">Substance</span>
+                  <span class="font-mono font-bold text-indigo-600 dark:text-indigo-400" :title="`Content Substance Factor: prevents zero-text or short posts from over-indexing`">
+                    {{ (postStat.substanceFactor !== undefined ? postStat.substanceFactor : 1.0).toFixed(2) }}&times;
                   </span>
                 </div>
 
