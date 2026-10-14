@@ -9103,12 +9103,45 @@ const refreshEngagementData = () => {
   if (posts.value && posts.value.length > 0) {
     postEngagementTracker.registerPosts(posts.value);
   }
+  if (searchResults.value && searchResults.value.length > 0) {
+    postEngagementTracker.registerPosts(searchResults.value);
+  }
   engagementPostsList.value = postEngagementTracker.getMostEngagedPosts({
     sortBy: engagementSortBy.value,
     limit: 150,
     minEffectiveTime: engagementMinTimeFilter.value,
   });
 };
+
+const getPostEngagement = (postKey: string): PostViewStats | undefined => {
+  if (!postKey) return undefined;
+  const _v = engagementVersion.value;
+  return postEngagementTracker.getPostStats(postKey);
+};
+
+const searchEngagementStats = computed(() => {
+  const _v = engagementVersion.value;
+  if (!searchResults.value || searchResults.value.length === 0) {
+    return { viewedCount: 0, totalEffectiveSec: 0, avgScore: 0 };
+  }
+  let viewedCount = 0;
+  let totalEffectiveSec = 0;
+  let totalScore = 0;
+  for (const p of searchResults.value) {
+    if (!p?.key) continue;
+    const stat = postEngagementTracker.getPostStats(p.key);
+    if (stat && stat.effectiveViewTimeSeconds > 0) {
+      viewedCount++;
+      totalEffectiveSec += stat.effectiveViewTimeSeconds;
+      totalScore += stat.engagementScore;
+    }
+  }
+  return {
+    viewedCount,
+    totalEffectiveSec,
+    avgScore: viewedCount > 0 ? totalScore / viewedCount : 0,
+  };
+});
 
 const filteredEngagementPosts = computed(() => {
   let list = engagementPostsList.value;
@@ -9152,7 +9185,11 @@ const exportEngagementDataJson = () => {
 
 const jumpToEngagedPost = (postKey: string) => {
   isEngagementModalVisible.value = false;
-  if (activeTab.value !== 'explorer') {
+  const isSearchPost = searchResults.value?.some((p: any) => p.key === postKey);
+  const isExplorerPost = posts.value?.some((p: any) => p.key === postKey);
+  if (isSearchPost && !isExplorerPost) {
+    activeTab.value = 'search';
+  } else if (isExplorerPost) {
     activeTab.value = 'explorer';
   }
   nextTick(() => {
@@ -9162,6 +9199,7 @@ const jumpToEngagedPost = (postKey: string) => {
 
 // Listen to background tracker updates
 postEngagementTracker.subscribe(() => {
+  engagementVersion.value++;
   if (isEngagementModalVisible.value || activeTab.value === 'monitor') {
     refreshEngagementData();
   }
@@ -9174,6 +9212,26 @@ watch([engagementSortBy, engagementMinTimeFilter], () => {
 watch(activeTab, (newTab) => {
   if (newTab === 'monitor') {
     refreshEngagementData();
+  } else if (newTab === 'search') {
+    if (searchResults.value && searchResults.value.length > 0) {
+      postEngagementTracker.registerPosts(searchResults.value);
+    }
+    nextTick(() => {
+      postEngagementTracker.sweepAndBindElements();
+    });
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 200);
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 600);
+  } else if (newTab === 'explorer') {
+    nextTick(() => {
+      postEngagementTracker.sweepAndBindElements();
+    });
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 200);
   }
 });
 
@@ -10214,8 +10272,14 @@ watch(searchResults, (newPosts) => {
     nextTick(() => {
       postEngagementTracker.sweepAndBindElements();
     });
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 200);
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 600);
   }
-});
+}, { immediate: true });
 const recentGlobalSearches = ref<string[]>([]);
 try {
   const savedSearches = localStorage.getItem("recentGlobalSearches");
@@ -10460,6 +10524,21 @@ const filteredSearchResults = computed(() => {
   }
 
   return result;
+});
+
+watch(filteredSearchResults, (newPosts) => {
+  if (Array.isArray(newPosts) && newPosts.length > 0) {
+    postEngagementTracker.registerPosts(newPosts);
+    nextTick(() => {
+      postEngagementTracker.sweepAndBindElements();
+    });
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 200);
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 600);
+  }
 });
 
 const toggleUsernameExplorer = (username: string) => {
@@ -12857,6 +12936,16 @@ const performGlobalSearch = async () => {
 
     searchResults.value = results;
     hasSearched.value = true;
+    postEngagementTracker.registerPosts(results);
+    nextTick(() => {
+      postEngagementTracker.sweepAndBindElements();
+    });
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 200);
+    setTimeout(() => {
+      postEngagementTracker.sweepAndBindElements();
+    }, 600);
 
     // check if we should load user profile
     if (isUserSelected) {
@@ -19048,6 +19137,33 @@ onUnmounted(() => {
                               <span class="text-[10px] font-bold font-mono text-gray-500 dark:text-gray-400 tabular-nums">{{ react.count.toLocaleString() }}</span>
                             </span>
                           </div>
+
+                          <!-- Post Engagement & Attention Tracker (Explorer) -->
+                          <div
+                            v-if="getPostEngagement(post.key) && getPostEngagement(post.key)!.effectiveViewTimeSeconds > 0"
+                            class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold transition-all shadow-3xs"
+                            :class="[
+                              getPostEngagement(post.key)!.engagementScore >= 1.5
+                                ? 'bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border border-purple-200/80 dark:border-purple-800/60'
+                                : getPostEngagement(post.key)!.engagementScore >= 1.0
+                                ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border border-teal-200/80 dark:border-teal-800/60'
+                                : getPostEngagement(post.key)!.engagementScore >= 0.5
+                                ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-800/60'
+                                : 'bg-gray-100 dark:bg-gray-750 text-gray-600 dark:text-gray-400 border border-gray-200/80 dark:border-gray-700'
+                            ]"
+                            :title="`Attention Score: ${getPostEngagement(post.key)!.engagementScore.toFixed(2)}x | Effective: ${getPostEngagement(post.key)!.effectiveViewTimeSeconds.toFixed(1)}s / Expected: ${getPostEngagement(post.key)!.expectedReadTimeSeconds.toFixed(1)}s | Substance: ${(getPostEngagement(post.key)!.substanceFactor || 1.0).toFixed(2)}x`"
+                          >
+                            <span>{{ getPostEngagement(post.key)!.engagementScore >= 1.5 ? '🔥' : getPostEngagement(post.key)!.engagementScore >= 1.0 ? '📖' : getPostEngagement(post.key)!.engagementScore >= 0.5 ? '👀' : '⚡' }}</span>
+                            <span>{{ getPostEngagement(post.key)!.engagementScore.toFixed(2) }}&times;</span>
+                            <span class="text-[9px] font-sans opacity-90 hidden sm:inline">
+                              {{
+                                getPostEngagement(post.key)!.engagementScore >= 1.5 ? 'Deep Read' :
+                                getPostEngagement(post.key)!.engagementScore >= 1.0 ? 'Thorough' :
+                                getPostEngagement(post.key)!.engagementScore >= 0.5 ? 'Moderate' : 'Skimmed'
+                              }}
+                            </span>
+                            <span class="text-[9px] opacity-75">({{ getPostEngagement(post.key)!.effectiveViewTimeSeconds.toFixed(1) }}s)</span>
+                          </div>
                         </div>
                         <div class="flex items-center gap-2 ml-auto">
                           <button
@@ -19715,20 +19831,33 @@ onUnmounted(() => {
           </p>
         </div>
 
-        <div v-if="filteredSearchResults.length > 0" class="flex items-center justify-between mb-4">
-              <h3 class="text-sm font-bold text-gray-900 dark:text-white">
-                {{ t('search.searchResultsCount', { count: filteredSearchResults.length }) }}
-              </h3>
-              <button
-                @click="addAllToWorkspace"
-                :disabled="isAddingAll"
-                class="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center shadow-md shadow-teal-500/25 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer"
-              >
-                <Loader2 v-if="isAddingAll" class="h-3.5 w-3.5 animate-spin mr-2" />
-                <Layers v-else class="h-3.5 w-3.5 mr-2" />
-                {{ isAddingAll ? t('search.adding') : t('search.addAllToWorkspace') }}
-              </button>
-            </div>
+        <div v-if="filteredSearchResults.length > 0" class="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div class="flex items-center gap-3 flex-wrap">
+            <h3 class="text-sm font-bold text-gray-900 dark:text-white">
+              {{ t('search.searchResultsCount', { count: filteredSearchResults.length }) }}
+            </h3>
+            <!-- Quick Reading Attention Summary Pill for Search -->
+            <button
+              v-if="searchEngagementStats.viewedCount > 0"
+              @click="activeTab = 'monitor'"
+              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-mono font-bold bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/60 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 border border-teal-200/80 dark:border-teal-800/60 transition-all cursor-pointer shadow-2xs group"
+              title="View Reading Attention & Engagement analytics in Monitor tab"
+            >
+              <Activity class="h-3.5 w-3.5 text-teal-500 animate-pulse" />
+              <span>{{ searchEngagementStats.viewedCount }} read &bull; {{ searchEngagementStats.totalEffectiveSec.toFixed(1) }}s attention</span>
+              <ChevronRight class="h-3 w-3 opacity-60 group-hover:translate-x-0.5 transition-transform" />
+            </button>
+          </div>
+          <button
+            @click="addAllToWorkspace"
+            :disabled="isAddingAll"
+            class="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white rounded-xl text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center shadow-md shadow-teal-500/25 hover:-translate-y-0.5 active:translate-y-0 cursor-pointer"
+          >
+            <Loader2 v-if="isAddingAll" class="h-3.5 w-3.5 animate-spin mr-2" />
+            <Layers v-else class="h-3.5 w-3.5 mr-2" />
+            {{ isAddingAll ? t('search.adding') : t('search.addAllToWorkspace') }}
+          </button>
+        </div>
           
             <div
               v-if="filteredSearchResults.length > 0"
@@ -20494,7 +20623,7 @@ onUnmounted(() => {
                 <div
                   class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400"
                 >
-                  <div class="flex items-center space-x-4 flex-wrap gap-y-1">
+                  <div class="flex items-center space-x-3 flex-wrap gap-y-1.5">
                     <span v-if="post.data?.views != null"
                       >{{ formatViews(post.data.views) }} {{ t('search.views') }}</span
                     >
@@ -20513,6 +20642,43 @@ onUnmounted(() => {
                         <span class="text-[9px] font-bold font-mono text-gray-400 dark:text-gray-500">{{ react.count.toLocaleString() }}</span>
                       </span>
                     </div>
+
+                    <!-- Post Engagement & Attention Tracker for Global Search -->
+                    <div
+                      v-if="getPostEngagement(post.key) && getPostEngagement(post.key)!.effectiveViewTimeSeconds > 0"
+                      class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold transition-all shadow-3xs"
+                      :class="[
+                        getPostEngagement(post.key)!.engagementScore >= 1.5
+                          ? 'bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border border-purple-200/80 dark:border-purple-800/60'
+                          : getPostEngagement(post.key)!.engagementScore >= 1.0
+                          ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-700 dark:text-teal-300 border border-teal-200/80 dark:border-teal-800/60'
+                          : getPostEngagement(post.key)!.engagementScore >= 0.5
+                          ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-800/60'
+                          : 'bg-gray-100 dark:bg-gray-750 text-gray-600 dark:text-gray-400 border border-gray-200/80 dark:border-gray-700'
+                      ]"
+                      :title="`Attention Score: ${getPostEngagement(post.key)!.engagementScore.toFixed(2)}x | Effective: ${getPostEngagement(post.key)!.effectiveViewTimeSeconds.toFixed(1)}s / Expected: ${getPostEngagement(post.key)!.expectedReadTimeSeconds.toFixed(1)}s | Substance: ${(getPostEngagement(post.key)!.substanceFactor || 1.0).toFixed(2)}x`"
+                    >
+                      <span>{{ getPostEngagement(post.key)!.engagementScore >= 1.5 ? '🔥' : getPostEngagement(post.key)!.engagementScore >= 1.0 ? '📖' : getPostEngagement(post.key)!.engagementScore >= 0.5 ? '👀' : '⚡' }}</span>
+                      <span>{{ getPostEngagement(post.key)!.engagementScore.toFixed(2) }}&times;</span>
+                      <span class="text-[9px] font-sans opacity-90 hidden sm:inline">
+                        {{
+                          getPostEngagement(post.key)!.engagementScore >= 1.5 ? 'Deep Read' :
+                          getPostEngagement(post.key)!.engagementScore >= 1.0 ? 'Thorough' :
+                          getPostEngagement(post.key)!.engagementScore >= 0.5 ? 'Moderate' : 'Skimmed'
+                        }}
+                      </span>
+                      <span class="text-[9px] opacity-75">({{ getPostEngagement(post.key)!.effectiveViewTimeSeconds.toFixed(1) }}s)</span>
+                    </div>
+
+                    <!-- Reading Time Estimate Pill before viewing -->
+                    <span
+                      v-else-if="getPostEngagement(post.key)?.expectedReadTimeSeconds"
+                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-mono text-gray-400 dark:text-gray-500 bg-gray-50 dark:bg-gray-900 border border-gray-150/40 dark:border-gray-800 shadow-3xs"
+                      :title="`Estimated read time: ${getPostEngagement(post.key)!.expectedReadTimeSeconds.toFixed(1)}s`"
+                    >
+                      <Clock class="w-2.5 h-2.5 opacity-70" />
+                      <span>~{{ Math.ceil(getPostEngagement(post.key)!.expectedReadTimeSeconds) }}s read</span>
+                    </span>
                   </div>
                   <div class="flex items-center gap-2">
                     <button

@@ -582,8 +582,8 @@ export class PostEngagementTracker {
       const text = extractCleanPostText(post);
       const stats: PostViewStats = {
         postKey: key,
-        channelName: post.data?.author || post.data?.user || '',
-        author: post.data?.author || post.data?.user || '',
+        channelName: post.data?.author || post.data?.user || post.data?.owner || (key.includes('.') ? key.split('.')[0] : ''),
+        author: post.data?.author || post.data?.user || post.data?.owner || (key.includes('.') ? key.split('.')[0] : ''),
         date: post.data?.date,
         textSnippet: text.slice(0, 140),
         postRef: post,
@@ -597,6 +597,7 @@ export class PostEngagementTracker {
         viewSessionsCount: 0,
         firstViewedAt: Date.now(),
         lastViewedAt: Date.now(),
+        slowStartExpiresAt: Date.now() + 2500, // 2.5s slow start grace period
       };
       this.statsMap.set(key, stats);
     } else {
@@ -642,6 +643,13 @@ export class PostEngagementTracker {
       "[id^='post-'], [id^='search-post-'], [id^='listen-post-'], [data-post-key]"
     );
 
+    const isElementVisible = (target: HTMLElement): boolean => {
+      if (!target || !document.body.contains(target)) return false;
+      if (target.offsetParent !== null) return true;
+      const rect = target.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+
     elements.forEach((el) => {
       let key = el.getAttribute('data-post-key');
       if (!key && el.id) {
@@ -654,7 +662,17 @@ export class PostEngagementTracker {
         }
       }
       if (key) {
-        this.elementMap.set(key, el);
+        const existing = this.elementMap.get(key);
+        if (!existing || !document.body.contains(existing)) {
+          this.elementMap.set(key, el);
+        } else {
+          // If existing is hidden (e.g. from an inactive tab) and candidate is visible, rebind to active card
+          const existingVis = isElementVisible(existing);
+          const candidateVis = isElementVisible(el);
+          if (!existingVis && candidateVis) {
+            this.elementMap.set(key, el);
+          }
+        }
         // If we already know the post metadata, update measured height
         const stat = this.statsMap.get(key);
         if (stat) {
@@ -747,8 +765,8 @@ export class PostEngagementTracker {
           const expected = calculateExpectedReadTime(postMeta, element);
           stats = {
             postKey: key,
-            channelName: postMeta.data?.author || postMeta.data?.user || '',
-            author: postMeta.data?.author || postMeta.data?.user || '',
+            channelName: postMeta.data?.author || postMeta.data?.user || postMeta.data?.owner || (key.includes('.') ? key.split('.')[0] : ''),
+            author: postMeta.data?.author || postMeta.data?.user || postMeta.data?.owner || (key.includes('.') ? key.split('.')[0] : ''),
             date: postMeta.data?.date,
             textSnippet: extractCleanPostText(postMeta).slice(0, 140),
             postRef: postMeta,
