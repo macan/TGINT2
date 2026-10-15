@@ -2699,6 +2699,9 @@ const selectedMoveTargetFolderId = ref<string | null>(null);
 const moveFolderSearchQuery = ref("");
 const moveModalFocusedIndex = ref(0);
 const moveSearchInputRef = ref<HTMLInputElement | null>(null);
+const moveModalCallerTab = ref<string>('listen');
+const moveModalSavedScrollY = ref<number>(0);
+const moveModalTriggerElement = ref<HTMLElement | null>(null);
 const recentMoveFolderIds = ref<string[]>([]);
 try {
   const savedRecents = localStorage.getItem("recent_move_folder_ids");
@@ -4940,6 +4943,9 @@ const jumpToFolderFromBreadcrumb = (folderId: string | null) => {
 
 const openMoveModal = (item: ListenItem) => {
   if (!item) return;
+  moveModalCallerTab.value = activeTab.value;
+  moveModalSavedScrollY.value = window.scrollY || document.documentElement.scrollTop || 0;
+  moveModalTriggerElement.value = (document.activeElement as HTMLElement) || document.getElementById('explorer-listen-status-panel');
   itemToMove.value = item;
   moveFolderSearchQuery.value = "";
   moveModalFocusedIndex.value = 0;
@@ -4953,9 +4959,28 @@ const openMoveModal = (item: ListenItem) => {
   });
 };
 
+const closeMoveModal = () => {
+  const callerTab = moveModalCallerTab.value || activeTab.value;
+  const savedScroll = moveModalSavedScrollY.value;
+  const triggerEl = moveModalTriggerElement.value;
+  isMoveModalOpen.value = false;
+  itemToMove.value = null;
+
+  if (callerTab === 'explorer' || activeTab.value === 'explorer') {
+    nextTick(() => {
+      window.scrollTo({ top: savedScroll, behavior: 'instant' });
+      triggerEl?.focus({ preventScroll: true });
+    });
+  }
+};
+
 const executeMoveItem = (targetFolderId: string | null) => {
+  const callerTab = moveModalCallerTab.value || activeTab.value;
+  const savedScroll = moveModalSavedScrollY.value;
+  const triggerEl = moveModalTriggerElement.value;
+
   if (!itemToMove.value) {
-    isMoveModalOpen.value = false;
+    closeMoveModal();
     return;
   }
   const idToMove = itemToMove.value.id;
@@ -4964,8 +4989,7 @@ const executeMoveItem = (targetFolderId: string | null) => {
   // Check if moving to current parent
   const parentInfo = getParentFolderId(listenDirectory.value, idToMove);
   if (parentInfo.parentId === targetFolderId) {
-    isMoveModalOpen.value = false;
-    itemToMove.value = null;
+    closeMoveModal();
     return;
   }
 
@@ -4976,8 +5000,7 @@ const executeMoveItem = (targetFolderId: string | null) => {
   });
 
   if (!extractedItem) {
-    isMoveModalOpen.value = false;
-    itemToMove.value = null;
+    closeMoveModal();
     return;
   }
 
@@ -5010,11 +5033,22 @@ const executeMoveItem = (targetFolderId: string | null) => {
 
   saveListenDirectory();
 
-  // Highlight and position in view
-  nextTick(() => {
-    expandParentFoldersForNode(idToMove);
-    positionListenNodeInView(idToMove);
-  });
+  // If in Listen tab, highlight and position in view in the directory tree
+  if (callerTab === 'listen' && activeTab.value === 'listen') {
+    nextTick(() => {
+      expandParentFoldersForNode(idToMove);
+      positionListenNodeInView(idToMove);
+    });
+  } else if (callerTab === 'explorer' || activeTab.value === 'explorer') {
+    // Crucial: preserve view position that was under the pop up modal
+    nextTick(() => {
+      window.scrollTo({ top: savedScroll, behavior: 'instant' });
+      triggerEl?.focus({ preventScroll: true });
+      requestAnimationFrame(() => {
+        window.scrollTo({ top: savedScroll, behavior: 'instant' });
+      });
+    });
+  }
 
   toastMessage.value = t("listen.toastMoveSuccess", { name: itemName });
   toastType.value = "success";
@@ -5191,7 +5225,7 @@ watch(moveFolderSearchQuery, () => {
 const onMoveModalKeydown = (e: KeyboardEvent) => {
   if (e.key === "Escape") {
     e.preventDefault();
-    isMoveModalOpen.value = false;
+    closeMoveModal();
   } else if (e.key === "ArrowDown") {
     e.preventDefault();
     const len = filteredFolderOptions.value.length;
@@ -8587,6 +8621,8 @@ const handleScroll = () => {
   } else if (activeTab.value === 'channel') {
     lastChannelScrollY.value = window.scrollY;
     tabScrollPositions.value['channel'] = window.scrollY;
+  } else if (activeTab.value === 'explorer') {
+    tabScrollPositions.value['explorer'] = window.scrollY;
   }
 };
 
@@ -9811,6 +9847,9 @@ const expandParentFoldersForNode = (targetId: string) => {
 };
 
 const positionListenNodeInView = (nodeId: string) => {
+  if (activeTab.value !== 'listen') {
+    return;
+  }
   highlightedListenNodeId.value = nodeId;
   if (highlightNodeTimer) clearTimeout(highlightNodeTimer);
   highlightNodeTimer = setTimeout(() => {
@@ -9828,6 +9867,7 @@ const positionListenNodeInView = (nodeId: string) => {
   }
 
   const attemptScroll = (): boolean => {
+    if (activeTab.value !== 'listen') return true;
     const el = document.getElementById(`listen-node-${nodeId}`);
     const container = listenTreeContainer.value || document.getElementById('listen-tree-container');
     if (el && container) {
@@ -9848,7 +9888,7 @@ const positionListenNodeInView = (nodeId: string) => {
   };
 
   nextTick(() => {
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (activeTab.value !== 'listen') return;
     if (!attemptScroll()) {
       requestAnimationFrame(() => {
         if (!attemptScroll()) {
@@ -25175,7 +25215,7 @@ onUnmounted(() => {
       <div 
         v-if="isMoveModalOpen" 
         class="fixed inset-0 z-[120] flex items-start sm:items-center justify-center p-3 sm:p-6 bg-gray-900/60 dark:bg-black/75 backdrop-blur-sm animate-in fade-in duration-150"
-        @click.self="isMoveModalOpen = false"
+        @click.self="closeMoveModal"
         @keydown="onMoveModalKeydown"
       >
         <div class="w-full max-w-lg bg-white dark:bg-gray-800 rounded-3xl overflow-hidden shadow-2xl border border-gray-200 dark:border-gray-700 flex flex-col max-h-[88vh] animate-in zoom-in-95 duration-150">
@@ -25196,7 +25236,7 @@ onUnmounted(() => {
                 </div>
               </div>
               <button 
-                @click="isMoveModalOpen = false" 
+                @click="closeMoveModal" 
                 class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700/60 rounded-xl p-2 cursor-pointer transition-colors"
                 :title="t('common.cancel')"
               >
@@ -25386,7 +25426,7 @@ onUnmounted(() => {
             </span>
             <button
               type="button"
-              @click="isMoveModalOpen = false"
+              @click="closeMoveModal"
               class="px-3 py-1 rounded-lg text-xs font-bold text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors cursor-pointer"
             >
               {{ t('common.cancel') }}
