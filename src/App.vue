@@ -10741,7 +10741,7 @@ watch(
 
 const isSearching = ref(false);
 const searchError = ref("");
-const searchLimit = ref(25);
+const searchLimit = ref(50);
 const limitOptions = [10, 25, 50, 100, 250, 500, 1000];
 
 const getLocalFormattedDate = (date: Date) => {
@@ -10760,6 +10760,96 @@ const searchStartDate = ref(getLocalFormattedDate(today));
 const searchEndDate = ref(getLocalFormattedDate(tomorrow));
 const hasSearched = ref(false);
 const searchWords = ref<string[]>([]);
+
+type QuickDatePreset = "today" | "last3" | "last7";
+const activeQuickDatePreset = ref<QuickDatePreset | null>("today");
+
+const quickDatePresets = computed(() => [
+  {
+    id: "today" as const,
+    label: t("search.today") || "Today",
+    tooltip: "Today (24h)",
+  },
+  {
+    id: "last3" as const,
+    label: t("search.last3") || "Last 3",
+    tooltip: "Last 3 Days",
+  },
+  {
+    id: "last7" as const,
+    label: t("search.last7Days") || "Last 7",
+    tooltip: "Last 7 Days",
+  },
+]);
+
+const applyQuickDatePreset = (preset: QuickDatePreset) => {
+  const baseToday = new Date();
+  baseToday.setHours(0, 0, 0, 0);
+
+  const end = new Date(baseToday);
+  end.setDate(end.getDate() + 1); // covers full day through tomorrow 00:00
+
+  const start = new Date(baseToday);
+  if (preset === "today") {
+    // start is baseToday 00:00 (1 calendar day)
+  } else if (preset === "last3") {
+    // 3 days: today, yesterday, and day before yesterday (3 calendar days)
+    start.setDate(start.getDate() - 2);
+  } else if (preset === "last7") {
+    // 7 days: today and previous 6 days (7 calendar days)
+    start.setDate(start.getDate() - 6);
+  }
+
+  searchStartDate.value = getLocalFormattedDate(start);
+  searchEndDate.value = getLocalFormattedDate(end);
+  activeQuickDatePreset.value = preset;
+};
+
+const detectActiveDatePreset = () => {
+  const baseToday = new Date();
+  baseToday.setHours(0, 0, 0, 0);
+  const endTomorrow = new Date(baseToday);
+  endTomorrow.setDate(endTomorrow.getDate() + 1);
+
+  const startToday = getLocalFormattedDate(baseToday);
+  const endTomorrowStr = getLocalFormattedDate(endTomorrow);
+
+  if (searchEndDate.value === endTomorrowStr) {
+    const last3Start_a = new Date(baseToday);
+    last3Start_a.setDate(last3Start_a.getDate() - 2);
+    const last3Start_b = new Date(baseToday);
+    last3Start_b.setDate(last3Start_b.getDate() - 3);
+
+    const last7Start_a = new Date(baseToday);
+    last7Start_a.setDate(last7Start_a.getDate() - 6);
+    const last7Start_b = new Date(baseToday);
+    last7Start_b.setDate(last7Start_b.getDate() - 7);
+
+    if (searchStartDate.value === startToday) {
+      activeQuickDatePreset.value = "today";
+      return;
+    }
+    if (
+      searchStartDate.value === getLocalFormattedDate(last3Start_a) ||
+      searchStartDate.value === getLocalFormattedDate(last3Start_b)
+    ) {
+      activeQuickDatePreset.value = "last3";
+      return;
+    }
+    if (
+      searchStartDate.value === getLocalFormattedDate(last7Start_a) ||
+      searchStartDate.value === getLocalFormattedDate(last7Start_b)
+    ) {
+      activeQuickDatePreset.value = "last7";
+      return;
+    }
+  }
+  activeQuickDatePreset.value = null;
+};
+
+watch([searchStartDate, searchEndDate], () => {
+  detectActiveDatePreset();
+});
 
 const searchTimelineStats = computed(() => {
   if (!filteredSearchResults.value || filteredSearchResults.value.length === 0)
@@ -19757,58 +19847,85 @@ onUnmounted(() => {
               </button>
             </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-gray-100 dark:border-gray-700/50">
+            <div class="flex flex-wrap xl:flex-nowrap items-end justify-between gap-4 lg:gap-5 pt-4 border-t border-gray-100 dark:border-gray-700/50">
               <!-- Target Fields -->
-              <div class="space-y-2.5">
+              <div class="space-y-2 shrink-0">
                 <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">
                   {{ t('search.searchInFields') }}
                 </label>
-                <div class="flex flex-wrap gap-1.5">
-                  <button
-                    v-for="(val, field) in searchFields"
-                    :key="field"
-                    type="button"
-                    @click="toggleField(field)"
-                    :class="[
-                      'flex items-center px-3 py-1.5 rounded-xl border text-[11px] font-bold tracking-tight transition-all duration-300 cursor-pointer shrink-0',
-                      searchFields[field]
-                        ? 'bg-teal-600 border-teal-600 text-white shadow-sm shadow-teal-500/10'
-                        : 'bg-gray-50 dark:bg-gray-900 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400',
-                    ]"
-                  >
-                    <component :is="getFieldIcon(field)" class="h-3.5 w-3.5 mr-1.5" />
-                    <span class="capitalize">{{ field === 'content' ? t('search.fieldPost') : field }}</span>
-                  </button>
+                <div class="flex items-center bg-gray-50 dark:bg-gray-900 p-1 rounded-2xl border border-gray-200 dark:border-gray-700 min-h-[42px] h-[42px] w-fit">
+                  <div class="flex items-center space-x-1">
+                    <button
+                      v-for="(val, field) in searchFields"
+                      :key="field"
+                      type="button"
+                      @click="toggleField(field)"
+                      :class="[
+                        'flex items-center px-2.5 sm:px-3 py-1.5 rounded-xl text-[11px] font-bold tracking-tight transition-all duration-200 cursor-pointer shrink-0 select-none',
+                        searchFields[field]
+                          ? 'bg-teal-600 text-white shadow-xs shadow-teal-500/20'
+                          : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100/60 dark:hover:bg-gray-800/60',
+                      ]"
+                    >
+                      <component :is="getFieldIcon(field)" class="h-3.5 w-3.5 mr-1.5" />
+                      <span class="capitalize">{{ field === 'content' ? t('search.fieldPost') : field }}</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
               <!-- Time Horizon -->
-              <div class="space-y-2.5">
+              <div class="space-y-2 flex-1 min-w-[340px] max-w-2xl">
                 <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">
                   {{ t('search.timeHorizon') }}
                 </label>
-                <div class="flex items-center bg-gray-50 dark:bg-gray-900 px-3 py-2 rounded-2xl border border-gray-200 dark:border-gray-700 gap-2">
-                  <input
-                    type="datetime-local"
-                    v-model="searchStartDate"
-                    class="bg-transparent text-[11px] text-gray-700 dark:text-gray-200 focus:outline-none w-[125px] sm:w-[135px] font-mono font-semibold"
-                  />
-                  <span class="text-[10px] text-gray-400 font-mono">➜</span>
-                  <input
-                    type="datetime-local"
-                    v-model="searchEndDate"
-                    class="bg-transparent text-[11px] text-gray-700 dark:text-gray-200 focus:outline-none w-[125px] sm:w-[135px] font-mono font-semibold"
-                  />
+                <div class="flex items-center justify-between flex-wrap gap-y-2 gap-x-2 bg-gray-50 dark:bg-gray-900 px-3 py-1 rounded-2xl border border-gray-200 dark:border-gray-700 min-h-[42px] h-[42px] transition-colors w-full">
+                  <!-- Inputs with Calendar Icon -->
+                  <div class="flex items-center gap-1.5 min-w-0">
+                    <div class="text-teal-600 dark:text-teal-400 flex items-center pr-1 shrink-0" :title="t('search.timeHorizon')">
+                      <Calendar class="h-3.5 w-3.5" />
+                    </div>
+                    <input
+                      type="datetime-local"
+                      v-model="searchStartDate"
+                      class="datetime-custom-picker bg-transparent text-[11px] text-gray-700 dark:text-gray-200 focus:outline-none w-[142px] shrink-0 font-mono font-semibold cursor-pointer [color-scheme:light] dark:[color-scheme:dark]"
+                    />
+                    <span class="text-[10px] text-gray-400 dark:text-gray-500 font-mono select-none shrink-0">➜</span>
+                    <input
+                      type="datetime-local"
+                      v-model="searchEndDate"
+                      class="datetime-custom-picker bg-transparent text-[11px] text-gray-700 dark:text-gray-200 focus:outline-none w-[142px] shrink-0 font-mono font-semibold cursor-pointer [color-scheme:light] dark:[color-scheme:dark]"
+                    />
+                  </div>
+
+                  <!-- Quick Set Buttons (Today, Last 3, Last 7) filling the empty space on the right -->
+                  <div class="flex items-center space-x-1 ml-auto shrink-0 pl-1 border-l sm:border-l-0 border-gray-200/80 dark:border-gray-700/80">
+                    <button
+                      v-for="preset in quickDatePresets"
+                      :key="preset.id"
+                      type="button"
+                      @click="applyQuickDatePreset(preset.id)"
+                      :class="[
+                        'px-2.5 py-1.5 rounded-xl text-[11px] font-bold tracking-tight transition-all duration-200 cursor-pointer select-none shrink-0 whitespace-nowrap',
+                        activeQuickDatePreset === preset.id
+                          ? 'bg-white dark:bg-gray-750 text-teal-650 dark:text-teal-400 shadow-2xs border border-gray-200/80 dark:border-gray-700 ring-1 ring-teal-500/10'
+                          : 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100/80 dark:hover:bg-gray-800/60'
+                      ]"
+                      :title="preset.tooltip"
+                    >
+                      {{ preset.label }}
+                    </button>
+                  </div>
                 </div>
               </div>
 
               <!-- Results Cap -->
-              <div class="space-y-2.5">
+              <div class="space-y-2 shrink-0">
                 <label class="block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">
                   {{ t('search.resultsCapLimit') }}
                 </label>
-                <div class="flex items-center bg-gray-50 dark:bg-gray-900 p-1 rounded-2xl border border-gray-200 dark:border-gray-700 w-fit">
-                  <div class="px-2 text-gray-450 dark:text-gray-550">
+                <div class="flex items-center bg-gray-50 dark:bg-gray-900 p-1 rounded-2xl border border-gray-200 dark:border-gray-700 min-h-[42px] h-[42px] w-fit">
+                  <div class="px-2 text-gray-450 dark:text-gray-550 flex items-center shrink-0">
                     <ListFilter class="h-3.5 w-3.5" />
                   </div>
                   <div class="flex space-x-1">
@@ -19818,10 +19935,10 @@ onUnmounted(() => {
                       type="button"
                       @click="searchLimit = limit"
                       :class="[
-                        'px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer',
+                        'px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer select-none',
                         searchLimit === limit
-                          ? 'bg-white dark:bg-gray-700 text-teal-650 dark:text-teal-400 shadow-sm'
-                          : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
+                          ? 'bg-white dark:bg-gray-700 text-teal-650 dark:text-teal-400 shadow-2xs border border-gray-200/80 dark:border-gray-600 ring-1 ring-teal-500/10'
+                          : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-100/60 dark:hover:bg-gray-800/60',
                       ]"
                     >
                       {{ limit }}
@@ -28478,5 +28595,43 @@ onUnmounted(() => {
 .dark .profile-highlight-text em {
   color: #2dd4bf !important; /* teal-400 */
   background-color: rgba(45, 212, 191, 0.12) !important;
+}
+
+/* Custom calendar icon indicator in light and dark mode for Time Horizon datetime inputs */
+.datetime-custom-picker {
+  min-width: 136px;
+}
+
+.datetime-custom-picker::-webkit-datetime-edit {
+  padding-right: 2px;
+}
+
+.datetime-custom-picker::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 1px;
+  margin-left: 2px;
+  opacity: 0.8;
+  /* Light mode: crisp teal tint matching #0d9488 */
+  filter: invert(42%) sepia(85%) saturate(550%) hue-rotate(130deg) brightness(88%) contrast(92%);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.datetime-custom-picker::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+  transform: scale(1.1);
+  filter: invert(30%) sepia(95%) saturate(750%) hue-rotate(135deg) brightness(82%) contrast(98%);
+}
+
+.dark .datetime-custom-picker::-webkit-calendar-picker-indicator {
+  /* Dark mode: bright high-contrast teal matching #2dd4bf */
+  filter: invert(75%) sepia(45%) saturate(850%) hue-rotate(122deg) brightness(115%) contrast(98%);
+  opacity: 0.9;
+}
+
+.dark .datetime-custom-picker::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+  transform: scale(1.1);
+  filter: invert(90%) sepia(50%) saturate(1200%) hue-rotate(122deg) brightness(130%) contrast(100%);
 }
 </style>
