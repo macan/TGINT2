@@ -27,6 +27,7 @@ export default {
     search: "Поиск",
     network: "Сеть",
     listen: "Мониторинг",
+    types: "Типы",
     autoFinding: "Автопоиск",
     workspace: "Граф",
     profile: "Профили",

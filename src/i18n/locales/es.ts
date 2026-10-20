@@ -27,6 +27,7 @@ export default {
     search: "Búsqueda",
     network: "Red",
     listen: "Monitor",
+    types: "Tipos",
     autoFinding: "Auto-Búsqueda",
     workspace: "Espacio",
     profile: "Perfiles",

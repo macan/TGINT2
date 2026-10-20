@@ -27,6 +27,7 @@ export default {
     search: "全域搜索",
     network: "拓扑网络",
     listen: "监听中心",
+    types: "类型分类",
     autoFinding: "自动发现",
     workspace: "工作空间",
     profile: "画像档案",

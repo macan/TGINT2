@@ -27,6 +27,7 @@ export default {
     search: "Search",
     network: "Network",
     listen: "Listen",
+    types: "Types",
     autoFinding: "Auto Finding",
     workspace: "Workspace",
     profile: "Profiles",

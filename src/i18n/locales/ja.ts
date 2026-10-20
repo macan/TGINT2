@@ -27,6 +27,7 @@ export default {
     search: "全体検索",
     network: "トポロジー",
     listen: "監視センター",
+    types: "タイプ",
     autoFinding: "自動検出",
     workspace: "ワークスペース",
     profile: "プロフィール",

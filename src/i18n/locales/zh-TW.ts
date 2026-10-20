@@ -27,6 +27,7 @@ export default {
     search: "全域搜尋",
     network: "拓撲網路",
     listen: "監聽中心",
+    types: "類型分類",
     autoFinding: "自動發現",
     workspace: "工作空間",
     profile: "畫像檔案",
