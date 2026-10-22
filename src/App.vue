@@ -133,6 +133,7 @@ import {
 } from "./utils";
 import AutoClassDistributionChart from "./components/AutoClassDistributionChart.vue";
 import TypesTab from "./components/TypesTab.vue";
+import ArticleReaderView from "./components/ArticleReaderView.vue";
 import {
   useI18n,
   currentLocale,
@@ -9151,7 +9152,7 @@ const error = ref("");
 const profileError = ref("");
 const metadata = ref<any>(null);
 const posts = ref<any[]>([]);
-const viewMode = ref<"list" | "masonry" | "timeline">("list");
+const viewMode = ref<"list" | "masonry" | "timeline" | "reader">("list");
 const isPostModalVisible = ref(false);
 const selectedPost = ref<any>(null);
 const selectedUsernamesExplorer = ref<string[]>([]);
@@ -13395,7 +13396,7 @@ const loadMorePosts = async () => {
 };
 
 const loadMoreRenderedPosts = () => {
-  if (viewMode.value === "list") {
+  if (viewMode.value === "list" || viewMode.value === "reader") {
     if (postsRenderLimit.value < filteredPosts.value.length) {
       postsRenderLimit.value += 50;
     } else {
@@ -18637,6 +18638,19 @@ onUnmounted(() => {
                     <Clock class="h-4 w-4" />
                   </button>
                   <button
+                    @click="viewMode = 'reader'"
+                    :class="[
+                      'p-2 rounded-lg transition-all flex items-center justify-center gap-1.5',
+                      viewMode === 'reader'
+                        ? 'bg-white dark:bg-gray-800 text-blue-600 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700'
+                        : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
+                    ]"
+                    title="Article"
+                  >
+                    <BookOpen class="h-4 w-4" />
+                    <span class="text-xs font-bold hidden md:inline">Article</span>
+                  </button>
+                  <button
                     @mousedown="startLongPress"
                     @mouseup="cancelLongPress"
                     @mouseleave="cancelLongPress"
@@ -19782,6 +19796,28 @@ onUnmounted(() => {
                       {{ t('explorer.noMediaPosts') }}
                     </p>
                   </div>
+                </div>
+
+                <!-- Article Reader View -->
+                <div v-else-if="viewMode === 'reader'">
+                  <ArticleReaderView
+                    :posts="visibleFilteredPosts"
+                    :has-more="hasMorePosts || postsRenderLimit < filteredPosts.length"
+                    :is-loading-more="isLoadingMore"
+                    :channel-name="channelName || ''"
+                    :channel-title="metadata?.title || metadata?.name || channelName || ''"
+                    :channel-avatar="metadata?.avatar || metadata?.photo"
+                    :metadata="metadata"
+                    :get-safe-post-content="getSafePostContent"
+                    :get-video-url="getVideoUrl"
+                    :format-date="formatDate"
+                    :is-translating="isTranslating"
+                    @translate="translatePost"
+                    @search-google="searchOnGoogle"
+                    @add-to-workspace="addToWorkspaceFromPost"
+                    @open-post-modal="openPostModal"
+                    @load-more="loadMoreRenderedPosts"
+                  />
                 </div>
 
                 <!-- Scroll Sentinel -->

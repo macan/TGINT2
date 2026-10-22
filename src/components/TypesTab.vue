@@ -24,7 +24,9 @@ import {
   Compass,
   Check,
   Radio,
-  FileText
+  FileText,
+  BookmarkCheck,
+  Award
 } from "lucide-vue-next";
 import { useI18n } from "../i18n";
 
@@ -34,7 +36,7 @@ const emit = defineEmits<{
   (e: "explore-channel", channel: string): void;
 }>();
 
-// Compact data structure for memory efficiency when scaling to millions
+// Compact data structure supporting both legacy and new format
 export interface ClassifiedChannel {
   channel: string;
   topic: string;
@@ -44,6 +46,11 @@ export interface ClassifiedChannel {
   countryConf: number;
   countryProbs: Record<string, number>;
   domestic: number;
+  // Read Value scoring (new format)
+  hasReadValue: boolean;
+  readValueScore: number | null;
+  readValueProbs: Record<string, number>;
+  readValueLegend?: Record<string, string> | null;
   tokensIn: number;
   tokensOut: number;
   latencyMs: number;
@@ -77,9 +84,18 @@ let readerRef: ReadableStreamDefaultReader<Uint8Array> | null = null;
 const searchQuery = ref("");
 const selectedTopic = ref<string>("all");
 const selectedCountry = ref<string>("all");
+
+// Domestic Affairs filter
 const domesticPreset = ref<"all" | "high" | "mid" | "low">("all");
 const domesticMinScore = ref<number>(0);
-const sortBy = ref<"topicConf" | "countryConf" | "domesticDesc" | "domesticAsc" | "channelAsc" | "latencyAsc">("topicConf");
+
+// Read Value filter (Supports score slider, presets, and mixed legacy format)
+const readValuePreset = ref<"all" | "critical" | "substantive" | "background" | "low" | "hasReadValue" | "legacyOnly" | "custom">("all");
+const readValueMinScore = ref<number>(0);
+
+const sortBy = ref<
+  "readValDesc" | "readValAsc" | "topicConf" | "countryConf" | "domesticDesc" | "domesticAsc" | "channelAsc" | "latencyAsc"
+>("readValDesc");
 
 // Pagination State
 const currentPage = ref(1);
@@ -112,20 +128,89 @@ const TOPIC_CONFIG: Record<string, { label: string; color: string; bg: string; b
   spam: { label: "Spam", color: "text-gray-700 dark:text-gray-300", bg: "bg-gray-100 dark:bg-gray-800/80", border: "border-gray-200 dark:border-gray-700" }
 };
 
-// Target Country Metadata & Styling
-const COUNTRY_CONFIG: Record<string, { label: string; flag: string }> = {
+// Target Country Metadata & Styling (Expanded with us_allies_asia, european_union, africa)
+export interface CountryMeta {
+  label: string;
+  flag: string;
+  isNew?: boolean;
+}
+
+const COUNTRY_CONFIG: Record<string, CountryMeta> = {
   russia: { label: "Russia", flag: "🇷🇺" },
   china: { label: "China", flag: "🇨🇳" },
   united_states: { label: "United States", flag: "🇺🇸" },
+  european_union: { label: "European Union", flag: "🇪🇺", isNew: true },
+  us_allies_asia: { label: "US Allies (Asia)", flag: "🌏", isNew: true },
   ukraine: { label: "Ukraine", flag: "🇺🇦" },
   taiwan: { label: "Taiwan", flag: "🇹🇼" },
-  israel_palestine: { label: "Israel/Palestine", flag: "🌐" },
+  israel_palestine: { label: "Israel/Palestine", flag: "🕊️" },
   iran: { label: "Iran", flag: "🇮🇷" },
-  international: { label: "International", flag: "🌍" },
+  africa: { label: "Africa", flag: "🌍", isNew: true },
+  international: { label: "International", flag: "🌐" },
   other: { label: "Other", flag: "🗺️" }
 };
 
-// Stream Ingestion Logic
+// Standard Read Value Legend
+const DEFAULT_READ_LEGEND: Record<string, string> = {
+  "0": "0: Fluff, greetings, boilerplate, rhetorical banter, or low-information chatter.",
+  "1": "1: Background context, emotional sentiment, subjective opinion, or common knowledge.",
+  "2": "2: Relevant circumstantial context, unverified claims, or secondary commentary.",
+  "3": "3: Critical facts, quantitative metrics, verified actions, breaking events, entity disclosures, or decisive operational changes."
+};
+
+// Read Value Level Definition Helper
+const getReadValueTier = (score: number | null) => {
+  if (score === null || score === undefined) {
+    return {
+      label: "Legacy (No Score)",
+      shortLabel: "Legacy",
+      color: "text-gray-500 dark:text-gray-400",
+      bg: "bg-gray-100 dark:bg-gray-800",
+      border: "border-gray-200 dark:border-gray-700",
+      level: -1
+    };
+  }
+  if (score >= 2.2) {
+    return {
+      label: "Critical Facts",
+      shortLabel: "L3 Critical",
+      color: "text-emerald-700 dark:text-emerald-300",
+      bg: "bg-emerald-50 dark:bg-emerald-950/60",
+      border: "border-emerald-200 dark:border-emerald-800",
+      level: 3
+    };
+  }
+  if (score >= 1.5) {
+    return {
+      label: "Substantive",
+      shortLabel: "L2 Substantive",
+      color: "text-blue-700 dark:text-blue-300",
+      bg: "bg-blue-50 dark:bg-blue-950/60",
+      border: "border-blue-200 dark:border-blue-800",
+      level: 2
+    };
+  }
+  if (score >= 0.8) {
+    return {
+      label: "Background",
+      shortLabel: "L1 Background",
+      color: "text-amber-700 dark:text-amber-300",
+      bg: "bg-amber-50 dark:bg-amber-950/60",
+      border: "border-amber-200 dark:border-amber-800",
+      level: 1
+    };
+  }
+  return {
+    label: "Low Info Chatter",
+    shortLabel: "L0 Chatter",
+    color: "text-slate-600 dark:text-slate-400",
+    bg: "bg-slate-100 dark:bg-slate-800/80",
+    border: "border-slate-200 dark:border-slate-700",
+    level: 0
+  };
+};
+
+// Stream Ingestion Logic (Handles both old and new format line-by-line)
 const startStreaming = async (resume = false) => {
   if (isStreaming.value && !isPaused.value) return;
 
@@ -177,6 +262,59 @@ const startStreaming = async (resume = false) => {
       }
     };
 
+    const parseLineToItem = (raw: string): ClassifiedChannel | null => {
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || !parsed.channel || !parsed.res || !parsed.res.answers) {
+          return null;
+        }
+
+        const answers = parsed.res.answers;
+        const topic = answers.topic?.choice || "unknown";
+        const topicConf = Number(answers.topic?.confidence || 0);
+        const topicProbs = answers.topic?.probabilities || {};
+
+        const country = answers.target_country?.choice || "unknown";
+        const countryConf = Number(answers.target_country?.confidence || 0);
+        const countryProbs = answers.target_country?.probabilities || {};
+
+        const domestic = Number(answers.is_domestic_affairs?.noul ?? 0);
+
+        // Parse read_value (handles both old format without read_value and new format with read_value)
+        const readVal = answers.read_value;
+        const hasReadValue = Boolean(readVal && typeof readVal.score === "number");
+        const readValueScore = hasReadValue ? Number(readVal.score) : null;
+        const readValueProbs = (hasReadValue && readVal.probabilities) ? readVal.probabilities : {};
+        const readValueLegend = (hasReadValue && readVal.legend) ? readVal.legend : null;
+
+        const tokensIn = Number(parsed.res.usage?.input_tokens || 0);
+        const tokensOut = Number(parsed.res.usage?.output_tokens || 0);
+        const latencyMs = Number(parsed.res.latency_ms || 0);
+        const model = String(parsed.res.model || "kev-latest");
+
+        return {
+          channel: parsed.channel,
+          topic,
+          topicConf,
+          topicProbs,
+          country,
+          countryConf,
+          countryProbs,
+          domestic,
+          hasReadValue,
+          readValueScore,
+          readValueProbs,
+          readValueLegend,
+          tokensIn,
+          tokensOut,
+          latencyMs,
+          model
+        };
+      } catch (e) {
+        return null;
+      }
+    };
+
     while (true) {
       if (isPaused.value) {
         break;
@@ -203,49 +341,12 @@ const startStreaming = async (resume = false) => {
           if (!rawLine) continue;
 
           totalParsedLines.value++;
-
-          try {
-            const parsed = JSON.parse(rawLine);
-            if (!parsed || !parsed.channel || !parsed.res || !parsed.res.answers) {
-              continue;
-            }
-
-            const answers = parsed.res.answers;
-            const topic = answers.topic?.choice || "unknown";
-            const topicConf = Number(answers.topic?.confidence || 0);
-            const topicProbs = answers.topic?.probabilities || {};
-
-            const country = answers.target_country?.choice || "unknown";
-            const countryConf = Number(answers.target_country?.confidence || 0);
-            const countryProbs = answers.target_country?.probabilities || {};
-
-            const domestic = Number(answers.is_domestic_affairs?.noul ?? 0);
-
-            const tokensIn = Number(parsed.res.usage?.input_tokens || 0);
-            const tokensOut = Number(parsed.res.usage?.output_tokens || 0);
-            const latencyMs = Number(parsed.res.latency_ms || 0);
-            const model = String(parsed.res.model || "kev-latest");
-
-            batch.push({
-              channel: parsed.channel,
-              topic,
-              topicConf,
-              topicProbs,
-              country,
-              countryConf,
-              countryProbs,
-              domestic,
-              tokensIn,
-              tokensOut,
-              latencyMs,
-              model
-            });
-
+          const item = parseLineToItem(rawLine);
+          if (item) {
+            batch.push(item);
             if (items.value.length + batch.length >= memoryLimit.value) {
               break;
             }
-          } catch (e) {
-            // Ignore malformed line
           }
         }
 
@@ -259,26 +360,10 @@ const startStreaming = async (resume = false) => {
 
     // Process leftover line
     if (lineRemainder.trim() && items.value.length + batch.length < memoryLimit.value) {
-      try {
-        const parsed = JSON.parse(lineRemainder.trim());
-        if (parsed?.channel && parsed?.res?.answers) {
-          const answers = parsed.res.answers;
-          batch.push({
-            channel: parsed.channel,
-            topic: answers.topic?.choice || "unknown",
-            topicConf: Number(answers.topic?.confidence || 0),
-            topicProbs: answers.topic?.probabilities || {},
-            country: answers.target_country?.choice || "unknown",
-            countryConf: Number(answers.target_country?.confidence || 0),
-            countryProbs: answers.target_country?.probabilities || {},
-            domestic: Number(answers.is_domestic_affairs?.noul ?? 0),
-            tokensIn: Number(parsed.res.usage?.input_tokens || 0),
-            tokensOut: Number(parsed.res.usage?.output_tokens || 0),
-            latencyMs: Number(parsed.res.latency_ms || 0),
-            model: String(parsed.res.model || "kev-latest")
-          });
-        }
-      } catch (e) {}
+      const item = parseLineToItem(lineRemainder.trim());
+      if (item) {
+        batch.push(item);
+      }
     }
 
     flushBatch();
@@ -335,6 +420,25 @@ const countryCounts = computed(() => {
   return map;
 });
 
+// Count of items with Read Value
+const readValueStats = computed(() => {
+  let hasCount = 0;
+  let criticalCount = 0;
+  let substantiveCount = 0;
+  let backgroundCount = 0;
+  let lowCount = 0;
+  for (const item of items.value) {
+    if (item.hasReadValue && item.readValueScore !== null) {
+      hasCount++;
+      if (item.readValueScore >= 2.2) criticalCount++;
+      else if (item.readValueScore >= 1.5) substantiveCount++;
+      else if (item.readValueScore >= 0.8) backgroundCount++;
+      else lowCount++;
+    }
+  }
+  return { hasCount, criticalCount, substantiveCount, backgroundCount, lowCount, legacyCount: items.value.length - hasCount };
+});
+
 // Preset domestic handler
 const applyDomesticPreset = (preset: "all" | "high" | "mid" | "low") => {
   domesticPreset.value = preset;
@@ -344,13 +448,29 @@ const applyDomesticPreset = (preset: "all" | "high" | "mid" | "low") => {
   else if (preset === "low") domesticMinScore.value = 0;
 };
 
-// Filtered and Sorted Channel List
+// Preset Read Value handler
+const applyReadValuePreset = (preset: "all" | "critical" | "substantive" | "background" | "low" | "hasReadValue" | "legacyOnly") => {
+  readValuePreset.value = preset;
+  if (preset === "all") readValueMinScore.value = 0;
+  else if (preset === "critical") readValueMinScore.value = 2.2;
+  else if (preset === "substantive") readValueMinScore.value = 1.5;
+  else if (preset === "background") readValueMinScore.value = 0.8;
+  else if (preset === "low") readValueMinScore.value = 0;
+  else if (preset === "hasReadValue") readValueMinScore.value = 0;
+  else if (preset === "legacyOnly") readValueMinScore.value = 0;
+};
+
+// Filtered and Sorted Channel List (Gracefully handles mixed formats)
 const filteredItems = computed(() => {
   const query = searchQuery.value.trim().toLowerCase();
   const topicFilter = selectedTopic.value;
   const countryFilter = selectedCountry.value;
-  const preset = domesticPreset.value;
+
+  const domPreset = domesticPreset.value;
   const minDom = domesticMinScore.value;
+
+  const rvPreset = readValuePreset.value;
+  const minRv = readValueMinScore.value;
 
   return items.value
     .filter((item) => {
@@ -362,24 +482,53 @@ const filteredItems = computed(() => {
       if (topicFilter !== "all" && item.topic !== topicFilter) {
         return false;
       }
-      // 3. Country
+      // 3. Country (handles both traditional and expanded countries)
       if (countryFilter !== "all" && item.country !== countryFilter) {
         return false;
       }
       // 4. Domestic Affairs
-      if (preset === "high" && item.domestic < 0.6) {
+      if (domPreset === "high" && item.domestic < 0.6) {
         return false;
-      } else if (preset === "mid" && (item.domestic < 0.3 || item.domestic >= 0.6)) {
+      } else if (domPreset === "mid" && (item.domestic < 0.3 || item.domestic >= 0.6)) {
         return false;
-      } else if (preset === "low" && item.domestic >= 0.3) {
+      } else if (domPreset === "low" && item.domestic >= 0.3) {
         return false;
-      } else if (preset === "all" && minDom > 0 && item.domestic < minDom) {
+      } else if (domPreset === "all" && minDom > 0 && item.domestic < minDom) {
         return false;
+      }
+
+      // 5. Read Value Filter (mixed format aware)
+      if (rvPreset === "critical") {
+        if (!item.hasReadValue || (item.readValueScore ?? 0) < 2.2) return false;
+      } else if (rvPreset === "substantive") {
+        if (!item.hasReadValue || (item.readValueScore ?? 0) < 1.5) return false;
+      } else if (rvPreset === "background") {
+        if (!item.hasReadValue || (item.readValueScore ?? 0) < 0.8) return false;
+      } else if (rvPreset === "low") {
+        if (!item.hasReadValue || (item.readValueScore ?? 0) >= 0.8) return false;
+      } else if (rvPreset === "hasReadValue") {
+        if (!item.hasReadValue) return false;
+      } else if (rvPreset === "legacyOnly") {
+        if (item.hasReadValue) return false;
+      } else if (minRv > 0) {
+        if (!item.hasReadValue || (item.readValueScore ?? 0) < minRv) return false;
       }
 
       return true;
     })
     .sort((a, b) => {
+      if (sortBy.value === "readValDesc") {
+        const valA = a.hasReadValue && a.readValueScore !== null ? a.readValueScore : -1;
+        const valB = b.hasReadValue && b.readValueScore !== null ? b.readValueScore : -1;
+        if (valB !== valA) return valB - valA;
+        return b.topicConf - a.topicConf;
+      }
+      if (sortBy.value === "readValAsc") {
+        const valA = a.hasReadValue && a.readValueScore !== null ? a.readValueScore : 999;
+        const valB = b.hasReadValue && b.readValueScore !== null ? b.readValueScore : 999;
+        if (valA !== valB) return valA - valB;
+        return a.topicConf - b.topicConf;
+      }
       if (sortBy.value === "topicConf") return b.topicConf - a.topicConf;
       if (sortBy.value === "countryConf") return b.countryConf - a.countryConf;
       if (sortBy.value === "domesticDesc") return b.domestic - a.domestic;
@@ -391,9 +540,22 @@ const filteredItems = computed(() => {
 });
 
 // Reset page on filter changes
-watch([searchQuery, selectedTopic, selectedCountry, domesticPreset, domesticMinScore, sortBy, pageSize], () => {
-  currentPage.value = 1;
-});
+watch(
+  [
+    searchQuery,
+    selectedTopic,
+    selectedCountry,
+    domesticPreset,
+    domesticMinScore,
+    readValuePreset,
+    readValueMinScore,
+    sortBy,
+    pageSize
+  ],
+  () => {
+    currentPage.value = 1;
+  }
+);
 
 // Paginated View Items
 const totalFilteredPages = computed(() => Math.max(1, Math.ceil(filteredItems.value.length / pageSize.value)));
@@ -405,15 +567,23 @@ const paginatedItems = computed(() => {
 
 // Helper for topic configuration
 const getTopicInfo = (topic: string) => {
-  return TOPIC_CONFIG[topic] || { label: topic, color: "text-gray-700 dark:text-gray-300", bg: "bg-gray-100 dark:bg-gray-800", border: "border-gray-200 dark:border-gray-700" };
+  return (
+    TOPIC_CONFIG[topic] || {
+      label: topic,
+      color: "text-gray-700 dark:text-gray-300",
+      bg: "bg-gray-100 dark:bg-gray-800",
+      border: "border-gray-200 dark:border-gray-700"
+    }
+  );
 };
 
 const getCountryInfo = (country: string) => {
-  return COUNTRY_CONFIG[country] || { label: country, flag: "🌐" };
+  return COUNTRY_CONFIG[country] || { label: country.replace(/_/g, " "), flag: "🌐" };
 };
 
 // Sort probabilities for multi-segment bars
 const getSortedProbs = (probs: Record<string, number>, max = 3) => {
+  if (!probs) return [];
   return Object.entries(probs)
     .sort((a, b) => b[1] - a[1])
     .slice(0, max);
@@ -440,10 +610,13 @@ const getCountrySegmentColor = (country: string) => {
     russia: "bg-rose-500",
     china: "bg-red-500",
     united_states: "bg-blue-500",
+    us_allies_asia: "bg-sky-500",
+    european_union: "bg-blue-600",
     ukraine: "bg-yellow-400",
     taiwan: "bg-emerald-500",
     israel_palestine: "bg-teal-500",
     iran: "bg-green-600",
+    africa: "bg-amber-500",
     international: "bg-indigo-500",
     other: "bg-slate-400"
   };
@@ -474,7 +647,7 @@ const handleExplore = (channel: string) => {
                 </span>
               </h2>
               <p class="text-xs text-gray-500 dark:text-gray-400">
-                Streaming model inferences for topic taxonomy, target country distribution, and domestic affairs assessment
+                Live stream analysis of topic taxonomies, 12 regional geopolitical targets, and Level 0–3 Read Value informativeness
               </p>
             </div>
           </div>
@@ -549,7 +722,9 @@ const handleExplore = (channel: string) => {
             </span>
             <span class="tabular-nums">
               {{ items.length.toLocaleString() }} channels active
-              <span v-if="totalParsedLines > items.length" class="text-gray-400">({{ totalParsedLines.toLocaleString() }} parsed)</span>
+              <span v-if="readValueStats.hasCount > 0" class="text-emerald-600 dark:text-emerald-400">
+                ({{ readValueStats.hasCount.toLocaleString() }} with Read Value)
+              </span>
             </span>
           </div>
           <div class="tabular-nums">
@@ -560,7 +735,7 @@ const handleExplore = (channel: string) => {
         </div>
         <div class="w-full h-1.5 bg-gray-100 dark:bg-gray-700/60 rounded-full overflow-hidden">
           <div
-            class="h-full bg-gradient-to-r from-indigo-500 to-cyan-500 transition-all duration-300"
+            class="h-full bg-gradient-to-r from-indigo-500 via-cyan-500 to-emerald-500 transition-all duration-300"
             :style="{ width: `${Math.min(100, Math.round((loadedBytes / totalBytesEstimated) * 100))}%` }"
           ></div>
         </div>
@@ -577,7 +752,7 @@ const handleExplore = (channel: string) => {
           <input
             v-model="searchQuery"
             type="text"
-            placeholder="Search channel username (e.g. husainov_photo, a11y)..."
+            placeholder="Search channel username (e.g. info65mchs, husainov_photo)..."
             class="w-full pl-10 pr-9 py-2 text-xs sm:text-sm bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-indigo-500/40 outline-none text-gray-900 dark:text-white transition"
           />
           <button
@@ -589,15 +764,188 @@ const handleExplore = (channel: string) => {
           </button>
         </div>
 
-        <!-- Sort & Domestic Quick Controls -->
-        <div class="flex flex-wrap items-center gap-2.5">
-          <!-- Domestic Affairs Presets -->
+        <!-- Sort Select -->
+        <div class="flex items-center gap-1.5 text-xs bg-gray-50 dark:bg-gray-900 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700">
+          <SlidersHorizontal class="w-3.5 h-3.5 text-gray-400" />
+          <select
+            v-model="sortBy"
+            class="bg-transparent font-bold text-gray-800 dark:text-gray-200 outline-none cursor-pointer"
+          >
+            <option value="readValDesc" class="dark:bg-gray-800">Read Value (High → Low)</option>
+            <option value="readValAsc" class="dark:bg-gray-800">Read Value (Low → High)</option>
+            <option value="topicConf" class="dark:bg-gray-800">Topic Confidence (High → Low)</option>
+            <option value="countryConf" class="dark:bg-gray-800">Country Confidence (High → Low)</option>
+            <option value="domesticDesc" class="dark:bg-gray-800">Domestic Score (High → Low)</option>
+            <option value="domesticAsc" class="dark:bg-gray-800">Domestic Score (Low → High)</option>
+            <option value="channelAsc" class="dark:bg-gray-800">Channel Name (A → Z)</option>
+            <option value="latencyAsc" class="dark:bg-gray-800">Latency (Fastest)</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Row 2: Read Value Scoring & Domestic Presets (Double Feature Row) -->
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-3 pt-2 border-t border-gray-100 dark:border-gray-700/60">
+        <!-- Read Value Filters (7 cols) -->
+        <div class="lg:col-span-7 space-y-1.5">
+          <div class="flex items-center justify-between">
+            <label class="block text-[10px] font-black uppercase tracking-wider text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
+              <Award class="w-3.5 h-3.5" />
+              <span>Read Value Scoring</span>
+            </label>
+            <div class="flex items-center gap-2">
+              <span class="text-[10px] font-mono text-gray-400">
+                Min: {{ readValueMinScore.toFixed(1) }} / 3.0
+              </span>
+              <button
+                @click="sortBy = 'readValDesc'"
+                :class="[
+                  'px-2 py-0.5 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer',
+                  sortBy === 'readValDesc'
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'bg-gray-100 dark:bg-gray-900/60 text-gray-600 dark:text-gray-300 hover:text-emerald-600'
+                ]"
+                title="Sort channels by Read Value High to Low"
+              >
+                <span>⚡ High → Low</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Interactive Score Slider -->
+          <div class="flex items-center gap-2 pt-0.5">
+            <span class="text-[10px] font-mono text-gray-400 shrink-0">0.0</span>
+            <input
+              type="range"
+              min="0"
+              max="3"
+              step="0.05"
+              v-model.number="readValueMinScore"
+              @input="readValuePreset = 'custom'"
+              class="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-emerald-600 dark:accent-emerald-500"
+              title="Slide to filter channels by minimum Read Value score"
+            />
+            <span class="text-[10px] font-mono text-gray-400 shrink-0">3.0</span>
+            <button
+              v-if="readValueMinScore > 0"
+              @click="readValueMinScore = 0; readValuePreset = 'all'"
+              class="text-[10px] font-bold text-gray-400 hover:text-rose-500 dark:hover:text-rose-400 px-1 py-0.5 transition cursor-pointer shrink-0"
+              title="Reset score slider"
+            >
+              Reset
+            </button>
+          </div>
+
+          <!-- Quick Presets -->
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button
+              @click="applyReadValuePreset('all')"
+              :class="[
+                'px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer',
+                readValuePreset === 'all'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'bg-gray-100 dark:bg-gray-900/60 text-gray-600 dark:text-gray-300 hover:bg-gray-200'
+              ]"
+            >
+              All
+            </button>
+            <button
+              @click="applyReadValuePreset('critical')"
+              :class="[
+                'px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1',
+                readValuePreset === 'critical'
+                  ? 'bg-emerald-600 text-white shadow-sm ring-2 ring-emerald-500/40'
+                  : 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100'
+              ]"
+            >
+              <span>L3 Critical (≥2.2)</span>
+              <span class="text-[10px] px-1 rounded-full font-mono bg-black/10 dark:bg-white/10">
+                {{ readValueStats.criticalCount.toLocaleString() }}
+              </span>
+            </button>
+            <button
+              @click="applyReadValuePreset('substantive')"
+              :class="[
+                'px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1',
+                readValuePreset === 'substantive'
+                  ? 'bg-blue-600 text-white shadow-sm ring-2 ring-blue-500/40'
+                  : 'bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 hover:bg-blue-100'
+              ]"
+            >
+              <span>L2 Substantive (≥1.5)</span>
+              <span class="text-[10px] px-1 rounded-full font-mono bg-black/10 dark:bg-white/10">
+                {{ readValueStats.substantiveCount.toLocaleString() }}
+              </span>
+            </button>
+            <button
+              @click="applyReadValuePreset('background')"
+              :class="[
+                'px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1',
+                readValuePreset === 'background'
+                  ? 'bg-amber-600 text-white shadow-sm ring-2 ring-amber-500/40'
+                  : 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 hover:bg-amber-100'
+              ]"
+            >
+              <span>L1 (≥0.8)</span>
+            </button>
+            <button
+              @click="applyReadValuePreset('low')"
+              :class="[
+                'px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1',
+                readValuePreset === 'low'
+                  ? 'bg-slate-600 text-white shadow-sm ring-2 ring-slate-500/40'
+                  : 'bg-slate-100 dark:bg-slate-900/60 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-200'
+              ]"
+            >
+              <span>L0 (&lt;0.8)</span>
+            </button>
+            <button
+              @click="applyReadValuePreset('hasReadValue')"
+              :class="[
+                'px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1',
+                readValuePreset === 'hasReadValue'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'bg-gray-100 dark:bg-gray-900/60 text-gray-700 dark:text-gray-300 hover:bg-gray-200'
+              ]"
+            >
+              <span>Scored</span>
+              <span class="text-[10px] px-1 rounded-full font-mono bg-black/10 dark:bg-white/10">
+                {{ readValueStats.hasCount.toLocaleString() }}
+              </span>
+            </button>
+            <button
+              @click="applyReadValuePreset('legacyOnly')"
+              :class="[
+                'px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1',
+                readValuePreset === 'legacyOnly'
+                  ? 'bg-gray-700 text-white shadow-sm'
+                  : 'bg-gray-100 dark:bg-gray-900/60 text-gray-500 dark:text-gray-400 hover:bg-gray-200'
+              ]"
+              title="Filter channels from legacy batch without Read Value scoring"
+            >
+              <span>Legacy</span>
+              <span class="text-[10px] px-1 rounded-full font-mono bg-black/10 dark:bg-white/10">
+                {{ readValueStats.legacyCount.toLocaleString() }}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Domestic Affairs Filter (5 cols) -->
+        <div class="lg:col-span-5 space-y-1.5">
+          <div class="flex items-center justify-between">
+            <label class="block text-[10px] font-black uppercase tracking-wider text-purple-600 dark:text-purple-400">
+              Domestic Affairs Orientation
+            </label>
+            <span class="text-[10px] font-mono text-gray-400">
+              Ratio: 0.0–1.0
+            </span>
+          </div>
+
           <div class="flex items-center gap-1 p-1 bg-gray-100 dark:bg-gray-900/60 rounded-xl border border-gray-200/60 dark:border-gray-700/60 text-xs">
-            <span class="text-[10px] uppercase font-bold tracking-wider text-gray-400 px-2">Domestic:</span>
             <button
               @click="applyDomesticPreset('all')"
               :class="[
-                'px-2.5 py-1 rounded-lg font-bold transition cursor-pointer',
+                'flex-1 py-1 rounded-lg font-bold transition text-center cursor-pointer',
                 domesticPreset === 'all'
                   ? 'bg-white dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 shadow-sm'
                   : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'
@@ -608,58 +956,42 @@ const handleExplore = (channel: string) => {
             <button
               @click="applyDomesticPreset('high')"
               :class="[
-                'px-2.5 py-1 rounded-lg font-bold transition cursor-pointer',
+                'flex-1 py-1 rounded-lg font-bold transition text-center cursor-pointer',
                 domesticPreset === 'high'
                   ? 'bg-white dark:bg-gray-800 text-purple-600 dark:text-purple-400 shadow-sm'
                   : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'
               ]"
             >
-              High (≥0.6)
+              Domestic (≥0.6)
             </button>
             <button
               @click="applyDomesticPreset('mid')"
               :class="[
-                'px-2.5 py-1 rounded-lg font-bold transition cursor-pointer',
+                'flex-1 py-1 rounded-lg font-bold transition text-center cursor-pointer',
                 domesticPreset === 'mid'
                   ? 'bg-white dark:bg-gray-800 text-purple-600 dark:text-purple-400 shadow-sm'
                   : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'
               ]"
             >
-              Mid (0.3-0.6)
+              Mid
             </button>
             <button
               @click="applyDomesticPreset('low')"
               :class="[
-                'px-2.5 py-1 rounded-lg font-bold transition cursor-pointer',
+                'flex-1 py-1 rounded-lg font-bold transition text-center cursor-pointer',
                 domesticPreset === 'low'
                   ? 'bg-white dark:bg-gray-800 text-purple-600 dark:text-purple-400 shadow-sm'
                   : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'
               ]"
             >
-              Low (&lt;0.3)
+              External (&lt;0.3)
             </button>
-          </div>
-
-          <!-- Sort Select -->
-          <div class="flex items-center gap-1.5 text-xs bg-gray-50 dark:bg-gray-900 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700">
-            <SlidersHorizontal class="w-3.5 h-3.5 text-gray-400" />
-            <select
-              v-model="sortBy"
-              class="bg-transparent font-bold text-gray-800 dark:text-gray-200 outline-none cursor-pointer"
-            >
-              <option value="topicConf" class="dark:bg-gray-800">Topic Confidence (High → Low)</option>
-              <option value="countryConf" class="dark:bg-gray-800">Country Confidence (High → Low)</option>
-              <option value="domesticDesc" class="dark:bg-gray-800">Domestic Score (High → Low)</option>
-              <option value="domesticAsc" class="dark:bg-gray-800">Domestic Score (Low → High)</option>
-              <option value="channelAsc" class="dark:bg-gray-800">Channel Name (A → Z)</option>
-              <option value="latencyAsc" class="dark:bg-gray-800">Latency (Fastest)</option>
-            </select>
           </div>
         </div>
       </div>
 
-      <!-- Row 2: Topic Chips -->
-      <div class="space-y-1.5">
+      <!-- Row 3: Topic Chips -->
+      <div class="space-y-1.5 pt-2 border-t border-gray-100 dark:border-gray-700/60">
         <label class="block text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500">
           Filter By Topic
         </label>
@@ -700,10 +1032,11 @@ const handleExplore = (channel: string) => {
         </div>
       </div>
 
-      <!-- Row 3: Target Country Chips -->
+      <!-- Row 4: Target Country Chips (Expanded to 12 regions) -->
       <div class="space-y-1.5">
-        <label class="block text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500">
-          Filter By Target Country
+        <label class="block text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500 flex items-center justify-between">
+          <span>Filter By Target Country / Region</span>
+          <span class="text-indigo-600 dark:text-indigo-400 lowercase font-normal">Includes European Union, US Allies Asia, Africa</span>
         </label>
         <div class="flex flex-wrap items-center gap-1.5">
           <button
@@ -725,13 +1058,21 @@ const handleExplore = (channel: string) => {
             :key="key"
             @click="selectedCountry = key"
             :class="[
-              'px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer',
+              'px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer relative',
               selectedCountry === key
                 ? 'bg-cyan-600 text-white shadow-sm ring-2 ring-cyan-500/40'
-                : 'bg-gray-50 dark:bg-gray-900/60 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800'
+                : cfg.isNew
+                  ? 'bg-cyan-50/80 dark:bg-cyan-950/30 text-cyan-800 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800/60 hover:bg-cyan-100 dark:hover:bg-cyan-900/50'
+                  : 'bg-gray-50 dark:bg-gray-900/60 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800'
             ]"
           >
             <span>{{ cfg.flag }} {{ cfg.label }}</span>
+            <span
+              v-if="cfg.isNew"
+              class="text-[9px] uppercase px-1 py-0.2 rounded font-extrabold bg-amber-400/20 text-amber-700 dark:text-amber-300 border border-amber-300/40"
+            >
+              New
+            </span>
             <span
               class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
               :class="selectedCountry === key ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400'"
@@ -808,10 +1149,10 @@ const handleExplore = (channel: string) => {
       </div>
       <h3 class="text-sm font-bold text-gray-900 dark:text-white">No classified channels match current filters</h3>
       <p class="text-xs text-gray-500 dark:text-gray-400 max-w-md mx-auto">
-        Try resetting the search query or expanding the topic/country filters.
+        Try resetting the search query or expanding topic, country, or Read Value thresholds.
       </p>
       <button
-        @click="searchQuery = ''; selectedTopic = 'all'; selectedCountry = 'all'; applyDomesticPreset('all')"
+        @click="searchQuery = ''; selectedTopic = 'all'; selectedCountry = 'all'; applyDomesticPreset('all'); applyReadValuePreset('all')"
         class="px-4 py-2 text-xs font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 transition cursor-pointer"
       >
         Reset Filters
@@ -823,7 +1164,7 @@ const handleExplore = (channel: string) => {
       <div
         v-for="item in paginatedItems"
         :key="item.channel"
-        class="bg-white dark:bg-gray-800/90 rounded-2xl border border-gray-200/80 dark:border-gray-700/80 p-4.5 shadow-sm hover:shadow-md transition-all duration-200 flex flex-col justify-between space-y-3.5 group relative"
+        class="bg-white dark:bg-gray-800/90 rounded-2xl border border-gray-200/80 dark:border-gray-700/80 p-4.5 shadow-sm hover:shadow-md transition-all duration-200 flex flex-col justify-between space-y-3 group relative"
       >
         <!-- Card Header: Avatar, Name & Actions -->
         <div class="flex items-start justify-between gap-2.5">
@@ -840,10 +1181,37 @@ const handleExplore = (channel: string) => {
               </div>
             </div>
             <div class="min-w-0 flex-1">
-              <h4 class="text-xs font-extrabold text-gray-900 dark:text-white truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition" :title="item.channel">
-                @{{ item.channel }}
-              </h4>
-              <div class="flex items-center gap-1.5 text-[10px] text-gray-400 font-mono">
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <h4 class="text-xs font-extrabold text-gray-900 dark:text-white truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition" :title="item.channel">
+                  @{{ item.channel }}
+                </h4>
+                <!-- Quality Score Badge on Card -->
+                <div
+                  v-if="item.hasReadValue && item.readValueScore !== null"
+                  :class="[
+                    'inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9px] font-black tracking-wide border shrink-0',
+                    item.readValueScore >= 2.2
+                      ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/80 dark:text-emerald-300 border-emerald-300 dark:border-emerald-700 ring-1 ring-emerald-500/20'
+                      : item.readValueScore >= 1.5
+                        ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/80 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+                        : item.readValueScore >= 0.8
+                          ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/80 dark:text-amber-300 border-amber-300 dark:border-amber-700'
+                          : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-slate-300 dark:border-slate-700'
+                  ]"
+                  :title="`Read Value Score: ${item.readValueScore.toFixed(2)} / 3.0`"
+                >
+                  <Award class="w-2.5 h-2.5 shrink-0" />
+                  <span>{{ item.readValueScore.toFixed(2) }} · {{ getReadValueTier(item.readValueScore).shortLabel }}</span>
+                </div>
+                <div
+                  v-else
+                  class="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9px] font-medium text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 border border-dashed border-gray-300 dark:border-gray-700 shrink-0"
+                  title="Legacy batch without Read Value scoring"
+                >
+                  <span>Legacy</span>
+                </div>
+              </div>
+              <div class="flex items-center gap-1.5 text-[10px] text-gray-400 font-mono mt-0.5">
                 <span>{{ item.model }}</span>
                 <span>·</span>
                 <span>{{ Math.round(item.latencyMs) }}ms</span>
@@ -856,7 +1224,7 @@ const handleExplore = (channel: string) => {
             <button
               @click="openDrawer(item)"
               class="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition cursor-pointer"
-              title="Inspect probability distributions"
+              title="Inspect full distributions and legend"
             >
               <Eye class="w-4 h-4" />
             </button>
@@ -902,16 +1270,16 @@ const handleExplore = (channel: string) => {
           </div>
         </div>
 
-        <!-- Section 2: Target Country Distribution -->
+        <!-- Section 2: Target Country Distribution (Supports expanded regions) -->
         <div class="space-y-1.5 bg-gray-50/70 dark:bg-gray-900/40 p-2.5 rounded-xl border border-gray-100 dark:border-gray-800/60">
           <div class="flex items-center justify-between text-xs">
             <span class="text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500">
-              Target Country
+              Target Region
             </span>
-            <span class="font-extrabold text-gray-800 dark:text-gray-200 capitalize flex items-center gap-1">
+            <span class="font-extrabold text-gray-800 dark:text-gray-200 capitalize flex items-center gap-1 truncate max-w-[170px]" :title="getCountryInfo(item.country).label">
               <span>{{ getCountryInfo(item.country).flag }}</span>
-              <span>{{ getCountryInfo(item.country).label }}</span>
-              <span class="text-[10px] font-mono font-normal text-cyan-600 dark:text-cyan-400 tabular-nums">
+              <span class="truncate">{{ getCountryInfo(item.country).label }}</span>
+              <span class="text-[10px] font-mono font-normal text-cyan-600 dark:text-cyan-400 tabular-nums shrink-0">
                 ({{ Math.round(item.countryConf * 100) }}%)
               </span>
             </span>
@@ -935,24 +1303,134 @@ const handleExplore = (channel: string) => {
           </div>
         </div>
 
-        <!-- Section 3: Domestic Affairs Ratio -->
-        <div class="space-y-1 bg-gray-50/70 dark:bg-gray-900/40 p-2.5 rounded-xl border border-gray-100 dark:border-gray-800/60">
-          <div class="flex items-center justify-between text-xs">
-            <span class="text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500">
-              Domestic Affairs
-            </span>
-            <span class="font-mono font-extrabold text-xs tabular-nums" :class="item.domestic >= 0.6 ? 'text-purple-600 dark:text-purple-400' : 'text-gray-700 dark:text-gray-300'">
-              {{ item.domestic.toFixed(2) }}
-              <span class="text-[10px] font-normal text-gray-400">
-                ({{ item.domestic >= 0.6 ? 'Domestic' : item.domestic >= 0.3 ? 'Balanced' : 'External' }})
+        <!-- Section 3: Dual Intelligence Strip: Domestic Affairs & Read Value -->
+        <div class="grid grid-cols-2 gap-2">
+          <!-- Domestic Affairs -->
+          <div class="space-y-1 bg-gray-50/70 dark:bg-gray-900/40 p-2.5 rounded-xl border border-gray-100 dark:border-gray-800/60">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-[9px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500">
+                Domestic
               </span>
-            </span>
+              <span class="font-mono font-extrabold text-[11px] tabular-nums" :class="item.domestic >= 0.6 ? 'text-purple-600 dark:text-purple-400' : 'text-gray-700 dark:text-gray-300'">
+                {{ item.domestic.toFixed(2) }}
+              </span>
+            </div>
+            <div class="w-full h-1.5 bg-gray-200/80 dark:bg-gray-700/60 rounded-full overflow-hidden">
+              <div
+                class="h-full bg-gradient-to-r from-purple-500 to-indigo-500"
+                :style="{ width: `${Math.round(item.domestic * 100)}%` }"
+              ></div>
+            </div>
+            <div class="text-[9px] text-gray-400 truncate">
+              {{ item.domestic >= 0.6 ? 'Domestic Focus' : item.domestic >= 0.3 ? 'Balanced' : 'External Focus' }}
+            </div>
           </div>
-          <div class="w-full h-1.5 bg-gray-200/80 dark:bg-gray-700/60 rounded-full overflow-hidden">
+
+          <!-- Read Value (Quality score badge with level meter and breakdown bar) -->
+          <div class="space-y-1.5 bg-gray-50/70 dark:bg-gray-900/40 p-2.5 rounded-xl border border-gray-100 dark:border-gray-800/60">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-[9px] font-black uppercase tracking-wider text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
+                <Award class="w-3 h-3" />
+                <span>Read Value</span>
+              </span>
+              <span
+                v-if="item.hasReadValue && item.readValueScore !== null"
+                class="font-mono font-extrabold text-[11px] tabular-nums text-emerald-600 dark:text-emerald-400"
+              >
+                {{ item.readValueScore.toFixed(2) }}
+              </span>
+              <span v-else class="text-[10px] text-gray-400 font-mono">
+                Legacy
+              </span>
+            </div>
+
+            <!-- Stepped Level Meter (0..3) -->
+            <div class="space-y-0.5">
+              <div class="grid grid-cols-4 gap-1 py-0.5" title="Stepped Quality Meter (L0: Chatter, L1: Background, L2: Substantive, L3: Critical)">
+                <div
+                  :class="[
+                    'h-2 rounded-xs transition-all flex items-center justify-center text-[7.5px] font-mono font-black',
+                    (item.hasReadValue && item.readValueScore !== null)
+                      ? 'bg-slate-400 text-white'
+                      : 'bg-gray-200 dark:bg-gray-700 text-gray-400 opacity-40'
+                  ]"
+                  title="Level 0: Fluff/Chatter (Score ≥ 0.0)"
+                >
+                  0
+                </div>
+                <div
+                  :class="[
+                    'h-2 rounded-xs transition-all flex items-center justify-center text-[7.5px] font-mono font-black',
+                    (item.hasReadValue && item.readValueScore !== null && item.readValueScore >= 0.8)
+                      ? 'bg-amber-500 text-white shadow-xs'
+                      : 'bg-gray-200 dark:bg-gray-700 text-gray-400 opacity-40'
+                  ]"
+                  title="Level 1: Background/Sentiment (Score ≥ 0.8)"
+                >
+                  1
+                </div>
+                <div
+                  :class="[
+                    'h-2 rounded-xs transition-all flex items-center justify-center text-[7.5px] font-mono font-black',
+                    (item.hasReadValue && item.readValueScore !== null && item.readValueScore >= 1.5)
+                      ? 'bg-blue-500 text-white shadow-xs'
+                      : 'bg-gray-200 dark:bg-gray-700 text-gray-400 opacity-40'
+                  ]"
+                  title="Level 2: Circumstantial/Claims (Score ≥ 1.5)"
+                >
+                  2
+                </div>
+                <div
+                  :class="[
+                    'h-2 rounded-xs transition-all flex items-center justify-center text-[7.5px] font-mono font-black',
+                    (item.hasReadValue && item.readValueScore !== null && item.readValueScore >= 2.2)
+                      ? 'bg-emerald-500 text-white shadow-xs ring-1 ring-emerald-300'
+                      : 'bg-gray-200 dark:bg-gray-700 text-gray-400 opacity-40'
+                  ]"
+                  title="Level 3: Critical Facts (Score ≥ 2.2)"
+                >
+                  3
+                </div>
+              </div>
+            </div>
+
+            <!-- 4-Level Read Value Breakdown Bar (0..3) -->
             <div
-              class="h-full bg-gradient-to-r from-purple-500 to-indigo-500"
-              :style="{ width: `${Math.round(item.domestic * 100)}%` }"
-            ></div>
+              v-if="item.hasReadValue && Object.keys(item.readValueProbs).length > 0"
+              class="w-full h-1.5 bg-gray-200/80 dark:bg-gray-700/60 rounded-full overflow-hidden flex"
+              :title="`L0: ${Math.round((item.readValueProbs['0'] || 0) * 100)}% · L1: ${Math.round((item.readValueProbs['1'] || 0) * 100)}% · L2: ${Math.round((item.readValueProbs['2'] || 0) * 100)}% · L3: ${Math.round((item.readValueProbs['3'] || 0) * 100)}%`"
+            >
+              <div
+                class="bg-slate-400"
+                :style="{ width: `${Math.round((item.readValueProbs['0'] || 0) * 100)}%` }"
+                title="Level 0: Fluff/Banter"
+              ></div>
+              <div
+                class="bg-amber-400"
+                :style="{ width: `${Math.round((item.readValueProbs['1'] || 0) * 100)}%` }"
+                title="Level 1: Background/Sentiment"
+              ></div>
+              <div
+                class="bg-sky-500"
+                :style="{ width: `${Math.round((item.readValueProbs['2'] || 0) * 100)}%` }"
+                title="Level 2: Circumstantial/Unverified"
+              ></div>
+              <div
+                class="bg-emerald-500"
+                :style="{ width: `${Math.round((item.readValueProbs['3'] || 0) * 100)}%` }"
+                title="Level 3: Critical Facts"
+              ></div>
+            </div>
+            <div v-else class="w-full h-1.5 bg-gray-200/60 dark:bg-gray-800 rounded-full border border-dashed border-gray-300 dark:border-gray-700" title="Legacy format without score breakdown"></div>
+
+            <div class="flex items-center justify-between text-[9px]">
+              <span class="truncate font-bold" :class="getReadValueTier(item.readValueScore).color">
+                {{ getReadValueTier(item.readValueScore).shortLabel }}
+              </span>
+              <span v-if="item.hasReadValue" class="text-gray-400 font-mono text-[8.5px]">
+                L3: {{ Math.round((item.readValueProbs['3'] || 0) * 100) }}%
+              </span>
+            </div>
           </div>
         </div>
 
@@ -1045,7 +1523,7 @@ const handleExplore = (channel: string) => {
                       @{{ selectedInspectionItem.channel }}
                     </h3>
                     <p class="text-xs text-gray-500 dark:text-gray-400">
-                      Deep Probability Breakdown & Metrics
+                      Channel Taxonomy, Read Value & Geopolitical Distribution
                     </p>
                   </div>
                 </div>
@@ -1057,10 +1535,11 @@ const handleExplore = (channel: string) => {
                 </button>
               </div>
 
-              <!-- Primary Highlights -->
-              <div class="grid grid-cols-3 gap-3 text-center">
-                <div class="p-3 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200/60 dark:border-indigo-800/60">
-                  <div class="text-[10px] font-black uppercase text-indigo-700 dark:text-indigo-300">Topic</div>
+              <!-- Primary Highlights: 4-Grid Breakdown -->
+              <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-center">
+                <!-- Topic -->
+                <div class="p-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200/60 dark:border-indigo-800/60">
+                  <div class="text-[9px] font-black uppercase text-indigo-700 dark:text-indigo-300">Topic</div>
                   <div class="text-xs font-bold text-gray-900 dark:text-white capitalize truncate mt-0.5">
                     {{ selectedInspectionItem.topic }}
                   </div>
@@ -1069,31 +1548,148 @@ const handleExplore = (channel: string) => {
                   </div>
                 </div>
 
-                <div class="p-3 rounded-xl bg-cyan-50 dark:bg-cyan-950/40 border border-cyan-200/60 dark:border-cyan-800/60">
-                  <div class="text-[10px] font-black uppercase text-cyan-700 dark:text-cyan-300">Country</div>
-                  <div class="text-xs font-bold text-gray-900 dark:text-white capitalize truncate mt-0.5">
-                    {{ selectedInspectionItem.country }}
+                <!-- Country -->
+                <div class="p-2.5 rounded-xl bg-cyan-50 dark:bg-cyan-950/40 border border-cyan-200/60 dark:border-cyan-800/60">
+                  <div class="text-[9px] font-black uppercase text-cyan-700 dark:text-cyan-300">Region</div>
+                  <div class="text-xs font-bold text-gray-900 dark:text-white capitalize truncate mt-0.5" :title="getCountryInfo(selectedInspectionItem.country).label">
+                    {{ getCountryInfo(selectedInspectionItem.country).label }}
                   </div>
                   <div class="text-[11px] font-mono font-bold text-cyan-600 dark:text-cyan-400">
                     {{ Math.round(selectedInspectionItem.countryConf * 100) }}%
                   </div>
                 </div>
 
-                <div class="p-3 rounded-xl bg-purple-50 dark:bg-purple-950/40 border border-purple-200/60 dark:border-purple-800/60">
-                  <div class="text-[10px] font-black uppercase text-purple-700 dark:text-purple-300">Domestic</div>
+                <!-- Domestic -->
+                <div class="p-2.5 rounded-xl bg-purple-50 dark:bg-purple-950/40 border border-purple-200/60 dark:border-purple-800/60">
+                  <div class="text-[9px] font-black uppercase text-purple-700 dark:text-purple-300">Domestic</div>
                   <div class="text-xs font-bold text-gray-900 dark:text-white truncate mt-0.5">
                     {{ selectedInspectionItem.domestic >= 0.6 ? 'Domestic' : 'External' }}
                   </div>
                   <div class="text-[11px] font-mono font-bold text-purple-600 dark:text-purple-400">
-                    {{ selectedInspectionItem.domestic.toFixed(3) }}
+                    {{ selectedInspectionItem.domestic.toFixed(2) }}
                   </div>
+                </div>
+
+                <!-- Read Value -->
+                <div class="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200/60 dark:border-emerald-800/60">
+                  <div class="text-[9px] font-black uppercase text-emerald-700 dark:text-emerald-300">Read Value</div>
+                  <div class="text-xs font-bold text-gray-900 dark:text-white truncate mt-0.5">
+                    {{ selectedInspectionItem.hasReadValue ? getReadValueTier(selectedInspectionItem.readValueScore).shortLabel : 'Legacy' }}
+                  </div>
+                  <div class="text-[11px] font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                    {{ selectedInspectionItem.hasReadValue && selectedInspectionItem.readValueScore !== null ? selectedInspectionItem.readValueScore.toFixed(2) : 'N/A' }}
+                  </div>
+                </div>
+              </div>
+
+              <!-- Read Value Deep Analysis Section -->
+              <div class="space-y-2.5 bg-gray-50/70 dark:bg-gray-900/40 p-3.5 rounded-2xl border border-gray-100 dark:border-gray-800/60">
+                <div class="flex items-center justify-between">
+                  <h4 class="text-xs font-black uppercase tracking-wider text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
+                    <Award class="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                    <span>Read Value Quality Breakdown</span>
+                  </h4>
+                  <span
+                    v-if="selectedInspectionItem.hasReadValue && selectedInspectionItem.readValueScore !== null"
+                    class="font-mono text-xs font-extrabold px-2 py-0.5 rounded-lg bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700"
+                  >
+                    Score: {{ selectedInspectionItem.readValueScore.toFixed(3) }} / 3.000
+                  </span>
+                  <span v-else class="text-[10px] text-gray-400 font-mono">
+                    Legacy Format (Score Not Included)
+                  </span>
+                </div>
+
+                <div v-if="selectedInspectionItem.hasReadValue" class="space-y-2">
+                  <!-- Levels 0 to 3 with Official Model Legend -->
+                  <div class="space-y-2">
+                    <!-- Level 3 -->
+                    <div class="space-y-1 bg-white dark:bg-gray-900/70 p-2.5 rounded-xl border border-emerald-200/60 dark:border-emerald-900/60">
+                      <div class="flex items-center justify-between text-xs">
+                        <span class="font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
+                          <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+                          Level 3: Critical Facts & Disclosures
+                        </span>
+                        <span class="font-mono text-[11px] font-bold tabular-nums text-emerald-800 dark:text-emerald-200">
+                          {{ (((selectedInspectionItem.readValueProbs['3'] || 0)) * 100).toFixed(2) }}%
+                        </span>
+                      </div>
+                      <div class="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                        <div class="h-full bg-emerald-500 rounded-full" :style="{ width: `${Math.round((selectedInspectionItem.readValueProbs['3'] || 0) * 100)}%` }"></div>
+                      </div>
+                      <p class="text-[10px] text-gray-500 dark:text-gray-400 italic leading-snug">
+                        {{ selectedInspectionItem.readValueLegend?.['3'] || DEFAULT_READ_LEGEND['3'] }}
+                      </p>
+                    </div>
+
+                    <!-- Level 2 -->
+                    <div class="space-y-1 bg-white dark:bg-gray-900/70 p-2.5 rounded-xl border border-blue-200/60 dark:border-blue-900/60">
+                      <div class="flex items-center justify-between text-xs">
+                        <span class="font-bold text-blue-700 dark:text-blue-300 flex items-center gap-1.5">
+                          <span class="w-2 h-2 rounded-full bg-blue-500"></span>
+                          Level 2: Circumstantial Context & Claims
+                        </span>
+                        <span class="font-mono text-[11px] font-bold tabular-nums text-blue-800 dark:text-blue-200">
+                          {{ (((selectedInspectionItem.readValueProbs['2'] || 0)) * 100).toFixed(2) }}%
+                        </span>
+                      </div>
+                      <div class="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                        <div class="h-full bg-blue-500 rounded-full" :style="{ width: `${Math.round((selectedInspectionItem.readValueProbs['2'] || 0) * 100)}%` }"></div>
+                      </div>
+                      <p class="text-[10px] text-gray-500 dark:text-gray-400 italic leading-snug">
+                        {{ selectedInspectionItem.readValueLegend?.['2'] || DEFAULT_READ_LEGEND['2'] }}
+                      </p>
+                    </div>
+
+                    <!-- Level 1 -->
+                    <div class="space-y-1 bg-white dark:bg-gray-900/70 p-2.5 rounded-xl border border-amber-200/60 dark:border-amber-900/60">
+                      <div class="flex items-center justify-between text-xs">
+                        <span class="font-bold text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
+                          <span class="w-2 h-2 rounded-full bg-amber-500"></span>
+                          Level 1: Background & Opinion
+                        </span>
+                        <span class="font-mono text-[11px] font-bold tabular-nums text-amber-800 dark:text-amber-200">
+                          {{ (((selectedInspectionItem.readValueProbs['1'] || 0)) * 100).toFixed(2) }}%
+                        </span>
+                      </div>
+                      <div class="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                        <div class="h-full bg-amber-500 rounded-full" :style="{ width: `${Math.round((selectedInspectionItem.readValueProbs['1'] || 0) * 100)}%` }"></div>
+                      </div>
+                      <p class="text-[10px] text-gray-500 dark:text-gray-400 italic leading-snug">
+                        {{ selectedInspectionItem.readValueLegend?.['1'] || DEFAULT_READ_LEGEND['1'] }}
+                      </p>
+                    </div>
+
+                    <!-- Level 0 -->
+                    <div class="space-y-1 bg-white dark:bg-gray-900/70 p-2.5 rounded-xl border border-slate-200/60 dark:border-slate-800/60">
+                      <div class="flex items-center justify-between text-xs">
+                        <span class="font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                          <span class="w-2 h-2 rounded-full bg-slate-400"></span>
+                          Level 0: Fluff & Chatter
+                        </span>
+                        <span class="font-mono text-[11px] font-bold tabular-nums text-slate-800 dark:text-slate-200">
+                          {{ (((selectedInspectionItem.readValueProbs['0'] || 0)) * 100).toFixed(2) }}%
+                        </span>
+                      </div>
+                      <div class="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                        <div class="h-full bg-slate-400 rounded-full" :style="{ width: `${Math.round((selectedInspectionItem.readValueProbs['0'] || 0) * 100)}%` }"></div>
+                      </div>
+                      <p class="text-[10px] text-gray-500 dark:text-gray-400 italic leading-snug">
+                        {{ selectedInspectionItem.readValueLegend?.['0'] || DEFAULT_READ_LEGEND['0'] }}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-else class="text-xs text-gray-500 dark:text-gray-400 italic bg-white dark:bg-gray-900/50 p-3 rounded-xl border border-gray-200/60 dark:border-gray-800">
+                  This record belongs to the legacy classification model run before Read Value scoring was implemented. Re-running the classifier on this channel will populate 0–3 level informativeness.
                 </div>
               </div>
 
               <!-- Topic Probabilities Table -->
               <div class="space-y-2">
                 <h4 class="text-xs font-black uppercase tracking-wider text-gray-600 dark:text-gray-300 flex items-center justify-between">
-                  <span>Topic Distribution (All Categories)</span>
+                  <span>Topic Distribution (All 9 Categories)</span>
                   <span class="text-[10px] font-mono font-normal text-gray-400">Probabilities</span>
                 </h4>
                 <div class="space-y-1.5 bg-gray-50 dark:bg-gray-900/60 p-3 rounded-xl border border-gray-200/60 dark:border-gray-700/60">
@@ -1120,10 +1716,10 @@ const handleExplore = (channel: string) => {
                 </div>
               </div>
 
-              <!-- Target Country Probabilities Table -->
+              <!-- Target Country Probabilities Table (Supports 12 regions) -->
               <div class="space-y-2">
                 <h4 class="text-xs font-black uppercase tracking-wider text-gray-600 dark:text-gray-300 flex items-center justify-between">
-                  <span>Target Country Distribution</span>
+                  <span>Geopolitical Target Region Distribution</span>
                   <span class="text-[10px] font-mono font-normal text-gray-400">Probabilities</span>
                 </h4>
                 <div class="space-y-1.5 bg-gray-50 dark:bg-gray-900/60 p-3 rounded-xl border border-gray-200/60 dark:border-gray-700/60">

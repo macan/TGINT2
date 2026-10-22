@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan for the new Types navigation tab featuring streaming NDJSON fetching of Telegram channel classifications (exchange/classify.json), topic & target country probability distributions, domestic affairs confidence scores, multi-dimensional filters, quick presets, pagination, and seamless Explorer tab integration.",
-  "updatedAt": "2026-10-20T04:25:23.979823651Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Architecture and design specification for the 'Article Reader' view in Explorer mode, featuring customizable typography controls (serif/sans, font size, line height, reading width, and background themes), collapsible media galleries, reading time estimation, and a distraction-free editorial layout for long-form channel posts.",
+  "updatedAt":  "2026-10-21T05:31:12.517967582Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }

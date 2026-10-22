@@ -1,163 +1,144 @@
-# Types Tab - Telegram Channel Classification & Intelligence Studio
+# Article Reader Mode for Channel Posts
 
-A high-performance classification analysis tab located after Listen in the main navigation, delivering streaming line-by-line NDJSON ingestion of over 50,000 AI-classified channels (`exchange/classify.json`), rich probability distributions, and instant multi-dimensional filtering.
+An editorial, distraction-free reading mode integrated seamlessly into the Explorer tab alongside Feed, Masonry, and Timeline views, designed specifically for long-form channel posts with customizable typography, reading time estimates, collapsible media, and archival reading themes.
 
----
-
-### User Review & Critical Decisions
+## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following architectural and UX decisions were confirmed during Phase 1 clarification:
-> - **Primary Layout & Visualization**: Paginated data cards featuring proportional probability bars, confidence ratings, and a slide-over inspection drawer for deep analysis.
-> - **Loading & Ingestion Model**: Streaming `ReadableStream` reader with a live progressive progress indicator, rendering channels into the interface incrementally without blocking UI threads.
-> - **Channel Interaction**: Clicking a channel item seamlessly switches to the **Explorer** tab, automatically populates the channel name, and loads its real-time posts and metadata, while an in-tab inspection drawer allows instant probability scrutiny.
+> Based on your confirmed choices in Phase 1:
+> - **Seamless Toggle Mode**: Article Reader is integrated directly into the Explorer tab view switcher as a fourth first-class layout mode (`Feed` | `Masonry` | `Timeline` | `Article Reader`), letting you switch effortlessly while preserving search queries, channel context, and filters.
+> - **Typography & Reading Controls**: A floating/sticky toolbar provides live adjustments for font family (Editorial Serif vs. Modern Sans), font scale (`15px` to `21px`), line height (`Relaxed` vs. `Loose`), column measure (`65ch`–`80ch`), and paper themes (`Pure White`, `Warm Parchment / Sepia`, `Muted Charcoal`, `Night Dark`).
+> - **Long-Form Focus & Collapsible Media**: Posts display estimated reading time (e.g. `3 min read · 480 words`), clear date headers, drop-cap styling on primary paragraphs, and clean inline collapsible media drawers so images/videos don't disrupt reading flow.
 
 ---
 
-### 1. Overview & Core Concept
+## 1. Overview & Core Concept
 
-- **What It Does**: The **Types** tab connects to the GOS object store (`namespace=exchange`, `key=classify.json`) to stream and parse 55,000+ channel classifications produced by the `kev-latest` model. It categorizes each channel into primary topics (`technology`, `general_news`, `blog`, `financial`, `military`, `university`, `political`, `game`, `spam`), target countries (`russia`, `china`, `united_states`, `ukraine`, `taiwan`, `israel_palestine`, `iran`, `international`, `other`), and evaluates an `is_domestic_affairs` confidence score.
-- **Target Audience**: Open-source intelligence (OSINT) researchers, regional analysts, and Telegram network monitors evaluating channel thematic focuses, geographic targeting, and domestic/international orientation.
-- **Key Value**: Eliminates manual auditing by transforming a 31MB raw NDJSON classification dataset into an instant, searchable, filterable visual catalog with instant jump-to-source inspection.
+When channels publish extensive essays, analytical briefings, transcripts, or multi-paragraph reporting, the traditional social feed card clutter (repetitive profile avatars, metric badges, tool tags, and dense action bars) causes visual fatigue. 
 
----
-
-### 2. User Experience & Visual Design
-
-#### Key User Flows
-1. **Initial Entry & Streaming Ingestion**:
-   - The user clicks the **Types** tab (positioned immediately after **Listen**).
-   - If not yet fetched, the app begins streaming `https://i.gogingko.net/api/v1/v/exchange/classify.json` via chunked stream reader.
-   - A clean top progress bar displays streamed bytes and parsed channel counts in real time (e.g. `2,450 / ~55,000 channels loaded`).
-   - Cards populate progressively, allowing users to start filtering and browsing immediately without waiting for the full 31MB download.
-2. **Multi-Faceted Filtering & Sorting**:
-   - **Quick Search**: Debounced search by channel handle or title.
-   - **Topic Filter**: Segmented chips for each topic category (`All`, `Tech`, `News`, `Blog`, `Finance`, `Military`, `Uni`, `Politics`, `Game`, `Spam`) with instant item counts.
-   - **Target Country Filter**: Dropdown or segmented buttons for countries with geographic distribution preview.
-   - **Domestic Affairs Slider / Range**: Quick slider/presets (`All`, `Low < 0.3`, `Medium 0.3–0.7`, `High > 0.7`) to isolate domestic vs international discourse.
-   - **Sorting**: By Channel Name (A-Z), Topic Confidence (High-Low), Country Confidence (High-Low), or Domestic Score (High-Low).
-3. **Card Presentation**:
-   - Each channel card displays:
-     - Avatar with fallback and channel handle `@channel`.
-     - Primary **Topic** with its top choice label, confidence percentage, and a miniature segmented probability bar showing the distribution across topics.
-     - Primary **Target Country** with confidence percentage and a miniature country probability bar.
-     - **Domestic Affairs** score gauge / progress bar indicating the `is_domestic_affairs` ratio.
-     - Model latency and token usage metrics.
-4. **Action Handlers**:
-   - **Primary Action (Card Click)**: Switches to the **Explorer** tab with `channelName` set, launching search and post fetching.
-   - **Inspect Action (Drawer Button)**: Opens a sliding side drawer displaying full probability tables, token consumption (`input_tokens`, `output_tokens`), latency, and raw JSON view.
-
-#### Visual Identity & Styling
-- **Palette & Accents**: Indigo / Slate theme with clean Tailwind neutral surfaces (`dark:bg-gray-800`, `dark:border-gray-700/80`).
-  - Topic tags & bars: Indigo / Cyan accents.
-  - Target Country: Amber / Emerald accents.
-  - Domestic Affairs: Violet / Purple accents.
-- **Tabular Figures**: All percentages, token counts, and latency numbers rendered with `font-mono tabular-nums`.
-- **Anti-Slop Discipline**: Zero decorative pulsing dots; clean unboxed metadata with `·` separators; functional interactive segmented buttons for active filtering states.
+The **Article Reader** view strips away peripheral interface noise and transforms the channel's chronological post stream into an elegant, high-legibility digital publication. Posts are rendered with generous editorial margins, balanced line lengths, clear typographical rhythm, and reading metadata (word counts, reading duration), while media galleries (photos, video players, doc attachments) are cleanly tucked into elegant expandable drawers.
 
 ---
 
-### 3. Key Product Decisions & Trade-Offs
+## 2. User Experience & Visual Design
 
-- **Decision 1: Streaming ReadableStream with Chunked Line-Buffer vs. `await res.text()`**
-  - *Chosen Approach*: Stream response body using `res.body.getReader()`, splitting chunks by newline with a buffer remainder, and updating reactive arrays in batched frames (`requestAnimationFrame` / 250ms intervals).
-  - *Why*: Parsing 31MB / 55,000 lines synchronously freezes the browser main thread for 1.5–3 seconds. Streaming keeps the tab 100% interactive and shows data within the first 150ms.
-- **Decision 2: Client-Side Virtualized / Paginated Grid vs Infinite Scroll**
-  - *Chosen Approach*: Responsive paginated card grid (e.g. 24 or 48 items per page) with page jump controls and summary stats (`Showing 1-24 of 55,106`).
-  - *Why*: Renders efficiently on mobile and desktop without memory leaks or DOM node bloat, while allowing exact page jumps.
-- **Decision 3: Seamless Cross-Tab State Preservation**
-  - *Chosen Approach*: Once fetched, parsed channel items remain in-memory so switching between Explorer, Types, and Listen is instantaneous without re-fetching.
+### Key User Flows
+
+1. **Activating Reader View**: In the Explorer tab, the view mode switcher is expanded with an **Article Reader** button (`BookOpen` icon) alongside Feed, Masonry, and Timeline. Clicking it smoothly transitions the feed into reader layout.
+2. **Customizing Reading Aesthetics**: A discreet, floating or header-adjacent Reading Controls bar allows instant adjustment of:
+   - **Font Style**: Book Serif (`Lora` / `Merriweather` / Georgia fallback) vs. Contemporary Sans (`Plus Jakarta Sans` / `Manrope`).
+   - **Text Size**: 4-step stepper (`A-` / `A+`: Small 15px, Medium 17px, Large 19px, X-Large 21px).
+   - **Line Spacing**: Relaxed (1.75) vs. Loose (1.95).
+   - **Reading Measure / Column Width**: Compact (`600px`), Standard (`720px` / `65ch`), Wide (`860px`).
+   - **Theme Canvas**:
+     - *Clean Light*: Pure white background with deep charcoal typography.
+     - *Warm Parchment / Sepia*: Soft ivory paper (`#FBF9F5` / `#F7F4EE`) with antique ink text (`#1C1917`).
+     - *Subdued Slate*: Slate gray surface (`#1E293B`) with soft silver text.
+     - *OLED Night*: Pure black canvas (`#09090B`) with high-contrast text.
+3. **Engaging with Long-Form Posts**:
+   - Posts present an editorial header: title or opening sentence emphasis, publication date, time elapsed, and estimated reading duration (`· 4 min read`).
+   - Body paragraphs feature comfortable margins and optional drop-cap on opening paragraphs.
+   - Posts with photos or videos feature a compact media badge (e.g. `📷 3 Photos · Tap to expand`) that opens into an inline gallery without displacing the reader.
+   - Action controls (Copy text, Share, Bookmark, Translate) are unobtrusive at the foot of each post.
+
+### Visual Identity & Typographic Hierarchy
+
+- **Anti-AI Slop Compliance**:
+  - No static pill capsules or candy-colored badges over text.
+  - Zero decorative pulsing dots or pseudo-technical comment prefixes.
+  - Generous negative space between consecutive posts with subtle hairline dividers (`border-b border-stone-200 dark:border-stone-800`).
+  - True `text-wrap: balance` on section titles and headlines.
+  - Tabular numerals for dates, timestamps, and word metrics.
 
 ---
 
-### 4. Technical Architecture & Data Strategy
+## 3. Key Product Decisions & Trade-Offs
 
-#### System & Component Flow Diagram
+- **Decision 1: View Switcher vs. Isolated Modal**
+  - *Chosen Approach*: Add `viewMode = 'reader'` to the existing Explorer view mode state (`list`, `masonry`, `timeline`, `reader`).
+  - *Why*: Allows users to search, filter by date/topic/channel, and paginate naturally through the channel's history without losing their spot or opening nested modal dialogs.
+  - *Alternative Considered*: A standalone modal view was considered, but it breaks continuous multi-post reading and channel exploration.
+
+- **Decision 2: Client-Side Reading State Persistence**
+  - *Chosen Approach*: Save reader preferences (`fontFamily`, `fontSize`, `theme`, `lineHeight`, `readingWidth`) to `localStorage` (`telegram-reader-preferences`).
+  - *Why*: Users configure their ideal reading comfort once and enjoy it consistently across sessions and different channels.
+
+- **Decision 3: Media Handling in Editorial Layout**
+  - *Chosen Approach*: Show a clean inline media teaser (`[Expand 2 Photos]`) by default in Reader mode, with one-click full display for users who want to inspect images.
+  - *Why*: Long-form channel posts frequently feature large banner photos that push text below the fold; collapsing them keeps the eye focused on reading.
+
+---
+
+## 4. Technical Architecture & Component Structure
+
+### Architecture Diagram
+
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        Top Navigation Bar                              │
-│ [Channel] [Explorer] [Search] [Network] [Listen] [Types] ... [Monitor]  │
-└───────────────────────────────────────────────────┬────────────────────┘
-                                                    │
-                                                    ▼
+│                              Explorer Tab                              │
+├────────────────────────────────────────────────────────────────────────┤
+│ Header & Search Bar (Channel @name, Search Query, Date Filter)        │
+│                                                                        │
+│ View Mode Switcher:                                                    │
+│ [ 📄 Feed ]  [ 🧱 Masonry ]  [ ⏱ Timeline ]  [ 📖 Article Reader ]    │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ viewMode === 'reader'
+                                    ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                              Types Tab                                 │
+│                   Reader Controls Bar (Sticky / Toolbar)               │
+│  Font: [ Serif | Sans ]   Size: [ A- | A+ ]   Theme: [ ⚪ | 📜 | 🌙 ]   │
+│  Measure: [ Narrow | Optimal | Wide ]   Media: [ Auto-Collapse Toggle ]│
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│               Article Reader Post Stream (Max Width Container)         │
 │                                                                        │
-│ ┌────────────────────────────────────────────────────────────────────┐ │
-│ │ Stream Ingestion & Progress: Loaded 55,106 items (100%) [Cached]   │ │
-│ └────────────────────────────────────────────────────────────────────┘ │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ Article Post Item                                                │  │
+│  │ ──────────────────────────────────────────────────────────────── │  │
+│  │ Oct 19, 2026 · 14:32 · 520 words · 3 min read                   │  │
+│  │                                                                  │  │
+│  │ [D] uring recent discussions surrounding regional infrastructure,│  │
+│  │     the committee outlined new regulatory guidelines...          │  │
+│  │                                                                  │  │
+│  │ [🖼 2 Photos Attached - Click to Expand / Collapse]              │  │
+│  │                                                                  │  │
+│  │ ── Actions: [Copy Text] [Translate] [Explore Link] ───────────── │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
 │                                                                        │
-│ ┌────────────────────────────────────────────────────────────────────┐ │
-│ │ Controls: [ Search Channel... ] [ Topic Filter ] [ Country Filter ]│ │
-│ │           [ Domestic Slider: ≥ 0.0 ] [ Sort: Confidence ▼ ]         │ │
-│ └────────────────────────────────────────────────────────────────────┘ │
-│                                                                        │
-│ ┌───────────────────────┐  ┌───────────────────────┐  ┌─────────────┐ │
-│ │ Channel Card          │  │ Channel Card          │  │ Channel ... │ │
-│ │ @a11yminsk            │  │ @husainov_photo       │  │             │ │
-│ │ Topic: technology 78% │  │ Topic: blog 45%       │  │             │ │
-│ │ Country: other 55%    │  │ Country: russia 50%   │  │             │ │
-│ │ Domestic: 0.09        │  │ Domestic: 0.36        │  │             │ │
-│ │ [Explore] [Details →] │  │ [Explore] [Details →] │  │             │ │
-│ └───────────┬───────────┘  └───────────────────────┘  └─────────────┘ │
-│             │                                                          │
-│             ▼                                                          │
-│  Switches to Explorer Tab                                              │
-│  or opens Inspection Slide-over Drawer                                 │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ Next Article Post Item...                                        │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Data Schema & Parsing Model
-```typescript
-interface ClassificationTopic {
-  type: string;
-  choice: string;
-  confidence: number;
-  probabilities: Record<string, number>;
-}
+### State & Logic Specifications
 
-interface ClassificationCountry {
-  type: string;
-  choice: string;
-  confidence: number;
-  probabilities: Record<string, number>;
-}
-
-interface ClassificationDomestic {
-  type: string;
-  noul: number;
-}
-
-interface ClassificationItem {
-  channel: string;
-  res: {
-    model: string;
-    answers: {
-      topic: ClassificationTopic;
-      target_country: ClassificationCountry;
-      is_domestic_affairs: ClassificationDomestic;
-    };
-    usage?: {
-      input_tokens: number;
-      output_tokens: number;
-    };
-    latency_ms?: number;
-  };
-}
-```
-
-#### Integration Plan
-1. **Navigation Extension**:
-   - Add `"types"` to `activeTab` union type: `"explorer" | "search" | "network" | "listen" | "types" | "monitor" | "auto-finding" | "workspace" | "profile" | "channel"`.
-   - Insert the **Types** tab button immediately after **Listen** in `src/App.vue` (default visible, independent of access token).
-   - Update `tabSequence` array to insert `"types"` right after `"listen"`.
-   - Add i18n locale entries (`types: "Types"`) across `en.ts`, `zh-CN.ts`, `ru.ts`, etc.
-2. **Ingestion & State Engine**:
-   - Implement `fetchClassificationData()` with chunked streaming text decoding and line splitting.
-   - Maintain reactive `classificationList`, `isClassificationLoading`, `classificationLoadedBytes`, and `classificationTotalBytes`.
-   - Reactive filtering with computed `filteredClassificationList`: channel handle search, topic selection, country selection, domestic threshold range, and sort ordering.
-3. **Types View Template**:
-   - Render hero filter bar with search input, topic chips, country select, domestic threshold slider, and sort controls.
-   - Render paginated card grid with topic probability bars, country probability bars, and domestic indicator.
-   - Slide-over inspection drawer for inspecting full probabilities and token metrics.
-   - Explorer navigation button on each card (`activeTab = 'explorer'; channelName = item.channel; searchChannel()`).
+1. **View Mode State**:
+   ```ts
+   const viewMode = ref<"list" | "masonry" | "timeline" | "reader">("list");
+   ```
+2. **Reader Customization Preferences**:
+   ```ts
+   interface ReaderPreferences {
+     fontFamily: "serif" | "sans";
+     fontSize: number; // 15, 17, 19, 21
+     lineHeight: "relaxed" | "loose";
+     maxWidth: "narrow" | "standard" | "wide";
+     theme: "white" | "sepia" | "slate" | "oled";
+     collapseMedia: boolean;
+   }
+   ```
+3. **Reading Duration & Word Count Calculator**:
+   ```ts
+   const getPostReadingStats = (text: string) => {
+     const words = text ? text.trim().split(/\s+/).filter(Boolean).length : 0;
+     const minutes = Math.max(1, Math.ceil(words / 200));
+     return { words, minutes };
+   };
+   ```
+4. **Interactive Component Handlers**:
+   - Live font style and size toggles updating reactive CSS classes.
+   - Collapsible media gallery drawer with thumbnail preview.
+   - Synchronized timeline and search filters matching standard Explorer capabilities.
