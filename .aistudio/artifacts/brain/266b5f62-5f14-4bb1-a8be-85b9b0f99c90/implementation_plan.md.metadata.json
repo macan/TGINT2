@@ -1,6 +1,6 @@
 {
-  "summary":  "Architecture and design specification for the 'Article Reader' view in Explorer mode, featuring customizable typography controls (serif/sans, font size, line height, reading width, and background themes), collapsible media galleries, reading time estimation, and a distraction-free editorial layout for long-form channel posts.",
-  "updatedAt":  "2026-10-21T05:31:12.517967582Z",
+  "summary":  "Implementation plan for building a natural language filter in the Types tab using the Kev SystemOne AI API with choice questions, distribution-aware channel matching, and interactive editable rule chips with suggestion presets.",
+  "updatedAt":  "2026-10-22T07:51:36.781400424Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

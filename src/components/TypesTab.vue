@@ -29,6 +29,12 @@ import {
   Award
 } from "lucide-vue-next";
 import { useI18n } from "../i18n";
+import {
+  parseNaturalLanguageQueryWithSystemOne,
+  parseQueryFastRules,
+  matchesDistributionAwareFilter,
+  type ParsedFilterCriteria
+} from "../utils/systemoneFilter";
 
 const { t } = useI18n();
 
@@ -84,6 +90,103 @@ let readerRef: ReadableStreamDefaultReader<Uint8Array> | null = null;
 const searchQuery = ref("");
 const selectedTopic = ref<string>("all");
 const selectedCountry = ref<string>("all");
+
+// Natural Language SystemOne Filter State
+const nlQuery = ref("");
+const isNlParsing = ref(false);
+const activeNlFilter = ref<ParsedFilterCriteria | null>(null);
+
+const hasActiveNlRules = computed(() => {
+  if (!activeNlFilter.value) return false;
+  return (
+    !!activeNlFilter.value.topic ||
+    (activeNlFilter.value.targetRegions && activeNlFilter.value.targetRegions.length > 0) ||
+    !!activeNlFilter.value.domesticOrientation ||
+    (activeNlFilter.value.minReadValue !== null && activeNlFilter.value.minReadValue !== undefined)
+  );
+});
+
+const NL_SUGGESTIONS = [
+  { label: "🇨🇳 🇯🇵 Political China with Japan", query: "political China with Japan" },
+  { label: "🪖 🇺🇦 Critical military updates in Ukraine", query: "critical military updates in Ukraine" },
+  { label: "💡 🤖 Tech and AI overseas developments", query: "external technology and AI" },
+  { label: "📈 🇪🇺 Substantive EU financial markets", query: "substantive financial European Union" },
+  { label: "🏛️ 🇺🇸 US domestic affairs", query: "domestic United States politics" }
+];
+
+const handleNlSearch = async (queryText?: string) => {
+  const target = (queryText !== undefined ? queryText : nlQuery.value).trim();
+  if (!target) {
+    activeNlFilter.value = null;
+    return;
+  }
+  nlQuery.value = target;
+
+  // 1. Immediate instant fast-rules pre-filter (<5ms latency)
+  activeNlFilter.value = parseQueryFastRules(target);
+
+  // 2. Background Kev SystemOne AI call
+  isNlParsing.value = true;
+  try {
+    const aiParsed = await parseNaturalLanguageQueryWithSystemOne(target);
+    if (nlQuery.value.trim() === target) {
+      activeNlFilter.value = aiParsed;
+    }
+  } catch (err) {
+    console.warn("Kev SystemOne NL parse error:", err);
+  } finally {
+    isNlParsing.value = false;
+  }
+};
+
+const clearNlFilter = () => {
+  nlQuery.value = "";
+  activeNlFilter.value = null;
+};
+
+const removeTopicCriteria = () => {
+  if (!activeNlFilter.value) return;
+  activeNlFilter.value = {
+    ...activeNlFilter.value,
+    topic: null,
+    topicConfidence: undefined
+  };
+};
+
+const removeRegionCriteria = (region: string) => {
+  if (!activeNlFilter.value) return;
+  const updatedRegions = activeNlFilter.value.targetRegions.filter((r) => r !== region);
+  const updatedConf = { ...(activeNlFilter.value.regionConfidences || {}) };
+  delete updatedConf[region];
+  activeNlFilter.value = {
+    ...activeNlFilter.value,
+    targetRegions: updatedRegions,
+    regionConfidences: updatedConf
+  };
+};
+
+const removeDomesticCriteria = () => {
+  if (!activeNlFilter.value) return;
+  activeNlFilter.value = {
+    ...activeNlFilter.value,
+    domesticOrientation: null,
+    domesticConfidence: undefined
+  };
+};
+
+const removeReadValueCriteria = () => {
+  if (!activeNlFilter.value) return;
+  activeNlFilter.value = {
+    ...activeNlFilter.value,
+    minReadValue: null,
+    readValueTier: null,
+    readValueConfidence: undefined
+  };
+};
+
+const applyNlPreset = (presetQuery: string) => {
+  handleNlSearch(presetQuery);
+};
 
 // Domestic Affairs filter
 const domesticPreset = ref<"all" | "high" | "mid" | "low">("all");
@@ -474,6 +577,11 @@ const filteredItems = computed(() => {
 
   return items.value
     .filter((item) => {
+      // 0. Natural Language Distribution-Aware Filter (Kev SystemOne)
+      if (activeNlFilter.value && !matchesDistributionAwareFilter(item, activeNlFilter.value)) {
+        return false;
+      }
+
       // 1. Channel Search
       if (query && !item.channel.toLowerCase().includes(query)) {
         return false;
@@ -550,7 +658,8 @@ watch(
     readValuePreset,
     readValueMinScore,
     sortBy,
-    pageSize
+    pageSize,
+    activeNlFilter
   ],
   () => {
     currentPage.value = 1;
@@ -744,6 +853,191 @@ const handleExplore = (channel: string) => {
 
     <!-- Filters, Search & Facet Control Deck -->
     <div class="bg-white dark:bg-gray-800/90 rounded-2xl border border-gray-200/80 dark:border-gray-700/80 p-5 shadow-sm space-y-4">
+      <!-- Natural Language Multi-Aspect Filter Bar (Kev SystemOne AI) -->
+      <div class="rounded-xl p-3.5 bg-gradient-to-r from-indigo-50/80 via-purple-50/60 to-sky-50/80 dark:from-indigo-950/40 dark:via-purple-950/30 dark:to-sky-950/40 border border-indigo-200/80 dark:border-indigo-800/70 space-y-3">
+        <!-- Input row with AI icon, submit and clear buttons -->
+        <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+          <div class="relative flex-1">
+            <div class="absolute left-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 pointer-events-none">
+              <Sparkles class="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+            </div>
+            <input
+              v-model="nlQuery"
+              @keydown.enter.prevent="handleNlSearch()"
+              type="text"
+              placeholder="Ask in natural language: e.g. 'political China with Japan', 'critical military in Ukraine'..."
+              class="w-full pl-9 pr-8 py-2 text-xs sm:text-sm bg-white dark:bg-gray-900 border border-indigo-200 dark:border-indigo-800/80 rounded-xl focus:ring-2 focus:ring-indigo-500/50 outline-none text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 shadow-xs"
+            />
+            <button
+              v-if="nlQuery"
+              @click="clearNlFilter"
+              class="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-0.5 cursor-pointer"
+              title="Clear natural language query"
+            >
+              <X class="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div class="flex items-center gap-1.5 shrink-0">
+            <button
+              @click="handleNlSearch()"
+              :disabled="!nlQuery.trim() || isNlParsing"
+              class="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-bold rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white transition cursor-pointer shadow-xs"
+            >
+              <RefreshCw v-if="isNlParsing" class="w-3.5 h-3.5 animate-spin" />
+              <Sparkles v-else class="w-3.5 h-3.5" />
+              <span>{{ isNlParsing ? "Kev AI Parsing..." : "Filter with Kev AI" }}</span>
+            </button>
+
+            <button
+              v-if="activeNlFilter"
+              @click="clearNlFilter"
+              class="px-2.5 py-2 text-xs font-semibold rounded-xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition cursor-pointer"
+              title="Reset all natural language filters"
+            >
+              Reset
+            </button>
+          </div>
+        </div>
+
+        <!-- 1-Click Suggestion Presets -->
+        <div class="flex items-center gap-1.5 flex-wrap text-[11px]">
+          <span class="text-gray-500 dark:text-gray-400 font-semibold flex items-center gap-1 shrink-0">
+            <span>Suggestions:</span>
+          </span>
+          <button
+            v-for="sug in NL_SUGGESTIONS"
+            :key="sug.query"
+            @click="applyNlPreset(sug.query)"
+            :class="[
+              'px-2 py-0.5 rounded-lg border transition cursor-pointer text-left',
+              nlQuery.trim().toLowerCase() === sug.query.toLowerCase()
+                ? 'bg-indigo-100 dark:bg-indigo-900/60 border-indigo-300 dark:border-indigo-700 text-indigo-800 dark:text-indigo-200 font-bold'
+                : 'bg-white/80 dark:bg-gray-900/60 border-indigo-100 dark:border-indigo-900/50 text-gray-700 dark:text-gray-300 hover:bg-indigo-50/80 dark:hover:bg-indigo-950/60'
+            ]"
+          >
+            {{ sug.label }}
+          </button>
+        </div>
+
+        <!-- Interactive Editable Filter Chips Ribbon -->
+        <div
+          v-if="hasActiveNlRules && activeNlFilter"
+          class="pt-2 border-t border-indigo-100 dark:border-indigo-900/50 flex flex-wrap items-center gap-2 text-xs"
+        >
+          <span class="text-[10px] font-black uppercase tracking-wider text-indigo-700 dark:text-indigo-300 flex items-center gap-1">
+            <span>Parsed Rules:</span>
+          </span>
+
+          <!-- Topic Chip -->
+          <div
+            v-if="activeNlFilter.topic"
+            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-100 dark:bg-indigo-900/70 border border-indigo-300 dark:border-indigo-700 text-indigo-900 dark:text-indigo-100 text-xs font-semibold shadow-2xs"
+          >
+            <span class="text-[10px] font-bold uppercase text-indigo-600 dark:text-indigo-400">Topic:</span>
+            <span>{{ TOPIC_CONFIG[activeNlFilter.topic]?.label || activeNlFilter.topic }}</span>
+            <span
+              v-if="activeNlFilter.topicConfidence"
+              class="text-[10px] font-mono px-1 rounded bg-indigo-200/80 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-200"
+            >
+              {{ Math.round(activeNlFilter.topicConfidence * 100) }}%
+            </span>
+            <button
+              @click="removeTopicCriteria"
+              class="text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-200 ml-0.5 cursor-pointer"
+              title="Remove Topic Rule"
+            >
+              <X class="w-3 h-3" />
+            </button>
+          </div>
+
+          <!-- Region Chips (Supports multi-aspect distribution-aware regions) -->
+          <template v-if="activeNlFilter.targetRegions && activeNlFilter.targetRegions.length > 0">
+            <div
+              v-for="region in activeNlFilter.targetRegions"
+              :key="region"
+              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-100 dark:bg-sky-900/70 border border-sky-300 dark:border-sky-700 text-sky-900 dark:text-sky-100 text-xs font-semibold shadow-2xs"
+            >
+              <span class="text-[10px] font-bold uppercase text-sky-600 dark:text-sky-400">Region:</span>
+              <span>{{ COUNTRY_CONFIG[region]?.flag }} {{ COUNTRY_CONFIG[region]?.label || region }}</span>
+              <span
+                v-if="activeNlFilter.regionConfidences?.[region]"
+                class="text-[10px] font-mono px-1 rounded bg-sky-200/80 dark:bg-sky-950 text-sky-800 dark:text-sky-200"
+              >
+                {{ Math.round(activeNlFilter.regionConfidences[region] * 100) }}%
+              </span>
+              <button
+                @click="removeRegionCriteria(region)"
+                class="text-sky-400 hover:text-sky-700 dark:hover:text-sky-200 ml-0.5 cursor-pointer"
+                title="Remove Region Rule"
+              >
+                <X class="w-3 h-3" />
+              </button>
+            </div>
+          </template>
+
+          <!-- Domestic Orientation Chip -->
+          <div
+            v-if="activeNlFilter.domesticOrientation"
+            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-purple-100 dark:bg-purple-900/70 border border-purple-300 dark:border-purple-700 text-purple-900 dark:text-purple-100 text-xs font-semibold shadow-2xs"
+          >
+            <span class="text-[10px] font-bold uppercase text-purple-600 dark:text-purple-400">Orientation:</span>
+            <span>
+              {{
+                activeNlFilter.domesticOrientation === "domestic"
+                  ? "Domestic Focus (≥55%)"
+                  : activeNlFilter.domesticOrientation === "external"
+                  ? "Foreign Focus (≤35%)"
+                  : "Balanced Focus"
+              }}
+            </span>
+            <button
+              @click="removeDomesticCriteria"
+              class="text-purple-400 hover:text-purple-700 dark:hover:text-purple-200 ml-0.5 cursor-pointer"
+              title="Remove Orientation Rule"
+            >
+              <X class="w-3 h-3" />
+            </button>
+          </div>
+
+          <!-- Read Value Chip -->
+          <div
+            v-if="activeNlFilter.minReadValue !== null && activeNlFilter.minReadValue !== undefined"
+            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-900/70 border border-emerald-300 dark:border-emerald-700 text-emerald-900 dark:text-emerald-100 text-xs font-semibold shadow-2xs"
+          >
+            <span class="text-[10px] font-bold uppercase text-emerald-600 dark:text-emerald-400">Quality:</span>
+            <span>{{ activeNlFilter.readValueTier || `≥ ${activeNlFilter.minReadValue}` }}</span>
+            <button
+              @click="removeReadValueCriteria"
+              class="text-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-200 ml-0.5 cursor-pointer"
+              title="Remove Quality Rule"
+            >
+              <X class="w-3 h-3" />
+            </button>
+          </div>
+
+          <!-- Matching Count & AI Status Tag -->
+          <div class="ml-auto flex items-center gap-2">
+            <span class="text-[11px] font-mono text-gray-500 dark:text-gray-400">
+              <strong class="text-indigo-600 dark:text-indigo-400">{{ filteredItems.length.toLocaleString() }}</strong> matches
+            </span>
+            <span
+              v-if="activeNlFilter.isAiParsed"
+              class="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800"
+            >
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+              Kev SystemOne Verified
+            </span>
+            <span
+              v-else
+              class="inline-flex items-center gap-1 text-[10px] font-medium text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-2 py-0.5 rounded-full border border-indigo-200 dark:border-indigo-800"
+            >
+              ⚡ Fast-Rule Pre-Filtered
+            </span>
+          </div>
+        </div>
+      </div>
+
       <!-- Row 1: Search & Sort Bar -->
       <div class="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
         <!-- Channel Search -->

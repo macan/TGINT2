@@ -1,144 +1,135 @@
-# Article Reader Mode for Channel Posts
+# Natural Language Filter for Channel Classification (Types Tab)
 
-An editorial, distraction-free reading mode integrated seamlessly into the Explorer tab alongside Feed, Masonry, and Timeline views, designed specifically for long-form channel posts with customizable typography, reading time estimates, collapsible media, and archival reading themes.
+A natural language filtering system in the **Types** tab powered by the **Kev SystemOne API**. Converts user intent queries (e.g. *"political China with Japan"*, *"critical military updates in Ukraine"*, *"high value domestic finance"*) into precise, distribution-aware classification filters with interactive rule chips and live suggestions.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
 > Based on your confirmed choices in Phase 1:
-> - **Seamless Toggle Mode**: Article Reader is integrated directly into the Explorer tab view switcher as a fourth first-class layout mode (`Feed` | `Masonry` | `Timeline` | `Article Reader`), letting you switch effortlessly while preserving search queries, channel context, and filters.
-> - **Typography & Reading Controls**: A floating/sticky toolbar provides live adjustments for font family (Editorial Serif vs. Modern Sans), font scale (`15px` to `21px`), line height (`Relaxed` vs. `Loose`), column measure (`65ch`–`80ch`), and paper themes (`Pure White`, `Warm Parchment / Sepia`, `Muted Charcoal`, `Night Dark`).
-> - **Long-Form Focus & Collapsible Media**: Posts display estimated reading time (e.g. `3 min read · 480 words`), clear date headers, drop-cap styling on primary paragraphs, and clean inline collapsible media drawers so images/videos don't disrupt reading flow.
+> - **Kev SystemOne API Parsing**: Natural language queries are passed as `state` to `callSystemOne()` with structured choice questions (for Topic, Primary Target Region, Secondary Target Region, Domestic Orientation, and Read Value Threshold), picking high-confidence (>0.25) results.
+> - **Distribution-Aware Matching**: Evaluates full category probability maps (`topicProbs`, `countryProbs`, `readValueProbs`, and `domestic`) rather than only primary single choices. For multi-country queries like *"China with Japan"*, matches channels with significant joint probability density across both regions.
+> - **Interactive Rule Chips & Suggestions**: Displays an editorial natural language search bar with 1-click example suggestions, an active parsed filter ribbon with removable/editable chips (`[Topic: Political ×]`, `[Region: China + US Allies ×]`), and confidence indicators.
 
 ---
 
-## 1. Overview & Core Concept
+## 1. Overview & Architecture
 
-When channels publish extensive essays, analytical briefings, transcripts, or multi-paragraph reporting, the traditional social feed card clutter (repetitive profile avatars, metric badges, tool tags, and dense action bars) causes visual fatigue. 
-
-The **Article Reader** view strips away peripheral interface noise and transforms the channel's chronological post stream into an elegant, high-legibility digital publication. Posts are rendered with generous editorial margins, balanced line lengths, clear typographical rhythm, and reading metadata (word counts, reading duration), while media galleries (photos, video players, doc attachments) are cleanly tucked into elegant expandable drawers.
-
----
-
-## 2. User Experience & Visual Design
-
-### Key User Flows
-
-1. **Activating Reader View**: In the Explorer tab, the view mode switcher is expanded with an **Article Reader** button (`BookOpen` icon) alongside Feed, Masonry, and Timeline. Clicking it smoothly transitions the feed into reader layout.
-2. **Customizing Reading Aesthetics**: A discreet, floating or header-adjacent Reading Controls bar allows instant adjustment of:
-   - **Font Style**: Book Serif (`Lora` / `Merriweather` / Georgia fallback) vs. Contemporary Sans (`Plus Jakarta Sans` / `Manrope`).
-   - **Text Size**: 4-step stepper (`A-` / `A+`: Small 15px, Medium 17px, Large 19px, X-Large 21px).
-   - **Line Spacing**: Relaxed (1.75) vs. Loose (1.95).
-   - **Reading Measure / Column Width**: Compact (`600px`), Standard (`720px` / `65ch`), Wide (`860px`).
-   - **Theme Canvas**:
-     - *Clean Light*: Pure white background with deep charcoal typography.
-     - *Warm Parchment / Sepia*: Soft ivory paper (`#FBF9F5` / `#F7F4EE`) with antique ink text (`#1C1917`).
-     - *Subdued Slate*: Slate gray surface (`#1E293B`) with soft silver text.
-     - *OLED Night*: Pure black canvas (`#09090B`) with high-contrast text.
-3. **Engaging with Long-Form Posts**:
-   - Posts present an editorial header: title or opening sentence emphasis, publication date, time elapsed, and estimated reading duration (`· 4 min read`).
-   - Body paragraphs feature comfortable margins and optional drop-cap on opening paragraphs.
-   - Posts with photos or videos feature a compact media badge (e.g. `📷 3 Photos · Tap to expand`) that opens into an inline gallery without displacing the reader.
-   - Action controls (Copy text, Share, Bookmark, Translate) are unobtrusive at the foot of each post.
-
-### Visual Identity & Typographic Hierarchy
-
-- **Anti-AI Slop Compliance**:
-  - No static pill capsules or candy-colored badges over text.
-  - Zero decorative pulsing dots or pseudo-technical comment prefixes.
-  - Generous negative space between consecutive posts with subtle hairline dividers (`border-b border-stone-200 dark:border-stone-800`).
-  - True `text-wrap: balance` on section titles and headlines.
-  - Tabular numerals for dates, timestamps, and word metrics.
-
----
-
-## 3. Key Product Decisions & Trade-Offs
-
-- **Decision 1: View Switcher vs. Isolated Modal**
-  - *Chosen Approach*: Add `viewMode = 'reader'` to the existing Explorer view mode state (`list`, `masonry`, `timeline`, `reader`).
-  - *Why*: Allows users to search, filter by date/topic/channel, and paginate naturally through the channel's history without losing their spot or opening nested modal dialogs.
-  - *Alternative Considered*: A standalone modal view was considered, but it breaks continuous multi-post reading and channel exploration.
-
-- **Decision 2: Client-Side Reading State Persistence**
-  - *Chosen Approach*: Save reader preferences (`fontFamily`, `fontSize`, `theme`, `lineHeight`, `readingWidth`) to `localStorage` (`telegram-reader-preferences`).
-  - *Why*: Users configure their ideal reading comfort once and enjoy it consistently across sessions and different channels.
-
-- **Decision 3: Media Handling in Editorial Layout**
-  - *Chosen Approach*: Show a clean inline media teaser (`[Expand 2 Photos]`) by default in Reader mode, with one-click full display for users who want to inspect images.
-  - *Why*: Long-form channel posts frequently feature large banner photos that push text below the fold; collapsing them keeps the eye focused on reading.
-
----
-
-## 4. Technical Architecture & Component Structure
-
-### Architecture Diagram
-
+### Query to Classification Pipeline
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                              Explorer Tab                              │
-├────────────────────────────────────────────────────────────────────────┤
-│ Header & Search Bar (Channel @name, Search Query, Date Filter)        │
-│                                                                        │
-│ View Mode Switcher:                                                    │
-│ [ 📄 Feed ]  [ 🧱 Masonry ]  [ ⏱ Timeline ]  [ 📖 Article Reader ]    │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ viewMode === 'reader'
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                   Reader Controls Bar (Sticky / Toolbar)               │
-│  Font: [ Serif | Sans ]   Size: [ A- | A+ ]   Theme: [ ⚪ | 📜 | 🌙 ]   │
-│  Measure: [ Narrow | Optimal | Wide ]   Media: [ Auto-Collapse Toggle ]│
+│                        Natural Language Query                          │
+│               "political China with Japan (high quality)"              │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│               Article Reader Post Stream (Max Width Container)         │
-│                                                                        │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ Article Post Item                                                │  │
-│  │ ──────────────────────────────────────────────────────────────── │  │
-│  │ Oct 19, 2026 · 14:32 · 520 words · 3 min read                   │  │
-│  │                                                                  │  │
-│  │ [D] uring recent discussions surrounding regional infrastructure,│  │
-│  │     the committee outlined new regulatory guidelines...          │  │
-│  │                                                                  │  │
-│  │ [🖼 2 Photos Attached - Click to Expand / Collapse]              │  │
-│  │                                                                  │  │
-│  │ ── Actions: [Copy Text] [Translate] [Explore Link] ───────────── │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                                                                        │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ Next Article Post Item...                                        │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
+│                  Kev SystemOne Choice Questions API                    │
+│   POST https://kev.gogingko.net/v1/systemone                           │
+│   - state: "political China with Japan (high quality)"                 │
+│   - questions: { topic, primary_region, secondary_region,              │
+│                  domestic_orientation, read_value_threshold }          │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ High confidence answers (>0.25)
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                  Parsed Filter Criteria Object                         │
+│   • topic: "political" (conf: 0.94)                                    │
+│   • targetRegions: ["china", "us_allies_asia"] (conf: 0.91, 0.86)       │
+│   • minReadValue: 1.5 (Level 2 Substantive)                            │
+│   • domesticMin: null, domesticMax: null                               │
+│   • matchMode: "distribution_joint" (covers both aspects)              │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│             Types Tab UI & Distribution-Aware Match Engine             │
+│   1. Interactive Filter Chips Ribbon (editable, removable tags)        │
+│   2. Distribution-Aware Channel Filter over 50,000+ items:             │
+│      - item.topicProbs['political'] >= 0.15                            │
+│      - item.countryProbs['china'] >= 0.08                              │
+│      - item.countryProbs['us_allies_asia'] >= 0.05                      │
+│      - item.readValueScore >= 1.5                                      │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-### State & Logic Specifications
+---
 
-1. **View Mode State**:
-   ```ts
-   const viewMode = ref<"list" | "masonry" | "timeline" | "reader">("list");
-   ```
-2. **Reader Customization Preferences**:
-   ```ts
-   interface ReaderPreferences {
-     fontFamily: "serif" | "sans";
-     fontSize: number; // 15, 17, 19, 21
-     lineHeight: "relaxed" | "loose";
-     maxWidth: "narrow" | "standard" | "wide";
-     theme: "white" | "sepia" | "slate" | "oled";
-     collapseMedia: boolean;
-   }
-   ```
-3. **Reading Duration & Word Count Calculator**:
-   ```ts
-   const getPostReadingStats = (text: string) => {
-     const words = text ? text.trim().split(/\s+/).filter(Boolean).length : 0;
-     const minutes = Math.max(1, Math.ceil(words / 200));
-     return { words, minutes };
-   };
-   ```
-4. **Interactive Component Handlers**:
-   - Live font style and size toggles updating reactive CSS classes.
-   - Collapsible media gallery drawer with thumbnail preview.
-   - Synchronized timeline and search filters matching standard Explorer capabilities.
+## 2. Technical Implementation Details
+
+### A. SystemOne Choice Questions Specification
+Constructed in `src/utils/systemoneFilter.ts`:
+1. **Topic Question (`topic`)**:
+   - Instructions: *"Identify the primary content topic requested in this query, or select 'any' if unspecified."*
+   - Criteria: All 9 dataset topics (`political`, `military`, `financial`, `technology`, `blog`, `general_news`, `university`, `game`, `spam`) + `any`.
+2. **Primary Region Question (`primary_region`)**:
+   - Instructions: *"Identify the primary target country or geopolitical region requested, or 'any' if none."*
+   - Criteria: All 12 regions (`china`, `us_allies_asia`, `united_states`, `european_union`, `russia`, `ukraine`, `taiwan`, `israel_palestine`, `iran`, `africa`, `international`, `other`, `any`).
+3. **Secondary Region Question (`secondary_region`)**:
+   - Instructions: *"Identify any secondary target country/region mentioned in conjunction (e.g. 'China with Japan', 'Russia and Ukraine'), or 'none'."*
+   - Criteria: Same 12 regions + `none`.
+4. **Domestic Orientation Question (`domestic_orientation`)**:
+   - Instructions: *"Does the query focus on internal domestic affairs, foreign external affairs, or neutral/any?"*
+   - Criteria: `domestic` (>=0.6), `external` (<=0.3), `balanced`, `any`.
+5. **Read Value Threshold Question (`read_value_importance`)**:
+   - Instructions: *"Does the query require high information quality or critical disclosures?"*
+   - Criteria: `critical` (L3 >= 2.2), `substantive` (L2 >= 1.5), `background` (L1 >= 0.8), `any`.
+
+### B. Client-Side Fast Hybrid Pre-Parser
+To ensure instant feedback while the SystemOne network request processes:
+- Immediate keyword/regex tokenizer extracts clear terms (`"political"`, `"china"`, `"japan" -> "us_allies_asia"`, `"ukraine"`, etc.) in `< 5ms`.
+- Asynchronously calls `callSystemOne()` to extract nuanced semantic relations and assign model confidence scores.
+- Updates the active filter chips with verified AI confidence.
+
+### C. Distribution-Aware Matching Logic
+Rather than matching only `item.topic === choice` and `item.country === choice`:
+- **Topic Probability Check**:
+  `item.topic === filter.topic || (item.topicProbs[filter.topic] || 0) >= 0.15`
+- **Multi-Region Co-Occurrence**:
+  For queries with multiple regions (e.g. China + US Allies/Japan):
+  - Primary country probability `>= 0.08`
+  - Secondary country probability `>= 0.05`
+  - Or joint probability score $\sqrt{P_1 \times P_2} \ge 0.05$
+  This surfaces channels that report on bilateral relations between both target nations.
+- **Domestic & Read Value Bounds**:
+  - `item.domestic >= 0.55` for domestic focus
+  - `item.readValueScore >= filter.minReadValue` for scored items
+
+---
+
+## 3. UI & Visual Design (Frontend Design Compliance)
+
+1. **Natural Language Input Deck**:
+   - Placed prominently above the manual filter row in `TypesTab.vue`.
+   - Polished search input with Sparkles icon, loading spinner indicator, clear button, and `"Filter with Kev AI"` action button.
+   - 1-click popular query presets:
+     - `🇨🇳 🇯🇵 Political China with Japan`
+     - `🪖 🇺🇦 Critical military updates in Ukraine`
+     - `💶 🇪🇺 European financial & economic news`
+     - `🔬 🇺🇸 High read value tech in US`
+     - `🏛️ Domestic affairs in Asian allies`
+2. **Active Parsed Filter Ribbon**:
+   - Displays unboxed, clean interactive tags for each parsed criterion:
+     - `[Topic: Political · 94% conf ×]`
+     - `[Region 1: China · 91% conf ×]`
+     - `[Region 2: US Allies (Asia) / Japan · 86% conf ×]`
+     - `[Quality: Substantive (≥1.5) ×]`
+   - Users can remove any individual chip with one click to broaden the search.
+   - Shows live matching channel count: `Showing 342 matching channels`.
+3. **Seamless Coordination with Manual Filters**:
+   - Natural language parsed filters seamlessly synchronize with existing channel sorting, pagination, and inspection drawers.
+
+---
+
+## 4. Verification & Testing Plan
+
+1. **Build & Type Checking**:
+   - Run `compile_applet` and `lint_applet` to ensure full TypeScript typing and zero compilation errors.
+2. **Parsing Verification**:
+   - Test queries:
+     - `"political China with Japan"` -> parsed as `topic=political`, `regions=[china, us_allies_asia]`.
+     - `"critical military in Ukraine"` -> parsed as `topic=military`, `regions=[ukraine]`, `minReadValue=2.0`.
+     - `"domestic tech in US allies"` -> parsed as `topic=technology`, `regions=[us_allies_asia]`, `domestic=domestic`.
+3. **UI Edge Cases**:
+   - Removing individual chips updates results immediately.
+   - Clearing the input restores the full channel view.
+   - Offline / latency fallback gracefully uses fast keyword parser if network is slow.
