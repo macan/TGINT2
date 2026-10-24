@@ -8,6 +8,8 @@ import {
   Gamepad2,
   Landmark,
   Shield,
+  ShieldAlert,
+  Users,
   GraduationCap,
   BookOpen,
   Newspaper,
@@ -145,6 +147,24 @@ const CATEGORY_META_MAP: Record<string, CategoryMeta> = {
     hex: "#06b6d4",
     bgHex: "rgba(6, 182, 212, 0.15)",
     borderHex: "rgba(6, 182, 212, 0.4)"
+  },
+  social_movements: {
+    key: "social_movements",
+    label: "Social Movements",
+    icon: Users,
+    colorClass: "text-violet-600 dark:text-violet-400 bg-violet-50 dark:bg-violet-950/50 border-violet-200 dark:border-violet-800/60",
+    hex: "#8b5cf6",
+    bgHex: "rgba(139, 92, 246, 0.15)",
+    borderHex: "rgba(139, 92, 246, 0.4)"
+  },
+  spam: {
+    key: "spam",
+    label: "Spam",
+    icon: ShieldAlert,
+    colorClass: "text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-800/80 border-gray-300 dark:border-gray-700",
+    hex: "#6b7280",
+    bgHex: "rgba(107, 114, 128, 0.15)",
+    borderHex: "rgba(107, 114, 128, 0.4)"
   }
 };
 

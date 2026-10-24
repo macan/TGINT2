@@ -109,6 +109,7 @@ const hasActiveNlRules = computed(() => {
 const NL_SUGGESTIONS = [
   { label: "🇨🇳 🇯🇵 Political China with Japan", query: "political China with Japan" },
   { label: "🪖 🇺🇦 Critical military updates in Ukraine", query: "critical military updates in Ukraine" },
+  { label: "✊ 🏳️‍🌈 Social justice & civil rights", query: "social movements and civil rights" },
   { label: "💡 🤖 Tech and AI overseas developments", query: "external technology and AI" },
   { label: "📈 🇪🇺 Substantive EU financial markets", query: "substantive financial European Union" },
   { label: "🏛️ 🇺🇸 US domestic affairs", query: "domestic United States politics" }
@@ -228,6 +229,7 @@ const TOPIC_CONFIG: Record<string, { label: string; color: string; bg: string; b
   university: { label: "University", color: "text-purple-700 dark:text-purple-300", bg: "bg-purple-50 dark:bg-purple-950/60", border: "border-purple-200 dark:border-purple-800" },
   political: { label: "Politics", color: "text-indigo-700 dark:text-indigo-300", bg: "bg-indigo-50 dark:bg-indigo-950/60", border: "border-indigo-200 dark:border-indigo-800" },
   game: { label: "Game", color: "text-fuchsia-700 dark:text-fuchsia-300", bg: "bg-fuchsia-50 dark:bg-fuchsia-950/60", border: "border-fuchsia-200 dark:border-fuchsia-800" },
+  social_movements: { label: "Social Movements", color: "text-violet-700 dark:text-violet-300", bg: "bg-violet-50 dark:bg-violet-950/60", border: "border-violet-200 dark:border-violet-800" },
   spam: { label: "Spam", color: "text-gray-700 dark:text-gray-300", bg: "bg-gray-100 dark:bg-gray-800/80", border: "border-gray-200 dark:border-gray-700" }
 };
 
@@ -709,6 +711,7 @@ const getTopicSegmentColor = (topic: string) => {
     university: "bg-purple-500",
     political: "bg-indigo-500",
     game: "bg-fuchsia-500",
+    social_movements: "bg-violet-500",
     spam: "bg-gray-400"
   };
   return map[topic] || "bg-indigo-400";

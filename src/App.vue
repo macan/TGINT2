@@ -28,6 +28,7 @@ import {
   Gamepad2,
   Landmark,
   Shield,
+  ShieldAlert,
   GraduationCap,
   Newspaper,
   Mail,
@@ -3648,7 +3649,9 @@ const SYSTEM_ONE_CLASSIFICATION_QUESTIONS = {
       financial: "money, economics, stocks, banking, currency, trading, inflation, revenue, funding, commerce, business investments",
       military: "warfare, weapons, army, navy, air force, combat operations, defense forces, artillery, defense strategy",
       university: "campus, academics, tuition, students, professors, degree, college education, scientific research papers, university labs",
-      general_news: "lifestyle, local events, weather, general media reporting, entertainment, pop culture, sports"
+      general_news: "lifestyle, local events, weather, general media reporting, entertainment, pop culture, sports",
+      spam: "unsolicited advertisements, promotional links, scams, phishing, automated bulk marketing, gambling promotions, bot ad blasts, fraudulent schemes, adult service solicitations, crypto pump schemes",
+      social_movements: "social justice, civil rights, LGBTQ+, queer rights, transgender issues, pride, feminism, MeToo, gender equality, racial equality, labor strikes, protests, human rights advocacy, environmental activism, grassroots organizing"
     }
   }
 };
@@ -3751,6 +3754,18 @@ const getChannelCategoryMeta = (cat: string) => {
         label: "General News",
         icon: Newspaper,
         colorClass: "bg-cyan-50 dark:bg-cyan-950/50 text-cyan-700 dark:text-cyan-300 border-cyan-200 dark:border-cyan-800/60",
+      };
+    case "social_movements":
+      return {
+        label: "Social Movements",
+        icon: Users,
+        colorClass: "bg-violet-50 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300 border-violet-200 dark:border-violet-800/60",
+      };
+    case "spam":
+      return {
+        label: "Spam",
+        icon: ShieldAlert,
+        colorClass: "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-700",
       };
     default:
       return {
@@ -5902,7 +5917,7 @@ const selectedAutoClassFilter = computed(() => {
   const q = listenSearchQuery.value.trim().toLowerCase();
   if (!q) return null;
   const clean = q.replace(/^(class|category|type|auto_class|auto):/, "").replace(/^[#@]/, "").trim();
-  const known = ["technology", "financial", "game", "political", "military", "university", "blog", "general_news"];
+  const known = ["technology", "financial", "game", "political", "military", "university", "blog", "general_news", "spam", "social_movements"];
   if (known.includes(clean)) return clean;
   return null;
 });
@@ -9461,6 +9476,22 @@ const AUTO_CLASS_COLOR_MAP: Record<string, { label: string; hex: string; bgClass
     textClass: "text-cyan-600 dark:text-cyan-400",
     borderClass: "border-cyan-400 dark:border-cyan-500",
     icon: Newspaper
+  },
+  social_movements: {
+    label: "Social Movements",
+    hex: "#8b5cf6",
+    bgClass: "bg-violet-500",
+    textClass: "text-violet-600 dark:text-violet-400",
+    borderClass: "border-violet-400 dark:border-violet-500",
+    icon: Users
+  },
+  spam: {
+    label: "Spam",
+    hex: "#6b7280",
+    bgClass: "bg-gray-500",
+    textClass: "text-gray-600 dark:text-gray-400",
+    borderClass: "border-gray-400 dark:border-gray-500",
+    icon: ShieldAlert
   }
 };
 

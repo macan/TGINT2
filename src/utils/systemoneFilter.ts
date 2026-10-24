@@ -50,7 +50,8 @@ export const SYSTEM_ONE_FILTER_QUESTIONS = {
       general_news: "general news, breaking news, media reports, journalism, current affairs, events, society",
       university: "education, academia, universities, students, college, scientific research papers",
       game: "gaming, video games, esports, Steam, console, walkthrough",
-      spam: "spam, advertisements, promotions, scams",
+      spam: "unsolicited advertisements, promotional links, scams, phishing, automated bulk marketing, gambling promotions, bot ad blasts, fraudulent schemes, adult service solicitations, crypto pump schemes",
+      social_movements: "social justice, civil rights, LGBTQ+, queer rights, transgender issues, pride, feminism, MeToo, gender equality, racial equality, labor strikes, protests, human rights advocacy, environmental activism, grassroots organizing",
       any: "no specific topic specified in the query or covers all topics"
     }
   },
@@ -154,7 +155,10 @@ export function parseQueryFastRules(query: string): ParsedFilterCriteria {
   } else if (/\b(game|gaming|games|esport|esports|steam|playstation)\b/i.test(q)) {
     criteria.topic = "game";
     criteria.topicConfidence = 0.85;
-  } else if (/\b(spam|ad|advertisement|promo|scam)\b/i.test(q)) {
+  } else if (/\b(social movement|social movements|social justice|civil rights|lgbt|lgbtq|transgender|queer|pride|feminism|metoo|gender equality|racial equality|labor strike|strikes|protest|protests|human rights|grassroots|activism|activist)\b/i.test(q)) {
+    criteria.topic = "social_movements";
+    criteria.topicConfidence = 0.85;
+  } else if (/\b(spam|ad|ads|advertisement|advertisements|promo|promos|promotional|scam|scams|phishing|bulk marketing|gambling|ad blast|crypto pump)\b/i.test(q)) {
     criteria.topic = "spam";
     criteria.topicConfidence = 0.85;
   }
