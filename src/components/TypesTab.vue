@@ -26,7 +26,9 @@ import {
   Radio,
   FileText,
   BookmarkCheck,
-  Award
+  Award,
+  AlertTriangle,
+  WifiOff
 } from "lucide-vue-next";
 import { useI18n } from "../i18n";
 import {
@@ -71,7 +73,7 @@ const isPaused = ref(false);
 const isCompleted = ref(false);
 const streamError = ref<string | null>(null);
 const loadedBytes = ref(0);
-const totalBytesEstimated = ref(59269408); // ~60.0 MB current size
+const totalBytesEstimated = ref(88906687); // Exact size on i.gogingko.net: 88,906,687 bytes (~88.9 MB)
 const totalParsedLines = ref(0);
 
 // Memory safety limit for multi-million scaling
@@ -84,8 +86,25 @@ const MAX_LIMIT_OPTIONS = [
 ];
 const memoryLimit = ref<number>(100000);
 
+// Resumable Range Streaming & Auto-Recovery State
+const isAutoRetrying = ref(false);
+const retryAttempt = ref(0);
+const maxRetries = 25;
+const retryCountdown = ref(0);
+const lastResumedByteOffset = ref<number | null>(null);
+const isRangeSupported = ref(true);
+const hasParsedTotalFromContentRange = ref(false);
+const contentRangeTotalLength = ref<number | null>(null);
+const serverTotalLength = ref<number | null>(null);
+
 let abortController: AbortController | null = null;
 let readerRef: ReadableStreamDefaultReader<Uint8Array> | null = null;
+let streamLineRemainder = "";
+let lastChunkReceivedTime = Date.now();
+let stallWatchdogTimer: any = null;
+let isStallTriggered = false;
+let retryTimeoutId: any = null;
+let retryCountdownInterval: any = null;
 
 // Filtering and Search State
 const searchQuery = ref("");
@@ -336,35 +355,283 @@ const getReadValueTier = (score: number | null) => {
   };
 };
 
-// Stream Ingestion Logic (Handles both old and new format line-by-line)
+// Parse NDJSON line into strongly-typed ClassifiedChannel
+const parseLineToItem = (raw: string): ClassifiedChannel | null => {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || !parsed.channel || !parsed.res || !parsed.res.answers) {
+      return null;
+    }
+
+    const answers = parsed.res.answers;
+    const topic = answers.topic?.choice || "unknown";
+    const topicConf = Number(answers.topic?.confidence || 0);
+    const topicProbs = answers.topic?.probabilities || {};
+
+    const country = answers.target_country?.choice || "unknown";
+    const countryConf = Number(answers.target_country?.confidence || 0);
+    const countryProbs = answers.target_country?.probabilities || {};
+
+    const domestic = Number(answers.is_domestic_affairs?.noul ?? 0);
+
+    // Parse read_value (handles both old format without read_value and new format with read_value)
+    const readVal = answers.read_value;
+    const hasReadValue = Boolean(readVal && typeof readVal.score === "number");
+    const readValueScore = hasReadValue ? Number(readVal.score) : null;
+    const readValueProbs = (hasReadValue && readVal.probabilities) ? readVal.probabilities : {};
+    const readValueLegend = (hasReadValue && readVal.legend) ? readVal.legend : null;
+
+    const tokensIn = Number(parsed.res.usage?.input_tokens || 0);
+    const tokensOut = Number(parsed.res.usage?.output_tokens || 0);
+    const latencyMs = Number(parsed.res.latency_ms || 0);
+    const model = String(parsed.res.model || "kev-latest");
+
+    return {
+      channel: parsed.channel,
+      topic,
+      topicConf,
+      topicProbs,
+      country,
+      countryConf,
+      countryProbs,
+      domestic,
+      hasReadValue,
+      readValueScore,
+      readValueProbs,
+      readValueLegend,
+      tokensIn,
+      tokensOut,
+      latencyMs,
+      model
+    };
+  } catch (e) {
+    return null;
+  }
+};
+
+// Retry Timer and Watchdog Management
+const clearRetryTimers = () => {
+  if (retryTimeoutId) {
+    clearTimeout(retryTimeoutId);
+    retryTimeoutId = null;
+  }
+  if (retryCountdownInterval) {
+    clearInterval(retryCountdownInterval);
+    retryCountdownInterval = null;
+  }
+  isAutoRetrying.value = false;
+  retryCountdown.value = 0;
+};
+
+const stopStallWatchdog = () => {
+  if (stallWatchdogTimer) {
+    clearInterval(stallWatchdogTimer);
+    stallWatchdogTimer = null;
+  }
+};
+
+const startStallWatchdog = () => {
+  stopStallWatchdog();
+  stallWatchdogTimer = setInterval(() => {
+    if (isStreaming.value && !isPaused.value && readerRef) {
+      const elapsed = Date.now() - lastChunkReceivedTime;
+      // If 20 seconds pass with zero bytes received during active streaming, network is throttled/stalled
+      if (elapsed > 20000) {
+        console.warn(`[Stream Watchdog] Stall detected (${Math.round(elapsed / 1000)}s without incoming data). Triggering Range resumption from byte ${loadedBytes.value}...`);
+        isStallTriggered = true;
+        if (abortController) {
+          abortController.abort();
+        }
+      }
+    }
+  }, 2500);
+};
+
+// RFC 7233 / 9110 Content-Range parser
+export interface ParsedContentRange {
+  unit: string;
+  start: number | null;
+  end: number | null;
+  total: number | null;
+  raw: string;
+}
+
+const parseContentRangeHeader = (headerValue: string | null): ParsedContentRange | null => {
+  if (!headerValue) return null;
+  const raw = headerValue.trim();
+  // Examples:
+  // "bytes 0-1048575/88906687"
+  // "bytes 88906687-88906686/88906687"
+  // "bytes */88906687"
+  // "bytes 1000-2000/*"
+  const match = raw.match(/^([a-zA-Z]+)\s+(?:(\d+)-(\d+)|\*)\/(\d+|\*)$/);
+  if (match) {
+    const unit = match[1];
+    const start = match[2] !== undefined ? parseInt(match[2], 10) : null;
+    const end = match[3] !== undefined ? parseInt(match[3], 10) : null;
+    const total = match[4] !== "*" ? parseInt(match[4], 10) : null;
+    return { unit, start, end, total, raw };
+  }
+
+  // Fallback: extract /<number> total if present
+  const totalMatch = raw.match(/\/(\d+)/);
+  return {
+    unit: "bytes",
+    start: null,
+    end: null,
+    total: totalMatch ? parseInt(totalMatch[1], 10) : null,
+    raw
+  };
+};
+
+// Stream Ingestion Logic with HTTP Range Resume
 const startStreaming = async (resume = false) => {
+  clearRetryTimers();
   if (isStreaming.value && !isPaused.value) return;
 
   if (!resume) {
     items.value = [];
     loadedBytes.value = 0;
     totalParsedLines.value = 0;
+    streamLineRemainder = "";
+    lastResumedByteOffset.value = null;
     isCompleted.value = false;
     streamError.value = null;
+    retryAttempt.value = 0;
+    hasParsedTotalFromContentRange.value = false;
+    contentRangeTotalLength.value = null;
+    serverTotalLength.value = null;
+  } else {
+    lastResumedByteOffset.value = loadedBytes.value;
   }
 
   isStreaming.value = true;
   isPaused.value = false;
   abortController = new AbortController();
+  lastChunkReceivedTime = Date.now();
+
+  const batch: ClassifiedChannel[] = [];
+  const FLUSH_INTERVAL = 150; // flush to Vue state every 150ms to keep UI silky smooth
+  let lastFlushTime = Date.now();
+  let receivedChunks = 0;
+
+  const flushBatch = () => {
+    if (batch.length > 0) {
+      items.value.push(...batch);
+      batch.length = 0;
+      lastFlushTime = Date.now();
+    }
+  };
 
   try {
     const url = "https://i.gogingko.net/api/v1/v/exchange/classify.json";
+    // Always send Range header (Range: bytes=0- on start, or Range: bytes=OFFSET- on resume).
+    // This allows i.gogingko.net to return HTTP 206 immediately in 0.5s rather than buffering full payload.
+    const headers: Record<string, string> = {
+      Range: `bytes=${loadedBytes.value}-`
+    };
+
     const res = await fetch(url, {
-      signal: abortController.signal
+      signal: abortController.signal,
+      headers
     });
 
-    if (!res.ok) {
-      throw new Error(`HTTP error! status: ${res.status}`);
+    // 416: Range Not Satisfiable
+    if (res.status === 416) {
+      const headerMeta: Record<string, string> = {};
+      res.headers.forEach((val, key) => {
+        headerMeta[key] = val;
+      });
+
+      // User instruction: Only parse Content-Range from 206, 200 response.
+      // If we already parsed total object length from Content-Range in a previous 206 response:
+      if (hasParsedTotalFromContentRange.value && contentRangeTotalLength.value !== null) {
+        console.warn(
+          `[Stream 416 Warning] Received HTTP 416 (Range Not Satisfiable), but total object length was previously parsed from Content-Range as ${contentRangeTotalLength.value} bytes (currently loaded ${loadedBytes.value} bytes). Not marking stream as completed.`,
+          {
+            status: res.status,
+            statusText: res.statusText,
+            requestedRange: headers["Range"],
+            loadedBytes: loadedBytes.value,
+            parsedTotalLength: contentRangeTotalLength.value,
+            responseHeaders: headerMeta
+          }
+        );
+        isStreaming.value = false;
+        isAutoRetrying.value = false;
+        streamError.value = `Server returned HTTP 416 (Range Not Satisfiable) at offset ${loadedBytes.value} bytes of total ${contentRangeTotalLength.value} bytes. Stream halted without marking completed.`;
+        return;
+      }
+
+      console.warn(
+        `[Stream 416] Received HTTP 416 with no prior Content-Range total length parsed. Marking completed.`,
+        {
+          status: res.status,
+          statusText: res.statusText,
+          requestedRange: headers["Range"],
+          loadedBytes: loadedBytes.value,
+          responseHeaders: headerMeta
+        }
+      );
+      isCompleted.value = true;
+      isStreaming.value = false;
+      retryAttempt.value = 0;
+      streamError.value = null;
+      return;
     }
 
-    const contentLength = res.headers.get("content-length");
-    if (contentLength) {
-      totalBytesEstimated.value = parseInt(contentLength, 10);
+    if (!res.ok) {
+      throw new Error(`HTTP error! status: ${res.status} (${res.statusText})`);
+    }
+
+    // Inspect server response status (only parse Content-Range on 206 / 200)
+    if (res.status === 206) {
+      isRangeSupported.value = true;
+      const contentRange = res.headers.get("content-range");
+      if (contentRange) {
+        const cr = parseContentRangeHeader(contentRange);
+        if (cr && cr.total !== null && cr.total > 0) {
+          serverTotalLength.value = cr.total;
+          contentRangeTotalLength.value = cr.total;
+          totalBytesEstimated.value = cr.total;
+          hasParsedTotalFromContentRange.value = true;
+        }
+
+        // Synchronize loadedBytes with range start if server specified start offset
+        if (cr && cr.start !== null && resume && loadedBytes.value !== cr.start) {
+          console.log(`[Stream Sync] Syncing loadedBytes offset from ${loadedBytes.value} to server range start ${cr.start}`);
+          loadedBytes.value = cr.start;
+        }
+
+        // If server indicated range is already at or past the end, e.g. bytes 88906687-88906686/88906687
+        if (cr && cr.total !== null && cr.start !== null && cr.start >= cr.total) {
+          console.log(`[Stream Complete] Server 206 confirmed offset ${cr.start} has reached total object length ${cr.total} bytes.`);
+          loadedBytes.value = cr.total;
+          isCompleted.value = true;
+          isStreaming.value = false;
+          retryAttempt.value = 0;
+          streamError.value = null;
+          return;
+        }
+      }
+    } else if (res.status === 200) {
+      // Server returned 200 OK (initial request or server ignored Range header)
+      if (resume && loadedBytes.value > 0) {
+        console.warn("Server responded with 200 OK instead of 206 Partial Content. Resetting offset to 0 to prevent duplicates.");
+        items.value = [];
+        loadedBytes.value = 0;
+        totalParsedLines.value = 0;
+        streamLineRemainder = "";
+        lastResumedByteOffset.value = 0;
+      }
+      const contentLength = res.headers.get("content-length");
+      if (contentLength) {
+        const parsedLen = parseInt(contentLength, 10);
+        if (!isNaN(parsedLen) && parsedLen > 0) {
+          serverTotalLength.value = parsedLen;
+          totalBytesEstimated.value = parsedLen;
+        }
+      }
     }
 
     if (!res.body) {
@@ -375,71 +642,9 @@ const startStreaming = async (resume = false) => {
     readerRef = reader;
     const decoder = new TextDecoder("utf-8");
 
-    let lineRemainder = "";
-    const batch: ClassifiedChannel[] = [];
-    const FLUSH_INTERVAL = 150; // flush to Vue state every 150ms to keep UI silky smooth
-    let lastFlushTime = Date.now();
-
-    const flushBatch = () => {
-      if (batch.length > 0) {
-        items.value.push(...batch);
-        batch.length = 0;
-        lastFlushTime = Date.now();
-      }
-    };
-
-    const parseLineToItem = (raw: string): ClassifiedChannel | null => {
-      try {
-        const parsed = JSON.parse(raw);
-        if (!parsed || !parsed.channel || !parsed.res || !parsed.res.answers) {
-          return null;
-        }
-
-        const answers = parsed.res.answers;
-        const topic = answers.topic?.choice || "unknown";
-        const topicConf = Number(answers.topic?.confidence || 0);
-        const topicProbs = answers.topic?.probabilities || {};
-
-        const country = answers.target_country?.choice || "unknown";
-        const countryConf = Number(answers.target_country?.confidence || 0);
-        const countryProbs = answers.target_country?.probabilities || {};
-
-        const domestic = Number(answers.is_domestic_affairs?.noul ?? 0);
-
-        // Parse read_value (handles both old format without read_value and new format with read_value)
-        const readVal = answers.read_value;
-        const hasReadValue = Boolean(readVal && typeof readVal.score === "number");
-        const readValueScore = hasReadValue ? Number(readVal.score) : null;
-        const readValueProbs = (hasReadValue && readVal.probabilities) ? readVal.probabilities : {};
-        const readValueLegend = (hasReadValue && readVal.legend) ? readVal.legend : null;
-
-        const tokensIn = Number(parsed.res.usage?.input_tokens || 0);
-        const tokensOut = Number(parsed.res.usage?.output_tokens || 0);
-        const latencyMs = Number(parsed.res.latency_ms || 0);
-        const model = String(parsed.res.model || "kev-latest");
-
-        return {
-          channel: parsed.channel,
-          topic,
-          topicConf,
-          topicProbs,
-          country,
-          countryConf,
-          countryProbs,
-          domestic,
-          hasReadValue,
-          readValueScore,
-          readValueProbs,
-          readValueLegend,
-          tokensIn,
-          tokensOut,
-          latencyMs,
-          model
-        };
-      } catch (e) {
-        return null;
-      }
-    };
+    // Start stall watchdog now that reader is actively acquired
+    lastChunkReceivedTime = Date.now();
+    startStallWatchdog();
 
     while (true) {
       if (isPaused.value) {
@@ -453,14 +658,33 @@ const startStreaming = async (resume = false) => {
 
       const { done, value } = await reader.read();
       if (done) {
+        // Check if stream closed prematurely on unreliable network
+        // Only test premature break if we confirmed total from 206 Content-Range
+        if (hasParsedTotalFromContentRange.value && contentRangeTotalLength.value !== null) {
+          const expectedTotal = contentRangeTotalLength.value;
+          if (loadedBytes.value < expectedTotal - 1024 && (items.value.length + batch.length < memoryLimit.value)) {
+            console.warn(`[Stream Premature Break] Reader returned done=true prematurely! Received ${loadedBytes.value} of ${expectedTotal} bytes (missing ${expectedTotal - loadedBytes.value} bytes). Auto-retrying with Range header...`);
+            throw new Error(`Connection closed prematurely (${(loadedBytes.value / (1024 * 1024)).toFixed(1)} MB of ${(expectedTotal / (1024 * 1024)).toFixed(1)} MB received)`);
+          }
+        }
         break;
       }
 
       if (value) {
+        lastChunkReceivedTime = Date.now();
+        receivedChunks++;
+
+        // Reset retry counters when data is actively flowing cleanly
+        if (receivedChunks > 2 && (retryAttempt.value > 0 || streamError.value)) {
+          retryAttempt.value = 0;
+          isAutoRetrying.value = false;
+          streamError.value = null;
+        }
+
         loadedBytes.value += value.byteLength;
         const chunkText = decoder.decode(value, { stream: true });
-        const lines = (lineRemainder + chunkText).split("\n");
-        lineRemainder = lines.pop() || "";
+        const lines = (streamLineRemainder + chunkText).split("\n");
+        streamLineRemainder = lines.pop() || "";
 
         for (let i = 0; i < lines.length; i++) {
           const rawLine = lines[i].trim();
@@ -484,29 +708,83 @@ const startStreaming = async (resume = false) => {
       }
     }
 
-    // Process leftover line
-    if (lineRemainder.trim() && items.value.length + batch.length < memoryLimit.value) {
-      const item = parseLineToItem(lineRemainder.trim());
+    stopStallWatchdog();
+
+    // Process leftover line only if completed naturally without pause
+    if (!isPaused.value && streamLineRemainder.trim() && items.value.length + batch.length < memoryLimit.value) {
+      const item = parseLineToItem(streamLineRemainder.trim());
       if (item) {
         batch.push(item);
       }
+      streamLineRemainder = "";
     }
 
     flushBatch();
-    isCompleted.value = true;
+
+    if (!isPaused.value) {
+      isCompleted.value = true;
+      retryAttempt.value = 0;
+      isAutoRetrying.value = false;
+      streamError.value = null;
+    }
   } catch (err: any) {
-    if (err.name !== "AbortError") {
-      console.error("Classification stream error:", err);
-      streamError.value = err.message || "Failed to stream classification data";
+    stopStallWatchdog();
+    const wasStall = isStallTriggered;
+    isStallTriggered = false;
+
+    // Flush any pending items parsed prior to the error/stall
+    flushBatch();
+
+    // If user clicked Pause, exit cleanly without retrying
+    if (isPaused.value) {
+      return;
+    }
+
+    const errorMsg = wasStall
+      ? `Stream stalled (${(loadedBytes.value / (1024 * 1024)).toFixed(1)} MB loaded, no incoming data for 15s)`
+      : (err.message || "Network stream connection dropped");
+
+    console.warn("[Classification Stream Error/Stall]:", errorMsg);
+    streamError.value = errorMsg;
+
+    // Trigger auto-retry with HTTP Range header if under maxRetries and not paused
+    if (retryAttempt.value < maxRetries && !isPaused.value) {
+      retryAttempt.value++;
+      isAutoRetrying.value = true;
+      // Exponential backoff capped at 8s so resumption is snappy
+      const delaySec = Math.min(8, Math.max(1, retryAttempt.value * 1.5));
+      retryCountdown.value = Math.ceil(delaySec);
+
+      clearInterval(retryCountdownInterval);
+      retryCountdownInterval = setInterval(() => {
+        retryCountdown.value--;
+        if (retryCountdown.value <= 0) {
+          clearInterval(retryCountdownInterval);
+        }
+      }, 1000);
+
+      clearTimeout(retryTimeoutId);
+      retryTimeoutId = setTimeout(() => {
+        if (!isPaused.value && !isCompleted.value) {
+          console.log(`Auto-resuming stream with Range header: bytes=${loadedBytes.value}- (Attempt ${retryAttempt.value}/${maxRetries})`);
+          startStreaming(true);
+        }
+      }, delaySec * 1000);
+    } else {
+      isAutoRetrying.value = false;
+      streamError.value = `${errorMsg}. Stopped after ${retryAttempt.value} attempts. Click Resume to restart with Range offset.`;
     }
   } finally {
     isStreaming.value = false;
     readerRef = null;
+    stopStallWatchdog();
   }
 };
 
 const pauseStream = () => {
   isPaused.value = true;
+  clearRetryTimers();
+  stopStallWatchdog();
   if (abortController) {
     abortController.abort();
   }
@@ -518,12 +796,19 @@ const reloadStream = () => {
   startStreaming(false);
 };
 
+const manualResumeNow = () => {
+  clearRetryTimers();
+  startStreaming(true);
+};
+
 // Start streaming automatically on mount
 onMounted(() => {
   startStreaming(false);
 });
 
 onUnmounted(() => {
+  stopStallWatchdog();
+  clearRetryTimers();
   if (abortController) {
     abortController.abort();
   }
@@ -854,7 +1139,11 @@ const handleExplore = (channel: string) => {
       <div class="space-y-1.5 pt-1">
         <div class="flex items-center justify-between text-[11px] font-mono text-gray-500 dark:text-gray-400">
           <div class="flex items-center gap-2">
-            <span v-if="isStreaming" class="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 font-bold">
+            <span v-if="isAutoRetrying" class="flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-bold">
+              <RefreshCw class="w-3 h-3 animate-spin text-amber-500" />
+              Retrying in {{ retryCountdown }}s (Attempt {{ retryAttempt }}/{{ maxRetries }})...
+            </span>
+            <span v-else-if="isStreaming" class="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 font-bold">
               <span class="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
               Streaming NDJSON...
             </span>
@@ -871,10 +1160,20 @@ const handleExplore = (channel: string) => {
               </span>
             </span>
           </div>
-          <div class="tabular-nums">
-            {{ (loadedBytes / (1024 * 1024)).toFixed(1) }} MB
-            <span class="text-gray-400">/ ~{{ (totalBytesEstimated / (1024 * 1024)).toFixed(1) }} MB</span>
-            ({{ Math.min(100, Math.round((loadedBytes / totalBytesEstimated) * 100)) }}%)
+          <div class="flex items-center gap-2 tabular-nums">
+            <span
+              v-if="lastResumedByteOffset && lastResumedByteOffset > 0"
+              class="hidden sm:inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800/60 font-mono"
+              title="Stream resumed using HTTP Range header from byte offset"
+            >
+              <span>Range:</span>
+              <span>{{ (lastResumedByteOffset / (1024 * 1024)).toFixed(1) }}MB+</span>
+            </span>
+            <div>
+              {{ (loadedBytes / (1024 * 1024)).toFixed(1) }} MB
+              <span class="text-gray-400">/ ~{{ (totalBytesEstimated / (1024 * 1024)).toFixed(1) }} MB</span>
+              ({{ Math.min(100, Math.round((loadedBytes / totalBytesEstimated) * 100)) }}%)
+            </div>
           </div>
         </div>
         <div class="w-full h-1.5 bg-gray-100 dark:bg-gray-700/60 rounded-full overflow-hidden">
@@ -882,6 +1181,65 @@ const handleExplore = (channel: string) => {
             class="h-full bg-gradient-to-r from-indigo-500 via-cyan-500 to-emerald-500 transition-all duration-300"
             :style="{ width: `${Math.min(100, Math.round((loadedBytes / totalBytesEstimated) * 100))}%` }"
           ></div>
+        </div>
+
+        <!-- Network Throttle Auto-Recovery Banner -->
+        <div
+          v-if="isAutoRetrying"
+          class="mt-2.5 p-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs shadow-2xs"
+        >
+          <div class="flex items-start sm:items-center gap-2 text-amber-800 dark:text-amber-200">
+            <RefreshCw class="w-4 h-4 text-amber-600 dark:text-amber-400 animate-spin shrink-0 mt-0.5 sm:mt-0" />
+            <div>
+              <span class="font-bold">Network throttled or connection dropped:</span>
+              <span class="text-amber-700 dark:text-amber-300 ml-1">
+                Auto-resuming with HTTP Range from {{ (loadedBytes / (1024 * 1024)).toFixed(2) }} MB in {{ retryCountdown }}s (Attempt {{ retryAttempt }}/{{ maxRetries }})...
+              </span>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 shrink-0">
+            <button
+              @click="manualResumeNow"
+              class="px-2.5 py-1 text-xs font-bold rounded-lg bg-amber-600 hover:bg-amber-700 text-white cursor-pointer transition shadow-2xs"
+            >
+              Resume Now
+            </button>
+            <button
+              @click="pauseStream"
+              class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-amber-100 hover:bg-amber-200 dark:bg-amber-900/60 dark:hover:bg-amber-900 text-amber-800 dark:text-amber-200 cursor-pointer transition"
+            >
+              Pause
+            </button>
+          </div>
+        </div>
+
+        <!-- Error & Manual Resume Banner (Exhausted retries or non-recoverable error) -->
+        <div
+          v-else-if="streamError && !isPaused"
+          class="mt-2.5 p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs shadow-2xs"
+        >
+          <div class="flex items-start sm:items-center gap-2 text-rose-800 dark:text-rose-200">
+            <AlertTriangle class="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5 sm:mt-0" />
+            <div>
+              <span class="font-bold">Stream Stopped:</span>
+              <span class="text-rose-700 dark:text-rose-300 ml-1">{{ streamError }}</span>
+            </div>
+          </div>
+          <div class="flex items-center gap-2 shrink-0">
+            <button
+              v-if="loadedBytes > 0"
+              @click="manualResumeNow"
+              class="px-2.5 py-1 text-xs font-bold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer transition shadow-2xs"
+            >
+              Resume from {{ (loadedBytes / (1024 * 1024)).toFixed(1) }} MB
+            </button>
+            <button
+              @click="reloadStream"
+              class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-rose-100 hover:bg-rose-200 dark:bg-rose-900/60 dark:hover:bg-rose-900 text-rose-800 dark:text-rose-200 cursor-pointer transition"
+            >
+              Reload from 0
+            </button>
+          </div>
         </div>
       </div>
     </div>
