@@ -35,10 +35,8 @@ import { useI18n } from "../i18n";
 import {
   probeLz4Endpoint,
   StreamingLz4FrameDecoder,
-  LZ4_DEFAULT_ENDPOINT,
-  LZ4_REMOTE_ENDPOINT,
-  RAW_DEFAULT_ENDPOINT,
-  RAW_REMOTE_ENDPOINT
+  CLASSIFY_LZ4_URL,
+  CLASSIFY_RAW_URL
 } from "../utils/lz4Stream";
 import {
   parseNaturalLanguageQueryWithSystemOne,
@@ -112,7 +110,7 @@ const isProbingLz4 = ref(false);
 const lz4ProbeStatus = ref<"probing" | "available" | "unavailable">("probing");
 const lz4ProbeMessage = ref<string>("");
 const decompressedBytesCount = ref(0);
-const activeStreamEndpoint = ref<string>(RAW_DEFAULT_ENDPOINT);
+const activeStreamEndpoint = ref<string>(CLASSIFY_RAW_URL);
 
 let abortController: AbortController | null = null;
 let readerRef: ReadableStreamDefaultReader<Uint8Array> | null = null;
@@ -524,28 +522,28 @@ const startStreaming = async (resume = false) => {
     isProbingLz4.value = true;
     lz4ProbeStatus.value = "probing";
     try {
-      const probe = await probeLz4Endpoint();
+      const probe = await probeLz4Endpoint(CLASSIFY_LZ4_URL);
       if (probe.available) {
         isUsingLz4.value = true;
         lz4ProbeStatus.value = "available";
-        activeStreamEndpoint.value = probe.endpointUrl;
-        lz4ProbeMessage.value = `LZ4 frame active (${probe.endpointUrl})`;
+        activeStreamEndpoint.value = CLASSIFY_LZ4_URL;
+        lz4ProbeMessage.value = `LZ4 frame active (${CLASSIFY_LZ4_URL})`;
         if (probe.totalBytes) {
           totalBytesEstimated.value = probe.totalBytes;
         }
-        console.log(`[LZ4 Probe] Detected valid LZ4 stream at ${probe.endpointUrl}. Streaming in LZ4 frame mode.`);
+        console.log(`[LZ4 Probe] Detected valid LZ4 stream at ${CLASSIFY_LZ4_URL}. Streaming in LZ4 frame mode.`);
       } else {
         isUsingLz4.value = false;
         lz4ProbeStatus.value = "unavailable";
-        activeStreamEndpoint.value = RAW_DEFAULT_ENDPOINT;
+        activeStreamEndpoint.value = CLASSIFY_RAW_URL;
         lz4ProbeMessage.value = probe.error || "LZ4 endpoint not found, falling back to NDJSON";
         totalBytesEstimated.value = 88906687; // fallback to uncompressed size
-        console.log(`[LZ4 Probe] classify.json.lz4 not available (${probe.error || '404'}). Cleanly falling back to NDJSON stream.`);
+        console.log(`[LZ4 Probe] classify.json.lz4 not available (${probe.error || '404'}). Cleanly falling back to NDJSON stream on ${CLASSIFY_RAW_URL}.`);
       }
     } catch (probeErr: any) {
       isUsingLz4.value = false;
       lz4ProbeStatus.value = "unavailable";
-      activeStreamEndpoint.value = RAW_DEFAULT_ENDPOINT;
+      activeStreamEndpoint.value = CLASSIFY_RAW_URL;
       totalBytesEstimated.value = 88906687;
       console.warn("[LZ4 Probe Error, falling back to uncompressed stream]:", probeErr);
     } finally {
@@ -580,47 +578,21 @@ const startStreaming = async (resume = false) => {
       headers["Range"] = `bytes=${loadedBytes.value}-`;
     }
 
-    let res: Response;
-    const primaryUrl = isUsingLz4.value ? LZ4_DEFAULT_ENDPOINT : RAW_DEFAULT_ENDPOINT;
-    const fallbackUrl = isUsingLz4.value ? LZ4_REMOTE_ENDPOINT : RAW_REMOTE_ENDPOINT;
+    const targetUrl = isUsingLz4.value ? CLASSIFY_LZ4_URL : CLASSIFY_RAW_URL;
+    let res = await fetch(targetUrl, {
+      signal: abortController.signal,
+      headers
+    });
 
-    try {
-      res = await fetch(primaryUrl, {
+    // If LZ4 mode was requested but returned 404, immediately fallback to raw stream on i.gogingko.net
+    if (isUsingLz4.value && (res.status === 404 || (!res.ok && res.status !== 206))) {
+      console.warn(`[LZ4 Stream] ${targetUrl} returned ${res.status}. Falling back to ${CLASSIFY_RAW_URL}.`);
+      isUsingLz4.value = false;
+      totalBytesEstimated.value = 88906687;
+      res = await fetch(CLASSIFY_RAW_URL, {
         signal: abortController.signal,
         headers
       });
-
-      // If LZ4 mode was requested but returned 404, immediately fallback to raw stream
-      if (isUsingLz4.value && (res.status === 404 || (!res.ok && res.status !== 206))) {
-        console.warn(`[LZ4 Stream] ${primaryUrl} returned ${res.status}. Falling back to uncompressed stream.`);
-        isUsingLz4.value = false;
-        totalBytesEstimated.value = 88906687;
-        res = await fetch(RAW_DEFAULT_ENDPOINT, {
-          signal: abortController.signal,
-          headers
-        });
-      }
-
-      if (!res.ok && res.status !== 416) {
-        throw new Error(`Primary endpoint returned status ${res.status}`);
-      }
-    } catch (proxyErr: any) {
-      if (proxyErr.name === "AbortError") throw proxyErr;
-      console.warn("Primary endpoint fetch failed, falling back to direct URL:", proxyErr);
-      res = await fetch(fallbackUrl, {
-        signal: abortController.signal,
-        headers
-      });
-
-      if (isUsingLz4.value && (res.status === 404 || (!res.ok && res.status !== 206))) {
-        console.warn(`[LZ4 Stream] Direct URL returned ${res.status}. Falling back to uncompressed direct stream.`);
-        isUsingLz4.value = false;
-        totalBytesEstimated.value = 88906687;
-        res = await fetch(RAW_REMOTE_ENDPOINT, {
-          signal: abortController.signal,
-          headers
-        });
-      }
     }
 
     // 416: Range Not Satisfiable

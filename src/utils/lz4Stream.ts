@@ -14,43 +14,41 @@ export interface Lz4ProbeResult {
   error?: string;
 }
 
-export const LZ4_DEFAULT_ENDPOINT = "/api/v1/v/exchange/classify.json.lz4";
-export const LZ4_REMOTE_ENDPOINT = "https://i.gogingko.net/api/v1/v/exchange/classify.json.lz4";
-export const RAW_DEFAULT_ENDPOINT = "/api/v1/v/exchange/classify.json";
-export const RAW_REMOTE_ENDPOINT = "https://i.gogingko.net/api/v1/v/exchange/classify.json";
+export const CLASSIFY_LZ4_URL = "https://i.gogingko.net/api/v1/v/exchange/classify.json.lz4";
+export const CLASSIFY_RAW_URL = "https://i.gogingko.net/api/v1/v/exchange/classify.json";
+
+// Aliases for compatibility
+export const LZ4_REMOTE_ENDPOINT = CLASSIFY_LZ4_URL;
+export const RAW_REMOTE_ENDPOINT = CLASSIFY_RAW_URL;
+export const LZ4_DEFAULT_ENDPOINT = CLASSIFY_LZ4_URL;
+export const RAW_DEFAULT_ENDPOINT = CLASSIFY_RAW_URL;
 
 /**
- * Probes whether the compressed LZ4 endpoint is available and valid.
- * Checks local/proxied endpoint first (/api/v1/v/exchange/classify.json.lz4),
- * then falls back to direct remote URL.
+ * Probes whether the compressed LZ4 endpoint is available and valid on i.gogingko.net.
  */
 export async function probeLz4Endpoint(
-  customUrl?: string,
+  endpointUrl: string = CLASSIFY_LZ4_URL,
   timeoutMs = 4000
 ): Promise<Lz4ProbeResult> {
-  const candidates = customUrl
-    ? [customUrl]
-    : [
-        LZ4_DEFAULT_ENDPOINT,
-        LZ4_REMOTE_ENDPOINT
-      ];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  for (const url of candidates) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    // Request initial bytes to verify LZ4 frame magic header (0x184D2204)
+    const res = await fetch(endpointUrl, {
+      method: "GET",
+      headers: { Range: "bytes=0-15" },
+      signal: controller.signal
+    });
+    clearTimeout(timer);
 
-    try {
-      // Request initial bytes to verify LZ4 frame magic header (0x184D2204)
-      const res = await fetch(url, {
-        method: "GET",
-        headers: { Range: "bytes=0-15" },
-        signal: controller.signal
-      });
-      clearTimeout(timer);
-
-      if (res.status === 404 || !res.ok && res.status !== 206) {
-        continue;
-      }
+    if (res.status === 404 || (!res.ok && res.status !== 206)) {
+      return {
+        available: false,
+        endpointUrl,
+        error: `HTTP ${res.status}: ${res.statusText || 'Not Found'}`
+      };
+    }
 
       // Check Content-Range or Content-Length for total size
       let totalBytes: number | null = null;
@@ -72,7 +70,11 @@ export async function probeLz4Endpoint(
       if (u8.length > 0 && u8[0] === 0x7B /* '{' */) {
         const text = new TextDecoder().decode(u8);
         if (text.includes('"state":1') || text.includes('not found')) {
-          continue;
+          return {
+            available: false,
+            endpointUrl,
+            error: "Key classify.json.lz4 not found on server"
+          };
         }
       }
 
@@ -86,22 +88,25 @@ export async function probeLz4Endpoint(
       ) {
         return {
           available: true,
-          endpointUrl: url,
+          endpointUrl,
           totalBytes
         };
       }
-    } catch {
+
+      return {
+        available: false,
+        endpointUrl,
+        error: "Invalid LZ4 frame header magic"
+      };
+    } catch (err: any) {
       clearTimeout(timer);
-      // Try next candidate
+      return {
+        available: false,
+        endpointUrl,
+        error: err?.message || "Probe request failed"
+      };
     }
   }
-
-  return {
-    available: false,
-    endpointUrl: candidates[0],
-    error: "LZ4 compressed object not found on server (404/invalid magic)"
-  };
-}
 
 /**
  * Stream-oriented LZ4 Frame Decompressor.
