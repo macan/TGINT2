@@ -8295,6 +8295,70 @@ const jumpToExplorerFromChannel = (channel: string, channelObj?: any) => {
   searchChannel();
 };
 
+const lastTypesScrollY = ref(0);
+const lastTypesChannel = ref("");
+
+const restoreTypesScrollPosition = () => {
+  const targetScroll = lastTypesScrollY.value || tabScrollPositions.value['types'] || 0;
+  const targetChannel = lastTypesChannel.value;
+
+  if (targetScroll <= 0 && !targetChannel) return;
+
+  let isRestored = false;
+
+  const applyScroll = () => {
+    if (activeTab.value !== 'types' || isRestored) return;
+
+    if (targetChannel) {
+      const cleanId = targetChannel.replace(/^@/, "").trim();
+      const el = document.getElementById(`types-channel-${cleanId}`) ||
+                 document.getElementById(`types-channel-${targetChannel}`) ||
+                 document.querySelector(`[data-types-channel="${cleanId}"]`) ||
+                 document.querySelector(`[data-types-channel="${targetChannel}"]`);
+      if (el) {
+        if (targetScroll > 0 && document.documentElement.scrollHeight >= targetScroll) {
+          window.scrollTo(0, targetScroll);
+          isRestored = Math.abs(window.scrollY - targetScroll) < 50;
+        } else {
+          el.scrollIntoView({ block: 'center', behavior: 'auto' });
+          isRestored = true;
+        }
+        return;
+      }
+    }
+
+    if (targetScroll > 0) {
+      window.scrollTo(0, targetScroll);
+      if (document.documentElement.scrollHeight >= targetScroll) {
+        isRestored = Math.abs(window.scrollY - targetScroll) < 50;
+      }
+    }
+  };
+
+  nextTick(() => {
+    applyScroll();
+    requestAnimationFrame(() => {
+      applyScroll();
+      setTimeout(applyScroll, 50);
+      setTimeout(applyScroll, 150);
+      setTimeout(applyScroll, 300);
+      setTimeout(applyScroll, 500);
+      setTimeout(applyScroll, 800);
+    });
+  });
+};
+
+const jumpToExplorerFromTypes = (channel: string) => {
+  const currentY = window.scrollY || document.documentElement.scrollTop || 0;
+  lastTypesScrollY.value = currentY;
+  lastTypesChannel.value = channel;
+  tabScrollPositions.value['types'] = currentY;
+
+  activeTab.value = 'explorer';
+  channelName.value = channel;
+  searchChannel();
+};
+
 watch(activeTab, (newTab, oldTab) => {
   // Save current scroll position
   if (oldTab) {
@@ -8315,6 +8379,11 @@ watch(activeTab, (newTab, oldTab) => {
       if (window.scrollY > 0 || !tabScrollPositions.value['channel']) {
         tabScrollPositions.value['channel'] = window.scrollY;
         lastChannelScrollY.value = window.scrollY;
+      }
+    } else if (oldTab === 'types') {
+      if (window.scrollY > 0 || !tabScrollPositions.value['types']) {
+        tabScrollPositions.value['types'] = window.scrollY;
+        lastTypesScrollY.value = window.scrollY;
       }
     } else {
       tabScrollPositions.value[oldTab] = window.scrollY;
@@ -8344,6 +8413,8 @@ watch(activeTab, (newTab, oldTab) => {
     restoreSearchScrollPosition();
   } else if (newTab === 'channel') {
     restoreChannelScrollPosition();
+  } else if (newTab === 'types') {
+    restoreTypesScrollPosition();
   } else if (newTab === 'monitor') {
     refreshEngagementData();
     nextTick(() => {
@@ -8682,6 +8753,9 @@ const handleScroll = () => {
     tabScrollPositions.value['channel'] = window.scrollY;
   } else if (activeTab.value === 'explorer') {
     tabScrollPositions.value['explorer'] = window.scrollY;
+  } else if (activeTab.value === 'types') {
+    lastTypesScrollY.value = window.scrollY;
+    tabScrollPositions.value['types'] = window.scrollY;
   }
 };
 
@@ -26215,11 +26289,7 @@ onUnmounted(() => {
       <!-- Types Tab -->
       <div v-show="activeTab === 'types'" class="w-full max-w-full mx-auto px-0 pt-1 pb-16 space-y-6">
         <TypesTab
-          @explore-channel="(targetChannel) => {
-            activeTab = 'explorer';
-            channelName = targetChannel;
-            searchChannel();
-          }"
+          @explore-channel="jumpToExplorerFromTypes"
         />
       </div>
 

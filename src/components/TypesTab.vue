@@ -2009,6 +2009,8 @@ const handleExplore = (channel: string) => {
       <div
         v-for="item in paginatedItems"
         :key="item.channel"
+        :id="`types-channel-${item.channel.replace(/^@/, '')}`"
+        :data-types-channel="item.channel.replace(/^@/, '')"
         class="bg-white dark:bg-gray-800/90 rounded-2xl border border-gray-200/80 dark:border-gray-700/80 p-4.5 shadow-sm hover:shadow-md transition-all duration-200 flex flex-col justify-between space-y-3 group relative"
       >
         <!-- Card Header: Avatar, Name & Actions -->
