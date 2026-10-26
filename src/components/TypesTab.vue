@@ -28,9 +28,11 @@ import {
   BookmarkCheck,
   Award,
   AlertTriangle,
-  WifiOff
+  WifiOff,
+  Zap
 } from "lucide-vue-next";
 import { useI18n } from "../i18n";
+import { probeLz4Endpoint, StreamingLz4FrameDecoder } from "../utils/lz4Stream";
 import {
   parseNaturalLanguageQueryWithSystemOne,
   parseQueryFastRules,
@@ -96,6 +98,14 @@ const isRangeSupported = ref(true);
 const hasParsedTotalFromContentRange = ref(false);
 const contentRangeTotalLength = ref<number | null>(null);
 const serverTotalLength = ref<number | null>(null);
+
+// LZ4 Compressed Stream & Probing State
+const isUsingLz4 = ref(false);
+const isProbingLz4 = ref(false);
+const lz4ProbeStatus = ref<"probing" | "available" | "unavailable">("probing");
+const lz4ProbeMessage = ref<string>("");
+const decompressedBytesCount = ref(0);
+const activeStreamEndpoint = ref<string>("/api/classify-stream");
 
 let abortController: AbortController | null = null;
 let readerRef: ReadableStreamDefaultReader<Uint8Array> | null = null;
@@ -484,7 +494,7 @@ const parseContentRangeHeader = (headerValue: string | null): ParsedContentRange
   };
 };
 
-// Stream Ingestion Logic with HTTP Range Resume
+// Stream Ingestion Logic with HTTP Range Resume and LZ4 Frame Stream Decompression
 const startStreaming = async (resume = false) => {
   clearRetryTimers();
   if (isStreaming.value && !isPaused.value) return;
@@ -492,6 +502,7 @@ const startStreaming = async (resume = false) => {
   if (!resume) {
     items.value = [];
     loadedBytes.value = 0;
+    decompressedBytesCount.value = 0;
     totalParsedLines.value = 0;
     streamLineRemainder = "";
     lastResumedByteOffset.value = null;
@@ -501,6 +512,38 @@ const startStreaming = async (resume = false) => {
     hasParsedTotalFromContentRange.value = false;
     contentRangeTotalLength.value = null;
     serverTotalLength.value = null;
+
+    // Step 1: Probe whether compressed object classify.json.lz4 is available
+    isProbingLz4.value = true;
+    lz4ProbeStatus.value = "probing";
+    try {
+      const probe = await probeLz4Endpoint();
+      if (probe.available) {
+        isUsingLz4.value = true;
+        lz4ProbeStatus.value = "available";
+        activeStreamEndpoint.value = probe.endpointUrl;
+        lz4ProbeMessage.value = `LZ4 frame active (${probe.endpointUrl})`;
+        if (probe.totalBytes) {
+          totalBytesEstimated.value = probe.totalBytes;
+        }
+        console.log(`[LZ4 Probe] Detected valid LZ4 stream at ${probe.endpointUrl}. Streaming in LZ4 frame mode.`);
+      } else {
+        isUsingLz4.value = false;
+        lz4ProbeStatus.value = "unavailable";
+        activeStreamEndpoint.value = "/api/classify-stream";
+        lz4ProbeMessage.value = probe.error || "LZ4 endpoint not found, falling back to NDJSON";
+        totalBytesEstimated.value = 88906687; // fallback to uncompressed size
+        console.log(`[LZ4 Probe] classify.json.lz4 not available (${probe.error || '404'}). Cleanly falling back to NDJSON stream.`);
+      }
+    } catch (probeErr: any) {
+      isUsingLz4.value = false;
+      lz4ProbeStatus.value = "unavailable";
+      activeStreamEndpoint.value = "/api/classify-stream";
+      totalBytesEstimated.value = 88906687;
+      console.warn("[LZ4 Probe Error, falling back to uncompressed stream]:", probeErr);
+    } finally {
+      isProbingLz4.value = false;
+    }
   } else {
     lastResumedByteOffset.value = loadedBytes.value;
   }
@@ -524,17 +567,56 @@ const startStreaming = async (resume = false) => {
   };
 
   try {
-    const url = "https://i.gogingko.net/api/v1/v/exchange/classify.json";
-    // Always send Range header (Range: bytes=0- on start, or Range: bytes=OFFSET- on resume).
-    // This allows i.gogingko.net to return HTTP 206 immediately in 0.5s rather than buffering full payload.
-    const headers: Record<string, string> = {
-      Range: `bytes=${loadedBytes.value}-`
-    };
+    const headers: Record<string, string> = {};
+    // Only send Range header when resuming from an already fetched offset > 0 (for raw NDJSON streams)
+    if (resume && loadedBytes.value > 0 && !isUsingLz4.value) {
+      headers["Range"] = `bytes=${loadedBytes.value}-`;
+    }
 
-    const res = await fetch(url, {
-      signal: abortController.signal,
-      headers
-    });
+    let res: Response;
+    const primaryUrl = isUsingLz4.value ? "/api/classify-stream-lz4" : "/api/classify-stream";
+    const fallbackUrl = isUsingLz4.value
+      ? "https://i.gogingko.net/api/v1/v/exchange/classify.json.lz4"
+      : "https://i.gogingko.net/api/v1/v/exchange/classify.json";
+
+    try {
+      res = await fetch(primaryUrl, {
+        signal: abortController.signal,
+        headers
+      });
+
+      // If LZ4 mode was requested but returned 404, immediately fallback to raw stream
+      if (isUsingLz4.value && (res.status === 404 || (!res.ok && res.status !== 206))) {
+        console.warn(`[LZ4 Stream] ${primaryUrl} returned ${res.status}. Falling back to uncompressed stream.`);
+        isUsingLz4.value = false;
+        totalBytesEstimated.value = 88906687;
+        res = await fetch("/api/classify-stream", {
+          signal: abortController.signal,
+          headers
+        });
+      }
+
+      if (!res.ok && res.status !== 416) {
+        throw new Error(`Proxy returned status ${res.status}`);
+      }
+    } catch (proxyErr: any) {
+      if (proxyErr.name === "AbortError") throw proxyErr;
+      console.warn("Container proxy fetch failed, falling back to direct URL:", proxyErr);
+      res = await fetch(fallbackUrl, {
+        signal: abortController.signal,
+        headers
+      });
+
+      if (isUsingLz4.value && (res.status === 404 || (!res.ok && res.status !== 206))) {
+        console.warn(`[LZ4 Stream] Direct URL returned ${res.status}. Falling back to uncompressed direct stream.`);
+        isUsingLz4.value = false;
+        totalBytesEstimated.value = 88906687;
+        res = await fetch("https://i.gogingko.net/api/v1/v/exchange/classify.json", {
+          signal: abortController.signal,
+          headers
+        });
+      }
+    }
 
     // 416: Range Not Satisfiable
     if (res.status === 416) {
@@ -598,7 +680,7 @@ const startStreaming = async (resume = false) => {
         }
 
         // Synchronize loadedBytes with range start if server specified start offset
-        if (cr && cr.start !== null && resume && loadedBytes.value !== cr.start) {
+        if (cr && cr.start !== null && resume && loadedBytes.value !== cr.start && !isUsingLz4.value) {
           console.log(`[Stream Sync] Syncing loadedBytes offset from ${loadedBytes.value} to server range start ${cr.start}`);
           loadedBytes.value = cr.start;
         }
@@ -616,10 +698,11 @@ const startStreaming = async (resume = false) => {
       }
     } else if (res.status === 200) {
       // Server returned 200 OK (initial request or server ignored Range header)
-      if (resume && loadedBytes.value > 0) {
+      if (resume && loadedBytes.value > 0 && !isUsingLz4.value) {
         console.warn("Server responded with 200 OK instead of 206 Partial Content. Resetting offset to 0 to prevent duplicates.");
         items.value = [];
         loadedBytes.value = 0;
+        decompressedBytesCount.value = 0;
         totalParsedLines.value = 0;
         streamLineRemainder = "";
         lastResumedByteOffset.value = 0;
@@ -642,6 +725,31 @@ const startStreaming = async (resume = false) => {
     readerRef = reader;
     const decoder = new TextDecoder("utf-8");
 
+    // Initialize Streaming LZ4 Frame Decompressor if streaming compressed file
+    let lz4Decoder: StreamingLz4FrameDecoder | null = null;
+    if (isUsingLz4.value) {
+      lz4Decoder = new StreamingLz4FrameDecoder((decompBlock) => {
+        decompressedBytesCount.value += decompBlock.byteLength;
+        const chunkText = decoder.decode(decompBlock, { stream: true });
+        const lines = (streamLineRemainder + chunkText).split("\n");
+        streamLineRemainder = lines.pop() || "";
+
+        for (let i = 0; i < lines.length; i++) {
+          const rawLine = lines[i].trim();
+          if (!rawLine) continue;
+
+          totalParsedLines.value++;
+          const item = parseLineToItem(rawLine);
+          if (item) {
+            batch.push(item);
+            if (items.value.length + batch.length >= memoryLimit.value) {
+              break;
+            }
+          }
+        }
+      });
+    }
+
     // Start stall watchdog now that reader is actively acquired
     lastChunkReceivedTime = Date.now();
     startStallWatchdog();
@@ -658,6 +766,11 @@ const startStreaming = async (resume = false) => {
 
       const { done, value } = await reader.read();
       if (done) {
+        // Flush any trailing decompression buffer
+        if (isUsingLz4.value && lz4Decoder) {
+          lz4Decoder.finish();
+        }
+
         // Check if stream closed prematurely on unreliable network
         // Only test premature break if we confirmed total from 206 Content-Range
         if (hasParsedTotalFromContentRange.value && contentRangeTotalLength.value !== null) {
@@ -682,20 +795,27 @@ const startStreaming = async (resume = false) => {
         }
 
         loadedBytes.value += value.byteLength;
-        const chunkText = decoder.decode(value, { stream: true });
-        const lines = (streamLineRemainder + chunkText).split("\n");
-        streamLineRemainder = lines.pop() || "";
 
-        for (let i = 0; i < lines.length; i++) {
-          const rawLine = lines[i].trim();
-          if (!rawLine) continue;
+        if (isUsingLz4.value && lz4Decoder) {
+          // Decode compressed chunk on the fly
+          lz4Decoder.append(value);
+        } else {
+          // Raw NDJSON chunk
+          const chunkText = decoder.decode(value, { stream: true });
+          const lines = (streamLineRemainder + chunkText).split("\n");
+          streamLineRemainder = lines.pop() || "";
 
-          totalParsedLines.value++;
-          const item = parseLineToItem(rawLine);
-          if (item) {
-            batch.push(item);
-            if (items.value.length + batch.length >= memoryLimit.value) {
-              break;
+          for (let i = 0; i < lines.length; i++) {
+            const rawLine = lines[i].trim();
+            if (!rawLine) continue;
+
+            totalParsedLines.value++;
+            const item = parseLineToItem(rawLine);
+            if (item) {
+              batch.push(item);
+              if (items.value.length + batch.length >= memoryLimit.value) {
+                break;
+              }
             }
           }
         }
@@ -792,6 +912,11 @@ const pauseStream = () => {
 };
 
 const reloadStream = () => {
+  pauseStream();
+  startStreaming(false);
+};
+
+const reprobeAndReload = () => {
   pauseStream();
   startStreaming(false);
 };
@@ -1069,10 +1194,14 @@ const handleExplore = (channel: string) => {
               <Tag class="w-5 h-5" />
             </div>
             <div>
-              <h2 class="text-lg font-extrabold text-gray-900 dark:text-white tracking-tight flex items-center gap-2">
+              <h2 class="text-lg font-extrabold text-gray-900 dark:text-white tracking-tight flex items-center gap-2 flex-wrap">
                 Types & Classification Intelligence
-                <span class="text-xs font-mono px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
-                  exchange/classify.json
+                <span
+                  class="text-xs font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1"
+                  :class="isUsingLz4 ? 'bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/40 dark:text-purple-300 dark:border-purple-800' : 'bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/40 dark:text-indigo-300 dark:border-indigo-800'"
+                >
+                  <Zap v-if="isUsingLz4" class="w-3 h-3 text-purple-600 dark:text-purple-400 fill-purple-500/20" />
+                  {{ isUsingLz4 ? 'classify.json.lz4 (Stream)' : 'classify.json (NDJSON)' }}
                 </span>
               </h2>
               <p class="text-xs text-gray-500 dark:text-gray-400">
@@ -1138,14 +1267,19 @@ const handleExplore = (channel: string) => {
       <!-- Ingestion Stream Progress Bar -->
       <div class="space-y-1.5 pt-1">
         <div class="flex items-center justify-between text-[11px] font-mono text-gray-500 dark:text-gray-400">
-          <div class="flex items-center gap-2">
-            <span v-if="isAutoRetrying" class="flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-bold">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span v-if="isProbingLz4" class="flex items-center gap-1.5 text-purple-600 dark:text-purple-400 font-bold">
+              <RefreshCw class="w-3 h-3 animate-spin text-purple-500" />
+              Probing classify.json.lz4...
+            </span>
+            <span v-else-if="isAutoRetrying" class="flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-bold">
               <RefreshCw class="w-3 h-3 animate-spin text-amber-500" />
               Retrying in {{ retryCountdown }}s (Attempt {{ retryAttempt }}/{{ maxRetries }})...
             </span>
-            <span v-else-if="isStreaming" class="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 font-bold">
-              <span class="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
-              Streaming NDJSON...
+            <span v-else-if="isStreaming" class="flex items-center gap-1.5 font-bold" :class="isUsingLz4 ? 'text-purple-600 dark:text-purple-400' : 'text-indigo-600 dark:text-indigo-400'">
+              <Zap v-if="isUsingLz4" class="w-3.5 h-3.5 text-purple-500 fill-purple-500/20 animate-pulse" />
+              <span v-else class="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
+              {{ isUsingLz4 ? 'Streaming LZ4 Frame...' : 'Streaming NDJSON...' }}
             </span>
             <span v-else-if="isCompleted" class="text-emerald-600 dark:text-emerald-400 font-bold">
               ✓ Ingestion Complete
@@ -1158,6 +1292,29 @@ const handleExplore = (channel: string) => {
               <span v-if="readValueStats.hasCount > 0" class="text-emerald-600 dark:text-emerald-400">
                 ({{ readValueStats.hasCount.toLocaleString() }} with Read Value)
               </span>
+            </span>
+
+            <!-- Compression Mode Badge -->
+            <span
+              class="hidden sm:inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-mono border"
+              :class="isUsingLz4
+                ? 'bg-purple-50 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800'
+                : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700'"
+              :title="isUsingLz4 ? 'Live stream LZ4 chunk decompressor' : 'Uncompressed fallback stream. Click to re-probe .lz4'"
+            >
+              <Zap v-if="isUsingLz4" class="w-2.5 h-2.5 text-purple-600 dark:text-purple-400" />
+              <span>{{ isUsingLz4 ? '⚡ LZ4 Stream' : 'Raw NDJSON' }}</span>
+              <span v-if="isUsingLz4 && decompressedBytesCount > 0" class="text-purple-600 dark:text-purple-400 opacity-90">
+                ({{ (decompressedBytesCount / (1024 * 1024)).toFixed(1) }} MB decomp)
+              </span>
+              <button
+                v-if="!isUsingLz4 && !isStreaming"
+                @click="reprobeAndReload"
+                class="ml-1 text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer flex items-center gap-0.5 font-bold"
+                title="Probe whether classify.json.lz4 has been uploaded"
+              >
+                <RefreshCw class="w-2.5 h-2.5" /> Probe .lz4
+              </button>
             </span>
           </div>
           <div class="flex items-center gap-2 tabular-nums">

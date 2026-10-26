@@ -19,6 +19,20 @@ export default defineConfig(({mode}) => {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
+      proxy: {
+        '/api/classify-stream-lz4': {
+          target: 'https://i.gogingko.net',
+          changeOrigin: true,
+          secure: true,
+          rewrite: (p) => p.replace(/^\/api\/classify-stream-lz4/, '/api/v1/v/exchange/classify.json.lz4'),
+        },
+        '/api/classify-stream': {
+          target: 'https://i.gogingko.net',
+          changeOrigin: true,
+          secure: true,
+          rewrite: (p) => p.replace(/^\/api\/classify-stream/, '/api/v1/v/exchange/classify.json'),
+        },
+      },
     },
   };
 });
