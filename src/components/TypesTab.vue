@@ -33,6 +33,7 @@ import {
   parseNaturalLanguageQueryWithSystemOne,
   parseQueryFastRules,
   matchesDistributionAwareFilter,
+  calculateDistributionAwareScore,
   type ParsedFilterCriteria
 } from "../utils/systemoneFilter";
 
@@ -70,7 +71,7 @@ const isPaused = ref(false);
 const isCompleted = ref(false);
 const streamError = ref<string | null>(null);
 const loadedBytes = ref(0);
-const totalBytesEstimated = ref(31941532); // ~31.9 MB current size
+const totalBytesEstimated = ref(59269408); // ~60.0 MB current size
 const totalParsedLines = ref(0);
 
 // Memory safety limit for multi-million scaling
@@ -100,6 +101,7 @@ const hasActiveNlRules = computed(() => {
   if (!activeNlFilter.value) return false;
   return (
     !!activeNlFilter.value.topic ||
+    (activeNlFilter.value.targetTopics && activeNlFilter.value.targetTopics.length > 0) ||
     (activeNlFilter.value.targetRegions && activeNlFilter.value.targetRegions.length > 0) ||
     !!activeNlFilter.value.domesticOrientation ||
     (activeNlFilter.value.minReadValue !== null && activeNlFilter.value.minReadValue !== undefined)
@@ -125,6 +127,7 @@ const handleNlSearch = async (queryText?: string) => {
 
   // 1. Immediate instant fast-rules pre-filter (<5ms latency)
   activeNlFilter.value = parseQueryFastRules(target);
+  sortBy.value = "aiRelevance";
 
   // 2. Background Kev SystemOne AI call
   isNlParsing.value = true;
@@ -143,14 +146,32 @@ const handleNlSearch = async (queryText?: string) => {
 const clearNlFilter = () => {
   nlQuery.value = "";
   activeNlFilter.value = null;
+  if (sortBy.value === "aiRelevance") {
+    sortBy.value = "readValDesc";
+  }
 };
 
-const removeTopicCriteria = () => {
+const removeTopicCriteria = (topicToRemove?: string) => {
   if (!activeNlFilter.value) return;
+  if (!topicToRemove) {
+    activeNlFilter.value = {
+      ...activeNlFilter.value,
+      topic: null,
+      topicConfidence: undefined,
+      targetTopics: [],
+      topicConfidences: {}
+    };
+    return;
+  }
+  const updatedTopics = (activeNlFilter.value.targetTopics || []).filter((t) => t !== topicToRemove);
+  const updatedConf = { ...(activeNlFilter.value.topicConfidences || {}) };
+  delete updatedConf[topicToRemove];
   activeNlFilter.value = {
     ...activeNlFilter.value,
-    topic: null,
-    topicConfidence: undefined
+    targetTopics: updatedTopics,
+    topicConfidences: updatedConf,
+    topic: updatedTopics[0] || null,
+    topicConfidence: updatedTopics[0] ? updatedConf[updatedTopics[0]] : undefined
   };
 };
 
@@ -198,7 +219,7 @@ const readValuePreset = ref<"all" | "critical" | "substantive" | "background" | 
 const readValueMinScore = ref<number>(0);
 
 const sortBy = ref<
-  "readValDesc" | "readValAsc" | "topicConf" | "countryConf" | "domesticDesc" | "domesticAsc" | "channelAsc" | "latencyAsc"
+  "aiRelevance" | "readValDesc" | "readValAsc" | "topicConf" | "countryConf" | "domesticDesc" | "domesticAsc" | "channelAsc" | "latencyAsc"
 >("readValDesc");
 
 // Pagination State
@@ -627,6 +648,17 @@ const filteredItems = computed(() => {
       return true;
     })
     .sort((a, b) => {
+      if (sortBy.value === "aiRelevance" && activeNlFilter.value) {
+        const scoreA = calculateDistributionAwareScore(a, activeNlFilter.value);
+        const scoreB = calculateDistributionAwareScore(b, activeNlFilter.value);
+        if (Math.abs(scoreB - scoreA) > 0.001) {
+          return scoreB - scoreA;
+        }
+        const valA = a.hasReadValue && a.readValueScore !== null ? a.readValueScore : -1;
+        const valB = b.hasReadValue && b.readValueScore !== null ? b.readValueScore : -1;
+        if (valB !== valA) return valB - valA;
+        return b.topicConf - a.topicConf;
+      }
       if (sortBy.value === "readValDesc") {
         const valA = a.hasReadValue && a.readValueScore !== null ? a.readValueScore : -1;
         const valB = b.hasReadValue && b.readValueScore !== null ? b.readValueScore : -1;
@@ -932,9 +964,32 @@ const handleExplore = (channel: string) => {
             <span>Parsed Rules:</span>
           </span>
 
-          <!-- Topic Chip -->
+          <!-- Topic Chips (Supports multi-aspect distribution-aware topics) -->
+          <template v-if="activeNlFilter.targetTopics && activeNlFilter.targetTopics.length > 0">
+            <div
+              v-for="top in activeNlFilter.targetTopics"
+              :key="top"
+              class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-100 dark:bg-indigo-900/70 border border-indigo-300 dark:border-indigo-700 text-indigo-900 dark:text-indigo-100 text-xs font-semibold shadow-2xs"
+            >
+              <span class="text-[10px] font-bold uppercase text-indigo-600 dark:text-indigo-400">Topic:</span>
+              <span>{{ TOPIC_CONFIG[top]?.label || top }}</span>
+              <span
+                v-if="activeNlFilter.topicConfidences?.[top] || (top === activeNlFilter.topic && activeNlFilter.topicConfidence)"
+                class="text-[10px] font-mono px-1 rounded bg-indigo-200/80 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-200"
+              >
+                {{ Math.round((activeNlFilter.topicConfidences?.[top] || activeNlFilter.topicConfidence || 0) * 100) }}%
+              </span>
+              <button
+                @click="removeTopicCriteria(top)"
+                class="text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-200 ml-0.5 cursor-pointer"
+                title="Remove Topic Rule"
+              >
+                <X class="w-3 h-3" />
+              </button>
+            </div>
+          </template>
           <div
-            v-if="activeNlFilter.topic"
+            v-else-if="activeNlFilter.topic"
             class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-100 dark:bg-indigo-900/70 border border-indigo-300 dark:border-indigo-700 text-indigo-900 dark:text-indigo-100 text-xs font-semibold shadow-2xs"
           >
             <span class="text-[10px] font-bold uppercase text-indigo-600 dark:text-indigo-400">Topic:</span>
@@ -946,7 +1001,7 @@ const handleExplore = (channel: string) => {
               {{ Math.round(activeNlFilter.topicConfidence * 100) }}%
             </span>
             <button
-              @click="removeTopicCriteria"
+              @click="removeTopicCriteria()"
               class="text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-200 ml-0.5 cursor-pointer"
               title="Remove Topic Rule"
             >
@@ -1068,6 +1123,7 @@ const handleExplore = (channel: string) => {
             v-model="sortBy"
             class="bg-transparent font-bold text-gray-800 dark:text-gray-200 outline-none cursor-pointer"
           >
+            <option v-if="activeNlFilter" value="aiRelevance" class="dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 font-bold">✨ AI Relevance (Best Match)</option>
             <option value="readValDesc" class="dark:bg-gray-800">Read Value (High → Low)</option>
             <option value="readValAsc" class="dark:bg-gray-800">Read Value (Low → High)</option>
             <option value="topicConf" class="dark:bg-gray-800">Topic Confidence (High → Low)</option>
@@ -1500,8 +1556,17 @@ const handleExplore = (channel: string) => {
                   <Award class="w-2.5 h-2.5 shrink-0" />
                   <span>{{ item.readValueScore.toFixed(2) }} · {{ getReadValueTier(item.readValueScore).shortLabel }}</span>
                 </div>
+                <!-- AI Match Affinity Badge -->
                 <div
-                  v-else
+                  v-if="activeNlFilter"
+                  class="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9px] font-black tracking-wide border shrink-0 bg-indigo-50 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300 border-indigo-300 dark:border-indigo-700"
+                  :title="`AI Match Affinity: ${Math.round(calculateDistributionAwareScore(item, activeNlFilter) * 100)}%`"
+                >
+                  <Sparkles class="w-2.5 h-2.5 shrink-0 text-indigo-500" />
+                  <span>{{ Math.round(calculateDistributionAwareScore(item, activeNlFilter) * 100) }}% Match</span>
+                </div>
+                <div
+                  v-else-if="!item.hasReadValue"
                   class="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9px] font-medium text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 border border-dashed border-gray-300 dark:border-gray-700 shrink-0"
                   title="Legacy batch without Read Value scoring"
                 >

@@ -22,6 +22,8 @@ export interface ParsedFilterCriteria {
   rawQuery: string;
   topic?: string | null;
   topicConfidence?: number;
+  targetTopics?: string[];
+  topicConfidences?: Record<string, number>;
   targetRegions: string[];
   regionConfidences?: Record<string, number>;
   domesticOrientation?: "domestic" | "external" | "balanced" | null;
@@ -53,6 +55,23 @@ export const SYSTEM_ONE_FILTER_QUESTIONS = {
       spam: "unsolicited advertisements, promotional links, scams, phishing, automated bulk marketing, gambling promotions, bot ad blasts, fraudulent schemes, adult service solicitations, crypto pump schemes",
       social_movements: "social justice, civil rights, LGBTQ+, queer rights, transgender issues, pride, feminism, MeToo, gender equality, racial equality, labor strikes, protests, human rights advocacy, environmental activism, grassroots organizing",
       any: "no specific topic specified in the query or covers all topics"
+    }
+  },
+  secondary_topic: {
+    type: "choice",
+    instructions: "Is there a second topic mentioned in conjunction (e.g. 'political with social movements', 'technology and spam', 'social justice with blogs')?",
+    criteria: {
+      social_movements: "social justice, civil rights, LGBTQ+, queer rights, transgender issues, pride, feminism, MeToo, gender equality, racial equality, labor strikes, protests, human rights advocacy, environmental activism, grassroots organizing",
+      spam: "unsolicited advertisements, promotional links, scams, phishing, automated bulk marketing, gambling promotions, bot ad blasts, fraudulent schemes, adult service solicitations, crypto pump schemes",
+      political: "politics, government, elections, diplomacy, state affairs, international relations, policy, geopolitics",
+      military: "warfare, weapons, army, armed forces, defense, invasion, conflict, frontline, soldier, combat",
+      financial: "finance, economy, markets, stocks, crypto, banking, currency, trading, business, trade",
+      technology: "tech, software, AI, artificial intelligence, programming, hardware, computing",
+      blog: "personal blogs, diary entries, personal opinion, essays, casual journaling",
+      general_news: "general news, breaking news, media reports, journalism, current affairs, events",
+      university: "education, academia, universities, students, scientific research papers",
+      game: "gaming, video games, esports, Steam, console",
+      none: "no second topic mentioned in this query"
     }
   },
   primary_region: {
@@ -123,6 +142,8 @@ export function parseQueryFastRules(query: string): ParsedFilterCriteria {
   const q = query.trim().toLowerCase();
   const criteria: ParsedFilterCriteria = {
     rawQuery: query,
+    targetTopics: [],
+    topicConfidences: {},
     targetRegions: [],
     regionConfidences: {},
     isAiParsed: false
@@ -130,38 +151,53 @@ export function parseQueryFastRules(query: string): ParsedFilterCriteria {
 
   if (!q) return criteria;
 
-  // 1. Topic Detection
-  if (/\b(polit|political|politics|government|diploma|election|geopolitic|state affairs)\b/i.test(q)) {
-    criteria.topic = "political";
-    criteria.topicConfidence = 0.85;
-  } else if (/\b(militar|military|war|warfare|army|weapon|combat|defense|invasion|frontline|soldier)\b/i.test(q)) {
-    criteria.topic = "military";
-    criteria.topicConfidence = 0.85;
-  } else if (/\b(financ|financial|econom|economy|stock|stocks|crypto|bank|market|trade|trading|currenc|invest)\b/i.test(q)) {
-    criteria.topic = "financial";
-    criteria.topicConfidence = 0.85;
-  } else if (/\b(tech|technology|software|ai|artificial intelligence|hardware|cyber|comput|programming|coding)\b/i.test(q)) {
-    criteria.topic = "technology";
-    criteria.topicConfidence = 0.85;
-  } else if (/\b(blog|diary|personal essay|opinion|opinions|commentary)\b/i.test(q)) {
-    criteria.topic = "blog";
-    criteria.topicConfidence = 0.85;
-  } else if (/\b(news|general news|media|journalis|reporting|press)\b/i.test(q)) {
-    criteria.topic = "general_news";
-    criteria.topicConfidence = 0.85;
-  } else if (/\b(university|universities|academic|college|research paper|campus|student)\b/i.test(q)) {
-    criteria.topic = "university";
-    criteria.topicConfidence = 0.85;
-  } else if (/\b(game|gaming|games|esport|esports|steam|playstation)\b/i.test(q)) {
-    criteria.topic = "game";
-    criteria.topicConfidence = 0.85;
-  } else if (/\b(social movement|social movements|social justice|civil rights|lgbt|lgbtq|transgender|queer|pride|feminism|metoo|gender equality|racial equality|labor strike|strikes|protest|protests|human rights|grassroots|activism|activist)\b/i.test(q)) {
-    criteria.topic = "social_movements";
-    criteria.topicConfidence = 0.85;
-  } else if (/\b(spam|ad|ads|advertisement|advertisements|promo|promos|promotional|scam|scams|phishing|bulk marketing|gambling|ad blast|crypto pump)\b/i.test(q)) {
-    criteria.topic = "spam";
-    criteria.topicConfidence = 0.85;
+  // 1. Topic Detection (Supports single & multi-topic detection like 'political with social movements')
+  const topicsFound: string[] = [];
+
+  if (/\b(social movement|social movements|social justice|civil rights|lgbt|lgbtq|transgender|queer|pride|feminism|metoo|gender equality|racial equality|labor strike|strikes|protest|protests|human rights|grassroots|activism|activist)\b/i.test(q)) {
+    topicsFound.push("social_movements");
+    criteria.topicConfidences!["social_movements"] = 0.88;
   }
+  if (/\b(spam|ad|ads|advertisement|advertisements|promo|promos|promotional|scam|scams|phishing|bulk marketing|gambling|ad blast|crypto pump)\b/i.test(q)) {
+    topicsFound.push("spam");
+    criteria.topicConfidences!["spam"] = 0.88;
+  }
+  if (/\b(polit|political|politics|government|diploma|election|geopolitic|state affairs)\b/i.test(q)) {
+    topicsFound.push("political");
+    criteria.topicConfidences!["political"] = 0.85;
+  }
+  if (/\b(militar|military|war|warfare|army|weapon|combat|defense|invasion|frontline|soldier)\b/i.test(q)) {
+    topicsFound.push("military");
+    criteria.topicConfidences!["military"] = 0.85;
+  }
+  if (/\b(financ|financial|econom|economy|stock|stocks|crypto|bank|market|trade|trading|currenc|invest)\b/i.test(q)) {
+    topicsFound.push("financial");
+    criteria.topicConfidences!["financial"] = 0.85;
+  }
+  if (/\b(tech|technology|software|ai|artificial intelligence|hardware|cyber|comput|programming|coding)\b/i.test(q)) {
+    topicsFound.push("technology");
+    criteria.topicConfidences!["technology"] = 0.85;
+  }
+  if (/\b(blog|diary|personal essay|opinion|opinions|commentary)\b/i.test(q)) {
+    topicsFound.push("blog");
+    criteria.topicConfidences!["blog"] = 0.85;
+  }
+  if (/\b(news|general news|media|journalis|reporting|press)\b/i.test(q)) {
+    topicsFound.push("general_news");
+    criteria.topicConfidences!["general_news"] = 0.85;
+  }
+  if (/\b(university|universities|academic|college|research paper|campus|student)\b/i.test(q)) {
+    topicsFound.push("university");
+    criteria.topicConfidences!["university"] = 0.85;
+  }
+  if (/\b(game|gaming|games|esport|esports|steam|playstation)\b/i.test(q)) {
+    topicsFound.push("game");
+    criteria.topicConfidences!["game"] = 0.85;
+  }
+
+  criteria.targetTopics = topicsFound;
+  criteria.topic = topicsFound[0] || null;
+  criteria.topicConfidence = criteria.topic ? criteria.topicConfidences![criteria.topic] : undefined;
 
   // 2. Region & Countries Detection (Can detect multiple regions)
   const regionsFound: string[] = [];
@@ -267,22 +303,52 @@ export async function parseNaturalLanguageQueryWithSystemOne(
 
     const aiCriteria: ParsedFilterCriteria = {
       rawQuery: cleanQuery,
+      targetTopics: [...(baseline.targetTopics || [])],
+      topicConfidences: { ...(baseline.topicConfidences || {}) },
       targetRegions: [...baseline.targetRegions],
       regionConfidences: { ...(baseline.regionConfidences || {}) },
       isAiParsed: true
     };
 
-    // 1. Topic answer
+    // 1. Topic answer (primary)
     const topicAns = answers.topic;
     if (topicAns && topicAns.choice && topicAns.choice !== "any") {
       const conf = Number(topicAns.confidence ?? 0);
       if (conf >= 0.25) {
+        if (!aiCriteria.targetTopics!.includes(topicAns.choice)) {
+          aiCriteria.targetTopics!.unshift(topicAns.choice);
+        }
         aiCriteria.topic = topicAns.choice;
         aiCriteria.topicConfidence = conf;
+        aiCriteria.topicConfidences![topicAns.choice] = conf;
       }
     } else if (baseline.topic) {
       aiCriteria.topic = baseline.topic;
       aiCriteria.topicConfidence = baseline.topicConfidence;
+    }
+
+    // 1b. Secondary Topic answer (for conjunctions like 'political with social movements', 'tech with spam')
+    const secTopicAns = answers.secondary_topic;
+    if (secTopicAns && secTopicAns.choice && secTopicAns.choice !== "none" && secTopicAns.choice !== "any") {
+      const conf = Number(secTopicAns.confidence ?? 0);
+      if (conf >= 0.20) {
+        if (!aiCriteria.targetTopics!.includes(secTopicAns.choice)) {
+          aiCriteria.targetTopics!.push(secTopicAns.choice);
+        }
+        aiCriteria.topicConfidences![secTopicAns.choice] = conf;
+      }
+    }
+
+    // Also inspect topic probability distributions for strong secondary presence (>= 0.20)
+    if (topicAns?.probabilities && typeof topicAns.probabilities === "object") {
+      for (const [topKey, prob] of Object.entries(topicAns.probabilities)) {
+        if (topKey !== "any" && topKey !== topicAns.choice && Number(prob) >= 0.20) {
+          if (!aiCriteria.targetTopics!.includes(topKey)) {
+            aiCriteria.targetTopics!.push(topKey);
+            aiCriteria.topicConfidences![topKey] = Number(prob);
+          }
+        }
+      }
     }
 
     // 2. Primary Region answer
@@ -365,71 +431,251 @@ export async function parseNaturalLanguageQueryWithSystemOne(
 }
 
 /**
- * Distribution-aware matching predicate over a channel's classification record.
- * Evaluates full probability distribution vectors (e.g. topicProbs, countryProbs)
- * rather than only primary single choices.
+ * Computes the effective probability of a topic for a given item,
+ * combining both primary classification confidence and secondary probability vector.
+ */
+export function getEffectiveTopicProb(item: ClassifiedChannel, topic: string): number {
+  if (item.topicProbs && typeof item.topicProbs[topic] === "number") {
+    return item.topicProbs[topic];
+  }
+  return item.topic === topic ? Math.max(item.topicConf || 0, 0.45) : 0;
+}
+
+/**
+ * Computes the effective probability of a target geopolitical region for a given item,
+ * combining both primary classification confidence and secondary probability vector.
+ */
+export function getEffectiveRegionProb(item: ClassifiedChannel, region: string): number {
+  if (item.countryProbs && typeof item.countryProbs[region] === "number") {
+    return item.countryProbs[region];
+  }
+  return item.country === region ? Math.max(item.countryConf || 0, 0.45) : 0;
+}
+
+/**
+ * Enhanced distribution-aware matching predicate over a channel's classification record.
+ * Evaluates full probability distribution vectors (topicProbs, countryProbs, readValueProbs)
+ * rather than only primary single choices, with rigorous multi-aspect conjunction precision.
  */
 export function matchesDistributionAwareFilter(
   item: ClassifiedChannel,
   filter: ParsedFilterCriteria
 ): boolean {
-  // 1. Topic Match
-  if (filter.topic) {
-    const primaryMatch = item.topic === filter.topic;
-    const probMatch = (item.topicProbs?.[filter.topic] ?? 0) >= 0.14;
+  // =========================================================================
+  // 1. TOPIC FILTERING (Distribution-Aware Single & Multi-Topic Matching)
+  // =========================================================================
+  const activeTopics = (filter.targetTopics && filter.targetTopics.length > 0)
+    ? filter.targetTopics
+    : (filter.topic ? [filter.topic] : []);
+
+  if (activeTopics.length === 1) {
+    const target = activeTopics[0];
+    const p = getEffectiveTopicProb(item, target);
+    const primaryMatch = item.topic === target;
+    // Distribution-aware threshold: 0.12 allows strong secondary topic representation
+    const probMatch = p >= 0.12;
     if (!primaryMatch && !probMatch) {
+      return false;
+    }
+  } else if (activeTopics.length === 2) {
+    const t1 = activeTopics[0];
+    const t2 = activeTopics[1];
+    const p1 = getEffectiveTopicProb(item, t1);
+    const p2 = getEffectiveTopicProb(item, t2);
+
+    // Distribution-aware joint criteria for dual topics:
+    // a) Geometric mean joint relevance score >= 0.035, with minimal noise floor (>= 0.02 each)
+    const jointScore = Math.sqrt(p1 * p2);
+    const hasSolidJointDensity = jointScore >= 0.035 && p1 >= 0.02 && p2 >= 0.02;
+
+    // b) Both topics have noticeable non-trivial presence in topic distribution
+    const hasBothPresence = (p1 >= 0.04 && p2 >= 0.03) || (p2 >= 0.04 && p1 >= 0.03);
+
+    // c) Primary is one topic, and the secondary topic has genuine presence (>= 3.5%)
+    // Precision fix: prevents false-positive match when item is 100% t1 but has 0% t2
+    const primaryWithSecondaryProb =
+      (item.topic === t1 && p2 >= 0.035) ||
+      (item.topic === t2 && p1 >= 0.035);
+
+    if (!hasSolidJointDensity && !hasBothPresence && !primaryWithSecondaryProb) {
+      return false;
+    }
+  } else if (activeTopics.length >= 3) {
+    // For 3+ topics: check that all target topics have at least a minimal trace (>= 1.5%)
+    // and that the average coverage across all target topics is substantive (>= 3.5%)
+    let sumP = 0;
+    for (const t of activeTopics) {
+      const p = getEffectiveTopicProb(item, t);
+      if (p < 0.015 && item.topic !== t) {
+        return false;
+      }
+      sumP += p;
+    }
+    if ((sumP / activeTopics.length) < 0.035) {
       return false;
     }
   }
 
-  // 2. Target Region Match (Distribution-Aware Multi-Aspect Matching)
+  // =========================================================================
+  // 2. TARGET REGIONS (Distribution-Aware Single & Multi-Region Matching)
+  // =========================================================================
   if (filter.targetRegions && filter.targetRegions.length > 0) {
     if (filter.targetRegions.length === 1) {
       const target = filter.targetRegions[0];
+      const p = getEffectiveRegionProb(item, target);
       const primaryMatch = item.country === target;
-      const probMatch = (item.countryProbs?.[target] ?? 0) >= 0.08;
+      // Distribution-aware threshold: 0.08 allows strong secondary regional focus
+      const probMatch = p >= 0.08;
       if (!primaryMatch && !probMatch) {
         return false;
       }
-    } else {
-      // Multiple countries (e.g. 'China with Japan' -> ['china', 'us_allies_asia'])
+    } else if (filter.targetRegions.length === 2) {
+      // e.g. 'China with Japan' -> ['china', 'us_allies_asia']
       const r1 = filter.targetRegions[0];
       const r2 = filter.targetRegions[1];
-      const p1 = item.countryProbs?.[r1] ?? 0;
-      const p2 = item.countryProbs?.[r2] ?? 0;
-      const isPrimaryEither = item.country === r1 || item.country === r2;
+      const p1 = getEffectiveRegionProb(item, r1);
+      const p2 = getEffectiveRegionProb(item, r2);
 
-      // Distribution-aware criteria:
-      // a) Geometric mean joint relevance score >= 0.035
+      // Distribution-aware criteria for dual regions:
+      // a) Geometric mean joint relevance score >= 0.035 with non-zero noise floor (>= 0.02 each)
       const jointScore = Math.sqrt(p1 * p2);
-      // b) Both have noticeable coverage (>= 4% and >= 3%)
+      const hasSolidJointDensity = jointScore >= 0.035 && p1 >= 0.02 && p2 >= 0.02;
+
+      // b) Both have noticeable coverage across the 12 regions (>= 4% and >= 3%)
       const hasBothPresence = (p1 >= 0.04 && p2 >= 0.03) || (p2 >= 0.04 && p1 >= 0.03);
-      // c) Primary country is one, and secondary country has >= 3% coverage
-      const primaryWithSecondaryProb = isPrimaryEither && (p1 >= 0.03 || p2 >= 0.03);
 
-      if (jointScore < 0.035 && !hasBothPresence && !primaryWithSecondaryProb) {
+      // c) Primary country is one, AND the other region has true secondary presence (>= 3.5%)
+      // Precision fix: prevents false-positive match when item is 100% r1 but has 0% r2
+      const primaryWithSecondaryProb =
+        (item.country === r1 && p2 >= 0.035) ||
+        (item.country === r2 && p1 >= 0.035);
+
+      if (!hasSolidJointDensity && !hasBothPresence && !primaryWithSecondaryProb) {
+        return false;
+      }
+    } else {
+      // 3 or more target regions (e.g. 'US, EU and China'):
+      // Require each region to have non-trivial presence (>= 1.5%) and average coverage >= 3.0%
+      let sumP = 0;
+      for (const r of filter.targetRegions) {
+        const p = getEffectiveRegionProb(item, r);
+        if (p < 0.015 && item.country !== r) {
+          return false;
+        }
+        sumP += p;
+      }
+      if ((sumP / filter.targetRegions.length) < 0.03) {
         return false;
       }
     }
   }
 
-  // 3. Domestic Orientation Match
+  // =========================================================================
+  // 3. DOMESTIC AFFAIRS ORIENTATION MATCHING
+  // =========================================================================
   if (filter.domesticOrientation === "domestic") {
-    if (item.domestic < 0.55) return false;
+    // Requires clear internal/domestic policy orientation (>= 0.52)
+    if (item.domestic < 0.52) return false;
   } else if (filter.domesticOrientation === "external") {
-    if (item.domestic > 0.35) return false;
+    // Requires clear foreign/international policy orientation (<= 0.38)
+    if (item.domestic > 0.38) return false;
   } else if (filter.domesticOrientation === "balanced") {
-    if (item.domestic < 0.30 || item.domestic > 0.65) return false;
+    // Balanced or neutral coverage between domestic and external (0.28 to 0.68)
+    if (item.domestic < 0.28 || item.domestic > 0.68) return false;
   }
 
-  // 4. Read Value Match
-  if (filter.minReadValue !== null && filter.minReadValue !== undefined) {
-    if (item.hasReadValue && item.readValueScore !== null) {
-      if (item.readValueScore < filter.minReadValue) {
-        return false;
+  // =========================================================================
+  // 4. READ VALUE QUALITY FILTERING (With Probabilistic Soft-Margin)
+  // =========================================================================
+  if (filter.minReadValue !== null && filter.minReadValue !== undefined && filter.minReadValue > 0) {
+    // If the filter specifically requested quality/read-value (e.g. Critical L3 or Substantive L2),
+    // items with NO read value score at all must be excluded
+    if (!item.hasReadValue || item.readValueScore === null) {
+      return false;
+    }
+
+    // Direct threshold check
+    if (item.readValueScore >= filter.minReadValue) {
+      return true;
+    }
+
+    // Probabilistic soft-margin:
+    // If the continuous score is slightly below the threshold, but the probability
+    // distribution across levels indicates decisive high-level density:
+    if (filter.minReadValue >= 2.0) {
+      // Critical Facts (L3): if score >= 1.80 and P(Level 3) >= 25%
+      const p3 = item.readValueProbs?.["3"] ?? 0;
+      if (item.readValueScore >= 1.80 && p3 >= 0.25) {
+        return true;
+      }
+    } else if (filter.minReadValue >= 1.4) {
+      // Substantive (L2+): if score >= 1.25 and (P(L2) + P(L3)) >= 40%
+      const pSubstantive = (item.readValueProbs?.["2"] ?? 0) + (item.readValueProbs?.["3"] ?? 0);
+      if (item.readValueScore >= 1.25 && pSubstantive >= 0.40) {
+        return true;
+      }
+    } else if (filter.minReadValue >= 0.8) {
+      // Background (L1+): if score >= 0.65 and (P(L1) + P(L2) + P(L3)) >= 60%
+      const pInformative = (item.readValueProbs?.["1"] ?? 0) + (item.readValueProbs?.["2"] ?? 0) + (item.readValueProbs?.["3"] ?? 0);
+      if (item.readValueScore >= 0.65 && pInformative >= 0.60) {
+        return true;
       }
     }
+
+    return false;
   }
 
   return true;
+}
+
+/**
+ * Calculates a continuous multi-dimensional AI relevance score (0.00 to 1.00)
+ * for a matching channel based on topic density, region density, domestic alignment,
+ * and read-value informativeness.
+ */
+export function calculateDistributionAwareScore(
+  item: ClassifiedChannel,
+  filter: ParsedFilterCriteria
+): number {
+  let score = 0.5; // baseline
+
+  // 1. Topic Affinity Component (weight: 0.35)
+  const activeTopics = (filter.targetTopics && filter.targetTopics.length > 0)
+    ? filter.targetTopics
+    : (filter.topic ? [filter.topic] : []);
+
+  if (activeTopics.length > 0) {
+    let topicProd = 1;
+    for (const t of activeTopics) {
+      const p = getEffectiveTopicProb(item, t);
+      topicProd *= Math.max(p, 0.05);
+    }
+    const topicScore = Math.pow(topicProd, 1 / activeTopics.length);
+    score += (topicScore - 0.2) * 0.35;
+  }
+
+  // 2. Regional Affinity Component (weight: 0.35)
+  if (filter.targetRegions && filter.targetRegions.length > 0) {
+    let regionProd = 1;
+    for (const r of filter.targetRegions) {
+      const p = getEffectiveRegionProb(item, r);
+      regionProd *= Math.max(p, 0.04);
+    }
+    const regionScore = Math.pow(regionProd, 1 / filter.targetRegions.length);
+    score += (regionScore - 0.15) * 0.35;
+  }
+
+  // 3. Domestic Orientation Alignment (weight: 0.15)
+  if (filter.domesticOrientation === "domestic") {
+    score += (item.domestic - 0.5) * 0.15;
+  } else if (filter.domesticOrientation === "external") {
+    score += (0.5 - item.domestic) * 0.15;
+  }
+
+  // 4. Read Value Informativeness (weight: 0.15)
+  if (item.hasReadValue && item.readValueScore !== null) {
+    score += (item.readValueScore / 3.0 - 0.3) * 0.15;
+  }
+
+  return Math.max(0.01, Math.min(1.0, score));
 }
