@@ -14,19 +14,25 @@ export interface Lz4ProbeResult {
   error?: string;
 }
 
+export const LZ4_DEFAULT_ENDPOINT = "/api/v1/v/exchange/classify.json.lz4";
+export const LZ4_REMOTE_ENDPOINT = "https://i.gogingko.net/api/v1/v/exchange/classify.json.lz4";
+export const RAW_DEFAULT_ENDPOINT = "/api/v1/v/exchange/classify.json";
+export const RAW_REMOTE_ENDPOINT = "https://i.gogingko.net/api/v1/v/exchange/classify.json";
+
 /**
  * Probes whether the compressed LZ4 endpoint is available and valid.
- * Checks proxy endpoint first, then falls back to direct remote URL.
+ * Checks local/proxied endpoint first (/api/v1/v/exchange/classify.json.lz4),
+ * then falls back to direct remote URL.
  */
 export async function probeLz4Endpoint(
   customUrl?: string,
-  timeoutMs = 3000
+  timeoutMs = 4000
 ): Promise<Lz4ProbeResult> {
   const candidates = customUrl
     ? [customUrl]
     : [
-        "/api/classify-stream-lz4",
-        "https://i.gogingko.net/api/v1/v/exchange/classify.json.lz4"
+        LZ4_DEFAULT_ENDPOINT,
+        LZ4_REMOTE_ENDPOINT
       ];
 
   for (const url of candidates) {

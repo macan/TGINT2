@@ -32,7 +32,14 @@ import {
   Zap
 } from "lucide-vue-next";
 import { useI18n } from "../i18n";
-import { probeLz4Endpoint, StreamingLz4FrameDecoder } from "../utils/lz4Stream";
+import {
+  probeLz4Endpoint,
+  StreamingLz4FrameDecoder,
+  LZ4_DEFAULT_ENDPOINT,
+  LZ4_REMOTE_ENDPOINT,
+  RAW_DEFAULT_ENDPOINT,
+  RAW_REMOTE_ENDPOINT
+} from "../utils/lz4Stream";
 import {
   parseNaturalLanguageQueryWithSystemOne,
   parseQueryFastRules,
@@ -105,7 +112,7 @@ const isProbingLz4 = ref(false);
 const lz4ProbeStatus = ref<"probing" | "available" | "unavailable">("probing");
 const lz4ProbeMessage = ref<string>("");
 const decompressedBytesCount = ref(0);
-const activeStreamEndpoint = ref<string>("/api/classify-stream");
+const activeStreamEndpoint = ref<string>(RAW_DEFAULT_ENDPOINT);
 
 let abortController: AbortController | null = null;
 let readerRef: ReadableStreamDefaultReader<Uint8Array> | null = null;
@@ -530,7 +537,7 @@ const startStreaming = async (resume = false) => {
       } else {
         isUsingLz4.value = false;
         lz4ProbeStatus.value = "unavailable";
-        activeStreamEndpoint.value = "/api/classify-stream";
+        activeStreamEndpoint.value = RAW_DEFAULT_ENDPOINT;
         lz4ProbeMessage.value = probe.error || "LZ4 endpoint not found, falling back to NDJSON";
         totalBytesEstimated.value = 88906687; // fallback to uncompressed size
         console.log(`[LZ4 Probe] classify.json.lz4 not available (${probe.error || '404'}). Cleanly falling back to NDJSON stream.`);
@@ -538,7 +545,7 @@ const startStreaming = async (resume = false) => {
     } catch (probeErr: any) {
       isUsingLz4.value = false;
       lz4ProbeStatus.value = "unavailable";
-      activeStreamEndpoint.value = "/api/classify-stream";
+      activeStreamEndpoint.value = RAW_DEFAULT_ENDPOINT;
       totalBytesEstimated.value = 88906687;
       console.warn("[LZ4 Probe Error, falling back to uncompressed stream]:", probeErr);
     } finally {
@@ -574,10 +581,8 @@ const startStreaming = async (resume = false) => {
     }
 
     let res: Response;
-    const primaryUrl = isUsingLz4.value ? "/api/classify-stream-lz4" : "/api/classify-stream";
-    const fallbackUrl = isUsingLz4.value
-      ? "https://i.gogingko.net/api/v1/v/exchange/classify.json.lz4"
-      : "https://i.gogingko.net/api/v1/v/exchange/classify.json";
+    const primaryUrl = isUsingLz4.value ? LZ4_DEFAULT_ENDPOINT : RAW_DEFAULT_ENDPOINT;
+    const fallbackUrl = isUsingLz4.value ? LZ4_REMOTE_ENDPOINT : RAW_REMOTE_ENDPOINT;
 
     try {
       res = await fetch(primaryUrl, {
@@ -590,18 +595,18 @@ const startStreaming = async (resume = false) => {
         console.warn(`[LZ4 Stream] ${primaryUrl} returned ${res.status}. Falling back to uncompressed stream.`);
         isUsingLz4.value = false;
         totalBytesEstimated.value = 88906687;
-        res = await fetch("/api/classify-stream", {
+        res = await fetch(RAW_DEFAULT_ENDPOINT, {
           signal: abortController.signal,
           headers
         });
       }
 
       if (!res.ok && res.status !== 416) {
-        throw new Error(`Proxy returned status ${res.status}`);
+        throw new Error(`Primary endpoint returned status ${res.status}`);
       }
     } catch (proxyErr: any) {
       if (proxyErr.name === "AbortError") throw proxyErr;
-      console.warn("Container proxy fetch failed, falling back to direct URL:", proxyErr);
+      console.warn("Primary endpoint fetch failed, falling back to direct URL:", proxyErr);
       res = await fetch(fallbackUrl, {
         signal: abortController.signal,
         headers
@@ -611,7 +616,7 @@ const startStreaming = async (resume = false) => {
         console.warn(`[LZ4 Stream] Direct URL returned ${res.status}. Falling back to uncompressed direct stream.`);
         isUsingLz4.value = false;
         totalBytesEstimated.value = 88906687;
-        res = await fetch("https://i.gogingko.net/api/v1/v/exchange/classify.json", {
+        res = await fetch(RAW_REMOTE_ENDPOINT, {
           signal: abortController.signal,
           headers
         });
