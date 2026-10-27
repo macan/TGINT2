@@ -25,16 +25,57 @@ export const RAW_DEFAULT_ENDPOINT = CLASSIFY_RAW_URL;
 
 /**
  * Probes whether the compressed LZ4 endpoint is available and valid on i.gogingko.net.
+ * Uses a CORS-friendly HEAD pre-check first, with a generous 12s timeout and
+ * first-chunk stream inspection fallback. Never downloads the entire compressed archive.
  */
 export async function probeLz4Endpoint(
   endpointUrl: string = CLASSIFY_LZ4_URL,
-  timeoutMs = 4000
+  timeoutMs = 12000
 ): Promise<Lz4ProbeResult> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => {
+    try {
+      controller.abort(
+        new DOMException(`LZ4 probe timed out after ${timeoutMs}ms`, "TimeoutError")
+      );
+    } catch {
+      controller.abort();
+    }
+  }, timeoutMs);
 
   try {
-    // Request initial bytes to verify LZ4 frame magic header (0x184D2204)
+    // Phase 1: Fast CORS-friendly HEAD check (no body, no Range preflight overhead)
+    try {
+      const headRes = await fetch(endpointUrl, {
+        method: "HEAD",
+        signal: controller.signal
+      });
+      if (headRes.status === 200) {
+        clearTimeout(timer);
+        const cl = headRes.headers.get("content-length");
+        const totalBytes = cl ? parseInt(cl, 10) : 16753596;
+        return {
+          available: true,
+          endpointUrl,
+          totalBytes
+        };
+      } else if (headRes.status === 404) {
+        clearTimeout(timer);
+        return {
+          available: false,
+          endpointUrl,
+          error: "HTTP 404: Key classify.json.lz4 not found on server"
+        };
+      }
+    } catch (headErr: any) {
+      // If HEAD is blocked or aborted early, inspect if timer fired
+      if (controller.signal.aborted) {
+        throw controller.signal.reason || headErr;
+      }
+      // If HEAD was disallowed by CORS policy, continue to stream slice verification
+    }
+
+    // Phase 2: GET first packet to verify LZ4 frame magic header (0x184D2204)
     const res = await fetch(endpointUrl, {
       method: "GET",
       headers: { Range: "bytes=0-15" },
@@ -50,63 +91,82 @@ export async function probeLz4Endpoint(
       };
     }
 
-      // Check Content-Range or Content-Length for total size
-      let totalBytes: number | null = null;
-      const cr = res.headers.get("content-range");
-      if (cr) {
-        const match = cr.match(/\/(\d+)/);
-        if (match) totalBytes = parseInt(match[1], 10);
-      } else {
-        const cl = res.headers.get("content-length");
-        if (cl && res.status === 200) {
-          totalBytes = parseInt(cl, 10);
-        }
+    // Check Content-Range or Content-Length for total size
+    let totalBytes: number | null = null;
+    const cr = res.headers.get("content-range");
+    if (cr) {
+      const match = cr.match(/\/(\d+)/);
+      if (match) totalBytes = parseInt(match[1], 10);
+    } else {
+      const cl = res.headers.get("content-length");
+      if (cl && (res.status === 200 || res.status === 206)) {
+        totalBytes = parseInt(cl, 10);
       }
+    }
 
-      const buf = await res.arrayBuffer();
-      const u8 = new Uint8Array(buf);
-
-      // Check if server returned error JSON (e.g. {"state":1,"info":"...not found"})
-      if (u8.length > 0 && u8[0] === 0x7B /* '{' */) {
-        const text = new TextDecoder().decode(u8);
-        if (text.includes('"state":1') || text.includes('not found')) {
-          return {
-            available: false,
-            endpointUrl,
-            error: "Key classify.json.lz4 not found on server"
-          };
-        }
-      }
-
-      // Verify LZ4 Frame Magic: 0x04, 0x22, 0x4D, 0x18 (little-endian 0x184D2204)
-      if (
-        u8.length >= 4 &&
-        u8[0] === 0x04 &&
-        u8[1] === 0x22 &&
-        u8[2] === 0x4D &&
-        u8[3] === 0x18
-      ) {
-        return {
-          available: true,
-          endpointUrl,
-          totalBytes
-        };
-      }
-
+    if (!res.body) {
       return {
         available: false,
         endpointUrl,
-        error: "Invalid LZ4 frame header magic"
-      };
-    } catch (err: any) {
-      clearTimeout(timer);
-      return {
-        available: false,
-        endpointUrl,
-        error: err?.message || "Probe request failed"
+        error: "Empty response body"
       };
     }
+
+    // Read only the first chunk (16+ bytes) and immediately cancel the stream
+    const reader = res.body.getReader();
+    const { value } = await reader.read();
+    await reader.cancel();
+
+    if (!value || value.byteLength < 4) {
+      return {
+        available: false,
+        endpointUrl,
+        error: "Probe response too short"
+      };
+    }
+
+    // Check if server returned error JSON (e.g. {"state":1,"info":"...not found"})
+    if (value[0] === 0x7B /* '{' */) {
+      const text = new TextDecoder().decode(value);
+      if (text.includes('"state":1') || text.includes('not found')) {
+        return {
+          available: false,
+          endpointUrl,
+          error: "Key classify.json.lz4 not found on server"
+        };
+      }
+    }
+
+    // Verify LZ4 Frame Magic: 0x04, 0x22, 0x4D, 0x18 (little-endian 0x184D2204)
+    if (
+      value[0] === 0x04 &&
+      value[1] === 0x22 &&
+      value[2] === 0x4D &&
+      value[3] === 0x18
+    ) {
+      return {
+        available: true,
+        endpointUrl,
+        totalBytes: totalBytes || 16753596
+      };
+    }
+
+    return {
+      available: false,
+      endpointUrl,
+      error: `Invalid LZ4 frame header magic: 0x${value[0].toString(16)}${value[1].toString(16)}`
+    };
+  } catch (err: any) {
+    clearTimeout(timer);
+    const isAborted = controller.signal.aborted || err?.name === "AbortError";
+    const reasonMsg = controller.signal.reason?.message || err?.message || "Probe request failed";
+    return {
+      available: false,
+      endpointUrl,
+      error: isAborted ? (reasonMsg.includes("timed out") ? reasonMsg : `Probe timed out after ${timeoutMs}ms`) : reasonMsg
+    };
   }
+}
 
 /**
  * Stream-oriented LZ4 Frame Decompressor.
