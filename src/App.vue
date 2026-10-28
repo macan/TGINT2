@@ -828,6 +828,12 @@ const handleClickOutside = (event: MouseEvent) => {
     if (explorerSearchFormRef.value && !explorerSearchFormRef.value.contains(event.target as Node)) {
         isInputFocused.value = false;
     }
+    if (isUsernameTooltipVisible.value) {
+        const target = event.target as HTMLElement | null;
+        if (target && !explorerTooltipRef.value?.contains(target) && !target.closest('[data-explorer-profile-trigger]')) {
+            closeExplorerTooltip();
+        }
+    }
 };
 
 const handlePointerDownOutside = (event: PointerEvent | MouseEvent) => {
@@ -870,6 +876,7 @@ const onMouseMove = (e: MouseEvent) => {
 const onMouseUp = () => {
     isChatDragging.value = false;
     isChatResizing.value = false;
+    isMouseDownInsideExplorerTooltip.value = false;
 };
 
 const handleGlobalKeyDown = (e: KeyboardEvent) => {
@@ -1690,9 +1697,47 @@ const hoveredUsername = ref<string | null>(null);
 const isUsernameTooltipVisible = ref(false);
 const usernameTooltipPos = ref<{ top: number; left: number; placeLeft?: boolean }>({ top: 0, left: 0, placeLeft: false });
 const usernameTooltipCopied = ref(false);
+const explorerTooltipRef = ref<HTMLElement | null>(null);
+const isMouseDownInsideExplorerTooltip = ref(false);
 
 let usernameHoverDebounceTimer: any = null;
 let usernameHideGraceTimer: any = null;
+
+const hasActiveSelectionInsideExplorerTooltip = (): boolean => {
+  const sel = window.getSelection();
+  if (!sel || !sel.toString().trim()) return false;
+  if (!explorerTooltipRef.value) return false;
+  try {
+    if (sel.anchorNode && explorerTooltipRef.value.contains(sel.anchorNode)) return true;
+    if (sel.focusNode && explorerTooltipRef.value.contains(sel.focusNode)) return true;
+  } catch {
+    return false;
+  }
+  return false;
+};
+
+const closeExplorerTooltip = () => {
+  if (usernameHoverDebounceTimer) {
+    clearTimeout(usernameHoverDebounceTimer);
+    usernameHoverDebounceTimer = null;
+  }
+  if (usernameHideGraceTimer) {
+    clearTimeout(usernameHideGraceTimer);
+    usernameHideGraceTimer = null;
+  }
+  isMouseDownInsideExplorerTooltip.value = false;
+  isUsernameTooltipVisible.value = false;
+  hoveredUsername.value = null;
+  usernameTooltipCopied.value = false;
+};
+
+const handleExplorerTooltipMouseDown = () => {
+  isMouseDownInsideExplorerTooltip.value = true;
+  if (usernameHideGraceTimer) {
+    clearTimeout(usernameHideGraceTimer);
+    usernameHideGraceTimer = null;
+  }
+};
 
 const getCleanHandle = (raw: string | null | undefined): string => {
   if (!raw) return "";
@@ -1886,10 +1931,13 @@ const handleUsernameMouseLeave = () => {
     usernameHoverDebounceTimer = null;
   }
   usernameHideGraceTimer = setTimeout(() => {
+    if (isMouseDownInsideExplorerTooltip.value || hasActiveSelectionInsideExplorerTooltip()) {
+      return;
+    }
     isUsernameTooltipVisible.value = false;
     hoveredUsername.value = null;
     usernameTooltipCopied.value = false;
-  }, 220);
+  }, 300);
 };
 
 const handleTooltipMouseEnter = () => {
@@ -1902,10 +1950,13 @@ const handleTooltipMouseEnter = () => {
 
 const handleTooltipMouseLeave = () => {
   usernameHideGraceTimer = setTimeout(() => {
+    if (isMouseDownInsideExplorerTooltip.value || hasActiveSelectionInsideExplorerTooltip()) {
+      return;
+    }
     isUsernameTooltipVisible.value = false;
     hoveredUsername.value = null;
     usernameTooltipCopied.value = false;
-  }, 200);
+  }, 350);
 };
 
 const copyTooltipUsername = (username: string) => {
@@ -2466,6 +2517,10 @@ const onChannelLeftRegionMouseLeave = () => {
     clearTimeout(channelLeaveTimer);
   }
   channelLeaveTimer = setTimeout(() => {
+    const sel = window.getSelection();
+    if (sel && sel.toString().trim().length > 0) {
+      return;
+    }
     hoveredChannelId.value = null;
   }, 350);
 };
@@ -2482,8 +2537,12 @@ const onChannelPopupCardMouseLeave = () => {
     clearTimeout(channelLeaveTimer);
   }
   channelLeaveTimer = setTimeout(() => {
+    const sel = window.getSelection();
+    if (sel && sel.toString().trim().length > 0) {
+      return;
+    }
     hoveredChannelId.value = null;
-  }, 250);
+  }, 350);
 };
 
 const getHighlightedHtml = (text: string | undefined | null, rawQuery: string) => {
@@ -6999,7 +7058,7 @@ const handleLangFetch = async () => {
                         }
                         userProfile.value = {
                             username: userData.username,
-                            avatarUrl: `https://i.gogingko.net/api/v1/v/telegram-profile/${name}`,
+                            avatarUrl: (userData.photo && userData.photo.startsWith('data:')) ? userData.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${name}`,
                             title: userData.title,
                             description: userData.description,
                             cdnNumber: cdnNumber,
@@ -11506,7 +11565,7 @@ const fetchUserProfile = async (name: string) => {
       if (userData._tool) {
         userProfile.value = {
             username: userData.username,
-            avatarUrl: `https://i.gogingko.net/api/v1/v/telegram-profile/${name}`,
+            avatarUrl: (userData.photo && userData.photo.startsWith('data:')) ? userData.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${name}`,
             id: userData.id,
             about: userData.about,
             firstName: userData.first_name,
@@ -11526,7 +11585,7 @@ const fetchUserProfile = async (name: string) => {
         }
         userProfile.value = {
             username: userData.username,
-            avatarUrl: `https://i.gogingko.net/api/v1/v/telegram-profile/${name}`,
+            avatarUrl: (userData.photo && userData.photo.startsWith('data:')) ? userData.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${name}`,
             title: userData.title,
             description: userData.description,
             cdnNumber: cdnNumber,
@@ -12133,7 +12192,8 @@ const initRelationsGraph = () => {
       
       const neighborAvatar = new Image();
       neighborAvatar.crossOrigin = "anonymous";
-      neighborAvatar.src = `https://i.gogingko.net/api/v1/v/telegram-profile/${neighborId}`;
+      const cachedNeighbor = usernameLookupCache.value?.[neighborId.toLowerCase()]?.data || usernameLookupCache.value?.[neighborId]?.data;
+      neighborAvatar.src = (cachedNeighbor?.photo && cachedNeighbor.photo.startsWith('data:')) ? cachedNeighbor.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${neighborId}`;
       neighborAvatar.onload = () => {
         neighborNode.avatarImg = neighborAvatar;
         neighborNode.avatarLoaded = true;
@@ -13523,8 +13583,16 @@ const closeLightbox = () => {
 };
 
 const handleKeydown = (e: KeyboardEvent) => {
-  if (e.key === "Escape" && lightboxPhoto.value) {
-    closeLightbox();
+  if (e.key === "Escape") {
+    if (lightboxPhoto.value) {
+      closeLightbox();
+    }
+    if (isUsernameTooltipVisible.value) {
+      closeExplorerTooltip();
+    }
+    if (hoveredChannelId.value) {
+      hoveredChannelId.value = null;
+    }
   }
 };
 
@@ -13631,11 +13699,21 @@ const handleImageError = (e: Event) => {
 };
 
 const getPostAvatarUrl = (post: any) => {
+  if (post?.data?.photo && post.data.photo.startsWith('data:')) {
+    return post.data.photo;
+  }
+  if (post?.metadata?.photo && post.metadata.photo.startsWith('data:')) {
+    return post.metadata.photo;
+  }
   const user = post.data?.user;
   if (user) {
     const parts = String(user).split("/");
     const username = parts[parts.length - 1];
     if (username) {
+      const cached = usernameLookupCache.value?.[username.toLowerCase()]?.data || usernameLookupCache.value?.[username]?.data;
+      if (cached?.photo && cached.photo.startsWith('data:')) {
+        return cached.photo;
+      }
       return `https://i.gogingko.net/api/v1/v/telegram-profile/${username}`;
     }
   }
@@ -14401,7 +14479,8 @@ const updateNodesMetadataInBatches = async (nodeIds: string[]) => {
 
       // Profile image load
       const img = new Image();
-      img.src = `https://i.gogingko.net/api/v1/v/telegram-profile/${id}`;
+      const targetMeta = nodeMap.get(id.toLowerCase())?.metadata;
+      img.src = (targetMeta?.photo && targetMeta.photo.startsWith('data:')) ? targetMeta.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${id}`;
       img.referrerPolicy = "no-referrer";
       img.onload = () => {
         const targetNode = nodeMap.get(id.toLowerCase());
@@ -14600,7 +14679,7 @@ const addNetworkNode = async (nameInput: string) => {
     };
 
     const img = new Image();
-    img.src = `https://i.gogingko.net/api/v1/v/telegram-profile/${nodeId}`;
+    img.src = (data?.photo && data.photo.startsWith('data:')) ? data.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${nodeId}`;
     img.referrerPolicy = "no-referrer";
     img.onload = () => {
       newNode.avatarImg = img;
@@ -14658,7 +14737,8 @@ const addNetworkNode = async (nameInput: string) => {
     };
 
     const img = new Image();
-    img.src = `https://i.gogingko.net/api/v1/v/telegram-profile/${cleanName}`;
+    const cachedFallback = usernameLookupCache.value?.[cleanName.toLowerCase()]?.data || usernameLookupCache.value?.[cleanName]?.data;
+    img.src = (cachedFallback?.photo && cachedFallback.photo.startsWith('data:')) ? cachedFallback.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${cleanName}`;
     img.referrerPolicy = "no-referrer";
     img.onload = () => {
       newNode.avatarImg = img;
@@ -15681,7 +15761,7 @@ onUnmounted(() => {
             <div class="w-14 h-14 rounded-2xl border border-teal-500/20 overflow-hidden shrink-0 flex items-center justify-center bg-gray-100 dark:bg-gray-900 shadow-inner select-none">
               <img
                 v-if="getUsername(shareCardPost) && getUsername(shareCardPost) !== 'Telegram User' && !avatarLoadError"
-                :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${getUsername(shareCardPost)}`"
+                :src="(shareCardPost?.data?.photo && shareCardPost.data.photo.startsWith('data:')) ? shareCardPost.data.photo : ((shareCardPost?.metadata?.photo && shareCardPost.metadata.photo.startsWith('data:')) ? shareCardPost.metadata.photo : `https://i.gogingko.net/api/v1/v/telegram-profile/${getUsername(shareCardPost)}`)"
                 @error="avatarLoadError = true"
                 class="w-full h-full object-cover rounded-2xl"
                 alt="Avatar"
@@ -17419,7 +17499,7 @@ onUnmounted(() => {
                 <!-- Avatar Circle Container -->
                 <div class="relative shrink-0 select-none">
                   <img 
-                    :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name || channel.key)" 
+                    :src="(channel.photo && channel.photo.startsWith('data:')) ? channel.photo : ('https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name || channel.key))" 
                     @error="handleImageError"
                     class="w-12 h-12 rounded-2xl border-2 border-teal-500/10 dark:border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900 group-hover:border-teal-500/40 transition-colors duration-300" 
                     :alt="t('channels.avatar')"
@@ -17503,7 +17583,7 @@ onUnmounted(() => {
               >
                 <div class="relative shrink-0 select-none">
                   <img 
-                    :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name || channel.key)" 
+                    :src="(channel.photo && channel.photo.startsWith('data:')) ? channel.photo : ('https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name || channel.key))" 
                     @error="handleImageError"
                     class="w-10 h-10 rounded-xl border border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900 group-hover:border-teal-500/50 transition-colors" 
                     :alt="t('channels.avatar')"
@@ -17566,16 +17646,18 @@ onUnmounted(() => {
                 v-if="hoveredChannelId === String(channel.id || channel.username || channel.name || '')"
                 @mouseenter="onChannelPopupCardMouseEnter()"
                 @mouseleave="onChannelPopupCardMouseLeave()"
-                class="pointer-events-auto opacity-100 transition-all duration-300 ease-out absolute left-4 sm:left-12 top-full mt-2 z-50 w-80 sm:w-88 p-5 bg-white/95 dark:bg-gray-800/95 backdrop-blur-md rounded-3xl border border-gray-200/90 dark:border-gray-700/90 shadow-2xl ring-1 ring-black/5 dark:ring-white/10 overflow-hidden"
+                @mousedown.stop
+                @click.stop
+                class="pointer-events-auto opacity-100 transition-all duration-300 ease-out absolute left-4 sm:left-12 top-full mt-2 z-50 w-80 sm:w-88 p-5 bg-white/95 dark:bg-gray-800/95 backdrop-blur-md rounded-3xl border border-gray-200/90 dark:border-gray-700/90 shadow-2xl ring-1 ring-black/5 dark:ring-white/10 overflow-hidden select-text selection:bg-teal-500 selection:text-white dark:selection:bg-teal-600 dark:selection:text-white"
               >
-                <div class="relative">
+                <div class="relative select-text">
                   <!-- Subtle Accent Circle -->
-                  <div class="absolute -right-12 -top-12 w-24 h-24 bg-teal-500/[0.04] dark:bg-teal-500/[0.06] rounded-full blur-xl pointer-events-none"></div>
+                  <div class="absolute -right-12 -top-12 w-24 h-24 bg-teal-500/[0.04] dark:bg-teal-500/[0.06] rounded-full blur-xl pointer-events-none select-none"></div>
 
-                  <div class="flex items-center gap-4 mb-4 relative z-10">
+                  <div class="flex items-center gap-4 mb-4 relative z-10 select-text">
                     <div class="relative shrink-0 select-none">
                       <img 
-                        :src="'https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name)" 
+                        :src="(channel.photo && channel.photo.startsWith('data:')) ? channel.photo : ('https://i.gogingko.net/api/v1/v/telegram-profile/' + (channel.id || channel.username || channel.name))" 
                         @error="handleImageError"
                         class="w-12 h-12 rounded-2xl border-2 border-teal-500/20 object-cover shadow-sm bg-gray-50 dark:bg-gray-900" 
                         :alt="t('channels.avatar')"
@@ -17585,41 +17667,41 @@ onUnmounted(() => {
                       </span>
                     </div>
 
-                    <div class="flex-grow min-w-0 pr-4">
-                      <h3 class="text-xs font-black text-gray-900 truncate dark:text-white" :title="channel.title || channel.name" v-html="getHighlightedHtml(channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : ''), channelSearchQuery)">
+                    <div class="flex-grow min-w-0 pr-4 select-text">
+                      <h3 class="text-xs font-black text-gray-900 truncate dark:text-white select-text cursor-text" :title="channel.title || channel.name" v-html="getHighlightedHtml(channel.title || channel.name || (channel.first_name ? channel.first_name : '') + (channel.last_name ? ' ' + channel.last_name : ''), channelSearchQuery)">
                       </h3>
-                      <p v-if="channel.username || channel.id" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 truncate mt-0.5 flex items-center gap-1.5">
-                        <span v-if="channel.username" v-html="'@' + getHighlightedHtml(channel.username, channelSearchQuery)"></span>
-                        <span v-if="channel.username && channel.id" class="opacity-60">•</span>
-                        <span v-if="channel.id" class="font-mono">ID: {{ channel.id }}</span>
+                      <p v-if="channel.username || channel.id" class="text-[10px] font-bold text-gray-400 dark:text-gray-500 truncate mt-0.5 flex items-center gap-1.5 select-text cursor-text">
+                        <span v-if="channel.username" class="select-text cursor-text" v-html="'@' + getHighlightedHtml(channel.username, channelSearchQuery)"></span>
+                        <span v-if="channel.username && channel.id" class="opacity-60 select-none">•</span>
+                        <span v-if="channel.id" class="font-mono select-text cursor-text">ID: {{ channel.id }}</span>
                       </p>
                     </div>
 
-                    <div v-if="channel.bot !== undefined" class="absolute top-0 right-0 z-15">
+                    <div v-if="channel.bot !== undefined" class="absolute top-0 right-0 z-15 select-none">
                       <span :class="['text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded-lg border shadow-sm shrink-0', channel.bot ? 'bg-emerald-500/[0.06] text-emerald-600 dark:text-emerald-400 border-emerald-500/10' : 'bg-rose-500/[0.06] text-rose-600 dark:text-rose-400 border-rose-500/10']">
                         {{ channel.bot ? t('channels.bot') : t('channels.user') }}
                       </span>
                     </div>
                   </div>
 
-                  <p v-if="channel.description || channel.about" class="text-[11px] text-gray-600 dark:text-gray-300 mb-4 leading-relaxed whitespace-pre-wrap break-words max-h-36 overflow-y-auto custom-scrollbar" v-html="getHighlightedHtml(channel.description || channel.about, channelSearchQuery)">
+                  <p v-if="channel.description || channel.about" class="text-[11px] text-gray-600 dark:text-gray-300 mb-4 leading-relaxed whitespace-pre-wrap break-words max-h-36 overflow-y-auto custom-scrollbar select-text cursor-text" v-html="getHighlightedHtml(channel.description || channel.about, channelSearchQuery)">
                   </p>
 
-                  <div class="flex flex-wrap gap-2 mb-3 z-10 relative">
-                    <span v-if="channel.status && channel.status.status" class="text-[9px] font-bold text-teal-600 dark:text-teal-400 bg-teal-500/[0.05] border border-teal-500/10 px-2 py-0.5 rounded-lg max-w-full truncate">{{ channel.status.status }}</span>
-                    <span v-if="channel.phone" class="text-[9px] font-bold text-rose-600 dark:text-rose-400 bg-rose-500/[0.05] border border-rose-500/10 px-2 py-0.5 rounded-lg max-w-full truncate">{{ channel.phone }}</span>
+                  <div class="flex flex-wrap gap-2 mb-3 z-10 relative select-text">
+                    <span v-if="channel.status && channel.status.status" class="text-[9px] font-bold text-teal-600 dark:text-teal-400 bg-teal-500/[0.05] border border-teal-500/10 px-2 py-0.5 rounded-lg max-w-full truncate select-text cursor-text">{{ channel.status.status }}</span>
+                    <span v-if="channel.phone" class="text-[9px] font-bold text-rose-600 dark:text-rose-400 bg-rose-500/[0.05] border border-rose-500/10 px-2 py-0.5 rounded-lg max-w-full truncate select-text cursor-text">{{ channel.phone }}</span>
                   </div>
 
-                  <div v-if="channel.members || channel.participants_count || channel.files || channel.photos || channel.videos" class="grid grid-cols-2 gap-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 mb-4 pt-3 border-t border-gray-100 dark:border-gray-700">
-                    <span v-if="channel.members || channel.participants_count" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Users class="h-3 w-3 text-teal-650" /> {{ channel.members || channel.participants_count }}</span>
-                    <span v-if="channel.files" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><FileText class="h-3 w-3 text-teal-650" /> {{ channel.files }}</span>
-                    <span v-if="channel.photos" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><ImageIcon class="h-3 w-3 text-teal-650" /> {{ channel.photos }}</span>
-                    <span v-if="channel.videos" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30"><Video class="h-3 w-3 text-teal-650" /> {{ channel.videos }}</span>
+                  <div v-if="channel.members || channel.participants_count || channel.files || channel.photos || channel.videos" class="grid grid-cols-2 gap-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 mb-4 pt-3 border-t border-gray-100 dark:border-gray-700 select-text">
+                    <span v-if="channel.members || channel.participants_count" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30 select-text cursor-text"><Users class="h-3 w-3 text-teal-650 select-none" /> {{ channel.members || channel.participants_count }}</span>
+                    <span v-if="channel.files" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30 select-text cursor-text"><FileText class="h-3 w-3 text-teal-650 select-none" /> {{ channel.files }}</span>
+                    <span v-if="channel.photos" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30 select-text cursor-text"><ImageIcon class="h-3 w-3 text-teal-650 select-none" /> {{ channel.photos }}</span>
+                    <span v-if="channel.videos" class="flex items-center gap-1.5 bg-gray-50/80 dark:bg-gray-900/40 px-2.5 py-1.5 rounded-xl border border-gray-150/40 dark:border-gray-800/30 select-text cursor-text"><Video class="h-3 w-3 text-teal-650 select-none" /> {{ channel.videos }}</span>
                   </div>
 
-                  <div v-if="channel.cdnNumber" class="text-[9px] font-mono font-black uppercase tracking-wider text-teal-650 dark:text-teal-400 bg-teal-500/[0.04] dark:bg-teal-950/40 px-2 py-0.5 rounded-lg border border-teal-500/10 mb-1 inline-flex items-center gap-1">
-                    <span>DC: {{ channel.cdnNumber }}</span>
-                    <span v-if="channel.cdnRegion" class="opacity-70">({{ channel.cdnRegion[1] }})</span>
+                  <div v-if="channel.cdnNumber" class="text-[9px] font-mono font-black uppercase tracking-wider text-teal-650 dark:text-teal-400 bg-teal-500/[0.04] dark:bg-teal-950/40 px-2 py-0.5 rounded-lg border border-teal-500/10 mb-1 inline-flex items-center gap-1 select-text cursor-text">
+                    <span class="select-text cursor-text">DC: {{ channel.cdnNumber }}</span>
+                    <span v-if="channel.cdnRegion" class="opacity-70 select-text cursor-text">({{ channel.cdnRegion[1] }})</span>
                   </div>
                 </div>
               </div>
@@ -18313,6 +18395,7 @@ onUnmounted(() => {
                   <button
                     v-for="username in allUsernamesExplorer"
                     :key="username"
+                    data-explorer-profile-trigger="true"
                     @click="toggleUsernameExplorer(username)"
                     @mouseenter="handleUsernameMouseEnter(username, $event)"
                     @mouseleave="handleUsernameMouseLeave"
@@ -19911,7 +19994,7 @@ onUnmounted(() => {
                     :is-loading-more="isLoadingMore"
                     :channel-name="channelName || ''"
                     :channel-title="metadata?.title || metadata?.name || channelName || ''"
-                    :channel-avatar="metadata?.avatar || metadata?.photo"
+                    :channel-avatar="(metadata?.photo && metadata.photo.startsWith('data:')) ? metadata.photo : (metadata?.avatar || metadata?.photo)"
                     :metadata="metadata"
                     :get-safe-post-content="getSafePostContent"
                     :get-video-url="getVideoUrl"
@@ -20308,6 +20391,7 @@ onUnmounted(() => {
                 <button
                   v-for="username in allUsernames"
                   :key="username"
+                  data-explorer-profile-trigger="true"
                   @click="toggleUsername(username)"
                   @mouseenter="handleUsernameMouseEnter(username, $event)"
                   @mouseleave="handleUsernameMouseLeave"
@@ -27564,7 +27648,7 @@ onUnmounted(() => {
                         >
                           <img 
                             v-if="selectedNetworkNode.avatarImg && selectedNetworkNode.avatarLoaded" 
-                            :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${selectedNetworkNode.id}`" 
+                            :src="(selectedNetworkNode.metadata?.photo && selectedNetworkNode.metadata.photo.startsWith('data:')) ? selectedNetworkNode.metadata.photo : (selectedNetworkNode.avatarImg.src || `https://i.gogingko.net/api/v1/v/telegram-profile/${selectedNetworkNode.id}`)" 
                             class="w-full h-full object-cover rounded-2xl" 
                             alt="Avatar"
                             referrerpolicy="no-referrer"
@@ -28526,17 +28610,20 @@ onUnmounted(() => {
     <!-- Global Username Lookup Hover Card / Tooltip -->
     <Teleport to="body">
       <div
+        ref="explorerTooltipRef"
         v-if="isUsernameTooltipVisible && hoveredUsername"
-        class="fixed z-[99999] pointer-events-auto transition-all duration-150 ease-out select-none"
+        class="fixed z-[99999] pointer-events-auto transition-all duration-150 ease-out select-text"
         :style="{
           top: `${usernameTooltipPos.top}px`,
           left: `${usernameTooltipPos.left}px`,
         }"
         @mouseenter="handleTooltipMouseEnter"
         @mouseleave="handleTooltipMouseLeave"
+        @mousedown="handleExplorerTooltipMouseDown"
+        @click.stop
       >
         <div
-          class="w-[330px] bg-white/95 dark:bg-gray-900/95 backdrop-blur-xl border border-gray-200/90 dark:border-gray-700/80 rounded-3xl shadow-2xl p-4 flex flex-col gap-3 animate-in fade-in zoom-in-95 duration-150"
+          class="w-[330px] bg-white/95 dark:bg-gray-900/95 backdrop-blur-xl border border-gray-200/90 dark:border-gray-700/80 rounded-3xl shadow-2xl p-4 flex flex-col gap-3 animate-in fade-in zoom-in-95 duration-150 select-text selection:bg-teal-500 selection:text-white dark:selection:bg-teal-600 dark:selection:text-white"
         >
           <!-- Top Header: Avatar + Title + Handle + Close Button -->
           <div class="flex items-start justify-between gap-2.5">
@@ -28544,7 +28631,7 @@ onUnmounted(() => {
               <!-- Avatar with fallback -->
               <div
                 :class="[
-                  'relative w-11 h-11 rounded-2xl shrink-0 overflow-hidden border flex items-center justify-center shadow-2xs',
+                  'relative w-11 h-11 rounded-2xl shrink-0 overflow-hidden border flex items-center justify-center shadow-2xs select-none',
                   currentHoveredUserMetadata?.isChannel
                     ? 'bg-gradient-to-br from-indigo-500/20 to-indigo-700/15 border-indigo-500/30'
                     : 'bg-gradient-to-br from-teal-500/20 to-teal-700/15 border-teal-500/30'
@@ -28563,7 +28650,7 @@ onUnmounted(() => {
                 <div
                   v-else
                   :class="[
-                    'text-xs font-black font-mono tracking-wider',
+                    'text-xs font-black font-mono tracking-wider select-none',
                     currentHoveredUserMetadata?.isChannel ? 'text-indigo-600 dark:text-indigo-400' : 'text-teal-600 dark:text-teal-400'
                   ]"
                 >
@@ -28572,7 +28659,7 @@ onUnmounted(() => {
                 <!-- Entity Type Icon Badge -->
                 <span
                   :class="[
-                    'absolute -bottom-0.5 -right-0.5 p-0.5 rounded-md text-white shadow-xs',
+                    'absolute -bottom-0.5 -right-0.5 p-0.5 rounded-md text-white shadow-xs select-none',
                     currentHoveredUserMetadata?.isChannel ? 'bg-indigo-600' : 'bg-teal-600'
                   ]"
                 >
@@ -28582,36 +28669,36 @@ onUnmounted(() => {
               </div>
 
               <!-- Titles -->
-              <div class="min-w-0 flex-1">
+              <div class="min-w-0 flex-1 select-text">
                 <div class="flex items-center gap-1.5 flex-wrap">
-                  <h4 class="text-xs font-black text-gray-900 dark:text-white truncate max-w-[160px]" :title="currentHoveredUserMetadata?.title || hoveredUsername">
+                  <h4 class="text-xs font-black text-gray-900 dark:text-white truncate max-w-[160px] select-text cursor-text" :title="currentHoveredUserMetadata?.title || hoveredUsername">
                     {{ currentHoveredUserMetadata?.title || `@${getCleanHandle(hoveredUsername)}` }}
                   </h4>
                   <!-- Channel/Group Badge vs Bot vs Verified -->
                   <span
                     v-if="currentHoveredUserMetadata?.isChannel"
-                    class="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 rounded-md shrink-0"
+                    class="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 rounded-md shrink-0 select-text cursor-text"
                   >
                     CHANNEL
                   </span>
                   <span
                     v-else-if="currentHoveredUserMetadata?.is_bot"
-                    class="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 bg-purple-500/15 text-purple-600 dark:text-purple-400 border border-purple-500/30 rounded-md shrink-0"
+                    class="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 bg-purple-500/15 text-purple-600 dark:text-purple-400 border border-purple-500/30 rounded-md shrink-0 select-text cursor-text"
                   >
                     BOT
                   </span>
                   <span
                     v-if="currentHoveredUserMetadata?.verified"
-                    class="text-[9px] font-bold text-teal-600 dark:text-teal-400 shrink-0"
+                    class="text-[9px] font-bold text-teal-600 dark:text-teal-400 shrink-0 select-none"
                     title="Verified"
                   >
                     <CheckCircle2 class="w-3.5 h-3.5" />
                   </span>
                 </div>
-                <div class="flex items-center gap-1 mt-0.5">
+                <div class="flex items-center gap-1 mt-0.5 select-text">
                   <span
                     :class="[
-                      'text-[11px] font-mono font-medium truncate',
+                      'text-[11px] font-mono font-medium truncate select-text cursor-text',
                       currentHoveredUserMetadata?.isChannel ? 'text-indigo-600 dark:text-indigo-400' : 'text-teal-600 dark:text-teal-400'
                     ]"
                   >
@@ -28623,8 +28710,8 @@ onUnmounted(() => {
 
             <!-- Dismiss button -->
             <button
-              @click="isUsernameTooltipVisible = false"
-              class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors shrink-0 cursor-pointer"
+              @click="closeExplorerTooltip"
+              class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors shrink-0 cursor-pointer select-none"
               title="Close"
             >
               <X class="w-3.5 h-3.5" />
@@ -28632,7 +28719,7 @@ onUnmounted(() => {
           </div>
 
           <!-- Loading State Skeleton -->
-          <div v-if="currentLookupState?.loading" class="py-2 px-1 flex flex-col items-center justify-center gap-2 text-center">
+          <div v-if="currentLookupState?.loading" class="py-2 px-1 flex flex-col items-center justify-center gap-2 text-center select-none">
             <div class="flex items-center gap-2 text-xs font-bold text-teal-600 dark:text-teal-400">
               <Loader2 class="w-3.5 h-3.5 animate-spin" />
               <span>{{ t('explorer.lookingUpUser') }}</span>
@@ -28644,53 +28731,53 @@ onUnmounted(() => {
           </div>
 
           <!-- Metadata Found State -->
-          <div v-else-if="currentHoveredUserMetadata" class="space-y-2.5">
+          <div v-else-if="currentHoveredUserMetadata" class="space-y-2.5 select-text">
             <!-- DC Region Banner if available -->
             <div
               v-if="currentHoveredUserMetadata.cdnNumber || currentHoveredUserMetadata.cdnRegion"
               :class="[
-                'flex items-center justify-between px-3 py-1.5 rounded-xl text-[10px] border',
+                'flex items-center justify-between px-3 py-1.5 rounded-xl text-[10px] border select-text',
                 currentHoveredUserMetadata.isChannel
                   ? 'bg-indigo-500/[0.08] dark:bg-indigo-500/15 border-indigo-500/25'
                   : 'bg-teal-500/[0.08] dark:bg-teal-500/15 border-teal-500/25'
               ]"
             >
-              <div class="flex items-center gap-1.5">
+              <div class="flex items-center gap-1.5 select-text">
                 <span
                   :class="[
-                    'inline-block w-1.5 h-1.5 rounded-full animate-pulse',
+                    'inline-block w-1.5 h-1.5 rounded-full animate-pulse select-none',
                     currentHoveredUserMetadata.isChannel ? 'bg-indigo-500 dark:bg-indigo-400' : 'bg-teal-500 dark:bg-teal-400'
                   ]"
                 ></span>
                 <span
                   :class="[
-                    'font-mono font-black uppercase tracking-wider',
+                    'font-mono font-black uppercase tracking-wider select-text cursor-text',
                     currentHoveredUserMetadata.isChannel ? 'text-indigo-700 dark:text-indigo-300' : 'text-teal-700 dark:text-teal-300'
                   ]"
                 >
                   DC {{ currentHoveredUserMetadata.cdnNumber }}
                 </span>
               </div>
-              <span v-if="currentHoveredUserMetadata.cdnRegion" class="font-semibold text-gray-600 dark:text-gray-300 truncate max-w-[170px]">
+              <span v-if="currentHoveredUserMetadata.cdnRegion" class="font-semibold text-gray-600 dark:text-gray-300 truncate max-w-[170px] select-text cursor-text">
                 {{ currentHoveredUserMetadata.cdnRegion[1] || currentHoveredUserMetadata.cdnRegion[0] }}
               </span>
             </div>
 
             <!-- Bio / About / Channel Description if present -->
-            <div v-if="currentHoveredUserMetadata.description" class="space-y-1">
-              <p class="text-[11px] text-gray-600 dark:text-gray-300 font-normal leading-relaxed bg-gray-50/80 dark:bg-gray-950/40 p-2.5 rounded-xl border border-gray-150/40 dark:border-gray-800/50 max-h-20 overflow-y-auto custom-scrollbar break-words">
+            <div v-if="currentHoveredUserMetadata.description" class="space-y-1 select-text">
+              <p class="text-[11px] text-gray-600 dark:text-gray-300 font-normal leading-relaxed bg-gray-50/80 dark:bg-gray-950/40 p-2.5 rounded-xl border border-gray-150/40 dark:border-gray-800/50 max-h-20 overflow-y-auto custom-scrollbar break-words select-text cursor-text">
                 {{ currentHoveredUserMetadata.description }}
               </p>
             </div>
 
             <!-- Bento Stats / Metadata Grid -->
-            <div class="grid grid-cols-2 gap-1.5 text-[11px]">
+            <div class="grid grid-cols-2 gap-1.5 text-[11px] select-text">
               <!-- Channel Posts Count in Current View -->
-              <div class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50">
-                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 block">Posts in Channel</span>
+              <div class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 select-text">
+                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 block select-text cursor-text">Posts in Channel</span>
                 <span
                   :class="[
-                    'font-bold font-mono text-xs',
+                    'font-bold font-mono text-xs select-text cursor-text',
                     currentHoveredUserMetadata.isChannel ? 'text-indigo-600 dark:text-indigo-400' : 'text-teal-600 dark:text-teal-400'
                   ]"
                 >
@@ -28701,19 +28788,19 @@ onUnmounted(() => {
               <!-- Channel Members / Subscribers (if channel) OR Node ID (if user) -->
               <div
                 v-if="currentHoveredUserMetadata.isChannel && currentHoveredUserMetadata.members !== undefined"
-                class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50"
+                class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 select-text"
               >
-                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 block">Subscribers</span>
-                <span class="font-bold font-mono text-indigo-600 dark:text-indigo-400 text-xs block">
+                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 block select-text cursor-text">Subscribers</span>
+                <span class="font-bold font-mono text-indigo-600 dark:text-indigo-400 text-xs block select-text cursor-text">
                   {{ formatNumber(currentHoveredUserMetadata.members) }}
                 </span>
               </div>
               <div
                 v-else
-                class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50"
+                class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 select-text"
               >
-                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 block">Node ID</span>
-                <span class="font-bold font-mono text-gray-800 dark:text-gray-200 text-xs truncate block" :title="String(currentHoveredUserMetadata.id || '')">
+                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 block select-text cursor-text">Node ID</span>
+                <span class="font-bold font-mono text-gray-800 dark:text-gray-200 text-xs truncate block select-text cursor-text" :title="String(currentHoveredUserMetadata.id || '')">
                   {{ currentHoveredUserMetadata.id || currentHoveredUserMetadata.uid || 'N/A' }}
                 </span>
               </div>
@@ -28721,15 +28808,15 @@ onUnmounted(() => {
               <!-- Additional Channel Media Stats (Photos/Links) if available -->
               <div
                 v-if="currentHoveredUserMetadata.isChannel && (currentHoveredUserMetadata.photos !== undefined || currentHoveredUserMetadata.links !== undefined)"
-                class="col-span-2 px-2.5 py-1.5 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 flex items-center justify-between text-[10px]"
+                class="col-span-2 px-2.5 py-1.5 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 flex items-center justify-between text-[10px] select-text"
               >
-                <span class="font-mono text-gray-500 dark:text-gray-400">
-                  <span class="font-bold text-gray-700 dark:text-gray-200">{{ currentHoveredUserMetadata.photos ?? 0 }}</span> photos
+                <span class="font-mono text-gray-500 dark:text-gray-400 select-text cursor-text">
+                  <span class="font-bold text-gray-700 dark:text-gray-200 select-text cursor-text">{{ currentHoveredUserMetadata.photos ?? 0 }}</span> photos
                 </span>
-                <span class="font-mono text-gray-500 dark:text-gray-400">
-                  <span class="font-bold text-gray-700 dark:text-gray-200">{{ currentHoveredUserMetadata.links ?? 0 }}</span> links
+                <span class="font-mono text-gray-500 dark:text-gray-400 select-text cursor-text">
+                  <span class="font-bold text-gray-700 dark:text-gray-200 select-text cursor-text">{{ currentHoveredUserMetadata.links ?? 0 }}</span> links
                 </span>
-                <span class="text-[9px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
+                <span class="text-[9px] font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 select-text cursor-text">
                   Public Channel
                 </span>
               </div>
@@ -28737,10 +28824,10 @@ onUnmounted(() => {
               <!-- Status if present (for user) -->
               <div
                 v-else-if="currentHoveredUserMetadata.status"
-                class="col-span-2 px-2 py-1.5 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 flex items-center justify-between"
+                class="col-span-2 px-2 py-1.5 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 flex items-center justify-between select-text"
               >
-                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400">Status</span>
-                <span class="font-semibold text-gray-700 dark:text-gray-300 text-[10px] truncate max-w-[200px]">
+                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 select-text cursor-text">Status</span>
+                <span class="font-semibold text-gray-700 dark:text-gray-300 text-[10px] truncate max-w-[200px] select-text cursor-text">
                   {{ currentHoveredUserMetadata.status }}
                 </span>
               </div>
@@ -28748,29 +28835,29 @@ onUnmounted(() => {
           </div>
 
           <!-- Uncached / Not in Public Index State -->
-          <div v-else class="space-y-2 py-1">
-            <div class="flex items-center gap-1.5 text-amber-600 dark:text-amber-400 text-xs font-bold">
-              <Info class="w-3.5 h-3.5 shrink-0" />
+          <div v-else class="space-y-2 py-1 select-text">
+            <div class="flex items-center gap-1.5 text-amber-600 dark:text-amber-400 text-xs font-bold select-text cursor-text">
+              <Info class="w-3.5 h-3.5 shrink-0 select-none" />
               <span>{{ t('explorer.noUserMetadata') }}</span>
             </div>
-            <p class="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed">
+            <p class="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed select-text cursor-text">
               {{ t('explorer.noUserMetadataDesc') }}
             </p>
-            <div class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 flex items-center justify-between text-[11px]">
-              <span class="text-[10px] font-black uppercase tracking-wider text-gray-400">Channel Posts</span>
-              <span class="font-bold text-teal-600 dark:text-teal-400 font-mono">
+            <div class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 flex items-center justify-between text-[11px] select-text">
+              <span class="text-[10px] font-black uppercase tracking-wider text-gray-400 select-text cursor-text">Channel Posts</span>
+              <span class="font-bold text-teal-600 dark:text-teal-400 font-mono select-text cursor-text">
                 {{ usernamePostCountsExplorer[hoveredUsername] || usernamePostCounts[hoveredUsername] || 0 }}
               </span>
             </div>
           </div>
 
           <!-- Action Footer Buttons -->
-          <div class="pt-2 border-t border-gray-150/70 dark:border-gray-800/70 flex items-center gap-1.5">
+          <div class="pt-2 border-t border-gray-150/70 dark:border-gray-800/70 flex items-center gap-1.5 select-none">
             <!-- Filter channel posts toggle -->
             <button
               @click="activeTab === 'explorer' ? toggleUsernameExplorer(hoveredUsername) : toggleUsername(hoveredUsername)"
               :class="[
-                'flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-3xs',
+                'flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-3xs select-none',
                 (selectedUsernamesExplorer.includes(hoveredUsername) || selectedUsernames.includes(hoveredUsername))
                   ? 'bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200/60'
                   : 'bg-teal-600 hover:bg-teal-700 text-white shadow-teal-600/20'
@@ -28787,7 +28874,7 @@ onUnmounted(() => {
             <!-- Dossier Lookup in Channel Tab -->
             <button
               @click="jumpToChannelsLookup(hoveredUsername)"
-              class="flex items-center justify-center gap-1 py-1.5 px-2.5 rounded-xl text-xs font-bold bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60 transition-colors cursor-pointer"
+              class="flex items-center justify-center gap-1 py-1.5 px-2.5 rounded-xl text-xs font-bold bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60 transition-colors cursor-pointer select-none"
               :title="t('explorer.userDossier')"
             >
               <ExternalLink class="w-3.5 h-3.5" />
@@ -28797,7 +28884,7 @@ onUnmounted(() => {
             <!-- Copy @handle -->
             <button
               @click="copyTooltipUsername(hoveredUsername)"
-              class="p-1.5 rounded-xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-600 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60 transition-colors cursor-pointer shrink-0"
+              class="p-1.5 rounded-xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-600 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60 transition-colors cursor-pointer shrink-0 select-none"
               :title="usernameTooltipCopied ? 'Copied!' : 'Copy @handle'"
             >
               <CheckCircle2 v-if="usernameTooltipCopied" class="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />

@@ -871,7 +871,7 @@ const lineHeightClass = computed(() => {
       <header class="pb-10 border-b border-stone-200/80 dark:border-stone-800 text-center space-y-3">
         <div class="inline-flex items-center justify-center w-14 h-14 rounded-full overflow-hidden border-2 border-stone-300 dark:border-stone-700 bg-stone-100 shadow-sm mx-auto">
           <img
-            :src="channelAvatar || `https://i.gogingko.net/api/v1/v/telegram-profile/${channelName}`"
+            :src="(channelAvatar && channelAvatar.startsWith('data:')) ? channelAvatar : (channelAvatar || `https://i.gogingko.net/api/v1/v/telegram-profile/${channelName}`)"
             @error="($event.target as HTMLElement).style.display = 'none'"
             class="w-full h-full object-cover"
             alt=""

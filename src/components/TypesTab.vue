@@ -29,7 +29,13 @@ import {
   Award,
   AlertTriangle,
   WifiOff,
-  Zap
+  Zap,
+  Users,
+  CheckCircle2,
+  Copy,
+  Loader2,
+  Image as ImageIcon,
+  Info
 } from "lucide-vue-next";
 import { useI18n } from "../i18n";
 import {
@@ -120,6 +126,8 @@ let stallWatchdogTimer: any = null;
 let isStallTriggered = false;
 let retryTimeoutId: any = null;
 let retryCountdownInterval: any = null;
+let profileHoverTimer: any = null;
+let profileLeaveTimer: any = null;
 
 // Filtering and Search State
 const searchQuery = ref("");
@@ -906,11 +914,18 @@ const manualResumeNow = () => {
 // Start streaming automatically on mount
 onMounted(() => {
   startStreaming(false);
+  window.addEventListener("mouseup", handleWindowMouseUp);
+  window.addEventListener("mousedown", handleGlobalMouseDown);
+  window.addEventListener("keydown", handleGlobalKeyDown);
 });
 
 onUnmounted(() => {
   stopStallWatchdog();
   clearRetryTimers();
+  closeProfileTooltip();
+  window.removeEventListener("mouseup", handleWindowMouseUp);
+  window.removeEventListener("mousedown", handleGlobalMouseDown);
+  window.removeEventListener("keydown", handleGlobalKeyDown);
   if (abortController) {
     abortController.abort();
   }
@@ -1157,6 +1172,242 @@ const getCountrySegmentColor = (country: string) => {
 // Trigger Explorer Tab Jump
 const handleExplore = (channel: string) => {
   emit("explore-channel", channel);
+};
+
+// Channel Profile Hover Hint Card State (Explorer Tab Style)
+export interface ChannelProfileMetadata {
+  title?: string;
+  username?: string;
+  verified?: boolean;
+  photo?: string;
+  description?: string;
+  members?: number;
+  participants_count?: number;
+  photos?: number;
+  files?: number;
+  videos?: number;
+  links?: number;
+  _type?: string;
+  cdnNumber?: number;
+  cdnRegion?: string[];
+}
+
+const channelProfileCache = new Map<string, ChannelProfileMetadata | null>();
+const isProfileTooltipVisible = ref(false);
+const hoveredProfileChannel = ref<string | null>(null);
+const hoveredProfileMetadata = ref<ChannelProfileMetadata | null>(null);
+const isProfileLoading = ref(false);
+const profileTooltipPos = ref({ top: 0, left: 0, placement: "bottom" as "bottom" | "top" });
+const isProfileCopied = ref(false);
+const profileTooltipRef = ref<HTMLElement | null>(null);
+const isMouseDownInsideTooltip = ref(false);
+
+const closeProfileTooltip = () => {
+  if (profileHoverTimer) {
+    clearTimeout(profileHoverTimer);
+    profileHoverTimer = null;
+  }
+  if (profileLeaveTimer) {
+    clearTimeout(profileLeaveTimer);
+    profileLeaveTimer = null;
+  }
+  isMouseDownInsideTooltip.value = false;
+  isProfileTooltipVisible.value = false;
+  hoveredProfileChannel.value = null;
+};
+
+const handleTooltipCardMouseDown = () => {
+  isMouseDownInsideTooltip.value = true;
+  if (profileLeaveTimer) {
+    clearTimeout(profileLeaveTimer);
+    profileLeaveTimer = null;
+  }
+};
+
+const handleWindowMouseUp = () => {
+  isMouseDownInsideTooltip.value = false;
+};
+
+const hasActiveSelectionInsideTooltip = (): boolean => {
+  const sel = window.getSelection();
+  if (!sel || !sel.toString().trim()) return false;
+  if (!profileTooltipRef.value) return false;
+  try {
+    if (sel.anchorNode && profileTooltipRef.value.contains(sel.anchorNode)) return true;
+    if (sel.focusNode && profileTooltipRef.value.contains(sel.focusNode)) return true;
+  } catch {
+    return false;
+  }
+  return false;
+};
+
+const formatMemberCount = (num?: number): string => {
+  if (num === undefined || num === null) return "N/A";
+  if (num >= 1_000_000) {
+    return (num / 1_000_000).toFixed(1).replace(/\.0$/, "") + "M";
+  }
+  if (num >= 1_000) {
+    return (num / 1_000).toFixed(1).replace(/\.0$/, "") + "K";
+  }
+  return num.toLocaleString();
+};
+
+const getChannelAvatarSrc = (channelName: string): string => {
+  const clean = (channelName || "").replace(/^@/, "").trim();
+  const cached = channelProfileCache.get(clean);
+  if (cached?.photo && cached.photo.startsWith("data:")) {
+    return cached.photo;
+  }
+  return `https://i.gogingko.net/api/v1/v/telegram-profile/${clean}`;
+};
+
+const fetchChannelMetadata = async (cleanChannel: string): Promise<ChannelProfileMetadata | null> => {
+  if (channelProfileCache.has(cleanChannel)) {
+    return channelProfileCache.get(cleanChannel) || null;
+  }
+  try {
+    const res = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${encodeURIComponent(cleanChannel)}`);
+    if (!res.ok) {
+      channelProfileCache.set(cleanChannel, null);
+      return null;
+    }
+    const data = await res.json();
+    channelProfileCache.set(cleanChannel, data);
+    return data;
+  } catch (e) {
+    console.warn(`[Profile Hover] Failed to fetch channel profile for ${cleanChannel}:`, e);
+    channelProfileCache.set(cleanChannel, null);
+    return null;
+  }
+};
+
+const handleChannelMouseEnter = (event: MouseEvent, rawChannel: string) => {
+  if (profileLeaveTimer) {
+    clearTimeout(profileLeaveTimer);
+    profileLeaveTimer = null;
+  }
+  if (profileHoverTimer) {
+    clearTimeout(profileHoverTimer);
+  }
+
+  const cleanChannel = rawChannel.replace(/^@/, "").trim();
+  const targetEl = event.currentTarget as HTMLElement | null;
+  if (!targetEl || !cleanChannel) return;
+
+  // Short 180ms debounce so mouse movement over cards does not flicker
+  profileHoverTimer = setTimeout(async () => {
+    hoveredProfileChannel.value = cleanChannel;
+    isProfileCopied.value = false;
+
+    // Viewport-aware boundary positioning
+    const rect = targetEl.getBoundingClientRect();
+    const tooltipWidth = 340;
+    const tooltipHeight = 280;
+
+    let left = rect.left;
+    if (left + tooltipWidth > window.innerWidth - 16) {
+      left = Math.max(16, window.innerWidth - tooltipWidth - 16);
+    }
+    if (left < 16) left = 16;
+
+    let top = rect.bottom + 8;
+    let placement: "bottom" | "top" = "bottom";
+
+    if (top + tooltipHeight > window.innerHeight - 16 && rect.top > tooltipHeight + 16) {
+      top = rect.top - tooltipHeight - 8;
+      placement = "top";
+    }
+
+    profileTooltipPos.value = { top, left, placement };
+    isProfileTooltipVisible.value = true;
+
+    // Check cache first for instant display
+    if (channelProfileCache.has(cleanChannel)) {
+      hoveredProfileMetadata.value = channelProfileCache.get(cleanChannel) || null;
+      isProfileLoading.value = false;
+    } else {
+      isProfileLoading.value = true;
+      hoveredProfileMetadata.value = null;
+      const meta = await fetchChannelMetadata(cleanChannel);
+      if (hoveredProfileChannel.value === cleanChannel) {
+        hoveredProfileMetadata.value = meta;
+        isProfileLoading.value = false;
+      }
+    }
+  }, 180);
+};
+
+const handleChannelMouseLeave = () => {
+  if (profileHoverTimer) {
+    clearTimeout(profileHoverTimer);
+    profileHoverTimer = null;
+  }
+  if (profileLeaveTimer) {
+    clearTimeout(profileLeaveTimer);
+  }
+  profileLeaveTimer = setTimeout(() => {
+    // If user is selecting text or mouse is pressed, keep open
+    if (isMouseDownInsideTooltip.value || hasActiveSelectionInsideTooltip()) {
+      return;
+    }
+    isProfileTooltipVisible.value = false;
+    hoveredProfileChannel.value = null;
+  }, 300);
+};
+
+const handleTooltipCardMouseEnter = () => {
+  if (profileLeaveTimer) {
+    clearTimeout(profileLeaveTimer);
+    profileLeaveTimer = null;
+  }
+};
+
+const handleTooltipCardMouseLeave = () => {
+  if (profileLeaveTimer) {
+    clearTimeout(profileLeaveTimer);
+  }
+  profileLeaveTimer = setTimeout(() => {
+    // If user is selecting text or mouse is pressed, keep open
+    if (isMouseDownInsideTooltip.value || hasActiveSelectionInsideTooltip()) {
+      return;
+    }
+    isProfileTooltipVisible.value = false;
+    hoveredProfileChannel.value = null;
+  }, 350);
+};
+
+const handleGlobalMouseDown = (e: MouseEvent) => {
+  if (!isProfileTooltipVisible.value) return;
+  const target = e.target as HTMLElement | null;
+  if (!target) return;
+  // If clicked inside tooltip card, allow selection and interaction
+  if (profileTooltipRef.value && profileTooltipRef.value.contains(target)) {
+    return;
+  }
+  // If clicked on a channel trigger, allow trigger handler to respond
+  if (target.closest("[data-profile-trigger]")) {
+    return;
+  }
+  // User clicked elsewhere on the page: close tooltip
+  closeProfileTooltip();
+};
+
+const handleGlobalKeyDown = (e: KeyboardEvent) => {
+  if (e.key === "Escape" && isProfileTooltipVisible.value) {
+    closeProfileTooltip();
+  }
+};
+
+const copyProfileChannelName = async (channel: string) => {
+  try {
+    await navigator.clipboard.writeText(`@${channel}`);
+    isProfileCopied.value = true;
+    setTimeout(() => {
+      isProfileCopied.value = false;
+    }, 2000);
+  } catch {
+    // fallback
+  }
 };
 </script>
 
@@ -2016,11 +2267,18 @@ const handleExplore = (channel: string) => {
         <!-- Card Header: Avatar, Name & Actions -->
         <div class="flex items-start justify-between gap-2.5">
           <div class="flex items-center gap-2.5 min-w-0 flex-1">
-            <div class="relative shrink-0">
+            <div
+              class="relative shrink-0 cursor-pointer"
+              data-profile-trigger="true"
+              @mouseenter="handleChannelMouseEnter($event, item.channel)"
+              @mouseleave="handleChannelMouseLeave"
+              @click.stop="handleExplore(item.channel)"
+              :title="`View profile hint card for @${item.channel}`"
+            >
               <img
-                :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${item.channel}`"
+                :src="getChannelAvatarSrc(item.channel)"
                 @error="($event.target as HTMLElement).style.display = 'none'"
-                class="w-9 h-9 rounded-full object-cover border border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-700"
+                class="w-9 h-9 rounded-full object-cover border border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-700 hover:ring-2 hover:ring-indigo-500/40 transition"
                 alt=""
               />
               <div class="w-9 h-9 rounded-full bg-indigo-100 dark:bg-indigo-950/80 text-indigo-600 dark:text-indigo-400 flex items-center justify-center text-xs font-bold uppercase -z-10 absolute inset-0">
@@ -2029,7 +2287,14 @@ const handleExplore = (channel: string) => {
             </div>
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-1.5 flex-wrap">
-                <h4 class="text-xs font-extrabold text-gray-900 dark:text-white truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition" :title="item.channel">
+                <h4
+                  class="text-xs font-extrabold text-gray-900 dark:text-white truncate hover:text-indigo-600 dark:hover:text-indigo-400 hover:underline cursor-pointer transition select-text"
+                  data-profile-trigger="true"
+                  :title="`View profile hint card for @${item.channel}`"
+                  @mouseenter="handleChannelMouseEnter($event, item.channel)"
+                  @mouseleave="handleChannelMouseLeave"
+                  @click.stop="handleExplore(item.channel)"
+                >
                   @{{ item.channel }}
                 </h4>
                 <!-- Quality Score Badge on Card -->
@@ -2370,7 +2635,7 @@ const handleExplore = (channel: string) => {
               <div class="flex items-center justify-between pb-3 border-b border-gray-100 dark:border-gray-700/60">
                 <div class="flex items-center gap-3">
                   <img
-                    :src="`https://i.gogingko.net/api/v1/v/telegram-profile/${selectedInspectionItem.channel}`"
+                    :src="getChannelAvatarSrc(selectedInspectionItem.channel)"
                     class="w-11 h-11 rounded-full object-cover border border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-700"
                     alt=""
                   />
@@ -2651,6 +2916,199 @@ const handleExplore = (channel: string) => {
           </div>
         </div>
       </Transition>
+    </Teleport>
+
+    <!-- Beautiful Channel Profile Popup Hint Card (Explorer Tab Style) -->
+    <Teleport to="body">
+      <div
+        ref="profileTooltipRef"
+        v-if="isProfileTooltipVisible && hoveredProfileChannel"
+        class="fixed z-[99999] pointer-events-auto transition-all duration-150 ease-out select-text"
+        :style="{
+          top: `${profileTooltipPos.top}px`,
+          left: `${profileTooltipPos.left}px`,
+        }"
+        @mouseenter="handleTooltipCardMouseEnter"
+        @mouseleave="handleTooltipCardMouseLeave"
+        @mousedown="handleTooltipCardMouseDown"
+        @click.stop
+      >
+        <div
+          class="w-[330px] sm:w-[350px] bg-white/95 dark:bg-gray-900/95 backdrop-blur-xl border border-gray-200/90 dark:border-gray-700/80 rounded-3xl shadow-2xl p-4.5 flex flex-col gap-3 animate-in fade-in zoom-in-95 duration-150 ring-1 ring-black/5 dark:ring-white/10 select-text selection:bg-indigo-500 selection:text-white dark:selection:bg-indigo-600 dark:selection:text-white"
+        >
+          <!-- Top Header: Avatar + Title + Handle + Channel Badge + Close Button -->
+          <div class="flex items-start justify-between gap-2.5">
+            <div class="flex items-center gap-2.5 min-w-0 flex-1">
+              <!-- Avatar with fallback -->
+              <div class="relative w-11 h-11 rounded-2xl shrink-0 overflow-hidden border border-indigo-500/25 bg-gradient-to-br from-indigo-500/20 to-indigo-700/15 flex items-center justify-center shadow-xs select-none">
+                <img
+                  :key="hoveredProfileChannel"
+                  :src="(hoveredProfileMetadata?.photo && hoveredProfileMetadata.photo.startsWith('data:'))
+                    ? hoveredProfileMetadata.photo
+                    : `https://i.gogingko.net/api/v1/v/telegram-profile/${hoveredProfileChannel}`"
+                  @error="($event.target as HTMLElement).style.display = 'none'"
+                  class="w-full h-full object-cover"
+                  referrerPolicy="no-referrer"
+                  alt=""
+                />
+                <div class="absolute inset-0 flex items-center justify-center text-xs font-black font-mono text-indigo-600 dark:text-indigo-400 -z-10 uppercase select-none">
+                  {{ hoveredProfileChannel.charAt(0) }}
+                </div>
+                <!-- Entity Type Icon Badge -->
+                <span class="absolute -bottom-0.5 -right-0.5 p-0.5 rounded-md text-white shadow-xs bg-indigo-600 select-none">
+                  <Radio class="w-2.5 h-2.5" />
+                </span>
+              </div>
+
+              <!-- Channel Title & Handle -->
+              <div class="min-w-0 flex-1 select-text">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <h4
+                    class="text-xs font-black text-gray-900 dark:text-white truncate max-w-[170px] select-text cursor-text"
+                    :title="hoveredProfileMetadata?.title || hoveredProfileChannel"
+                  >
+                    {{ hoveredProfileMetadata?.title || `@${hoveredProfileChannel}` }}
+                  </h4>
+                  <!-- Channel Badge -->
+                  <span class="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 rounded-md shrink-0 select-text cursor-text">
+                    CHANNEL
+                  </span>
+                  <!-- Verified Badge -->
+                  <span
+                    v-if="hoveredProfileMetadata?.verified"
+                    class="text-[9px] font-bold text-teal-600 dark:text-teal-400 shrink-0 select-none"
+                    title="Verified"
+                  >
+                    <CheckCircle2 class="w-3.5 h-3.5" />
+                  </span>
+                </div>
+                <div class="flex items-center gap-1 mt-0.5 select-text">
+                  <span class="text-[11px] font-mono font-medium truncate text-indigo-600 dark:text-indigo-400 select-text cursor-text">
+                    @{{ hoveredProfileChannel }}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Dismiss Button -->
+            <button
+              @click="closeProfileTooltip"
+              class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors shrink-0 cursor-pointer select-none"
+              title="Close"
+            >
+              <X class="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <!-- Loading State Skeleton -->
+          <div v-if="isProfileLoading" class="py-3 px-1 flex flex-col items-center justify-center gap-2 text-center select-none">
+            <div class="flex items-center gap-2 text-xs font-bold text-indigo-600 dark:text-indigo-400">
+              <Loader2 class="w-3.5 h-3.5 animate-spin" />
+              <span>Fetching channel profile...</span>
+            </div>
+            <div class="w-full space-y-1.5 mt-1">
+              <div class="h-2 bg-gray-100 dark:bg-gray-800 rounded-full animate-pulse w-4/5 mx-auto"></div>
+              <div class="h-1.5 bg-gray-100 dark:bg-gray-800 rounded-full animate-pulse w-3/5 mx-auto"></div>
+            </div>
+          </div>
+
+          <!-- Metadata Found State -->
+          <div v-else-if="hoveredProfileMetadata" class="space-y-2.5 select-text">
+            <!-- Bio / About Description if present -->
+            <div v-if="hoveredProfileMetadata.description" class="space-y-1 select-text">
+              <p class="text-[11px] text-gray-600 dark:text-gray-300 font-normal leading-relaxed bg-gray-50/80 dark:bg-gray-950/40 p-2.5 rounded-xl border border-gray-150/40 dark:border-gray-800/50 max-h-24 overflow-y-auto custom-scrollbar break-words whitespace-pre-wrap select-text cursor-text">
+                {{ hoveredProfileMetadata.description }}
+              </p>
+            </div>
+
+            <!-- Bento Stats Grid -->
+            <div class="grid grid-cols-2 gap-1.5 text-[11px] select-text">
+              <!-- Subscribers / Members Count -->
+              <div class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 select-text">
+                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 flex items-center gap-1 select-text cursor-text">
+                  <Users class="w-2.5 h-2.5 select-none" />
+                  Subscribers
+                </span>
+                <span class="font-bold font-mono text-indigo-600 dark:text-indigo-400 text-xs block mt-0.5 select-text cursor-text">
+                  {{ formatMemberCount(hoveredProfileMetadata.members || hoveredProfileMetadata.participants_count) }}
+                </span>
+              </div>
+
+              <!-- Media Highlights (Photos / Files / Links) -->
+              <div class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 select-text">
+                <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 flex items-center gap-1 select-text cursor-text">
+                  <ImageIcon class="w-2.5 h-2.5 select-none" />
+                  Media Items
+                </span>
+                <span class="font-bold font-mono text-gray-800 dark:text-gray-200 text-xs block mt-0.5 select-text cursor-text">
+                  {{ ((hoveredProfileMetadata.photos || 0) + (hoveredProfileMetadata.files || 0) + (hoveredProfileMetadata.videos || 0)).toLocaleString() }}
+                </span>
+              </div>
+
+              <!-- Detailed media breakdown pills -->
+              <div
+                v-if="hoveredProfileMetadata.photos !== undefined || hoveredProfileMetadata.links !== undefined || hoveredProfileMetadata.files !== undefined"
+                class="col-span-2 px-2.5 py-1.5 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 flex items-center justify-between text-[10px] select-text"
+              >
+                <span class="font-mono text-gray-500 dark:text-gray-400 select-text cursor-text">
+                  <span class="font-bold text-gray-700 dark:text-gray-200 select-text cursor-text">{{ hoveredProfileMetadata.photos ?? 0 }}</span> photos
+                </span>
+                <span class="font-mono text-gray-500 dark:text-gray-400 select-text cursor-text">
+                  <span class="font-bold text-gray-700 dark:text-gray-200 select-text cursor-text">{{ hoveredProfileMetadata.files ?? 0 }}</span> files
+                </span>
+                <span class="font-mono text-gray-500 dark:text-gray-400 select-text cursor-text">
+                  <span class="font-bold text-gray-700 dark:text-gray-200 select-text cursor-text">{{ hoveredProfileMetadata.links ?? 0 }}</span> links
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Uncached / Not Found Fallback State -->
+          <div v-else class="space-y-1.5 py-1.5 text-center select-text">
+            <div class="flex items-center justify-center gap-1.5 text-amber-600 dark:text-amber-400 text-xs font-bold select-text cursor-text">
+              <Info class="w-3.5 h-3.5 shrink-0 select-none" />
+              <span>Public Profile Bio Not Cached</span>
+            </div>
+            <p class="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed select-text cursor-text">
+              Channel is actively indexed in the live stream. Click Explore to inspect recent posts.
+            </p>
+          </div>
+
+          <!-- Action Footer Buttons -->
+          <div class="pt-2 border-t border-gray-150/70 dark:border-gray-800/70 flex items-center gap-1.5 select-none">
+            <!-- Jump to Explorer Button -->
+            <button
+              @click="handleExplore(hoveredProfileChannel); closeProfileTooltip();"
+              class="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-colors cursor-pointer select-none"
+            >
+              <ArrowUpRight class="w-3.5 h-3.5" />
+              <span>Explore Channel</span>
+            </button>
+
+            <!-- Open in Telegram Web -->
+            <a
+              :href="`https://t.me/${hoveredProfileChannel}`"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="flex items-center justify-center gap-1 py-1.5 px-2.5 rounded-xl text-xs font-bold bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60 transition-colors select-none"
+              title="Open in Telegram Web"
+            >
+              <ExternalLink class="w-3.5 h-3.5" />
+              <span class="hidden sm:inline">Telegram</span>
+            </a>
+
+            <!-- Copy Handle -->
+            <button
+              @click="copyProfileChannelName(hoveredProfileChannel)"
+              class="p-1.5 rounded-xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-600 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60 transition-colors cursor-pointer shrink-0 select-none"
+              :title="isProfileCopied ? 'Copied!' : 'Copy @handle'"
+            >
+              <CheckCircle2 v-if="isProfileCopied" class="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
+              <Copy v-else class="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
     </Teleport>
   </div>
 </template>
