@@ -199,6 +199,7 @@ export default {
     listView: "清單檢視",
     masonryGrid: "瀑布流網格",
     timelineView: "時間軸檢視",
+    articleReaderView: "文章",
     scheduleRepeatly: "定期擷取排程",
     scheduleOnce: "單次擷取排程",
     scheduled: "已排程",

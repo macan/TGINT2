@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue";
 import {
   Tag,
   Search,
@@ -35,7 +35,8 @@ import {
   Copy,
   Loader2,
   Image as ImageIcon,
-  Info
+  Info,
+  Languages
 } from "lucide-vue-next";
 import { useI18n } from "../i18n";
 import {
@@ -276,6 +277,7 @@ const isDrawerOpen = ref(false);
 const openDrawer = (item: ClassifiedChannel) => {
   selectedInspectionItem.value = item;
   isDrawerOpen.value = true;
+  fetchChannelJobMeta(item.channel);
 };
 
 const closeDrawer = () => {
@@ -1192,7 +1194,181 @@ export interface ChannelProfileMetadata {
   cdnRegion?: string[];
 }
 
+export interface ChannelJobMeta {
+  channel: string;
+  lang?: string;
+  tags?: string[];
+  loading?: boolean;
+  error?: boolean;
+}
+
 const channelProfileCache = new Map<string, ChannelProfileMetadata | null>();
+const channelJobMetaCache = reactive(new Map<string, ChannelJobMeta>());
+
+const LANGUAGE_CONFIG: Record<string, { name: string; flag: string; short: string }> = {
+  "zh-cn": { name: "Chinese (Simplified)", flag: "🇨🇳", short: "ZH" },
+  "zh-tw": { name: "Chinese (Traditional)", flag: "🇹🇼", short: "ZH" },
+  "zh-hk": { name: "Chinese (HK)", flag: "🇭🇰", short: "ZH" },
+  "zh": { name: "Chinese", flag: "🇨🇳", short: "ZH" },
+  "en": { name: "English", flag: "🇬🇧", short: "EN" },
+  "en-us": { name: "English (US)", flag: "🇺🇸", short: "EN" },
+  "en-gb": { name: "English (UK)", flag: "🇬🇧", short: "EN" },
+  "ru": { name: "Russian", flag: "🇷🇺", short: "RU" },
+  "uk": { name: "Ukrainian", flag: "🇺🇦", short: "UK" },
+  "fa": { name: "Persian", flag: "🇮🇷", short: "FA" },
+  "ar": { name: "Arabic", flag: "🇸🇦", short: "AR" },
+  "es": { name: "Spanish", flag: "🇪🇸", short: "ES" },
+  "fr": { name: "French", flag: "🇫🇷", short: "FR" },
+  "de": { name: "German", flag: "🇩🇪", short: "DE" },
+  "pt": { name: "Portuguese", flag: "🇵🇹", short: "PT" },
+  "pt-br": { name: "Portuguese (BR)", flag: "🇧🇷", short: "PT" },
+  "tr": { name: "Turkish", flag: "🇹🇷", short: "TR" },
+  "ja": { name: "Japanese", flag: "🇯🇵", short: "JA" },
+  "ko": { name: "Korean", flag: "🇰🇷", short: "KO" },
+  "it": { name: "Italian", flag: "🇮🇹", short: "IT" },
+  "pl": { name: "Polish", flag: "🇵🇱", short: "PL" },
+  "nl": { name: "Dutch", flag: "🇳🇱", short: "NL" },
+  "he": { name: "Hebrew", flag: "🇮🇱", short: "HE" },
+  "iw": { name: "Hebrew", flag: "🇮🇱", short: "HE" },
+  "vi": { name: "Vietnamese", flag: "🇻🇳", short: "VI" },
+  "id": { name: "Indonesian", flag: "🇮🇩", short: "ID" },
+  "th": { name: "Thai", flag: "🇹🇭", short: "TH" },
+  "uz": { name: "Uzbek", flag: "🇺🇿", short: "UZ" },
+  "kk": { name: "Kazakh", flag: "🇰🇿", short: "KK" },
+  "az": { name: "Azerbaijani", flag: "🇦🇿", short: "AZ" },
+  "hy": { name: "Armenian", flag: "🇦🇲", short: "HY" },
+  "ka": { name: "Georgian", flag: "🇬🇪", short: "KA" },
+  "be": { name: "Belarusian", flag: "🇧🇾", short: "BE" },
+  "hi": { name: "Hindi", flag: "🇮🇳", short: "HI" },
+  "cs": { name: "Czech", flag: "🇨🇿", short: "CS" },
+  "sv": { name: "Swedish", flag: "🇸🇪", short: "SV" },
+  "el": { name: "Greek", flag: "🇬🇷", short: "EL" },
+  "ro": { name: "Romanian", flag: "🇷🇴", short: "RO" },
+  "hu": { name: "Hungarian", flag: "🇭🇺", short: "HU" }
+};
+
+const getLanguageInfo = (langCode?: string) => {
+  if (!langCode) return null;
+  const key = langCode.trim().toLowerCase();
+  if (LANGUAGE_CONFIG[key]) {
+    return LANGUAGE_CONFIG[key];
+  }
+  const base = key.split(/[-_]/)[0];
+  if (LANGUAGE_CONFIG[base]) {
+    return LANGUAGE_CONFIG[base];
+  }
+  return {
+    name: langCode.toUpperCase(),
+    flag: "🌐",
+    short: (base || langCode).substring(0, 3).toUpperCase()
+  };
+};
+
+const formatLanguageCode = (langCode?: string): string => {
+  if (!langCode) return "";
+  const info = getLanguageInfo(langCode);
+  return info?.short || langCode.toUpperCase();
+};
+
+const getLanguageFlag = (langCode?: string): string => {
+  if (!langCode) return "🌐";
+  const info = getLanguageInfo(langCode);
+  return info?.flag || "🌐";
+};
+
+const getLanguageDisplayName = (langCode?: string): string => {
+  if (!langCode) return "";
+  const info = getLanguageInfo(langCode);
+  return info?.name || langCode;
+};
+
+const getChannelJobMeta = (rawChannel: string): ChannelJobMeta | undefined => {
+  const clean = (rawChannel || "").replace(/^@/, "").trim();
+  return channelJobMetaCache.get(clean);
+};
+
+const getChannelLang = (rawChannel: string): string | undefined => {
+  const clean = (rawChannel || "").replace(/^@/, "").trim();
+  return channelJobMetaCache.get(clean)?.lang;
+};
+
+const fetchChannelJobMeta = async (rawChannel: string): Promise<ChannelJobMeta | null> => {
+  const clean = (rawChannel || "").replace(/^@/, "").trim();
+  if (!clean) return null;
+  const existing = channelJobMetaCache.get(clean);
+  if (existing && (existing.loading || !existing.error)) {
+    return existing;
+  }
+
+  channelJobMetaCache.set(clean, { channel: clean, loading: true, error: false });
+
+  try {
+    const res = await fetch(`https://i.gogingko.net/api/v1/z/JOB_TG/metas/${encodeURIComponent(clean)}`);
+    if (!res.ok) {
+      channelJobMetaCache.set(clean, { channel: clean, loading: false, error: true });
+      return null;
+    }
+    const data = await res.json();
+    if (data.state === 0 && data.gso?.result) {
+      let parsed: any = null;
+      if (typeof data.gso.result === "object" && data.gso.result !== null) {
+        parsed = data.gso.result;
+      } else if (typeof data.gso.result === "string") {
+        try {
+          parsed = JSON.parse(data.gso.result);
+        } catch {
+          try {
+            parsed = JSON.parse(data.gso.result.replace(/'/g, '"'));
+          } catch {
+            const matchLang = data.gso.result.match(/['"]l['"]\s*:\s*['"]([^'"]+)['"]/);
+            if (matchLang) {
+              parsed = { l: matchLang[1] };
+            }
+          }
+        }
+      }
+      const lang = parsed?.l || parsed?.lang || undefined;
+      const tags = Array.isArray(parsed?.t)
+        ? parsed.t
+        : Array.isArray(parsed?.tags)
+          ? parsed.tags
+          : undefined;
+      const metaRecord: ChannelJobMeta = {
+        channel: clean,
+        lang,
+        tags,
+        loading: false,
+        error: false
+      };
+      channelJobMetaCache.set(clean, metaRecord);
+      return metaRecord;
+    } else {
+      channelJobMetaCache.set(clean, { channel: clean, loading: false, error: true });
+      return null;
+    }
+  } catch (err) {
+    channelJobMetaCache.set(clean, { channel: clean, loading: false, error: true });
+    return null;
+  }
+};
+
+const fetchJobMetasForVisibleItems = () => {
+  const channels = paginatedItems.value.map((item) => item.channel.replace(/^@/, "").trim());
+  const missing = channels.filter((ch) => ch && !channelJobMetaCache.has(ch));
+  if (missing.length === 0) return;
+
+  missing.forEach((ch) => {
+    fetchChannelJobMeta(ch);
+  });
+};
+
+watch(
+  () => paginatedItems.value.map((it) => it.channel),
+  () => {
+    fetchJobMetasForVisibleItems();
+  },
+  { immediate: true }
+);
 const isProfileTooltipVisible = ref(false);
 const hoveredProfileChannel = ref<string | null>(null);
 const hoveredProfileMetadata = ref<ChannelProfileMetadata | null>(null);
@@ -1298,6 +1474,7 @@ const handleChannelMouseEnter = (event: MouseEvent, rawChannel: string) => {
   profileHoverTimer = setTimeout(async () => {
     hoveredProfileChannel.value = cleanChannel;
     isProfileCopied.value = false;
+    fetchChannelJobMeta(cleanChannel);
 
     // Viewport-aware boundary positioning
     const rect = targetEl.getBoundingClientRect();
@@ -2297,6 +2474,26 @@ const copyProfileChannelName = async (channel: string) => {
                 >
                   @{{ item.channel }}
                 </h4>
+
+                <!-- Language Easy View Badge -->
+                <div
+                  v-if="getChannelLang(item.channel)"
+                  class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-black tracking-wider uppercase border shrink-0 bg-violet-50 text-violet-700 dark:bg-violet-950/70 dark:text-violet-300 border-violet-200 dark:border-violet-800/80 shadow-2xs hover:scale-105 transition-transform"
+                  :title="`Language: ${getLanguageDisplayName(getChannelLang(item.channel))} (${getChannelLang(item.channel)})`"
+                >
+                  <Languages class="w-2.5 h-2.5 shrink-0 text-violet-600 dark:text-violet-400" />
+                  <span v-if="getLanguageFlag(getChannelLang(item.channel))" class="text-[10px] leading-none">{{ getLanguageFlag(getChannelLang(item.channel)) }}</span>
+                  <span>{{ formatLanguageCode(getChannelLang(item.channel)) }}</span>
+                </div>
+                <div
+                  v-else-if="getChannelJobMeta(item.channel)?.loading"
+                  class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[8.5px] font-bold tracking-wider border shrink-0 bg-gray-50 text-gray-400 dark:bg-gray-800 dark:text-gray-500 border-gray-200 dark:border-gray-700 animate-pulse"
+                  title="Detecting channel language..."
+                >
+                  <Languages class="w-2.5 h-2.5 shrink-0 opacity-60 animate-spin" />
+                  <span>LANG...</span>
+                </div>
+
                 <!-- Quality Score Badge on Card -->
                 <div
                   v-if="item.hasReadValue && item.readValueScore !== null"
@@ -2332,10 +2529,23 @@ const copyProfileChannelName = async (channel: string) => {
                   <span>Legacy</span>
                 </div>
               </div>
-              <div class="flex items-center gap-1.5 text-[10px] text-gray-400 font-mono mt-0.5">
+              <div class="flex items-center gap-1.5 text-[10px] text-gray-400 font-mono mt-0.5 flex-wrap">
                 <span>{{ item.model }}</span>
                 <span>·</span>
                 <span>{{ Math.round(item.latencyMs) }}ms</span>
+                <template v-if="getChannelLang(item.channel)">
+                  <span>·</span>
+                  <span class="inline-flex items-center gap-1 text-gray-600 dark:text-gray-300 font-sans font-medium" :title="getLanguageDisplayName(getChannelLang(item.channel))">
+                    <Languages class="w-2.5 h-2.5 text-violet-500 shrink-0" />
+                    <span>{{ getLanguageDisplayName(getChannelLang(item.channel)) }}</span>
+                  </span>
+                </template>
+                <template v-if="getChannelJobMeta(item.channel)?.tags?.length">
+                  <span>·</span>
+                  <span class="text-indigo-500 font-semibold truncate max-w-[120px]" :title="`Tags: ${getChannelJobMeta(item.channel)?.tags?.join(', ')}`">
+                    #{{ getChannelJobMeta(item.channel)?.tags?.[0] }}
+                  </span>
+                </template>
               </div>
             </div>
           </div>
@@ -2640,9 +2850,21 @@ const copyProfileChannelName = async (channel: string) => {
                     alt=""
                   />
                   <div>
-                    <h3 class="text-base font-extrabold text-gray-900 dark:text-white">
-                      @{{ selectedInspectionItem.channel }}
-                    </h3>
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <h3 class="text-base font-extrabold text-gray-900 dark:text-white">
+                        @{{ selectedInspectionItem.channel }}
+                      </h3>
+                      <!-- Language Easy View Badge -->
+                      <div
+                        v-if="getChannelLang(selectedInspectionItem.channel)"
+                        class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-black tracking-wider uppercase border shrink-0 bg-violet-50 text-violet-700 dark:bg-violet-950/70 dark:text-violet-300 border-violet-200 dark:border-violet-800/80 shadow-2xs"
+                        :title="`Primary Language: ${getLanguageDisplayName(getChannelLang(selectedInspectionItem.channel))}`"
+                      >
+                        <Languages class="w-3 h-3 text-violet-600 dark:text-violet-400" />
+                        <span v-if="getLanguageFlag(getChannelLang(selectedInspectionItem.channel))">{{ getLanguageFlag(getChannelLang(selectedInspectionItem.channel)) }}</span>
+                        <span>{{ getLanguageDisplayName(getChannelLang(selectedInspectionItem.channel)) }} ({{ formatLanguageCode(getChannelLang(selectedInspectionItem.channel)) }})</span>
+                      </div>
+                    </div>
                     <p class="text-xs text-gray-500 dark:text-gray-400">
                       Channel Taxonomy, Read Value & Geopolitical Distribution
                     </p>
@@ -2973,6 +3195,16 @@ const copyProfileChannelName = async (channel: string) => {
                   <span class="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 rounded-md shrink-0 select-text cursor-text">
                     CHANNEL
                   </span>
+                  <!-- Language Easy View Badge -->
+                  <div
+                    v-if="getChannelLang(hoveredProfileChannel)"
+                    class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-black tracking-wider uppercase border shrink-0 bg-violet-50 text-violet-700 dark:bg-violet-950/70 dark:text-violet-300 border-violet-200 dark:border-violet-800/80 shadow-2xs select-text cursor-text"
+                    :title="`Primary Language: ${getLanguageDisplayName(getChannelLang(hoveredProfileChannel))}`"
+                  >
+                    <Languages class="w-2.5 h-2.5 text-violet-600 dark:text-violet-400" />
+                    <span v-if="getLanguageFlag(getChannelLang(hoveredProfileChannel))">{{ getLanguageFlag(getChannelLang(hoveredProfileChannel)) }}</span>
+                    <span>{{ formatLanguageCode(getChannelLang(hoveredProfileChannel)) }}</span>
+                  </div>
                   <!-- Verified Badge -->
                   <span
                     v-if="hoveredProfileMetadata?.verified"

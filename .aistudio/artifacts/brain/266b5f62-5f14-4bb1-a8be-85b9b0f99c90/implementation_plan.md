@@ -1,135 +1,119 @@
-# Natural Language Filter for Channel Classification (Types Tab)
+# LCP Performance Optimization Plan
 
-A natural language filtering system in the **Types** tab powered by the **Kev SystemOne API**. Converts user intent queries (e.g. *"political China with Japan"*, *"critical military updates in Ukraine"*, *"high value domestic finance"*) into precise, distribution-aware classification filters with interactive rule chips and live suggestions.
+Comprehensive multi-tier performance overhaul to resolve the 8+ second Largest Contentful Paint (LCP) on Cloudflare by decomposing the monolithic 2.42MB JavaScript bundle into optimized vendor chunks, preloading secondary view chunks post-initial paint, and deferring background network polling outside the critical rendering path.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> Based on your confirmed choices in Phase 1:
-> - **Kev SystemOne API Parsing**: Natural language queries are passed as `state` to `callSystemOne()` with structured choice questions (for Topic, Primary Target Region, Secondary Target Region, Domestic Orientation, and Read Value Threshold), picking high-confidence (>0.25) results.
-> - **Distribution-Aware Matching**: Evaluates full category probability maps (`topicProbs`, `countryProbs`, `readValueProbs`, and `domestic`) rather than only primary single choices. For multi-country queries like *"China with Japan"*, matches channels with significant joint probability density across both regions.
-> - **Interactive Rule Chips & Suggestions**: Displays an editorial natural language search bar with 1-click example suggestions, an active parsed filter ribbon with removable/editable chips (`[Topic: Political ×]`, `[Region: China + US Allies ×]`), and confidence indicators.
+> The following architectural decisions were aligned and confirmed in Phase 1:
+> - **Strategy Choice**: Comprehensive multi-tier optimization (Rollup manual chunking, asynchronous sub-component splitting, deferred network polling).
+> - **Tab Loading Architecture**: Separate chunked bundles for heavy tabs (`TypesTab`, `Network Graph / Cytoscape`, `ArticleReaderView`), preloaded asynchronously after the initial paint to guarantee instant subsequent tab switching with zero cold lag.
+> - **Hydration Presentation**: Clean progressive hydration without intrusive skeleton layout shifts, prioritizing immediate availability of the Explorer search interface.
 
 ---
 
-## 1. Overview & Architecture
+## 1. Overview & Core Concept
 
-### Query to Classification Pipeline
+- **What It Does**: Optimizes the web application's initial bundle size, critical rendering path, and main-thread execution budget so that the Explorer viewport achieves an sub-1.5 second LCP score on real-world networks (including Cloudflare edge hosting).
+- **The Core Problem**: The current production build produces a single, monolithic JavaScript bundle of **2,421.88 kB** (nearly 700kB gzipped). On cold start over Cloudflare, the browser must finish downloading, uncompressing, parsing, compiling, and executing this entire script before Vue can mount or paint the Explorer interface. Compounding this, `onMounted` immediately triggers six simultaneous background HTTP polling intervals and IndexedDB sweeps, saturating the CPU during the critical LCP measurement window.
+- **Key Value**:
+  - Drops initial payload by over 65% for the first paint.
+  - Frees the browser main thread during the first 2 seconds of page load.
+  - Ensures Cloudflare edge nodes deliver lightweight, cached vendor chunks in parallel.
+
+---
+
+## 2. User Experience & Visual Design
+
+- **Key User Flows**:
+  1. **Instant First Paint**: The Explorer view header, navigation bar, and search form appear crisply without delay.
+  2. **Non-Blocking Post-Paint Preloading**: Heavy libraries (e.g. `cytoscape` for network relations, `lz4js` and `StreamingLz4FrameDecoder` for Types tab, `markdown-it`, `ArticleReaderView`) load silently in the background using browser idle cycles (`requestIdleCallback`).
+  3. **Smooth Tab Transitions**: When a user switches to **Types**, **Network**, or **Article** reader, the chunks are already cached in browser memory, avoiding spinners or layout shifts.
+- **Visual Identity & Theme**:
+  - Preserves the established enterprise SaaS aesthetic, dual light/dark mode design tokens, and unboxed typography.
+  - Zero layout shifts (CLS < 0.05) achieved by maintaining stable component boundaries during hydration.
+
+---
+
+## 3. Key Product Decisions & Trade-Offs
+
+- **Decision 1: Vite Rollup `manualChunks` Strategy**
+  - *Chosen Approach*: Group dependencies into dedicated vendor chunks:
+    - `vendor-vue`: `vue`, `@vue/*`, `i18n`.
+    - `vendor-cytoscape`: `cytoscape` (graph visualization engine).
+    - `vendor-compression`: `pako`, `lz4js`, `@addmaple/lz4`.
+    - `vendor-markdown`: `markdown-it`, `dompurify`.
+    - `vendor-icons`: `lucide-vue-next`.
+  - *Why*: Allows the browser to download smaller chunks concurrently via HTTP/2 / HTTP/3 on Cloudflare, and enables long-term edge caching (vendor chunks don't change between minor app updates).
+  - *Alternatives Considered*: Standard automatic chunking (creates too many tiny fragments that increase HTTP handshake overhead).
+
+- **Decision 2: Asynchronous Component Splitting with Idle Preloading**
+  - *Chosen Approach*: Convert heavy view components (`TypesTab`, `ArticleReaderView`, `AutoClassDistributionChart`) into `defineAsyncComponent`. Trigger an idle preload immediately after `window.addEventListener('load')` or during `requestIdleCallback`.
+  - *Why*: Keeps the entry chunk ultra-lightweight while guaranteeing zero user-perceived delay when navigating between tabs.
+  - *Alternatives Considered*: Pure lazy loading on tab click (causes a 200–400ms visual hitch on the first tab switch).
+
+- **Decision 3: Defer Non-Critical Background Polling and Telemetry**
+  - *Chosen Approach*: Move `fetchCounters()`, `fetchNamespaceStats()`, `fetchPendingJobs()`, `fetchQ0Jobs()`, `fetchQ1Jobs()`, and `loadAllListenPostsFreshnessFromIndexedDB()` inside a 1,500ms deferred timeout / `requestIdleCallback` block.
+  - *Why*: Prevents network and CPU contention during the first 1–2 seconds when the browser's performance observer is registering LCP and FCP.
+  - *Alternatives Considered*: Running them synchronously in `onMounted` (blocks the event loop and delays the first frame render).
+
+---
+
+## 4. Technical Architecture & Data Strategy
+
+### Bundle & Preload Architecture
+
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        Natural Language Query                          │
-│               "political China with Japan (high quality)"              │
+│                          Initial Page Request                          │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                  Kev SystemOne Choice Questions API                    │
-│   POST https://kev.gogingko.net/v1/systemone                           │
-│   - state: "political China with Japan (high quality)"                 │
-│   - questions: { topic, primary_region, secondary_region,              │
-│                  domestic_orientation, read_value_threshold }          │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ High confidence answers (>0.25)
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                  Parsed Filter Criteria Object                         │
-│   • topic: "political" (conf: 0.94)                                    │
-│   • targetRegions: ["china", "us_allies_asia"] (conf: 0.91, 0.86)       │
-│   • minReadValue: 1.5 (Level 2 Substantive)                            │
-│   • domesticMin: null, domesticMax: null                               │
-│   • matchMode: "distribution_joint" (covers both aspects)              │
-└───────────────────────────────────┬────────────────────────────────────┘
+       ┌────────────────────────────────────────────────────────┐
+       │   Fast Critical Path (<350kB gzipped across HTTP/2)   │
+       │   • index.html                                         │
+       │   • vendor-vue.js                                      │
+       │   • vendor-icons.js                                    │
+       │   • entry-app.js (Explorer Search & Core State)        │
+       └────────────────────────────┬───────────────────────────┘
                                     │
                                     ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│             Types Tab UI & Distribution-Aware Match Engine             │
-│   1. Interactive Filter Chips Ribbon (editable, removable tags)        │
-│   2. Distribution-Aware Channel Filter over 50,000+ items:             │
-│      - item.topicProbs['political'] >= 0.15                            │
-│      - item.countryProbs['china'] >= 0.08                              │
-│      - item.countryProbs['us_allies_asia'] >= 0.05                      │
-│      - item.readValueScore >= 1.5                                      │
-└────────────────────────────────────────────────────────────────────────┘
+           [FIRST CONTENTFUL PAINT & LCP COMPLETE (<1.5s)]
+                                    │
+                  ┌─────────────────┴─────────────────┐
+                  │ requestIdleCallback / post-paint  │
+                  ▼                                   ▼
+┌───────────────────────────────────┐ ┌──────────────────────────────────┐
+│  Idle Preload Async View Chunks   │ │  Deferred Background Polling     │
+│  • chunk-TypesTab.js              │ │  • fetchCounters() (1.5s delay)  │
+│  • chunk-ArticleReaderView.js     │ │  • fetchNamespaceStats() (1.5s)  │
+│  • chunk-cytoscape.js             │ │  • fetchPendingJobs() (2.0s)     │
+│  • chunk-compression.js (lz4/pako)│ │  • IndexedDB freshness sweep     │
+└───────────────────────────────────┘ └──────────────────────────────────┘
 ```
 
----
+### Component & Chunk Mapping
 
-## 2. Technical Implementation Details
+| View / Feature | Implementation Strategy | Target Chunk Name |
+| :--- | :--- | :--- |
+| **Explorer & Top Navigation** | Synchronous Main Chunk | `index` + `vendor-vue` |
+| **Types Tab** | `defineAsyncComponent` + Idle Preload | `view-types-tab` |
+| **Article Reader Mode** | `defineAsyncComponent` + Idle Preload | `view-article-reader` |
+| **Cytoscape Graph Visualizer** | Dynamic `import('cytoscape')` in render | `vendor-cytoscape` |
+| **Compression (LZ4 / Pako)** | Shared Async Vendor Chunk | `vendor-compression` |
+| **Markdown Parser** | Shared Async Vendor Chunk | `vendor-markdown` |
 
-### A. SystemOne Choice Questions Specification
-Constructed in `src/utils/systemoneFilter.ts`:
-1. **Topic Question (`topic`)**:
-   - Instructions: *"Identify the primary content topic requested in this query, or select 'any' if unspecified."*
-   - Criteria: All 9 dataset topics (`political`, `military`, `financial`, `technology`, `blog`, `general_news`, `university`, `game`, `spam`) + `any`.
-2. **Primary Region Question (`primary_region`)**:
-   - Instructions: *"Identify the primary target country or geopolitical region requested, or 'any' if none."*
-   - Criteria: All 12 regions (`china`, `us_allies_asia`, `united_states`, `european_union`, `russia`, `ukraine`, `taiwan`, `israel_palestine`, `iran`, `africa`, `international`, `other`, `any`).
-3. **Secondary Region Question (`secondary_region`)**:
-   - Instructions: *"Identify any secondary target country/region mentioned in conjunction (e.g. 'China with Japan', 'Russia and Ukraine'), or 'none'."*
-   - Criteria: Same 12 regions + `none`.
-4. **Domestic Orientation Question (`domestic_orientation`)**:
-   - Instructions: *"Does the query focus on internal domestic affairs, foreign external affairs, or neutral/any?"*
-   - Criteria: `domestic` (>=0.6), `external` (<=0.3), `balanced`, `any`.
-5. **Read Value Threshold Question (`read_value_importance`)**:
-   - Instructions: *"Does the query require high information quality or critical disclosures?"*
-   - Criteria: `critical` (L3 >= 2.2), `substantive` (L2 >= 1.5), `background` (L1 >= 0.8), `any`.
+### Step-by-Step Execution Sequence
 
-### B. Client-Side Fast Hybrid Pre-Parser
-To ensure instant feedback while the SystemOne network request processes:
-- Immediate keyword/regex tokenizer extracts clear terms (`"political"`, `"china"`, `"japan" -> "us_allies_asia"`, `"ukraine"`, etc.) in `< 5ms`.
-- Asynchronously calls `callSystemOne()` to extract nuanced semantic relations and assign model confidence scores.
-- Updates the active filter chips with verified AI confidence.
-
-### C. Distribution-Aware Matching Logic
-Rather than matching only `item.topic === choice` and `item.country === choice`:
-- **Topic Probability Check**:
-  `item.topic === filter.topic || (item.topicProbs[filter.topic] || 0) >= 0.15`
-- **Multi-Region Co-Occurrence**:
-  For queries with multiple regions (e.g. China + US Allies/Japan):
-  - Primary country probability `>= 0.08`
-  - Secondary country probability `>= 0.05`
-  - Or joint probability score $\sqrt{P_1 \times P_2} \ge 0.05$
-  This surfaces channels that report on bilateral relations between both target nations.
-- **Domestic & Read Value Bounds**:
-  - `item.domestic >= 0.55` for domestic focus
-  - `item.readValueScore >= filter.minReadValue` for scored items
-
----
-
-## 3. UI & Visual Design (Frontend Design Compliance)
-
-1. **Natural Language Input Deck**:
-   - Placed prominently above the manual filter row in `TypesTab.vue`.
-   - Polished search input with Sparkles icon, loading spinner indicator, clear button, and `"Filter with Kev AI"` action button.
-   - 1-click popular query presets:
-     - `🇨🇳 🇯🇵 Political China with Japan`
-     - `🪖 🇺🇦 Critical military updates in Ukraine`
-     - `💶 🇪🇺 European financial & economic news`
-     - `🔬 🇺🇸 High read value tech in US`
-     - `🏛️ Domestic affairs in Asian allies`
-2. **Active Parsed Filter Ribbon**:
-   - Displays unboxed, clean interactive tags for each parsed criterion:
-     - `[Topic: Political · 94% conf ×]`
-     - `[Region 1: China · 91% conf ×]`
-     - `[Region 2: US Allies (Asia) / Japan · 86% conf ×]`
-     - `[Quality: Substantive (≥1.5) ×]`
-   - Users can remove any individual chip with one click to broaden the search.
-   - Shows live matching channel count: `Showing 342 matching channels`.
-3. **Seamless Coordination with Manual Filters**:
-   - Natural language parsed filters seamlessly synchronize with existing channel sorting, pagination, and inspection drawers.
-
----
-
-## 4. Verification & Testing Plan
-
-1. **Build & Type Checking**:
-   - Run `compile_applet` and `lint_applet` to ensure full TypeScript typing and zero compilation errors.
-2. **Parsing Verification**:
-   - Test queries:
-     - `"political China with Japan"` -> parsed as `topic=political`, `regions=[china, us_allies_asia]`.
-     - `"critical military in Ukraine"` -> parsed as `topic=military`, `regions=[ukraine]`, `minReadValue=2.0`.
-     - `"domestic tech in US allies"` -> parsed as `topic=technology`, `regions=[us_allies_asia]`, `domestic=domestic`.
-3. **UI Edge Cases**:
-   - Removing individual chips updates results immediately.
-   - Clearing the input restores the full channel view.
-   - Offline / latency fallback gracefully uses fast keyword parser if network is slow.
+1. **Vite Configuration**:
+   - Update `vite.config.ts` with custom `rollupOptions.output.manualChunks` to split heavy vendor modules cleanly.
+2. **Component Code Splitting**:
+   - In `src/App.vue`, convert `TypesTab`, `ArticleReaderView`, and `AutoClassDistributionChart` to `defineAsyncComponent()`.
+   - Implement an idle preload helper that invokes component loaders during `requestIdleCallback` or after initial render tick.
+3. **Lazy-Load Cytoscape Engine**:
+   - Refactor cytoscape import to dynamically import on-demand when the Network tab is opened or preloaded.
+4. **Deferred Background Timers in `onMounted`**:
+   - Wrap secondary telemetry and indexing jobs in `setTimeout(..., 1500)` / `requestIdleCallback` so initial rendering has 100% of the main-thread budget.
+5. **Verification**:
+   - Run `npm run build` and inspect the generated chunk breakdown table to confirm the entry bundle is significantly reduced and warnings are eliminated.
+   - Run `lint_applet` and `compile_applet`.

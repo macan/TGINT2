@@ -199,6 +199,7 @@ export default {
     listView: "リスト表示",
     masonryGrid: "グリッド表示",
     timelineView: "タイムライン表示",
+    articleReaderView: "記事",
     scheduleRepeatly: "定時スクレイピング",
     scheduleOnce: "1回スクレイピング",
     scheduled: "予約済み",

@@ -199,6 +199,7 @@ export default {
     listView: "Список",
     masonryGrid: "Сетка",
     timelineView: "Хронология",
+    articleReaderView: "Статья",
     scheduleRepeatly: "Цикличный Парсинг",
     scheduleOnce: "Разовый Парсинг",
     scheduled: "Запланировано",

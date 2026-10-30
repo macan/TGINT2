@@ -37,7 +37,7 @@ export interface ArticleReaderPrefs {
   fontFamily: "serif" | "sans" | "mono";
   fontSize: "sm" | "base" | "lg" | "xl";
   lineHeight: "relaxed" | "loose";
-  maxWidth: "narrow" | "standard" | "wide";
+  maxWidth: "narrow" | "standard" | "wide" | "full";
   theme: "sepia" | "white" | "slate" | "oled";
   autoCollapseMedia: boolean;
   minWordFilter: number; // 0 for all, 50 for longform, 150 for essays
@@ -404,12 +404,14 @@ const progressBarGradientClass = computed(() => {
 const containerMaxWidthClass = computed(() => {
   switch (prefs.value.maxWidth) {
     case "narrow":
-      return "max-w-[620px]";
+      return "max-w-3xl lg:max-w-[880px] w-full";
     case "wide":
-      return "max-w-[880px]";
+      return "max-w-7xl 2xl:max-w-[1440px] w-full";
+    case "full":
+      return "max-w-[98%] 2xl:max-w-[1720px] w-full";
     case "standard":
     default:
-      return "max-w-[740px]";
+      return "max-w-5xl xl:max-w-[1160px] w-full";
   }
 });
 
@@ -463,9 +465,10 @@ const lineHeightClass = computed(() => {
   <div ref="readerContainerRef" class="w-full transition-colors duration-300 min-h-[600px] pb-24 relative">
     <!-- Floating / Sticky Reading Controls Bar with Integrated Progress Track -->
     <div
-      class="sticky z-30 mb-8 rounded-2xl shadow-lg border backdrop-blur-md px-4 py-3 transition-all duration-200 relative overflow-hidden"
+      class="sticky z-30 mb-8 rounded-2xl shadow-lg border backdrop-blur-md px-4 py-3 transition-all duration-200 relative overflow-hidden mx-auto w-full"
       :style="{ top: `${navHeaderOffset}px` }"
       :class="[
+        containerMaxWidthClass,
         prefs.theme === 'sepia'
           ? 'bg-[#F7F4EE]/95 dark:bg-[#1C1A17]/95 border-[#E2DDD3] dark:border-[#2F2B26] text-[#292524] dark:text-[#D6D3D1]'
           : prefs.theme === 'white'
@@ -658,11 +661,11 @@ const lineHeightClass = computed(() => {
                 'px-2 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer',
                 prefs.maxWidth === 'narrow'
                   ? 'bg-white dark:bg-neutral-800 text-amber-900 dark:text-amber-200 shadow-xs'
-                  : 'text-stone-500 hover:text-stone-900'
+                  : 'text-stone-500 hover:text-stone-900 dark:hover:text-stone-200'
               ]"
-              title="Narrow Measure (620px)"
+              title="Compact Measure (880px)"
             >
-              Narrow
+              Compact
             </button>
             <button
               @click="prefs.maxWidth = 'standard'"
@@ -670,11 +673,11 @@ const lineHeightClass = computed(() => {
                 'px-2 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer',
                 prefs.maxWidth === 'standard'
                   ? 'bg-white dark:bg-neutral-800 text-amber-900 dark:text-amber-200 shadow-xs'
-                  : 'text-stone-500 hover:text-stone-900'
+                  : 'text-stone-500 hover:text-stone-900 dark:hover:text-stone-200'
               ]"
-              title="Standard Optimal Measure (740px / ~65ch)"
+              title="Standard Reading Measure (1160px)"
             >
-              Optimal
+              Standard
             </button>
             <button
               @click="prefs.maxWidth = 'wide'"
@@ -682,11 +685,23 @@ const lineHeightClass = computed(() => {
                 'px-2 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer',
                 prefs.maxWidth === 'wide'
                   ? 'bg-white dark:bg-neutral-800 text-amber-900 dark:text-amber-200 shadow-xs'
-                  : 'text-stone-500 hover:text-stone-900'
+                  : 'text-stone-500 hover:text-stone-900 dark:hover:text-stone-200'
               ]"
-              title="Wide Measure (880px)"
+              title="Wide Reading Measure (1440px)"
             >
               Wide
+            </button>
+            <button
+              @click="prefs.maxWidth = 'full'"
+              :class="[
+                'px-2 py-1 rounded-lg text-[11px] font-bold transition cursor-pointer',
+                prefs.maxWidth === 'full'
+                  ? 'bg-white dark:bg-neutral-800 text-amber-900 dark:text-amber-200 shadow-xs'
+                  : 'text-stone-500 hover:text-stone-900 dark:hover:text-stone-200'
+              ]"
+              title="Full Widescreen Measure (1720px)"
+            >
+              Full
             </button>
           </div>
 
@@ -865,7 +880,7 @@ const lineHeightClass = computed(() => {
     <!-- Article Reader Reading Stream -->
     <div
       v-else
-      :class="['mx-auto rounded-3xl p-6 sm:p-12 shadow-sm border transition-all duration-300 space-y-16', containerMaxWidthClass, themeClasses]"
+      :class="['mx-auto rounded-3xl p-6 sm:p-12 lg:p-14 shadow-sm border transition-all duration-300 space-y-16', containerMaxWidthClass, themeClasses]"
     >
       <!-- Channel Editorial Masthead -->
       <header class="pb-10 border-b border-stone-200/80 dark:border-stone-800 text-center space-y-3">

@@ -199,6 +199,7 @@ export default {
     listView: "Vista de Lista",
     masonryGrid: "Cuadrícula",
     timelineView: "Línea de Tiempo",
+    articleReaderView: "Artículo",
     scheduleRepeatly: "Programar Periódicamente",
     scheduleOnce: "Programar una Vez",
     scheduled: "Programado",

@@ -214,6 +214,7 @@ export default {
     listView: "列表视图",
     masonryGrid: "瀑布流网格",
     timelineView: "时间线视图",
+    articleReaderView: "文章",
     scheduleRepeatly: "循环抓取调度",
     scheduleOnce: "单次抓取调度",
     scheduled: "已调度",

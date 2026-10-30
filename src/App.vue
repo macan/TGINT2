@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, computed, nextTick } from "vue";
+import { ref, onMounted, onUnmounted, watch, computed, nextTick, defineAsyncComponent } from "vue";
 import DOMPurify from "dompurify";
-import cytoscape from "cytoscape";
 import pako from "pako";
 import {
   Search,
@@ -132,9 +131,22 @@ import {
   calculatePostEngagementScore,
   type PostViewStats
 } from "./utils";
-import AutoClassDistributionChart from "./components/AutoClassDistributionChart.vue";
-import TypesTab from "./components/TypesTab.vue";
-import ArticleReaderView from "./components/ArticleReaderView.vue";
+const AutoClassDistributionChart = defineAsyncComponent(() => import("./components/AutoClassDistributionChart.vue"));
+const TypesTab = defineAsyncComponent(() => import("./components/TypesTab.vue"));
+const ArticleReaderView = defineAsyncComponent(() => import("./components/ArticleReaderView.vue"));
+
+const preloadSecondaryViews = () => {
+  if (typeof window === "undefined") return;
+  // Non-blocking background preload of heavy chunks after initial paint
+  try {
+    import("./components/TypesTab.vue");
+    import("./components/ArticleReaderView.vue");
+    import("./components/AutoClassDistributionChart.vue");
+    import("cytoscape");
+  } catch {
+    // Ignore preload errors
+  }
+};
 import {
   useI18n,
   currentLocale,
@@ -7864,7 +7876,7 @@ const selectEdge = (edge: any) => {
     selectedEdge.value = edge;
 };
 
-const initGraph = () => {
+const initGraph = async () => {
   const container = document.getElementById('workspace-canvas');
   if (!container) return;
   if (!workspaceGraph.value) {
@@ -7891,7 +7903,8 @@ const initGraph = () => {
         ];
     }
 
-    workspaceGraph.value = cytoscape({
+    const cytoscapeModule = (await import("cytoscape")).default;
+    workspaceGraph.value = cytoscapeModule({
       container: container,
       elements: elements,
       pixelRatio: 1,
@@ -9171,29 +9184,43 @@ onMounted(() => {
   postEngagementTracker.sweepAndBindElements();
 
   if (!isShareCardView.value) {
-    fetchCounters();
-    counterTimer = setInterval(fetchCounters, 30000);
-    fetchNamespaceStats();
-    namespaceStatsTimer = setInterval(fetchNamespaceStats, 30000);
-    fetchPendingJobs();
-    pendingJobsTimer = setInterval(fetchPendingJobs, 30000);
-    fetchQ0Jobs();
-    pendingQ0Timer = setInterval(fetchQ0Jobs, 30000);
-    fetchQ1Jobs();
-    pendingQ1Timer = setInterval(fetchQ1Jobs, 30000);
-    if (activeTab.value === 'explorer') {
-      pollingTimer = setInterval(pollLatestPosts, 30000);
-    }
     loadSavedProfiles();
     loadLogin();
     loadListenDirectory();
-    loadAllListenPostsFreshnessFromIndexedDB();
-    setupListenBackgroundSyncTimer();
-    if (listenLayoutMode.value === 'flexible') {
-      initFlexibleWorkdesk();
-    }
-    fetchIndexedProfilesCount();
     document.addEventListener("click", handleDocumentClickForSortMenu);
+
+    // Defer non-critical network polling and heavy background operations to idle time
+    // so initial paint and LCP are achieved immediately without main-thread contention
+    const startDeferredOperations = () => {
+      fetchCounters();
+      counterTimer = setInterval(fetchCounters, 30000);
+      fetchNamespaceStats();
+      namespaceStatsTimer = setInterval(fetchNamespaceStats, 30000);
+      fetchPendingJobs();
+      pendingJobsTimer = setInterval(fetchPendingJobs, 30000);
+      fetchQ0Jobs();
+      pendingQ0Timer = setInterval(fetchQ0Jobs, 30000);
+      fetchQ1Jobs();
+      pendingQ1Timer = setInterval(fetchQ1Jobs, 30000);
+      if (activeTab.value === 'explorer') {
+        pollingTimer = setInterval(pollLatestPosts, 30000);
+      }
+      loadAllListenPostsFreshnessFromIndexedDB();
+      setupListenBackgroundSyncTimer();
+      if (listenLayoutMode.value === 'flexible') {
+        initFlexibleWorkdesk();
+      }
+      fetchIndexedProfilesCount();
+      preloadSecondaryViews();
+    };
+
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      window.requestIdleCallback(() => {
+        setTimeout(startDeferredOperations, 1200);
+      }, { timeout: 3000 });
+    } else {
+      setTimeout(startDeferredOperations, 1500);
+    }
 
     nextTick(() => {
       const container = listenTreeContainer.value || document.getElementById('listen-tree-container');
@@ -10035,6 +10062,86 @@ const findListenDirectoryHit = (
   return hit;
 };
 
+const cleanChannelName = (s?: string | null): string => {
+  if (!s) return "";
+  return String(s)
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\/t\.me\//i, "")
+    .replace(/^@/, "")
+    .replace(/\/+$/, "")
+    .trim();
+};
+
+const findListenDirectoryHitExactChannel = (
+  rawChannelName?: string
+): ListenHit | null => {
+  const targetChannel = cleanChannelName(rawChannelName);
+  if (!targetChannel) return null;
+
+  const tree = listenDirectory.value || [];
+
+  const searchTree = (
+    nodes: ListenItem[],
+    currentPath: string[],
+    currentCrumbs: FolderCrumb[]
+  ): { item: ListenItem; path: string[]; folders: string[]; folderCrumbs: FolderCrumb[] } | null => {
+    for (const node of nodes) {
+      const nodePath = [...currentPath, node.name];
+
+      // Folders are containers, search into children
+      if (node.isFolder) {
+        if (node.children && Array.isArray(node.children) && node.children.length > 0) {
+          const found = searchTree(
+            node.children,
+            nodePath,
+            [...currentCrumbs, { id: node.id, name: node.name }]
+          );
+          if (found) return found;
+        }
+        continue;
+      }
+
+      // Ignore keyword items
+      if (node.type === "keyword") {
+        continue;
+      }
+
+      // Exact channel name match (case-insensitive, ignoring leading @ or url prefixes)
+      const itemChannel = cleanChannelName(node.argument || node.name);
+      if (itemChannel && itemChannel === targetChannel) {
+        return {
+          item: node,
+          path: nodePath,
+          folders: currentPath,
+          folderCrumbs: currentCrumbs
+        };
+      }
+
+      if (node.children && Array.isArray(node.children) && node.children.length > 0) {
+        const found = searchTree(
+          node.children,
+          nodePath,
+          [...currentCrumbs, { id: node.id, name: node.name }]
+        );
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+
+  const match = searchTree(tree, [], []);
+  if (!match) return null;
+
+  return {
+    item: match.item,
+    path: match.path,
+    folders: match.folders,
+    folderCrumbs: match.folderCrumbs,
+    matchedBy: "username"
+  };
+};
+
 const expandParentFoldersForNode = (targetId: string) => {
   const findAndExpand = (nodes: ListenItem[], parents: string[]): boolean => {
     for (const node of nodes) {
@@ -10211,23 +10318,15 @@ const explorerListenHit = ref<ListenHit | null>(null);
 const explorerListenHint = ref<string>("Add to Listen Directory");
 
 const checkExplorerListenDirectory = () => {
-  const currentUsername = (
+  // Extract strictly the channel name / username (do NOT use title or fuzzy fallback)
+  const targetChannel = (
     metadata.value?.username ||
-    metadata.value?.name ||
-    channelName.value ||
     currentChannelName.value ||
+    channelName.value ||
     ""
   ).trim();
 
-  const currentTitle = (
-    metadata.value?.title ||
-    metadata.value?.name ||
-    channelName.value ||
-    currentChannelName.value ||
-    ""
-  ).trim();
-
-  const hit = findListenDirectoryHit(currentUsername, currentTitle);
+  const hit = findListenDirectoryHitExactChannel(targetChannel);
   explorerListenHit.value = hit;
 
   // if hit found, display directory path in the hint, otherwise localized default
@@ -17993,6 +18092,16 @@ onUnmounted(() => {
                       <Globe class="h-3.5 w-3.5 text-blue-500" />
                       <span>Google</span>
                     </button>
+                    <a
+                      :href="`https://t.me/${getCleanHandle(metadata.username || metadata.name || channelName)}`"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="flex items-center gap-1.5 px-3 py-1.5 bg-sky-50 hover:bg-sky-100 dark:bg-sky-950/50 dark:hover:bg-sky-900/60 text-sky-700 dark:text-sky-300 rounded-xl border border-sky-200 dark:border-sky-800/60 text-xs font-bold transition-all cursor-pointer shadow-3xs no-underline"
+                      :title="`Open https://t.me/${getCleanHandle(metadata.username || metadata.name || channelName)} in Telegram`"
+                    >
+                      <Send class="h-3.5 w-3.5 text-sky-500" />
+                      <span>TG</span>
+                    </a>
                     <button @click="openChannelOldVersionsModal(metadata.username || metadata.name || channelName)" class="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/50 dark:hover:bg-amber-900/60 text-amber-700 dark:text-amber-300 rounded-xl border border-amber-200 dark:border-amber-800/60 text-xs font-bold transition-all cursor-pointer shadow-3xs" :title="t('explorer.oldVersions')">
                       <History class="h-3.5 w-3.5 text-amber-500" />
                       <span>{{ t('explorer.oldVersions') }}</span>
@@ -18833,10 +18942,9 @@ onUnmounted(() => {
                         ? 'bg-white dark:bg-gray-800 text-blue-600 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700'
                         : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
                     ]"
-                    title="Article"
+                    :title="t('explorer.articleReaderView')"
                   >
                     <BookOpen class="h-4 w-4" />
-                    <span class="text-xs font-bold hidden md:inline">Article</span>
                   </button>
                   <button
                     @mousedown="startLongPress"
