@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, nextTick } from "vue";
+import { ref, onMounted, onUnmounted, watch, nextTick, toRaw } from "vue";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { ChannelEngagementDashboard, type PostItem } from "./analytics/ChannelEngagementDashboard";
@@ -35,14 +35,43 @@ const parseNumericMetric = (val: any): number => {
   return 0;
 };
 
-// Convert Vue reactive proxies into plain JavaScript objects to prevent
-// React 19 inspection Proxy invariant errors (TypeError: 'get' on proxy)
+// Deeply unwrap Vue reactive Proxies into pure plain vanilla JavaScript objects
+// to prevent Recharts/React 19 Proxy invariant errors on freezing/traversing nested properties
+const deepUnwrap = (val: any): any => {
+  if (val == null) return val;
+  try {
+    return JSON.parse(JSON.stringify(val));
+  } catch {
+    const seen = new WeakSet();
+    const unwrap = (obj: any): any => {
+      if (obj === null || typeof obj !== "object") return obj;
+      if (seen.has(obj)) return undefined;
+      seen.add(obj);
+      const raw = toRaw(obj);
+      if (Array.isArray(raw)) {
+        return raw.map(unwrap);
+      }
+      const out: Record<string, any> = {};
+      for (const k of Object.keys(raw)) {
+        out[k] = unwrap(raw[k]);
+      }
+      return out;
+    };
+    return unwrap(val);
+  }
+};
+
+// Convert Vue reactive proxies into plain JavaScript objects
 const toPlainPosts = (rawPosts: any[]): PostItem[] => {
   if (!rawPosts || !Array.isArray(rawPosts)) return [];
-  return rawPosts.map((p, idx) => {
+  // First, completely unwrap the entire array and nested structures from Vue reactive Proxies
+  const cleanPosts = deepUnwrap(rawPosts);
+  if (!Array.isArray(cleanPosts)) return [];
+
+  return cleanPosts.map((p: any, idx: number) => {
     if (!p) return {} as PostItem;
     const pData = p.data || {};
-    const date = pData.date || p.date || p.datetime || pData.datetime || "";
+    const date = pData.date || p.date || p.datetime || pData.datetime || p.mtime || pData.created_at || "";
     const views = parseNumericMetric(pData.views != null ? pData.views : p.views);
     const forwards = parseNumericMetric(pData.forwards != null ? pData.forwards : p.forwards);
     const content = typeof pData.content === "string" ? pData.content : (typeof p.content === "string" ? p.content : "");

@@ -20,8 +20,13 @@ export interface PostItem {
   key?: string;
   url?: string;
   link?: string;
+  date?: string | number;
+  datetime?: string | number;
+  mtime?: number | string;
   data?: {
-    date?: string;
+    date?: string | number;
+    datetime?: string | number;
+    created_at?: string | number;
     views?: number;
     forwards?: number;
     forward_from?: any;
@@ -38,6 +43,38 @@ export interface PostItem {
     reply?: any;
   };
 }
+
+// Canonical English weekday keys (0=Sun, 1=Mon, ..., 6=Sat)
+export const WEEKDAY_KEYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+export type WeekdayKey = (typeof WEEKDAY_KEYS)[number];
+
+// Robust helper to parse various Telegram date representations
+export const parsePostDate = (rawDate: any): Date => {
+  if (rawDate == null || rawDate === "") return new Date(NaN);
+  if (rawDate instanceof Date) return isNaN(rawDate.getTime()) ? new Date(NaN) : rawDate;
+  if (typeof rawDate === "number") {
+    // If Unix timestamp in seconds (typically < 10 billion), multiply by 1000
+    const ms = rawDate < 10_000_000_000 ? rawDate * 1000 : rawDate;
+    return new Date(ms);
+  }
+  if (typeof rawDate === "string") {
+    const trimmed = rawDate.trim();
+    if (!trimmed) return new Date(NaN);
+    // All digits: numeric timestamp in string form
+    if (/^\d+$/.test(trimmed)) {
+      const num = Number(trimmed);
+      const ms = num < 10_000_000_000 ? num * 1000 : num;
+      return new Date(ms);
+    }
+    // Standard ISO or date string
+    const d1 = new Date(trimmed);
+    if (!isNaN(d1.getTime())) return d1;
+    // Format with space instead of T (e.g. "2025-05-20 14:32:00")
+    const d2 = new Date(trimmed.replace(" ", "T"));
+    if (!isNaN(d2.getTime())) return d2;
+  }
+  return new Date(NaN);
+};
 
 export interface ChannelEngagementDashboardProps {
   posts: PostItem[];
@@ -136,6 +173,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
   const [timeRange, setTimeRange] = useState<"all" | "20" | "50">("all");
   const [activeTab, setActiveTab] = useState<"growth" | "forwards" | "hourly">("growth");
   const [selectedForwardSource, setSelectedForwardSource] = useState<string | null>(null);
+  const [selectedWeekday, setSelectedWeekday] = useState<string | null>(null);
 
   // Format numbers compactly (e.g. 1.2k, 450k, 1.5M)
   const formatNumber = (num: number): string => {
@@ -144,34 +182,49 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
     return num.toLocaleString();
   };
 
+  // Helper to ensure post objects passed into Recharts chart datasets are 100% plain objects
+  const sanitizeObject = (obj: any) => {
+    if (obj == null) return obj;
+    try {
+      return JSON.parse(JSON.stringify(obj));
+    } catch {
+      return obj;
+    }
+  };
+
   // Process & chronologically sort post points
   const processedData = useMemo(() => {
     if (!posts || posts.length === 0) return [];
 
     // Filter valid posts that have dates
     const valid = posts
-      .filter((p) => p && p.data && p.data.date)
       .map((p) => {
-        const d = new Date(p.data?.date || 0);
-        const views = typeof p.data?.views === "number" ? p.data.views : 0;
-        const rawContent = p.data?.content || p.data?.rawcontent || "";
+        if (!p) return null;
+        const pData = p.data || {};
+        const rawDate = pData.date ?? (p as any).date ?? pData.datetime ?? (p as any).datetime ?? (p as any).mtime ?? pData.created_at;
+        const d = parsePostDate(rawDate);
+        if (isNaN(d.getTime())) return null;
+
+        const views = typeof pData.views === "number" ? pData.views : 0;
+        const rawContent = pData.content || pData.rawcontent || "";
         const cleanSnippet = rawContent.replace(/<[^>]*>/g, " ").trim().slice(0, 100);
 
-        const fwdDetails = extractForwardDetails(p.data);
+        const fwdDetails = extractForwardDetails(pData);
+
+        // Map d.getDay() (0=Sun, 1=Mon, ..., 6=Sat) into fixed canonical day keys
+        const dayIdx = d.getDay();
+        const weekdayKey = WEEKDAY_KEYS[dayIdx]; // "Sun" | "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat"
 
         return {
-          rawPost: p,
+          rawPost: sanitizeObject(p),
           timestamp: d.getTime(),
           dateObj: d,
-          dateStr: !isNaN(d.getTime())
-            ? d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
-            : "Unknown",
-          timeStr: !isNaN(d.getTime())
-            ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
-            : "",
-          fullDate: !isNaN(d.getTime()) ? d.toLocaleString() : "",
-          hour: !isNaN(d.getTime()) ? d.getHours() : 0,
-          weekday: !isNaN(d.getTime()) ? d.toLocaleDateString(undefined, { weekday: "short" }) : "",
+          dateStr: d.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+          timeStr: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
+          fullDate: d.toLocaleString(),
+          hour: d.getHours(),
+          dayIndex: dayIdx,
+          weekday: weekdayKey,
           views,
           isForwardIn: fwdDetails.isForwardIn,
           forwardSource: fwdDetails.source,
@@ -180,7 +233,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           snippet: cleanSnippet
         };
       })
-      .filter((p) => !isNaN(p.timestamp));
+      .filter((p): p is NonNullable<typeof p> => p !== null && !isNaN(p.timestamp));
 
     // Sort chronologically ascending for time-series charts
     valid.sort((a, b) => a.timestamp - b.timestamp);
@@ -208,8 +261,8 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
   const dragStartWindowRef = useRef<{ start: number; end: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
-  // Base filtered dataset before zoom
-  const baseData = useMemo(() => {
+  // Base filtered dataset before weekday filter
+  const datasetBeforeWeekdayFilter = useMemo(() => {
     let dataset = processedData;
     if (selectedForwardSource) {
       dataset = dataset.filter((p) => p.forwardSource === selectedForwardSource);
@@ -219,6 +272,14 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
     return dataset;
   }, [processedData, timeRange, selectedForwardSource]);
 
+  // Base filtered dataset before zoom (with optional weekday filter)
+  const baseData = useMemo(() => {
+    if (selectedWeekday) {
+      return datasetBeforeWeekdayFilter.filter((p) => p.weekday === selectedWeekday);
+    }
+    return datasetBeforeWeekdayFilter;
+  }, [datasetBeforeWeekdayFilter, selectedWeekday]);
+
   // Sliced data based on active zoom window
   const displayData = useMemo(() => {
     if (!zoomWindow || baseData.length <= 5) return baseData;
@@ -227,10 +288,15 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
     return baseData.slice(start, end + 1);
   }, [baseData, zoomWindow]);
 
-  // Reset zoom window whenever tab, timeRange, channel, or upstream filter changes
+  // Reset zoom window whenever tab, timeRange, channel, upstream, or weekday filter changes
   useEffect(() => {
     setZoomWindow(null);
-  }, [activeTab, timeRange, selectedForwardSource, channelName]);
+  }, [activeTab, timeRange, selectedForwardSource, channelName, selectedWeekday]);
+
+  // Reset weekday filter when changing channels
+  useEffect(() => {
+    setSelectedWeekday(null);
+  }, [channelName]);
 
   // Scoped Wheel Zoom: captures wheel events ONLY inside the chart display area
   useEffect(() => {
@@ -480,7 +546,8 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
       avgViews: 0
     }));
 
-    for (const p of processedData) {
+    const targetPosts = datasetBeforeWeekdayFilter.length > 0 ? datasetBeforeWeekdayFilter : processedData;
+    for (const p of targetPosts) {
       if (p.hour >= 0 && p.hour < 24) {
         hours[p.hour].postsCount += 1;
         hours[p.hour].totalViews += p.views;
@@ -491,11 +558,11 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
       ...h,
       avgViews: h.postsCount > 0 ? Math.round(h.totalViews / h.postsCount) : 0
     }));
-  }, [processedData]);
+  }, [datasetBeforeWeekdayFilter, processedData]);
 
   // Aggregate Day-of-Week cadence
   const weekdayData = useMemo(() => {
-    const daysOrder = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const daysOrder = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
     const counts: Record<string, { posts: number; totalViews: number }> = {
       Mon: { posts: 0, totalViews: 0 },
       Tue: { posts: 0, totalViews: 0 },
@@ -506,19 +573,37 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
       Sun: { posts: 0, totalViews: 0 }
     };
 
-    for (const p of processedData) {
-      if (p.weekday && counts[p.weekday]) {
+    const targetPosts = datasetBeforeWeekdayFilter.length > 0 ? datasetBeforeWeekdayFilter : processedData;
+    for (const p of targetPosts) {
+      if (p.weekday && counts[p.weekday] !== undefined) {
         counts[p.weekday].posts += 1;
         counts[p.weekday].totalViews += p.views;
       }
     }
 
-    return daysOrder.map((day) => ({
-      day,
-      postsCount: counts[day].posts,
-      avgViews: counts[day].posts > 0 ? Math.round(counts[day].totalViews / counts[day].posts) : 0
-    }));
-  }, [processedData]);
+    const totalPostsCount = targetPosts.length;
+    let maxPosts = 0;
+    for (const d of daysOrder) {
+      if (counts[d].posts > maxPosts) {
+        maxPosts = counts[d].posts;
+      }
+    }
+
+    return daysOrder.map((day) => {
+      const postsCount = counts[day].posts;
+      const totalViews = counts[day].totalViews;
+      const avgViews = postsCount > 0 ? Math.round(totalViews / postsCount) : 0;
+      const percentage = totalPostsCount > 0 ? Math.round((postsCount / totalPostsCount) * 100) : 0;
+      const isPeak = maxPosts > 0 && postsCount === maxPosts;
+      return {
+        day,
+        postsCount,
+        avgViews,
+        percentage,
+        isPeak
+      };
+    });
+  }, [datasetBeforeWeekdayFilter, processedData]);
 
   // Theme-aware colors
   const chartColors = {
@@ -1015,8 +1100,11 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                 data={displayData}
                 margin={{ top: 10, right: 10, left: -15, bottom: 0 }}
                 onClick={(e: any) => {
-                  if (e && e.activePayload && e.activePayload[0] && onPostClick) {
-                    onPostClick(e.activePayload[0].payload.rawPost);
+                  if (e && e.activePayload && e.activePayload.length > 0 && onPostClick) {
+                    const post = e.activePayload[0]?.payload?.rawPost || e.activePayload[1]?.payload?.rawPost;
+                    if (post) {
+                      onPostClick(post);
+                    }
                   }
                 }}
               >
@@ -1058,6 +1146,48 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                   iconType="circle"
                   wrapperStyle={{ fontSize: "11px", paddingBottom: "12px" }}
                 />
+
+                {/* 1. 5-Post Moving Average Line rendered first (underneath post dots) */}
+                <Line
+                  type="monotone"
+                  dataKey="movingAvgViews"
+                  name="5-Post Moving Avg"
+                  stroke={chartColors.movingAvgLine}
+                  strokeWidth={2}
+                  strokeDasharray="4 4"
+                  dot={false}
+                  style={{ pointerEvents: "none" }}
+                  activeDot={(activeDotProps: any) => {
+                    const { cx, cy, payload } = activeDotProps;
+                    if (cx == null || cy == null || !payload) return null;
+                    return (
+                      <circle
+                        cx={cx}
+                        cy={cy}
+                        r={5.5}
+                        fill={chartColors.movingAvgLine}
+                        stroke={isDark ? "#0F172A" : "#FFFFFF"}
+                        strokeWidth={1.5}
+                        className="cursor-pointer transition-all hover:scale-125"
+                        style={{ cursor: "pointer", pointerEvents: "all" }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (payload && payload.rawPost && onPostClick) {
+                            onPostClick(payload.rawPost);
+                          }
+                        }}
+                      />
+                    );
+                  }}
+                  onClick={(e: any) => {
+                    const post = e?.payload?.rawPost || e?.activePayload?.[0]?.payload?.rawPost;
+                    if (post && onPostClick) {
+                      onPostClick(post);
+                    }
+                  }}
+                />
+
+                {/* 2. Post Views Area & Interactive Nodes rendered second (on top of moving average) */}
                 <Area
                   type="monotone"
                   dataKey="views"
@@ -1088,11 +1218,11 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
 
                     return (
                       <g key={`dot-g-${payload.postIndex}`} className="cursor-pointer">
-                        {/* Enlarged transparent hit target for effortless clicking */}
+                        {/* Enlarged transparent hit target for effortless clicking (always on top) */}
                         <circle
                           cx={cx}
                           cy={cy}
-                          r={Math.max(14, r * 2.2)}
+                          r={Math.max(16, r * 2.4)}
                           fill="transparent"
                           className="cursor-pointer"
                           style={{ cursor: "pointer", pointerEvents: "all" }}
@@ -1131,7 +1261,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                         <circle
                           cx={cx}
                           cy={cy}
-                          r={20}
+                          r={22}
                           fill="transparent"
                           className="cursor-pointer"
                           style={{ cursor: "pointer", pointerEvents: "all" }}
@@ -1160,15 +1290,6 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                       </g>
                     );
                   }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="movingAvgViews"
-                  name="5-Post Moving Avg"
-                  stroke={chartColors.movingAvgLine}
-                  strokeWidth={2}
-                  strokeDasharray="4 4"
-                  dot={false}
                 />
               </AreaChart>
             </ResponsiveContainer>
@@ -1284,26 +1405,73 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
 
         {/* 4. Weekday Cadence Footer Strip */}
         <div className="mt-6 pt-4 border-t border-gray-150 dark:border-gray-750 flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex items-center gap-1.5 font-bold text-gray-500 dark:text-gray-400">
-            <span>📅 Day of Week Density:</span>
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            {weekdayData.map((w) => (
-              <div
-                key={w.day}
-                className={`px-2.5 py-1 rounded-xl border text-[11px] font-mono flex items-center gap-1.5 transition-colors ${
-                  w.postsCount > 0
-                    ? "bg-gray-50 dark:bg-gray-900 border-gray-200 dark:border-gray-700 text-gray-800 dark:text-gray-200"
-                    : "bg-transparent border-dashed border-gray-200 dark:border-gray-800 text-gray-400 opacity-60"
-                }`}
-                title={`${w.postsCount} posts on ${w.day} (Avg ${formatNumber(w.avgViews)} views)`}
+          <div className="flex items-center gap-2 font-bold text-gray-500 dark:text-gray-400">
+            <span className="flex items-center gap-1.5">
+              <span>📅 Day of Week Density:</span>
+              <span className="text-[10px] font-normal text-gray-400 dark:text-gray-500 font-mono">
+                ({datasetBeforeWeekdayFilter.length} posts)
+              </span>
+            </span>
+            {selectedWeekday && (
+              <button
+                type="button"
+                onClick={() => setSelectedWeekday(null)}
+                className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-sky-100 hover:bg-sky-200 dark:bg-sky-950 dark:hover:bg-sky-900 text-sky-700 dark:text-sky-300 transition-colors flex items-center gap-1 cursor-pointer"
+                title="Clear day filter"
               >
-                <span className="font-bold">{w.day}</span>
-                <span className="tabular-nums font-black text-sky-600 dark:text-sky-400">
-                  {w.postsCount}
-                </span>
-              </div>
-            ))}
+                <span>Filter: {selectedWeekday}</span>
+                <span>&times;</span>
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+            {weekdayData.map((w) => {
+              const isSelected = selectedWeekday === w.day;
+              return (
+                <button
+                  type="button"
+                  key={w.day}
+                  onClick={() => setSelectedWeekday(isSelected ? null : w.day)}
+                  className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-mono flex items-center gap-1.5 transition-all cursor-pointer select-none ${
+                    isSelected
+                      ? "bg-sky-600 border-sky-600 text-white shadow-xs scale-105"
+                      : w.postsCount > 0
+                      ? w.isPeak
+                        ? "bg-sky-50 dark:bg-sky-950/60 border-sky-300 dark:border-sky-800 text-sky-900 dark:text-sky-200 hover:border-sky-400"
+                        : "bg-gray-50 dark:bg-gray-900 border-gray-200 dark:border-gray-700 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"
+                      : "bg-transparent border-dashed border-gray-200 dark:border-gray-800 text-gray-400 opacity-60 hover:opacity-100"
+                  }`}
+                  title={`${w.postsCount} posts on ${w.day} (${w.percentage}% of total · Avg ${formatNumber(w.avgViews)} views) · Click to filter`}
+                >
+                  <span className="font-bold flex items-center gap-0.5">
+                    <span>{w.day}</span>
+                    {w.isPeak && w.postsCount > 0 && !isSelected && (
+                      <span className="text-[9px] text-amber-500" title="Peak activity day">⭐</span>
+                    )}
+                  </span>
+                  <span
+                    className={`tabular-nums font-black ${
+                      isSelected
+                        ? "text-white"
+                        : w.postsCount > 0
+                        ? "text-sky-600 dark:text-sky-400"
+                        : "text-gray-400"
+                    }`}
+                  >
+                    {w.postsCount}
+                  </span>
+                  {w.postsCount > 0 && (
+                    <span
+                      className={`text-[9.5px] opacity-75 font-sans ${
+                        isSelected ? "text-sky-100" : "text-gray-400 dark:text-gray-500"
+                      }`}
+                    >
+                      ({w.percentage}%)
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>
