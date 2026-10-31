@@ -20145,6 +20145,7 @@ onUnmounted(() => {
                   <ChannelAnalyticsWrapper
                     :posts="posts"
                     :channel-name="channelName || currentChannelName || ''"
+                    :metadata="metadata"
                     :is-dark="isDark"
                     @open-post-modal="openPostModal"
                     @explore-channel="(targetChannel) => { channelName = targetChannel.replace(/^@/, ''); searchChannel(); }"

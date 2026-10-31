@@ -3,10 +3,12 @@ import { ref, onMounted, onUnmounted, watch, nextTick, toRaw } from "vue";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { ChannelEngagementDashboard, type PostItem } from "./analytics/ChannelEngagementDashboard";
+import { currentLocale, onLocaleLayoutChange } from "../i18n";
 
 const props = defineProps<{
   posts: any[];
   channelName: string;
+  metadata?: any;
   isDark?: boolean;
 }>();
 
@@ -103,12 +105,18 @@ const renderReactDashboard = () => {
   }
 
   const plainPosts = toPlainPosts(props.posts);
+  const cleanMetadata = props.metadata ? deepUnwrap(props.metadata) : null;
+  const rawSubs = cleanMetadata?.subscribers ?? cleanMetadata?.members ?? cleanMetadata?.participants_count ?? cleanMetadata?.participants;
+  const subsCount = parseNumericMetric(rawSubs);
 
   reactRoot.render(
     React.createElement(ChannelEngagementDashboard, {
       posts: plainPosts,
       channelName: String(props.channelName || ""),
+      metadata: cleanMetadata,
+      subscribersCount: subsCount,
       isDark: Boolean(props.isDark),
+      locale: currentLocale.value,
       onPostClick: (clickedPost: any) => {
         let original: any = null;
         if (clickedPost && typeof clickedPost._index === "number" && props.posts[clickedPost._index]) {
@@ -127,14 +135,19 @@ const renderReactDashboard = () => {
   );
 };
 
+let unregisterLocaleListener: (() => void) | null = null;
+
 onMounted(() => {
   nextTick(() => {
+    renderReactDashboard();
+  });
+  unregisterLocaleListener = onLocaleLayoutChange(() => {
     renderReactDashboard();
   });
 });
 
 watch(
-  [() => props.posts, () => props.channelName, () => props.isDark],
+  [() => props.posts, () => props.channelName, () => props.isDark, () => props.metadata, () => currentLocale.value],
   () => {
     renderReactDashboard();
   },
@@ -142,6 +155,10 @@ watch(
 );
 
 onUnmounted(() => {
+  if (unregisterLocaleListener) {
+    unregisterLocaleListener();
+    unregisterLocaleListener = null;
+  }
   if (reactRoot) {
     try {
       reactRoot.unmount();

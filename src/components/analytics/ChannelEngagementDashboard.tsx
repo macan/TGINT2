@@ -13,6 +13,7 @@ import {
   Legend,
   Cell
 } from "recharts";
+import { t } from "../../i18n";
 
 export interface PostItem {
   _index?: number;
@@ -76,10 +77,25 @@ export const parsePostDate = (rawDate: any): Date => {
   return new Date(NaN);
 };
 
+export interface ChannelMetadata {
+  title?: string;
+  subscribers?: number | string;
+  members?: number | string;
+  participants_count?: number | string;
+  type?: string;
+  photo?: string;
+  description?: string;
+  about?: string;
+  [key: string]: any;
+}
+
 export interface ChannelEngagementDashboardProps {
   posts: PostItem[];
   channelName: string;
+  metadata?: ChannelMetadata | null;
+  subscribersCount?: number;
   isDark?: boolean;
+  locale?: string;
   onPostClick?: (post: PostItem) => void;
   onExploreChannel?: (channel: string) => void;
 }
@@ -166,7 +182,10 @@ const extractForwardDetails = (
 export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProps> = ({
   posts = [],
   channelName,
+  metadata = null,
+  subscribersCount = 0,
   isDark = false,
+  locale,
   onPostClick,
   onExploreChannel
 }) => {
@@ -174,6 +193,19 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
   const [activeTab, setActiveTab] = useState<"growth" | "forwards" | "hourly">("growth");
   const [selectedForwardSource, setSelectedForwardSource] = useState<string | null>(null);
   const [selectedWeekday, setSelectedWeekday] = useState<string | null>(null);
+
+  // Custom subscriber count override / simulation
+  const [customSubscribers, setCustomSubscribers] = useState<number | null>(null);
+  const [isEditingSubscribers, setIsEditingSubscribers] = useState(false);
+  const [subscriberInput, setSubscriberInput] = useState("");
+  const [isAssessmentExpanded, setIsAssessmentExpanded] = useState(true);
+
+  // Effective subscribers count (from profile metadata or user simulation)
+  const effectiveSubscribers = useMemo(() => {
+    if (customSubscribers !== null && customSubscribers > 0) return customSubscribers;
+    const fromProps = Number(subscribersCount || metadata?.subscribers || metadata?.members || metadata?.participants_count || 0);
+    return isNaN(fromProps) ? 0 : fromProps;
+  }, [customSubscribers, subscribersCount, metadata]);
 
   // Format numbers compactly (e.g. 1.2k, 450k, 1.5M)
   const formatNumber = (num: number): string => {
@@ -219,9 +251,9 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           rawPost: sanitizeObject(p),
           timestamp: d.getTime(),
           dateObj: d,
-          dateStr: d.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
-          timeStr: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
-          fullDate: d.toLocaleString(),
+          dateStr: d.toLocaleDateString(locale || undefined, { month: "short", day: "numeric" }),
+          timeStr: d.toLocaleTimeString(locale || undefined, { hour: "2-digit", minute: "2-digit" }),
+          fullDate: d.toLocaleString(locale || undefined),
           hour: d.getHours(),
           dayIndex: dayIdx,
           weekday: weekdayKey,
@@ -251,7 +283,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
         movingAvgViews: avgViews
       };
     });
-  }, [posts]);
+  }, [posts, locale]);
 
   // Zoom state: window indices in the filtered dataset
   const [zoomWindow, setZoomWindow] = useState<{ start: number; end: number } | null>(null);
@@ -492,10 +524,10 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
       }))
       .sort((a, b) => b.count - a.count);
 
-    const topSource = topSources[0] ? `${topSources[0].name} (${topSources[0].count})` : "100% Native";
+    const topSource = topSources[0] ? `${topSources[0].name} (${topSources[0].count})` : t("analytics.native100");
     const topSourceFull = topSources[0]
       ? `${topSources[0].name} (${topSources[0].count} posts, avg ${formatNumber(topSources[0].avgViews)} views)`
-      : "No forwarded-in messages detected";
+      : t("analytics.noForwardDetected");
 
     let maxPost = processedData[0];
     for (const p of processedData) {
@@ -535,7 +567,177 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
       maxPost,
       peakHour
     };
-  }, [processedData]);
+  }, [processedData, locale]);
+
+  // Channel Impact & Audience Viability Evaluator
+  // Synthesizes Average Views and Subscriber/Member count to evaluate Popularity, Importance, Utility, and Attractability
+  const assessment = useMemo(() => {
+    const subs = effectiveSubscribers;
+    const avgV = kpis.avgViews;
+    const hasSubscribers = subs > 0;
+
+    // View-to-Subscriber Ratio (Engagement Penetration Rate per Post)
+    const vsr = hasSubscribers ? (avgV / subs) * 100 : 0;
+    const vsrFormatted = hasSubscribers ? vsr.toFixed(1) : "--";
+
+    // 1. Popularity Score (0 - 100): Absolute audience size + absolute view volume
+    let popularityScore = 0;
+    let popularityTier = "";
+    if (hasSubscribers) {
+      // 0 to 1M subscribers = 0 to 50 pts; 0 to 100k avg views = 0 to 50 pts
+      const subsLog = Math.min(50, (Math.log10(Math.max(10, subs)) / 6) * 50);
+      const viewsLog = Math.min(50, (Math.log10(Math.max(10, avgV)) / 5) * 50);
+      popularityScore = Math.round(Math.min(100, Math.max(10, subsLog + viewsLog)));
+    } else {
+      popularityScore = Math.round(Math.min(100, (Math.log10(Math.max(10, avgV)) / 5) * 100));
+    }
+
+    if (popularityScore >= 80) popularityTier = t("analytics.popularityTiers.tier1");
+    else if (popularityScore >= 65) popularityTier = t("analytics.popularityTiers.tier2");
+    else if (popularityScore >= 45) popularityTier = t("analytics.popularityTiers.tier3");
+    else if (popularityScore >= 25) popularityTier = t("analytics.popularityTiers.tier4");
+    else popularityTier = t("analytics.popularityTiers.tier5");
+
+    // 2. Importance & Authority Score (0 - 100): High VSR penetration + original reporting
+    const nativeRatio = Number(kpis.nativeCount) / Math.max(1, kpis.totalPosts);
+    let importanceScore = 0;
+    let importanceTier = "";
+    if (hasSubscribers) {
+      // Standard healthy Telegram VSR is 15-35%. VSR >= 35% gives top engagement score.
+      const vsrPts = Math.min(60, (vsr / 35) * 60);
+      const nativePts = nativeRatio * 25; // Original reporting vs forward aggregation
+      const scalePts = Math.min(15, (Math.log10(Math.max(10, subs)) / 6) * 15);
+      importanceScore = Math.round(Math.min(100, Math.max(10, vsrPts + nativePts + scalePts)));
+    } else {
+      importanceScore = Math.round(Math.min(100, Math.max(15, 45 + nativeRatio * 40)));
+    }
+
+    if (importanceScore >= 80) importanceTier = t("analytics.importanceTiers.tier1");
+    else if (importanceScore >= 65) importanceTier = t("analytics.importanceTiers.tier2");
+    else if (importanceScore >= 45) importanceTier = t("analytics.importanceTiers.tier3");
+    else importanceTier = t("analytics.importanceTiers.tier4");
+
+    // 3. Utility & Signal-to-Noise Score (0 - 100): Predictable attention, active retention
+    let utilityScore = 0;
+    let utilityTier = "";
+    const peakMulti = avgV > 0 && kpis.maxPost ? kpis.maxPost.views / avgV : 1;
+    // Lower volatility signals consistent reliable utility
+    const consistencyScore = Math.max(10, 40 - Math.min(25, (peakMulti - 1) * 8));
+    if (hasSubscribers) {
+      const activeScore = Math.min(40, (vsr / 30) * 40);
+      utilityScore = Math.round(Math.min(100, Math.max(10, activeScore + consistencyScore + nativeRatio * 20)));
+    } else {
+      utilityScore = Math.round(Math.min(100, Math.max(20, 50 + consistencyScore + nativeRatio * 20)));
+    }
+
+    if (utilityScore >= 80) utilityTier = t("analytics.utilityTiers.tier1");
+    else if (utilityScore >= 60) utilityTier = t("analytics.utilityTiers.tier2");
+    else if (utilityScore >= 40) utilityTier = t("analytics.utilityTiers.tier3");
+    else utilityTier = t("analytics.utilityTiers.tier4");
+
+    // 4. Attractability & Virality Score (0 - 100): Outward viral expansion, external pull
+    let attractabilityScore = 0;
+    let attractabilityTier = "";
+    const viralPeakPts = Math.min(40, (peakMulti / 4) * 40);
+    const forwardInBonus = (Number(kpis.forwardInRatio) / 100) * 15;
+    if (hasSubscribers) {
+      // If VSR >= 50%, content is heavily forwarded to external channels
+      const externalExpansionPts = Math.min(45, (vsr / 50) * 45);
+      attractabilityScore = Math.round(Math.min(100, Math.max(10, externalExpansionPts + viralPeakPts + forwardInBonus)));
+    } else {
+      attractabilityScore = Math.round(Math.min(100, Math.max(15, 45 + viralPeakPts + forwardInBonus)));
+    }
+
+    if (attractabilityScore >= 80) attractabilityTier = t("analytics.attractabilityTiers.tier1");
+    else if (attractabilityScore >= 60) attractabilityTier = t("analytics.attractabilityTiers.tier2");
+    else if (attractabilityScore >= 40) attractabilityTier = t("analytics.attractabilityTiers.tier3");
+    else attractabilityTier = t("analytics.attractabilityTiers.tier4");
+
+    // Qualitative Verdict & Health Assessment
+    let verdictTitle = "";
+    let verdictBadge = "";
+    let verdictColor: "emerald" | "purple" | "sky" | "amber" | "rose" | "blue" = "sky";
+    let audienceQuality = "";
+    let explanation = "";
+
+    if (hasSubscribers) {
+      if (vsr >= 100) {
+        verdictTitle = "Viral Outward Sensation";
+        verdictBadge = t("analytics.badgeHyperViral");
+        verdictColor = "purple";
+        audienceQuality = t("analytics.qualityViralSpillover");
+        explanation = t("analytics.explanationViral", {
+          avg: formatNumber(avgV),
+          subs: formatNumber(subs),
+          vsr: vsrFormatted
+        });
+      } else if (vsr >= 40) {
+        verdictTitle = "High-Authority Powerhouse";
+        verdictBadge = t("analytics.badgeTopEngagement");
+        verdictColor = "emerald";
+        audienceQuality = t("analytics.qualityHyperActiveCore");
+        explanation = t("analytics.explanationTop", {
+          vsr: vsrFormatted
+        });
+      } else if (vsr >= 15) {
+        verdictTitle = "Established & Popular Hub";
+        verdictBadge = t("analytics.badgeHealthyBenchmark");
+        verdictColor = "sky";
+        audienceQuality = t("analytics.qualityAuthenticSteady");
+        explanation = t("analytics.explanationHealthy", {
+          vsr: vsrFormatted
+        });
+      } else if (vsr >= 5) {
+        verdictTitle = "Broad Broadcast / Muted Audience";
+        verdictBadge = t("analytics.badgeModerateReach");
+        verdictColor = "amber";
+        audienceQuality = t("analytics.qualityPassiveFollowing");
+        explanation = t("analytics.explanationModerate", {
+          vsr: vsrFormatted
+        });
+      } else {
+        verdictTitle = "Low-Penetration / Inactive Risk";
+        verdictBadge = t("analytics.badgeLowEngagement");
+        verdictColor = "rose";
+        audienceQuality = t("analytics.qualityGhostAudienceRisk");
+        explanation = t("analytics.explanationLow", {
+          vsr: vsrFormatted,
+          subs: formatNumber(subs)
+        });
+      }
+    } else {
+      verdictTitle = "Active Post Stream";
+      verdictBadge = t("analytics.badgeViewsActive");
+      verdictColor = "blue";
+      audienceQuality = t("analytics.qualityUnlistedSubscribers");
+      explanation = t("analytics.explanationUnlisted", {
+        avg: formatNumber(avgV),
+        min: formatNumber(avgV * 3),
+        max: formatNumber(avgV * 6)
+      });
+    }
+
+    return {
+      subs,
+      hasSubscribers,
+      avgViews: avgV,
+      vsr,
+      vsrFormatted,
+      popularityScore,
+      popularityTier,
+      importanceScore,
+      importanceTier,
+      utilityScore,
+      utilityTier,
+      attractabilityScore,
+      attractabilityTier,
+      verdictTitle,
+      verdictBadge,
+      verdictColor,
+      audienceQuality,
+      explanation
+    };
+  }, [effectiveSubscribers, kpis, locale]);
 
   // Aggregate 24-hour distribution pattern
   const hourlyData = useMemo(() => {
@@ -643,11 +845,11 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
         <div className="flex items-center justify-between gap-3 pb-2 border-b border-black/5 dark:border-white/10 mb-2">
           <div className="flex items-center gap-1.5">
             <span className="font-extrabold text-[11px] uppercase tracking-wider text-sky-600 dark:text-sky-400">
-              Post #{data?.postIndex || label}
+              {t("analytics.postNumber", { number: data?.postIndex || label })}
             </span>
             {data?.views > 0 && data?.views === kpis.maxPost?.views && (
               <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-500 text-[9px] font-bold">
-                Peak 🏆
+                {t("analytics.peakBadge")}
               </span>
             )}
           </div>
@@ -661,12 +863,12 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           <div className="mb-2.5">
             {data.isForwardIn ? (
               <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800/60">
-                <span>📥 Forward from:</span>
-                <span className="font-mono">{data.forwardSource || "External Channel"}</span>
+                <span>{t("analytics.forwardFromLabel")}</span>
+                <span className="font-mono">{data.forwardSource || t("analytics.externalChannel")}</span>
               </div>
             ) : (
               <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700">
-                <span>📝 Original Native Post</span>
+                <span>{t("analytics.originalNativePost")}</span>
               </div>
             )}
           </div>
@@ -675,7 +877,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
         <div className="space-y-1.5 font-mono text-[11px]">
           {data?.views !== undefined && (
             <div className="flex items-center justify-between gap-4">
-              <span className="text-stone-500 dark:text-stone-400">Views:</span>
+              <span className="text-stone-500 dark:text-stone-400">{t("analytics.viewsLabel")}</span>
               <span className="font-bold text-sky-600 dark:text-sky-400 tabular-nums">
                 {data.views.toLocaleString()}
               </span>
@@ -683,7 +885,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           )}
           {data?.movingAvgViews !== undefined && (
             <div className="flex items-center justify-between gap-4">
-              <span className="text-stone-500 dark:text-stone-400">5-Post Avg:</span>
+              <span className="text-stone-500 dark:text-stone-400">{t("analytics.movingAvgLabel")}</span>
               <span className="font-bold text-amber-600 dark:text-amber-400 tabular-nums">
                 {data.movingAvgViews.toLocaleString()}
               </span>
@@ -691,7 +893,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           )}
           {data?.postsCount !== undefined && (
             <div className="flex items-center justify-between gap-4">
-              <span className="text-stone-500 dark:text-stone-400">Posts Published:</span>
+              <span className="text-stone-500 dark:text-stone-400">{t("analytics.postsPublishedLabel")}</span>
               <span className="font-bold text-indigo-600 dark:text-indigo-400 tabular-nums">
                 {data.postsCount}
               </span>
@@ -699,7 +901,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           )}
           {data?.avgViews !== undefined && (
             <div className="flex items-center justify-between gap-4">
-              <span className="text-stone-500 dark:text-stone-400">Avg Views / Post:</span>
+              <span className="text-stone-500 dark:text-stone-400">{t("analytics.avgViewsPostLabel")}</span>
               <span className="font-bold text-sky-600 dark:text-sky-400 tabular-nums">
                 {data.avgViews.toLocaleString()}
               </span>
@@ -716,7 +918,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
         {data?.rawPost && onPostClick && (
           <div className="mt-2.5 pt-2 border-t border-black/5 dark:border-white/10 flex items-center justify-between">
             <span className="text-[10px] text-gray-400 dark:text-gray-500 font-sans">
-              Post details
+              {t("analytics.postDetails")}
             </span>
             <button
               type="button"
@@ -727,7 +929,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
               }}
               className="text-[10px] text-sky-600 dark:text-sky-400 font-bold hover:text-sky-700 dark:hover:text-sky-300 hover:underline cursor-pointer flex items-center gap-1 bg-sky-50 dark:bg-sky-950/50 px-2.5 py-1 rounded-lg border border-sky-200/50 dark:border-sky-800/50 transition-all active:scale-95 shadow-xs"
             >
-              <span>View post</span>
+              <span>{t("analytics.viewPost")}</span>
               <span aria-hidden="true">→</span>
             </button>
           </div>
@@ -745,10 +947,10 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           </svg>
         </div>
         <h4 className="text-base font-bold text-gray-800 dark:text-gray-100 mb-1">
-          No Engagement Metrics Available Yet
+          {t("analytics.noMetricsTitle")}
         </h4>
         <p className="text-xs text-gray-500 dark:text-gray-400 max-w-sm mx-auto">
-          Explore or scrape posts for <span className="font-mono text-blue-500">@{channelName}</span> to populate views growth, forward-in analysis, and hourly publishing cadence.
+          {t("analytics.noMetricsDesc", { channel: channelName })}
         </p>
       </div>
     );
@@ -761,7 +963,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
         {/* Metric 1: Avg Views */}
         <div className="p-4 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200/80 dark:border-gray-700/80 shadow-xs flex flex-col justify-between">
           <span className="text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center justify-between">
-            <span>Avg Views / Post</span>
+            <span>{t("analytics.avgViews")}</span>
             <span className="text-sky-500 text-xs font-mono">👁️</span>
           </span>
           <div className="mt-2">
@@ -769,7 +971,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
               {formatNumber(kpis.avgViews)}
             </span>
             <div className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-0.5">
-              {formatNumber(kpis.totalViews)} total impressions
+              {t("analytics.totalImpressions", { count: formatNumber(kpis.totalViews) })}
             </div>
           </div>
         </div>
@@ -777,7 +979,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
         {/* Metric 2: Forward-In Content Ratio */}
         <div className="p-4 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200/80 dark:border-gray-700/80 shadow-xs flex flex-col justify-between">
           <span className="text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center justify-between">
-            <span>Forward-In Ratio</span>
+            <span>{t("analytics.forwardInRatio")}</span>
             <span className="text-emerald-500 text-xs font-mono">📥</span>
           </span>
           <div className="mt-2">
@@ -785,7 +987,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
               {kpis.forwardInRatio}%
             </span>
             <div className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-0.5">
-              {kpis.forwardInCount} forwarded · {kpis.nativeCount} original
+              {t("analytics.forwardVsOriginal", { forwarded: kpis.forwardInCount, original: kpis.nativeCount })}
             </div>
           </div>
         </div>
@@ -793,7 +995,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
         {/* Metric 3: Top Upstream Source */}
         <div className="p-4 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200/80 dark:border-gray-700/80 shadow-xs flex flex-col justify-between">
           <span className="text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center justify-between">
-            <span>Top Forward Source</span>
+            <span>{t("analytics.topForwardSource")}</span>
             <span className="text-emerald-500 text-xs font-mono">🔗</span>
           </span>
           <div className="mt-2">
@@ -804,9 +1006,11 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
               {kpis.topSource}
             </span>
             <div className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-0.5 truncate">
-              {kpis.uniqueSourcesCount > 0
-                ? `${kpis.uniqueSourcesCount} upstream channel${kpis.uniqueSourcesCount > 1 ? "s" : ""} detected`
-                : "All messages created natively"}
+              {kpis.uniqueSourcesCount > 1
+                ? t("analytics.upstreamChannelsDetected", { count: kpis.uniqueSourcesCount })
+                : kpis.uniqueSourcesCount === 1
+                ? t("analytics.upstreamChannelDetected")
+                : t("analytics.allNativeMessages")}
             </div>
           </div>
         </div>
@@ -814,7 +1018,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
         {/* Metric 4: Forwarded vs Native Views */}
         <div className="p-4 rounded-2xl bg-white dark:bg-gray-800 border border-gray-200/80 dark:border-gray-700/80 shadow-xs flex flex-col justify-between">
           <span className="text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center justify-between">
-            <span>Fwd vs Native Views</span>
+            <span>{t("analytics.fwdVsNativeViews")}</span>
             <span className="text-indigo-500 text-xs font-mono">⚖️</span>
           </span>
           <div className="mt-2">
@@ -835,16 +1039,336 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
             </div>
             <div className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-0.5 truncate">
               {kpis.forwardInCount === 0
-                ? "No forwarded posts"
+                ? t("analytics.noForwardedPosts")
                 : kpis.forwardInAvgViews >= kpis.nativeAvgViews
-                ? "Forwarded content performs higher"
-                : "Native content performs higher"}
+                ? t("analytics.fwdPerformsHigher")
+                : t("analytics.nativePerformsHigher")}
             </div>
           </div>
         </div>
       </div>
 
-      {/* 2. Interactive Chart Canvas Card */}
+      {/* 2. Channel Viability, Popularity, Importance, Utility & Attractability Assessment */}
+      <div className="bg-gradient-to-br from-white via-sky-50/20 to-indigo-50/20 dark:from-gray-800 dark:via-gray-800/90 dark:to-gray-900 rounded-3xl border border-gray-200/90 dark:border-gray-700/80 p-5 sm:p-6 shadow-xs transition-all">
+        {/* Header with Title, Overall Verdict Badge, and Expand/Collapse */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-4 border-b border-gray-150 dark:border-gray-700/60">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="p-2.5 rounded-2xl bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20 shrink-0">
+              <span className="text-lg">🧠</span>
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-extrabold text-gray-900 dark:text-white uppercase tracking-tight">
+                  {t("analytics.assessmentTitle")}
+                </h3>
+                <span
+                  className={`px-2.5 py-0.5 rounded-full text-[10px] font-black tracking-wide border shadow-2xs ${
+                    assessment.verdictColor === "purple"
+                      ? "bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-950/80 dark:text-purple-300 dark:border-purple-700"
+                      : assessment.verdictColor === "emerald"
+                      ? "bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950/80 dark:text-emerald-300 dark:border-emerald-700"
+                      : assessment.verdictColor === "amber"
+                      ? "bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950/80 dark:text-amber-300 dark:border-amber-700"
+                      : assessment.verdictColor === "rose"
+                      ? "bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-950/80 dark:text-rose-300 dark:border-rose-700"
+                      : "bg-sky-100 text-sky-800 border-sky-300 dark:bg-sky-950/80 dark:text-sky-300 dark:border-sky-700"
+                  }`}
+                >
+                  {assessment.verdictBadge}
+                </span>
+              </div>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                {assessment.hasSubscribers
+                  ? t("analytics.synthesizingWithSubscribers", {
+                      avg: formatNumber(kpis.avgViews),
+                      subs: formatNumber(assessment.subs)
+                    })
+                  : t("analytics.synthesizingEstimated", {
+                      avg: formatNumber(kpis.avgViews)
+                    })}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 self-end md:self-center shrink-0">
+            {/* Quick Subscribers Calibrator button */}
+            <button
+              type="button"
+              onClick={() => {
+                setIsEditingSubscribers(!isEditingSubscribers);
+                if (!isEditingSubscribers) {
+                  setSubscriberInput(String(assessment.subs || ""));
+                }
+              }}
+              className="px-2.5 py-1 rounded-xl text-[11px] font-bold bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
+              title="Calibrate or simulate different subscriber counts"
+            >
+              <span>⚙️</span>
+              <span>{isEditingSubscribers ? t("analytics.closeCalibration") : t("analytics.calibrateAudience")}</span>
+            </button>
+
+            {/* Toggle Expand / Minimize */}
+            <button
+              type="button"
+              onClick={() => setIsAssessmentExpanded(!isAssessmentExpanded)}
+              className="p-1.5 rounded-xl text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer"
+              title={isAssessmentExpanded ? t("analytics.collapseEvaluation") : t("analytics.expandEvaluation")}
+            >
+              <svg
+                className={`w-4 h-4 transition-transform duration-200 ${isAssessmentExpanded ? "rotate-180" : ""}`}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {/* Subscriber Calibration Drawer (Optional Simulator) */}
+        {isEditingSubscribers && (
+          <div className="mt-3.5 p-3.5 bg-sky-50/70 dark:bg-sky-950/40 rounded-2xl border border-sky-200/60 dark:border-sky-800/60 flex flex-wrap items-center justify-between gap-3 text-xs animate-fadeIn">
+            <div className="space-y-0.5">
+              <span className="font-bold text-sky-900 dark:text-sky-200">
+                {t("analytics.calibrateTitle")}
+              </span>
+              <p className="text-[11px] text-sky-700/80 dark:text-sky-300/80">
+                {t("analytics.calibrateDesc")}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-1">
+                {[1000, 10000, 50000, 250000].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => {
+                      setCustomSubscribers(preset);
+                      setSubscriberInput(String(preset));
+                    }}
+                    className={`px-2 py-0.5 rounded-lg text-[10px] font-mono font-bold border transition-colors cursor-pointer ${
+                      assessment.subs === preset
+                        ? "bg-sky-600 text-white border-sky-600"
+                        : "bg-white dark:bg-gray-800 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800 hover:bg-sky-100"
+                    }`}
+                  >
+                    {formatNumber(preset)}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="number"
+                  min="1"
+                  step="100"
+                  placeholder="e.g. 25000"
+                  value={subscriberInput}
+                  onChange={(e) => setSubscriberInput(e.target.value)}
+                  className="w-24 px-2 py-1 rounded-lg border border-sky-300 dark:border-sky-700 bg-white dark:bg-gray-900 text-xs font-mono font-bold text-gray-900 dark:text-white outline-none focus:ring-1 focus:ring-sky-500"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const parsed = parseInt(subscriberInput, 10);
+                    if (!isNaN(parsed) && parsed > 0) {
+                      setCustomSubscribers(parsed);
+                    }
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-sky-600 text-white font-bold text-xs hover:bg-sky-500 cursor-pointer shadow-2xs"
+                >
+                  {t("analytics.apply")}
+                </button>
+                {customSubscribers !== null && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomSubscribers(null);
+                      setSubscriberInput("");
+                    }}
+                    className="px-2 py-1 rounded-lg text-[10px] text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 hover:underline cursor-pointer"
+                  >
+                    {t("analytics.resetToProfile")}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isAssessmentExpanded && (
+          <div className="mt-5 space-y-5">
+            {/* 4 Core Dimensions Matrix: Popular, Important, Useful, Attractable */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+              {/* Dimension 1: Popularity */}
+              <div className="p-4 rounded-2xl bg-white/80 dark:bg-gray-800/80 border border-gray-200/80 dark:border-gray-700/80 shadow-2xs flex flex-col justify-between space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <span className="text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <span>{t("analytics.popularityScale")}</span>
+                      <span title={t("analytics.popularityScaleDesc")}>ℹ️</span>
+                    </span>
+                    <span className="text-xs font-extrabold text-gray-900 dark:text-white block">
+                      {assessment.popularityTier}
+                    </span>
+                  </div>
+                  <span className="text-xl font-black text-sky-600 dark:text-sky-400 tabular-nums">
+                    {assessment.popularityScore}<span className="text-[11px] font-normal text-gray-400">/100</span>
+                  </span>
+                </div>
+                <div>
+                  <div className="h-1.5 w-full rounded-full bg-gray-150 dark:bg-gray-700 overflow-hidden">
+                    <div
+                      className="h-full bg-sky-500 rounded-full transition-all duration-700"
+                      style={{ width: `${assessment.popularityScore}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-1.5 block">
+                    {assessment.hasSubscribers
+                      ? t("analytics.membersAndAvgViews", {
+                          members: formatNumber(assessment.subs),
+                          avg: formatNumber(kpis.avgViews)
+                        })
+                      : t("analytics.avgViewsPerPost", {
+                          avg: formatNumber(kpis.avgViews)
+                        })}
+                  </span>
+                </div>
+              </div>
+
+              {/* Dimension 2: Importance & Authority */}
+              <div className="p-4 rounded-2xl bg-white/80 dark:bg-gray-800/80 border border-gray-200/80 dark:border-gray-700/80 shadow-2xs flex flex-col justify-between space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <span className="text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <span>{t("analytics.importanceAuthority")}</span>
+                      <span title={t("analytics.importanceAuthorityDesc")}>ℹ️</span>
+                    </span>
+                    <span className="text-xs font-extrabold text-gray-900 dark:text-white block">
+                      {assessment.importanceTier}
+                    </span>
+                  </div>
+                  <span className="text-xl font-black text-emerald-600 dark:text-emerald-400 tabular-nums">
+                    {assessment.importanceScore}<span className="text-[11px] font-normal text-gray-400">/100</span>
+                  </span>
+                </div>
+                <div>
+                  <div className="h-1.5 w-full rounded-full bg-gray-150 dark:bg-gray-700 overflow-hidden">
+                    <div
+                      className="h-full bg-emerald-500 rounded-full transition-all duration-700"
+                      style={{ width: `${assessment.importanceScore}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-1.5 block">
+                    {assessment.hasSubscribers
+                      ? t("analytics.viewPenetrationNative", {
+                          vsr: assessment.vsrFormatted,
+                          count: kpis.nativeCount
+                        })
+                      : t("analytics.nativePostsOriginalRatio", {
+                          count: kpis.nativeCount,
+                          ratio: (100 - Number(kpis.forwardInRatio)).toFixed(0)
+                        })}
+                  </span>
+                </div>
+              </div>
+
+              {/* Dimension 3: Utility & Signal-to-Noise */}
+              <div className="p-4 rounded-2xl bg-white/80 dark:bg-gray-800/80 border border-gray-200/80 dark:border-gray-700/80 shadow-2xs flex flex-col justify-between space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <span className="text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <span>{t("analytics.utilityValue")}</span>
+                      <span title={t("analytics.utilityValueDesc")}>ℹ️</span>
+                    </span>
+                    <span className="text-xs font-extrabold text-gray-900 dark:text-white block">
+                      {assessment.utilityTier}
+                    </span>
+                  </div>
+                  <span className="text-xl font-black text-indigo-600 dark:text-indigo-400 tabular-nums">
+                    {assessment.utilityScore}<span className="text-[11px] font-normal text-gray-400">/100</span>
+                  </span>
+                </div>
+                <div>
+                  <div className="h-1.5 w-full rounded-full bg-gray-150 dark:bg-gray-700 overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-500 rounded-full transition-all duration-700"
+                      style={{ width: `${assessment.utilityScore}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-1.5 block">
+                    {t("analytics.peakViewsSteady", { peak: formatNumber(kpis.maxPost?.views || 0) })}
+                  </span>
+                </div>
+              </div>
+
+              {/* Dimension 4: Attractability & Virality */}
+              <div className="p-4 rounded-2xl bg-white/80 dark:bg-gray-800/80 border border-gray-200/80 dark:border-gray-700/80 shadow-2xs flex flex-col justify-between space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <span className="text-[11px] font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+                      <span>{t("analytics.attractabilityVirality")}</span>
+                      <span title={t("analytics.attractabilityViralityDesc")}>ℹ️</span>
+                    </span>
+                    <span className="text-xs font-extrabold text-gray-900 dark:text-white block">
+                      {assessment.attractabilityTier}
+                    </span>
+                  </div>
+                  <span className="text-xl font-black text-purple-600 dark:text-purple-400 tabular-nums">
+                    {assessment.attractabilityScore}<span className="text-[11px] font-normal text-gray-400">/100</span>
+                  </span>
+                </div>
+                <div>
+                  <div className="h-1.5 w-full rounded-full bg-gray-150 dark:bg-gray-700 overflow-hidden">
+                    <div
+                      className="h-full bg-purple-500 rounded-full transition-all duration-700"
+                      style={{ width: `${assessment.attractabilityScore}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-1.5 block">
+                    {assessment.vsr >= 50 ? t("analytics.viralReachBeyond") : t("analytics.organicCirculation")}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* View-to-Subscriber Ratio (VSR) Benchmark Spectrum & Authenticity Callout */}
+            <div className="p-4 rounded-2xl bg-white dark:bg-gray-800/90 border border-gray-200/70 dark:border-gray-700/70 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="space-y-1.5 max-w-xl">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-black uppercase tracking-wider text-gray-800 dark:text-gray-200">
+                    {t("analytics.audienceHealthDiagnosis")}
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-sky-100 dark:bg-sky-950/80 text-sky-800 dark:text-sky-300 border border-sky-200 dark:border-sky-800 font-mono">
+                    {assessment.audienceQuality}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-600 dark:text-gray-300 leading-relaxed font-sans">
+                  {assessment.explanation}
+                </p>
+              </div>
+
+              {/* VSR Gauge Meter */}
+              {assessment.hasSubscribers && (
+                <div className="shrink-0 p-3 rounded-xl bg-gray-50 dark:bg-gray-900 border border-gray-200/80 dark:border-gray-700/80 text-center min-w-[210px]">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500 block">
+                    {t("analytics.vsrTitle")}
+                  </span>
+                  <div className="text-2xl font-black text-gray-900 dark:text-white tabular-nums tracking-tight my-0.5">
+                    {assessment.vsrFormatted}%
+                  </div>
+                  <div className="text-[10px] font-mono text-gray-500 dark:text-gray-400 flex items-center justify-center gap-1">
+                    <span>{t("analytics.healthyBenchmark")}</span>
+                    <strong className="text-emerald-600 dark:text-emerald-400">{t("analytics.benchmarkRange")}</strong>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 3. Interactive Chart Canvas Card */}
       <div className="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 shadow-sm p-5 sm:p-6 transition-colors">
         {/* Chart Header Toolbar */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-5 border-b border-gray-150 dark:border-gray-700/60 mb-6">
@@ -856,14 +1380,14 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
             </div>
             <div>
               <h3 className="text-sm font-black text-gray-900 dark:text-white uppercase tracking-tight">
-                {activeTab === "growth" && "Chronological Views & Momentum Trajectory"}
-                {activeTab === "forwards" && "Forwarded-In Content Distribution & Upstream Sources"}
-                {activeTab === "hourly" && "24-Hour Publishing Activity Rhythm"}
+                {activeTab === "growth" && t("analytics.growthHeaderTitle")}
+                {activeTab === "forwards" && t("analytics.forwardsHeaderTitle")}
+                {activeTab === "hourly" && t("analytics.hourlyHeaderTitle")}
               </h3>
               <p className="text-[11px] text-gray-400 dark:text-gray-500 font-mono">
-                {activeTab === "growth" && `Showing post views alongside 5-post rolling average for @${channelName}`}
-                {activeTab === "forwards" && `Inflow analysis of messages forwarded into @${channelName} from upstream channels`}
-                {activeTab === "hourly" && `Posting frequency and engagement by time of day (00:00 - 23:00)`}
+                {activeTab === "growth" && t("analytics.growthHeaderSubtitle", { channel: channelName })}
+                {activeTab === "forwards" && t("analytics.forwardsHeaderSubtitle", { channel: channelName })}
+                {activeTab === "hourly" && t("analytics.hourlyHeaderSubtitle")}
               </p>
             </div>
           </div>
@@ -880,7 +1404,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                     : "text-gray-500 hover:text-gray-900 dark:hover:text-white"
                 }`}
               >
-                Views Growth
+                {t("analytics.tabViewsGrowth")}
               </button>
               <button
                 onClick={() => setActiveTab("forwards")}
@@ -890,7 +1414,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                     : "text-gray-500 hover:text-gray-900 dark:hover:text-white"
                 }`}
               >
-                <span>Forward In</span>
+                <span>{t("analytics.tabForwardIn")}</span>
                 {kpis.forwardInCount > 0 && (
                   <span className="px-1.5 py-0.2 rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-mono">
                     {kpis.forwardInCount}
@@ -905,7 +1429,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                     : "text-gray-500 hover:text-gray-900 dark:hover:text-white"
                 }`}
               >
-                24H Rhythms
+                {t("analytics.tab24hRhythms")}
               </button>
             </div>
 
@@ -920,7 +1444,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                       : "text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
                   }`}
                 >
-                  All ({processedData.length})
+                  {t("analytics.timeRangeAll", { count: processedData.length })}
                 </button>
                 <button
                   onClick={() => setTimeRange("50")}
@@ -930,7 +1454,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                       : "text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
                   }`}
                 >
-                  Last 50
+                  {t("analytics.timeRange50")}
                 </button>
                 <button
                   onClick={() => setTimeRange("20")}
@@ -940,7 +1464,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                       : "text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
                   }`}
                 >
-                  Last 20
+                  {t("analytics.timeRange20")}
                 </button>
               </div>
             )}
@@ -954,12 +1478,12 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-[11px] font-mono font-bold">
                 <span className="text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
-                  <span>📥 Forwarded In:</span>
-                  <span>{kpis.forwardInCount} posts ({kpis.forwardInRatio}%)</span>
+                  <span>📥 {t("analytics.forwardedInBanner")}</span>
+                  <span>{t("analytics.postsCountPercent", { count: kpis.forwardInCount, percent: kpis.forwardInRatio })}</span>
                 </span>
                 <span className="text-gray-500 dark:text-gray-400 flex items-center gap-1">
-                  <span>📝 Native:</span>
-                  <span>{kpis.nativeCount} posts ({(100 - Number(kpis.forwardInRatio)).toFixed(1)}%)</span>
+                  <span>📝 {t("analytics.nativeBanner")}</span>
+                  <span>{t("analytics.postsCountPercent", { count: kpis.nativeCount, percent: (100 - Number(kpis.forwardInRatio)).toFixed(1) })}</span>
                 </span>
               </div>
               <div className="h-2 w-full rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden flex">
@@ -978,14 +1502,14 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
             {kpis.topSources.length > 0 && (
               <div className="pt-2 border-t border-gray-200/50 dark:border-gray-700/50 flex flex-wrap items-center gap-2">
                 <span className="text-[11px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mr-1">
-                  Upstream Sources:
+                  {t("analytics.upstreamSourcesTitle")}
                 </span>
                 {selectedForwardSource && (
                   <button
                     onClick={() => setSelectedForwardSource(null)}
                     className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-gray-200 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-300 transition-colors flex items-center gap-1 cursor-pointer"
                   >
-                    <span>Show All Sources</span>
+                    <span>{t("analytics.showAllSources")}</span>
                     <span>&times;</span>
                   </button>
                 )}
@@ -1005,7 +1529,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                           ? "bg-emerald-600 text-white border-emerald-600 shadow-xs"
                           : "bg-white dark:bg-gray-800 text-emerald-700 dark:text-emerald-300 border-emerald-300/40 dark:border-emerald-700/40 hover:bg-emerald-50 dark:hover:bg-emerald-950/40"
                       }`}
-                      title={`${src.count} posts from ${src.name} (Avg ${formatNumber(src.avgViews)} views)`}
+                      title={t("analytics.sourceTooltip", { name: src.name, count: src.count, avg: formatNumber(src.avgViews) })}
                     >
                       <span>{src.name}</span>
                       <span className="px-1.5 py-0.2 rounded bg-black/10 dark:bg-white/10 text-[9px]">
@@ -1027,17 +1551,19 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                 <span aria-hidden="true">🔍</span>
                 <span>
                   {zoomWindow ? (
-                    <>
-                      Zoom: <strong className="font-bold text-sky-800 dark:text-sky-200">{displayData.length}</strong> of {baseData.length} posts ({Math.round((displayData.length / baseData.length) * 100)}%)
-                    </>
+                    t("analytics.zoomStatus", {
+                      current: displayData.length,
+                      total: baseData.length,
+                      percent: Math.round((displayData.length / baseData.length) * 100)
+                    })
                   ) : (
-                    <>Showing all <strong>{baseData.length}</strong> posts · Scroll inside chart to zoom</>
+                    t("analytics.zoomShowingAll", { total: baseData.length })
                   )}
                 </span>
               </span>
               {zoomWindow && (
                 <span className="text-[11px] text-gray-500 dark:text-gray-400 hidden sm:inline">
-                  Drag chart to pan · Click any node to view post
+                  {t("analytics.zoomDragHint")}
                 </span>
               )}
             </div>
@@ -1047,7 +1573,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                 type="button"
                 onClick={handleZoomIn}
                 className="w-7 h-7 rounded-lg bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 text-sm font-bold flex items-center justify-center transition-all cursor-pointer border border-gray-200 dark:border-gray-700 shadow-2xs"
-                title="Zoom in (or mouse wheel up)"
+                title={t("analytics.zoomInBtn")}
               >
                 +
               </button>
@@ -1060,7 +1586,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                     ? "bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 border-gray-200 dark:border-gray-700 cursor-pointer"
                     : "opacity-40 text-gray-400 border-gray-200/40 dark:border-gray-800 cursor-not-allowed"
                 }`}
-                title="Zoom out (or mouse wheel down)"
+                title={t("analytics.zoomOutBtn")}
               >
                 −
               </button>
@@ -1069,9 +1595,9 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                   type="button"
                   onClick={() => setZoomWindow(null)}
                   className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-sky-600 hover:bg-sky-500 text-white shadow-xs transition-all cursor-pointer flex items-center gap-1 ml-0.5"
-                  title="Reset zoom to view all posts"
+                  title={t("analytics.resetZoom")}
                 >
-                  <span>Reset</span>
+                  <span>{t("analytics.resetZoom")}</span>
                   <span className="text-[10px]">↺</span>
                 </button>
               )}
@@ -1151,7 +1677,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                 <Line
                   type="monotone"
                   dataKey="movingAvgViews"
-                  name="5-Post Moving Avg"
+                  name={t("analytics.legendFivePostAvg")}
                   stroke={chartColors.movingAvgLine}
                   strokeWidth={2}
                   strokeDasharray="4 4"
@@ -1191,7 +1717,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                 <Area
                   type="monotone"
                   dataKey="views"
-                  name="Post Views"
+                  name={t("analytics.legendPostViews")}
                   stroke={chartColors.viewsLine}
                   strokeWidth={2}
                   fillOpacity={1}
@@ -1340,7 +1866,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                 />
                 <Bar
                   dataKey="views"
-                  name="Views (Forwarded vs Native)"
+                  name={t("analytics.legendViewsFwdVsNative")}
                   fill={chartColors.forwardInBar}
                   radius={[4, 4, 0, 0]}
                   maxBarSize={36}
@@ -1361,7 +1887,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                 <Line
                   type="monotone"
                   dataKey="movingAvgViews"
-                  name="Views Moving Avg"
+                  name={t("analytics.legendViewsMovingAvg")}
                   stroke={chartColors.movingAvgLine}
                   strokeWidth={2}
                   strokeDasharray="4 4"
@@ -1386,7 +1912,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                 />
                 <Bar
                   dataKey="postsCount"
-                  name="Posts Published"
+                  name={t("analytics.legendPostsPublished")}
                   fill={chartColors.hourlyBar}
                   radius={[4, 4, 0, 0]}
                   maxBarSize={28}
@@ -1407,9 +1933,9 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
         <div className="mt-6 pt-4 border-t border-gray-150 dark:border-gray-750 flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2 font-bold text-gray-500 dark:text-gray-400">
             <span className="flex items-center gap-1.5">
-              <span>📅 Day of Week Density:</span>
+              <span>📅 {t("analytics.dayOfWeekDensity")}</span>
               <span className="text-[10px] font-normal text-gray-400 dark:text-gray-500 font-mono">
-                ({datasetBeforeWeekdayFilter.length} posts)
+                {t("analytics.postsCountParenthesis", { count: datasetBeforeWeekdayFilter.length })}
               </span>
             </span>
             {selectedWeekday && (
@@ -1417,9 +1943,9 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                 type="button"
                 onClick={() => setSelectedWeekday(null)}
                 className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-sky-100 hover:bg-sky-200 dark:bg-sky-950 dark:hover:bg-sky-900 text-sky-700 dark:text-sky-300 transition-colors flex items-center gap-1 cursor-pointer"
-                title="Clear day filter"
+                title={t("analytics.clearDayFilter")}
               >
-                <span>Filter: {selectedWeekday}</span>
+                <span>{t("analytics.filterDay", { day: t(`analytics.weekdays.${selectedWeekday}` as any) || selectedWeekday })}</span>
                 <span>&times;</span>
               </button>
             )}
@@ -1427,6 +1953,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
             {weekdayData.map((w) => {
               const isSelected = selectedWeekday === w.day;
+              const localizedDay = t(`analytics.weekdays.${w.day}` as any) || w.day;
               return (
                 <button
                   type="button"
@@ -1441,12 +1968,17 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                         : "bg-gray-50 dark:bg-gray-900 border-gray-200 dark:border-gray-700 text-gray-800 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800"
                       : "bg-transparent border-dashed border-gray-200 dark:border-gray-800 text-gray-400 opacity-60 hover:opacity-100"
                   }`}
-                  title={`${w.postsCount} posts on ${w.day} (${w.percentage}% of total · Avg ${formatNumber(w.avgViews)} views) · Click to filter`}
+                  title={t("analytics.dayTooltip", {
+                    count: w.postsCount,
+                    day: localizedDay,
+                    percent: w.percentage,
+                    avg: formatNumber(w.avgViews)
+                  })}
                 >
                   <span className="font-bold flex items-center gap-0.5">
-                    <span>{w.day}</span>
+                    <span>{localizedDay}</span>
                     {w.isPeak && w.postsCount > 0 && !isSelected && (
-                      <span className="text-[9px] text-amber-500" title="Peak activity day">⭐</span>
+                      <span className="text-[9px] text-amber-500" title={t("analytics.peakActivityDay")}>⭐</span>
                     )}
                   </span>
                   <span
