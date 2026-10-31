@@ -215,6 +215,7 @@ export default {
     masonryGrid: "瀑布流网格",
     timelineView: "时间线视图",
     articleReaderView: "文章",
+    analyticsView: "数据分析",
     scheduleRepeatly: "循环抓取调度",
     scheduleOnce: "单次抓取调度",
     scheduled: "已调度",

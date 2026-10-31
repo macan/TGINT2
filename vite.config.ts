@@ -33,7 +33,13 @@ export default defineConfig(({mode}) => {
               if (id.includes('lucide-vue-next') || id.includes('lucide-react')) {
                 return 'vendor-icons';
               }
-              if (id.includes('vue') || id.includes('@vue')) {
+              if (id.includes('recharts') || id.includes('d3-')) {
+                return 'vendor-recharts';
+              }
+              if (id.includes('/node_modules/react/') || id.includes('/node_modules/react-dom/') || id.includes('/node_modules/scheduler/')) {
+                return 'vendor-react';
+              }
+              if (id.includes('/node_modules/vue/') || id.includes('/node_modules/@vue/')) {
                 return 'vendor-vue';
               }
               return 'vendor-libs';

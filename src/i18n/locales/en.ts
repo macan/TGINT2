@@ -215,6 +215,7 @@ export default {
     masonryGrid: "Masonry Grid",
     timelineView: "Timeline View",
     articleReaderView: "Article",
+    analyticsView: "Analytics",
     scheduleRepeatly: "Schedule Repeatly",
     scheduleOnce: "Schedule Once",
     scheduled: "Scheduled",

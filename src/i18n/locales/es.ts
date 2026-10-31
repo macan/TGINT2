@@ -200,6 +200,7 @@ export default {
     masonryGrid: "Cuadrícula",
     timelineView: "Línea de Tiempo",
     articleReaderView: "Artículo",
+    analyticsView: "Analítica",
     scheduleRepeatly: "Programar Periódicamente",
     scheduleOnce: "Programar una Vez",
     scheduled: "Programado",

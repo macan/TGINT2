@@ -200,6 +200,7 @@ export default {
     masonryGrid: "Сетка",
     timelineView: "Хронология",
     articleReaderView: "Статья",
+    analyticsView: "Аналитика",
     scheduleRepeatly: "Цикличный Парсинг",
     scheduleOnce: "Разовый Парсинг",
     scheduled: "Запланировано",

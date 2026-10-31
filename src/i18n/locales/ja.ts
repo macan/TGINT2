@@ -200,6 +200,7 @@ export default {
     masonryGrid: "グリッド表示",
     timelineView: "タイムライン表示",
     articleReaderView: "記事",
+    analyticsView: "アナリティクス",
     scheduleRepeatly: "定時スクレイピング",
     scheduleOnce: "1回スクレイピング",
     scheduled: "予約済み",

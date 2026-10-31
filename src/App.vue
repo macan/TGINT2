@@ -77,6 +77,7 @@ import {
   CornerDownLeft,
   Eye,
   BookOpen,
+  BarChart3,
   Move,
   ArrowRightLeft,
   ArrowUpDown,
@@ -134,6 +135,7 @@ import {
 const AutoClassDistributionChart = defineAsyncComponent(() => import("./components/AutoClassDistributionChart.vue"));
 const TypesTab = defineAsyncComponent(() => import("./components/TypesTab.vue"));
 const ArticleReaderView = defineAsyncComponent(() => import("./components/ArticleReaderView.vue"));
+const ChannelAnalyticsWrapper = defineAsyncComponent(() => import("./components/ChannelAnalyticsWrapper.vue"));
 
 const preloadSecondaryViews = () => {
   if (typeof window === "undefined") return;
@@ -142,6 +144,7 @@ const preloadSecondaryViews = () => {
     import("./components/TypesTab.vue");
     import("./components/ArticleReaderView.vue");
     import("./components/AutoClassDistributionChart.vue");
+    import("./components/ChannelAnalyticsWrapper.vue");
     import("cytoscape");
   } catch {
     // Ignore preload errors
@@ -9094,7 +9097,15 @@ const pollLatestPosts = async () => {
 
       // Remove emphasis after a few seconds
       setTimeout(() => {
-        posts.value.forEach(p => delete p.isNewEmphasized);
+        posts.value.forEach((p) => {
+          if (p && p.isNewEmphasized) {
+            try {
+              p.isNewEmphasized = false;
+            } catch {
+              // ignore if read-only
+            }
+          }
+        });
       }, 15000);
     }
   } catch (err) {
@@ -9327,7 +9338,7 @@ const error = ref("");
 const profileError = ref("");
 const metadata = ref<any>(null);
 const posts = ref<any[]>([]);
-const viewMode = ref<"list" | "masonry" | "timeline" | "reader">("list");
+const viewMode = ref<"list" | "masonry" | "timeline" | "reader" | "analytics">("list");
 const isPostModalVisible = ref(false);
 const selectedPost = ref<any>(null);
 const selectedUsernamesExplorer = ref<string[]>([]);
@@ -18849,10 +18860,11 @@ onUnmounted(() => {
                     <PanelLeft v-else class="h-5 w-5" />
                   </button>
                   <div class="flex items-center">
-                    <MessageSquare
+                    <component
+                      :is="viewMode === 'analytics' ? BarChart3 : MessageSquare"
                       class="h-6 w-6 mr-3 text-blue-600 dark:text-blue-400"
                     />
-                    {{ viewMode === "list" ? t('explorer.feed') : t('explorer.medias') }}
+                    {{ viewMode === "list" ? t('explorer.feed') : viewMode === "analytics" ? t('explorer.analyticsView') : t('explorer.medias') }}
                   </div>
                   <span
                     v-if="latestPostTimeDelta"
@@ -18947,6 +18959,18 @@ onUnmounted(() => {
                     <BookOpen class="h-4 w-4" />
                   </button>
                   <button
+                    @click="viewMode = 'analytics'"
+                    :class="[
+                      'p-2 rounded-lg transition-all flex items-center justify-center gap-1.5',
+                      viewMode === 'analytics'
+                        ? 'bg-white dark:bg-gray-800 text-blue-600 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700'
+                        : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300',
+                    ]"
+                    :title="t('explorer.analyticsView')"
+                  >
+                    <BarChart3 class="h-4 w-4" />
+                  </button>
+                  <button
                     @mousedown="startLongPress"
                     @mouseup="cancelLongPress"
                     @mouseleave="cancelLongPress"
@@ -18954,7 +18978,7 @@ onUnmounted(() => {
                     @touchend="cancelLongPress"
                     @click="handleScrapeClick"
                     :disabled="isScrapingDisabled"
-                    class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                    class="ml-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[10px] font-bold shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                     :title="isRepeatScheduleMode ? t('explorer.scheduleRepeatly') : t('explorer.scheduleOnce')"
                   >
                     <ListFilter class="h-3 w-3" />
@@ -20113,6 +20137,17 @@ onUnmounted(() => {
                     @add-to-workspace="addToWorkspaceFromPost"
                     @open-post-modal="openPostModal"
                     @load-more="loadMoreRenderedPosts"
+                  />
+                </div>
+
+                <!-- Channel Engagement & Activity Analytics (Recharts) -->
+                <div v-else-if="viewMode === 'analytics'" class="pb-12">
+                  <ChannelAnalyticsWrapper
+                    :posts="posts"
+                    :channel-name="channelName || currentChannelName || ''"
+                    :is-dark="isDark"
+                    @open-post-modal="openPostModal"
+                    @explore-channel="(targetChannel) => { channelName = targetChannel.replace(/^@/, ''); searchChannel(); }"
                   />
                 </div>
 
@@ -21450,74 +21485,405 @@ onUnmounted(() => {
             @click="closePostModal"
           >
             <div
-              class="bg-white dark:bg-gray-800 rounded-3xl shadow-2xl p-6 sm:p-8 max-w-2xl w-full max-h-[90vh] overflow-y-auto relative"
+              class="bg-white dark:bg-gray-800 rounded-3xl shadow-2xl p-6 sm:p-8 max-w-3xl w-full max-h-[90vh] overflow-y-auto relative border border-gray-100 dark:border-gray-700 custom-scrollbar"
               @click.stop
             >
+              <!-- Close Button -->
               <button
                 @click="closePostModal"
-                class="absolute top-4 right-4 p-2 bg-gray-100 dark:bg-gray-700 rounded-full text-gray-500 hover:text-gray-900 dark:hover:text-white transition-colors"
+                class="absolute top-5 right-5 p-2 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 rounded-full text-gray-500 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer z-20"
+                :title="t('common.close')"
               >
                 <X class="h-5 w-5" />
               </button>
 
-              <div v-if="selectedPost" class="space-y-6">
+              <div v-if="selectedPost" class="space-y-5">
+                <!-- Post Card Header (matching List mode) -->
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-100 dark:border-gray-700/60 pr-10">
+                  <div class="flex items-center gap-3 min-w-0">
+                    <div
+                      class="w-11 h-11 rounded-2xl bg-gray-50 dark:bg-gray-900 flex items-center justify-center font-bold text-xs overflow-hidden ring-1 ring-gray-150 dark:ring-gray-850 shadow-sm shrink-0"
+                    >
+                      <img
+                        :src="getPostAvatarUrl(selectedPost)"
+                        @error="handleImageError"
+                        :alt="t('channels.avatar')"
+                        class="w-full h-full object-cover"
+                      />
+                    </div>
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-1.5 flex-wrap">
+                        <button
+                          class="text-sm font-extrabold text-gray-900 dark:text-white hover:text-teal-600 dark:hover:text-teal-400 transition-colors text-left truncate max-w-[220px]"
+                          @click="searchXUser(selectedPost.data?.author || selectedPost.data?.user || metadata?.name)"
+                        >
+                          {{ selectedPost.data?.author || selectedPost.data?.user || metadata?.title || metadata?.name || channelName }}
+                        </button>
+                        <span
+                          v-if="getToolName(selectedPost)"
+                          class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full"
+                          :class="
+                            getToolName(selectedPost) === 'TGB'
+                              ? 'bg-purple-50 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400 border border-purple-100/50 dark:border-purple-900/10'
+                              : 'bg-gray-50 dark:bg-gray-900 text-gray-450 border border-gray-150/40 dark:border-gray-800'
+                          "
+                        >
+                          {{ getToolName(selectedPost) }}
+                        </span>
+                        <span
+                          v-if="getUsername(selectedPost)"
+                          class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full bg-teal-50 dark:bg-teal-950/30 text-teal-650 dark:text-teal-400 border border-teal-100/40 dark:border-teal-900/20"
+                        >
+                          {{ getUsername(selectedPost) }}
+                        </span>
+                        <span
+                          v-if="selectedPost.key || selectedPost.id"
+                          class="text-[9px] font-mono font-bold px-2 py-0.5 rounded-md bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border border-gray-200 dark:border-gray-700"
+                        >
+                          ID: {{ selectedPost.key ? selectedPost.key.split('.').pop() : selectedPost.id }}
+                        </span>
+                      </div>
+                      <p
+                        class="flex items-center gap-2 text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-1"
+                      >
+                        <span>{{ formatDate(selectedPost.data?.date) }}</span>
+                        <span v-if="selectedPost.mtime" class="text-[9px] text-teal-600 dark:text-teal-400">
+                          ({{ t('explorer.scraped', { date: formatScrapedDate(selectedPost.mtime) }) }})
+                        </span>
+                      </p>
+                    </div>
+                  </div>
+
+                  <!-- Header Action Controls -->
+                  <div class="flex items-center gap-1.5 flex-wrap sm:self-center">
+                    <button
+                      @click.stop="addToWorkspaceFromPost(selectedPost)"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
+                      :title="t('explorer.addToWorkspace')"
+                    >
+                      <Layout class="h-3 w-3 text-teal-500" />
+                      <span>{{ t('explorer.workspace') }}</span>
+                    </button>
+                    <button
+                      @click.stop="sharePost(selectedPost)"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-850 text-gray-650 dark:text-gray-300 rounded-lg border border-gray-200/50 dark:border-gray-700/50 text-[10px] font-extrabold transition-all cursor-pointer"
+                      :title="t('explorer.share')"
+                    >
+                      <Share2 class="h-3 w-3 text-teal-500" />
+                      <span>{{ t('explorer.share') }}</span>
+                    </button>
+                    <a
+                      v-if="selectedPost.url || selectedPost.link"
+                      :href="selectedPost.url || selectedPost.link"
+                      target="_blank"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/50 dark:hover:bg-teal-900/40 text-teal-600 dark:text-teal-450 rounded-lg border border-teal-100 dark:border-teal-900/30 text-[10px] font-extrabold transition-all cursor-pointer"
+                    >
+                      <span>{{ t('explorer.view') }}</span>
+                      <ExternalLink class="h-3 w-3" />
+                    </a>
+                  </div>
+                </div>
+
+                <!-- Sub Group Status Badge -->
                 <div
-                  class="rounded-2xl overflow-hidden shadow-inner border border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 flex items-center justify-center"
+                  v-if="selectedPost.data?.grouped?.nr > 0"
+                  :class="[
+                    'inline-flex items-center px-2 py-0.5 rounded-md text-[9px] font-mono font-bold uppercase tracking-wider mb-2',
+                    getGroupStyles(selectedPost.data.grouped.root).badge,
+                  ]"
+                >
+                  <Layers class="h-3 w-3 mr-1" />
+                  {{ t('explorer.group') }}: {{ selectedPost.data.grouped.root }}
+                </div>
+
+                <!-- Quoted Reply Message -->
+                <div
+                  v-if="selectedPost.data?.reply && selectedPost.data.reply.length >= 2"
+                  class="border-l-4 border-teal-500 bg-teal-500/[0.03] dark:bg-teal-950/[0.15] p-3.5 rounded-r-2xl border border-teal-100/50 dark:border-teal-900/20"
+                >
+                  <div
+                    class="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-teal-600 dark:text-teal-400 mb-1.5"
+                  >
+                    <div class="flex items-center">
+                      <Reply class="h-3.5 w-3.5 mr-1" />
+                      {{ t('explorer.replyToMessage') }}
+                    </div>
+                    <span
+                      v-if="Array.isArray(selectedPost.data?.reply) && selectedPost.data.reply[0] != null"
+                      class="font-mono bg-teal-50 dark:bg-teal-950/40 px-2 py-0.5 rounded border border-teal-100/50 dark:border-teal-900/10 tracking-normal text-[9px] normal-case"
+                    >
+                      ID: {{ selectedPost.data._tool ? selectedPost.data.reply[0] : String(selectedPost.data.reply[0]).split('/').pop() }}
+                    </span>
+                  </div>
+                  <div
+                    class="text-gray-600 dark:text-gray-300 text-xs whitespace-pre-wrap break-words italic line-clamp-3"
+                  >
+                    {{ selectedPost.data.reply[1] }}
+                  </div>
+                </div>
+
+                <!-- Forward Area -->
+                <div
+                  v-if="selectedPost.data?.forward_url || selectedPost.data?.forward_from"
+                  class="border-l-4 border-indigo-500 bg-indigo-500/[0.03] dark:bg-indigo-950/[0.15] p-3.5 rounded-r-2xl border border-indigo-100/50 dark:border-indigo-900/20"
+                >
+                  <div
+                    class="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-indigo-600 dark:text-indigo-400 mb-1.5"
+                  >
+                    <div class="flex items-center">
+                      <Forward class="h-3.5 w-3.5 mr-1" />
+                      {{ t('explorer.forwardedMessage') }}
+                    </div>
+                    <span
+                      v-if="getForwardInfo(selectedPost)?.date"
+                      class="font-mono bg-indigo-50 dark:bg-indigo-950/40 px-2 py-0.5 rounded border border-indigo-100/50 dark:border-indigo-900/10 tracking-normal text-[9px] normal-case"
+                    >
+                      {{ getForwardInfo(selectedPost)?.date }}
+                    </span>
+                  </div>
+                  <div class="flex items-start justify-between gap-4">
+                    <div class="text-gray-600 dark:text-gray-300 text-xs font-medium whitespace-pre-wrap break-words italic line-clamp-3 flex-1">
+                      {{ getForwardInfo(selectedPost)?.text }}
+                    </div>
+                    <button
+                      v-if="getForwardInfo(selectedPost)?.target"
+                      @click="closePostModal(); activeTab = 'explorer'; channelName = getForwardInfo(selectedPost).target; searchChannel()"
+                      class="inline-flex items-center gap-1 px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/40 dark:hover:bg-indigo-900/70 text-indigo-600 dark:text-indigo-400 rounded-xl border border-indigo-200/50 dark:border-indigo-850 text-[10px] font-bold transition-all shrink-0 cursor-pointer self-start"
+                      :title="t('explorer.viewChannel')"
+                    >
+                      <span>@{{ getForwardInfo(selectedPost).target }}</span>
+                      <ChevronRight class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Post Text Content with Translate & Search -->
+                <div
+                  v-if="selectedPost.data?.content || selectedPost.data?.rawcontent"
+                  class="flex items-start gap-3 bg-gray-50/60 dark:bg-gray-900/40 p-4 rounded-2xl border border-gray-150 dark:border-gray-800"
+                >
+                  <div
+                    class="text-gray-800 dark:text-gray-200 text-sm leading-relaxed whitespace-pre-wrap break-words flex-1"
+                    v-html="getSafePostContent(selectedPost)"
+                  ></div>
+                  <div class="flex items-center gap-1 shrink-0">
+                    <button
+                      @click="translatePost(selectedPost)"
+                      class="p-1.5 text-gray-400 hover:text-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-md transition-colors cursor-pointer"
+                      :title="t('explorer.translate')"
+                    >
+                      <Languages v-if="!isTranslating[selectedPost.key]" class="h-4 w-4" />
+                      <Loader2 v-else class="h-4 w-4 animate-spin" />
+                    </button>
+                    <button
+                      @click="searchOnGoogle(selectedPost.data?.content || selectedPost.data?.rawcontent)"
+                      class="p-1.5 text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors cursor-pointer"
+                      :title="t('explorer.searchOnGoogle')"
+                    >
+                      <Search class="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Contact Subcard (if shared) -->
+                <div
+                  v-if="selectedPost.data?.contact && Object.keys(selectedPost.data.contact).length > 0"
+                  class="rounded-xl border border-blue-200/50 dark:border-blue-800/50 bg-blue-50/50 dark:bg-blue-900/20 p-4 shadow-sm"
+                >
+                  <div class="flex items-center mb-2">
+                    <div class="h-7 w-7 rounded-full bg-blue-100 dark:bg-blue-800/50 flex shrink-0 items-center justify-center text-blue-600 dark:text-blue-400 mr-2.5">
+                      <User class="h-4 w-4" />
+                    </div>
+                    <div class="text-[10px] font-black tracking-widest text-blue-500 uppercase">
+                      {{ t('explorer.contactShared') }}
+                    </div>
+                  </div>
+                  <div class="space-y-1 bg-white/60 dark:bg-gray-900/60 p-3 rounded-lg border border-gray-100/50 dark:border-gray-700/50 text-xs">
+                    <div v-if="selectedPost.data.contact.first_name || selectedPost.data.contact.last_name" class="font-bold text-gray-900 dark:text-gray-100">
+                      {{ selectedPost.data.contact.first_name }} {{ selectedPost.data.contact.last_name }}
+                    </div>
+                    <div v-if="selectedPost.data.contact.phone_number" class="flex items-center text-gray-700 dark:text-gray-300">
+                      <Phone class="h-3 w-3 mr-1 text-blue-500/70" />
+                      {{ selectedPost.data.contact.phone_number }}
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Media Embeds -->
+                <div
+                  v-if="selectedPost.data?.photos && selectedPost.data.photos.length > 0"
+                  class="rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center"
+                  @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_0`)"
                 >
                   <img
-                    v-if="
-                      selectedPost.data?.photos &&
-                      selectedPost.data.photos.length > 0
-                    "
                     :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_0`"
-                    class="w-full h-auto max-h-[400px] object-contain"
-                    referrerpolicy="no-referrer"
-                  />
-                  <video
-                    v-else-if="
-                      selectedPost.data?.videos &&
-                      selectedPost.data.videos.length > 0
-                    "
-                    controls
-                    preload="metadata"
-                    playsinline
-                    class="w-full h-auto bg-black max-h-[400px]"
-                  >
-                    <source :src="getVideoUrl(selectedPost)" type="video/mp4" />
-                  </video>
-                  <img
-                    v-else-if="
-                      selectedPost.data?.linkPreview &&
-                      selectedPost.data.linkPreview.image
-                    "
-                    :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_l_0`"
-                    class="w-full h-auto max-h-[400px] object-contain"
+                    class="w-full h-auto max-h-[450px] object-contain mx-auto transition-transform duration-700 group-hover/media:scale-105"
+                    alt="Post photo"
                     referrerpolicy="no-referrer"
                   />
                 </div>
 
-                <div class="space-y-4">
-                  <h2 class="text-xl font-black text-gray-900 dark:text-white">
-                    {{
-                      selectedPost.data?.author ||
-                      selectedPost.data?.user ||
-                      metadata.title ||
-                      t('search.postDetails')
-                    }}
-                  </h2>
-                  <p
-                    class="text-gray-600 dark:text-gray-400 text-sm leading-relaxed"
-                    v-html=getSafePostContent(selectedPost)
+                <div
+                  v-else-if="selectedPost.data?.videos && selectedPost.data.videos.length > 0"
+                  class="rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-black flex items-center justify-center"
+                >
+                  <video
+                    controls
+                    preload="metadata"
+                    playsinline
+                    class="w-full h-auto max-h-[450px]"
                   >
-                  </p>
-                  <div
-                    class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400"
-                  >
-                    <span>{{ formatDate(selectedPost.data?.date) }}</span>
-                    <span v-if="selectedPost.data?.views != null"
-                      >{{ formatViews(selectedPost.data.views) }} {{ t('search.views') }}</span
-                    >
+                    <source :src="getVideoUrl(selectedPost)" type="video/mp4" />
+                  </video>
+                </div>
+
+                <div
+                  v-if="selectedPost.data?.documents && selectedPost.data.documents.length > 0 && selectedPost.data.documents[0].mime_type && selectedPost.data.documents[0].mime_type.startsWith('image/')"
+                  class="rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center"
+                  @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-doc/${selectedPost.key}`)"
+                >
+                  <img
+                    :src="`https://i.gogingko.net/api/v1/v/telegram-doc/${selectedPost.key}`"
+                    class="w-full h-auto max-h-[450px] object-contain mx-auto transition-transform duration-700 group-hover/media:scale-105"
+                    alt="Document photo"
+                    referrerpolicy="no-referrer"
+                  />
+                </div>
+
+                <!-- Document Files Preview -->
+                <div
+                  v-for="(doc, dIdx) in getPostDocuments(selectedPost)"
+                  :key="dIdx"
+                  class="rounded-2xl overflow-hidden border border-gray-150 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/50 flex items-center p-3.5 shadow-sm"
+                >
+                  <div class="mr-3 shrink-0">
+                    <FileText class="h-8 w-8 text-red-500" />
                   </div>
+                  <div class="flex-1 min-w-0">
+                    <h4 class="text-xs font-bold text-gray-900 dark:text-white mb-0.5 truncate">
+                      {{ doc.title }}
+                    </h4>
+                    <a
+                      v-if="doc.url"
+                      :href="doc.url"
+                      target="_blank"
+                      class="text-[11px] text-blue-600 dark:text-blue-400 hover:underline font-semibold"
+                    >
+                      {{ t('explorer.viewDocument') }}
+                    </a>
+                  </div>
+                </div>
+
+                <!-- Link Preview Card -->
+                <div
+                  v-if="selectedPost.data?.linkPreview"
+                  class="rounded-2xl overflow-hidden border border-gray-150 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/50 flex flex-col sm:flex-row shadow-sm"
+                >
+                  <div
+                    v-if="selectedPost.data.linkPreview.image"
+                    class="w-full sm:w-48 h-36 bg-gray-100 dark:bg-gray-900 shrink-0 overflow-hidden cursor-zoom-in"
+                    @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_l_0`)"
+                  >
+                    <img
+                      :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_l_0`"
+                      class="w-full h-full object-cover"
+                      referrerpolicy="no-referrer"
+                    />
+                  </div>
+                  <div class="p-3.5 flex flex-col justify-center min-w-0">
+                    <span v-if="selectedPost.data.linkPreview.site_name" class="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                      {{ selectedPost.data.linkPreview.site_name }}
+                    </span>
+                    <a
+                      v-if="selectedPost.data.linkPreview.url"
+                      :href="selectedPost.data.linkPreview.url"
+                      target="_blank"
+                      class="text-xs font-bold text-blue-600 dark:text-blue-400 hover:underline mb-1 line-clamp-2"
+                    >
+                      {{ selectedPost.data.linkPreview.title || selectedPost.data.linkPreview.url }}
+                    </a>
+                    <p v-if="selectedPost.data.linkPreview.description" class="text-[11px] text-gray-600 dark:text-gray-400 line-clamp-2">
+                      {{ selectedPost.data.linkPreview.description }}
+                    </p>
+                  </div>
+                </div>
+
+                <!-- Footer Metadata & Engagement Stats (matching List mode) -->
+                <div class="pt-4 border-t border-gray-150 dark:border-gray-700/60 flex flex-col gap-3">
+                  <div class="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400 flex-wrap gap-2">
+                    <div class="flex items-center gap-3 flex-wrap">
+                      <!-- Views Badge -->
+                      <span
+                        v-if="selectedPost.data?.views != null"
+                        class="inline-flex items-center font-bold border border-gray-200 dark:border-gray-700 rounded-lg px-2.5 py-1 bg-gray-50 dark:bg-gray-900/60 text-gray-800 dark:text-gray-200 text-xs"
+                      >
+                        <Users class="h-3.5 w-3.5 mr-1.5 text-sky-500" />
+                        {{ formatViews(selectedPost.data.views) }} {{ t('search.views') }}
+                      </span>
+
+                      <!-- Post Reactions -->
+                      <div
+                        v-if="selectedPost.data?.reactions && getParsedReactions(selectedPost.data.reactions).length > 0"
+                        class="flex flex-wrap items-center gap-1.5"
+                      >
+                        <span
+                          v-for="(react, rIdx) in getParsedReactions(selectedPost.data.reactions)"
+                          :key="rIdx"
+                          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-semibold bg-gray-100/70 dark:bg-gray-800/85 border border-gray-200/60 dark:border-gray-700/60 cursor-default select-none shadow-3xs"
+                          :title="`${react.count.toLocaleString()} reactions`"
+                        >
+                          <span class="text-sm leading-none" v-html="react.emoji"></span>
+                          <span class="text-[10px] font-bold font-mono text-gray-500 dark:text-gray-400 tabular-nums">
+                            {{ react.count.toLocaleString() }}
+                          </span>
+                        </span>
+                      </div>
+
+                      <!-- Post Engagement Score & Read Attention -->
+                      <div
+                        v-if="getPostEngagement(selectedPost.key) && getPostEngagement(selectedPost.key)!.effectiveViewTimeSeconds > 0"
+                        class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold bg-teal-50 dark:bg-teal-950/40 text-teal-700 dark:text-teal-300 border border-teal-200/60 dark:border-teal-800/60"
+                        :title="`Attention Score: ${getPostEngagement(selectedPost.key)!.engagementScore.toFixed(2)}x`"
+                      >
+                        <span>{{ getPostEngagement(selectedPost.key)!.engagementScore >= 1.5 ? '🔥' : getPostEngagement(selectedPost.key)!.engagementScore >= 1.0 ? '📖' : '👀' }}</span>
+                        <span>{{ getPostEngagement(selectedPost.key)!.engagementScore.toFixed(2) }}&times; Attention</span>
+                        <span class="text-[9px] opacity-75">({{ getPostEngagement(selectedPost.key)!.effectiveViewTimeSeconds.toFixed(1) }}s)</span>
+                      </div>
+                    </div>
+
+                    <!-- Right ID and Version History -->
+                    <div class="flex items-center gap-2 ml-auto">
+                      <button
+                        v-if="hasOldVersions(selectedPost)"
+                        @click="openOldVersionsModal(selectedPost)"
+                        class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/80 dark:border-amber-800/60 hover:bg-amber-100 transition-all cursor-pointer shadow-3xs"
+                        :title="t('explorer.viewVersionHistory')"
+                      >
+                        <History class="w-3 h-3 text-amber-500" />
+                        <span>{{ t('explorer.oldVersions') }}</span>
+                      </button>
+                      <span
+                        v-if="selectedPost.key"
+                        class="font-mono bg-gray-50 dark:bg-gray-900 border border-gray-200/60 dark:border-gray-700/60 px-2.5 py-1 rounded-lg text-[10px] font-medium text-gray-500 dark:text-gray-400"
+                      >
+                        Key: {{ selectedPost.key }}
+                      </span>
+                    </div>
+                  </div>
+
+                  <!-- Collapsible Raw Post Debug -->
+                  <details
+                    class="bg-gray-50/60 dark:bg-gray-900/40 rounded-xl border border-gray-200/50 dark:border-gray-700/50 p-3 text-xs transition-colors"
+                  >
+                    <summary
+                      class="font-bold text-gray-600 dark:text-gray-400 cursor-pointer outline-none hover:text-gray-900 dark:hover:text-gray-200 text-[11px]"
+                    >
+                      {{ t('explorer.viewRawPostData') }}
+                    </summary>
+                    <pre
+                      class="mt-2.5 overflow-x-auto text-[11px] font-mono text-gray-600 dark:text-gray-400 p-2 bg-black/5 dark:bg-black/30 rounded-lg custom-scrollbar max-h-60"
+                    >{{ JSON.stringify(selectedPost, null, 2) }}</pre>
+                  </details>
                 </div>
               </div>
             </div>
