@@ -132,6 +132,12 @@ import {
   calculatePostEngagementScore,
   type PostViewStats
 } from "./utils";
+import {
+  fetchChannelLanguage,
+  getLanguageDisplayName,
+  getLanguageFlag,
+  formatLanguageCode
+} from "./utils/channelLanguage";
 const AutoClassDistributionChart = defineAsyncComponent(() => import("./components/AutoClassDistributionChart.vue"));
 const TypesTab = defineAsyncComponent(() => import("./components/TypesTab.vue"));
 const ArticleReaderView = defineAsyncComponent(() => import("./components/ArticleReaderView.vue"));
@@ -1035,10 +1041,14 @@ const formatNamespaceMillion = (nkeys?: number) => {
 const fetchNamespaceStats = async () => {
   const namespaces = ['telegram-post', 'telegram-photo', 'telegram-channel', 'telegram-video'];
   try {
-    await Promise.all(
+    await Promise.allSettled(
       namespaces.map(async (ns) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
         try {
-          const res = await fetch(`https://i.gogingko.net/api/v1/vn/${ns}`);
+          const res = await fetch(`https://i.gogingko.net/api/v1/vn/${ns}`, {
+            signal: controller.signal,
+          });
           if (res.ok) {
             const data = await res.json();
             if (data && typeof data.nkeys === 'number') {
@@ -1046,19 +1056,25 @@ const fetchNamespaceStats = async () => {
             }
           }
         } catch (e) {
-          console.error(`Failed to fetch namespace stat for ${ns}:`, e);
+          console.warn(`[Telemetry] Failed to fetch namespace stat for ${ns}, using default fallback:`, e);
+        } finally {
+          clearTimeout(timeoutId);
         }
       })
     );
   } catch (err) {
-    console.error("Failed to fetch namespace stats:", err);
+    console.warn("[Telemetry] Failed to fetch namespace stats:", err);
   }
 };
 
 const fetchCounters = async () => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
   try {
     const yyyymmdd = format(new Date(), "yyyyMMdd");
-    const response = await fetch(`https://i.gogingko.net/api/v1/v/counter/${yyyymmdd}`);
+    const response = await fetch(`https://i.gogingko.net/api/v1/v/counter/${yyyymmdd}`, {
+      signal: controller.signal,
+    });
     if (response.ok) {
       const newCounters = await response.json();
       for (const type in newCounters) {
@@ -1069,69 +1085,91 @@ const fetchCounters = async () => {
       counters.value = newCounters;
     }
   } catch (err) {
-    console.error("Failed to fetch counters:", err);
+    console.warn("[Telemetry] Failed to fetch counters:", err);
+  } finally {
+    clearTimeout(timeoutId);
   }
 };
 
 const fetchChannelNamesByLang = async (langCode: string) => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
   try {
     const response = await fetch(`https://i.gogingko.net/api/v1/lang/${langCode}`, {
       method: "GET",
+      signal: controller.signal,
     });
     if (!response.ok) throw new Error("Failed to fetch channel names: " + response.status);
     const text = await response.text();
     return text.split(',').map(name => name.trim()).filter(name => name.length > 0);
   } catch (err) {
-    console.error("Failed to fetch channel names:", err);
+    console.warn("[Telemetry] Failed to fetch channel names:", err);
     return [];
+  } finally {
+    clearTimeout(timeoutId);
   }
 };
 
 const fetchPendingJobs = async () => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
   try {
     const response = await fetch("https://i.gogingko.net/api/v1/z/test2/set0", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
+      signal: controller.signal,
     });
     if (response.ok) {
       const data = await response.json();
       pendingJobs.value = data.gso?.result ?? 0;
     }
   } catch (err) {
-    console.error("Failed to fetch pending jobs:", err);
+    console.warn("[Telemetry] Failed to fetch pending jobs:", err);
+  } finally {
+    clearTimeout(timeoutId);
   }
 };
 
 const fetchQ0Jobs = async () => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
   try {
     const response = await fetch("https://i.gogingko.net/api/v1/z/test2/q0", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
+      signal: controller.signal,
     });
     if (response.ok) {
       const data = await response.json();
       pendingQ0Jobs.value = data.gso?.result ?? 0;
     }
   } catch (err) {
-    console.error("Failed to fetch q0 pending jobs:", err);
+    console.warn("[Telemetry] Failed to fetch q0 pending jobs:", err);
+  } finally {
+    clearTimeout(timeoutId);
   }
 };
 
 const fetchQ1Jobs = async () => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
   try {
     const response = await fetch("https://i.gogingko.net/api/v1/z/test2/q1", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
+      signal: controller.signal,
     });
     if (response.ok) {
       const data = await response.json();
       pendingQ1Jobs.value = data.gso?.result ?? 0;
     }
   } catch (err) {
-    console.error("Failed to fetch q1 pending jobs:", err);
+    console.warn("[Telemetry] Failed to fetch q1 pending jobs:", err);
+  } finally {
+    clearTimeout(timeoutId);
   }
 };
 
@@ -9580,6 +9618,55 @@ const classifyChannelWithSystemOne = async (targetChannelName?: string) => {
   }
 };
 
+// Channel Language State & Lookup (using Types tab JOB_TG/metas endpoint)
+const channelLanguage = ref<string | null>(null);
+const isFetchingChannelLanguage = ref(false);
+let languageLookupRequestId = 0;
+
+const loadChannelLanguage = async (targetChannel?: string) => {
+  const target = targetChannel || metadata.value?.username || metadata.value?.name || currentChannelName.value || channelName.value;
+  if (!target) {
+    channelLanguage.value = null;
+    return;
+  }
+  const clean = target.replace(/^@/, "").trim();
+  if (!clean) return;
+
+  const currentReq = ++languageLookupRequestId;
+  isFetchingChannelLanguage.value = true;
+
+  // Build sample text fallback from metadata description or posts
+  let sampleText = metadata.value?.description || metadata.value?.about || "";
+  if (!sampleText && posts.value && posts.value.length > 0) {
+    sampleText = posts.value.slice(0, 5).map(p => p.content || p.data?.message || "").join(" ");
+  }
+
+  try {
+    const lang = await fetchChannelLanguage(clean, sampleText);
+    if (currentReq === languageLookupRequestId) {
+      channelLanguage.value = lang;
+    }
+  } catch (err) {
+    console.warn("[ChannelLanguage] Error loading language:", err);
+  } finally {
+    if (currentReq === languageLookupRequestId) {
+      isFetchingChannelLanguage.value = false;
+    }
+  }
+};
+
+watch(
+  () => metadata.value ? (metadata.value.username || metadata.value.name || currentChannelName.value || channelName.value) : null,
+  (newTarget) => {
+    if (newTarget) {
+      loadChannelLanguage(newTarget);
+    } else {
+      channelLanguage.value = null;
+    }
+  },
+  { immediate: true }
+);
+
 // SystemOne Timeline Date Range Bucket Auto-Class Classification
 const TIMELINE_BUCKET_CACHE_STORAGE_KEY = "timeline_bucket_autoclass_cache_v1";
 
@@ -13015,6 +13102,9 @@ const searchChannel = async () => {
   channelClassification.value = null;
   isClassifyingChannel.value = false;
   classificationRequestId.value++;
+  channelLanguage.value = null;
+  isFetchingChannelLanguage.value = false;
+  languageLookupRequestId++;
   
   let name = channelName.value.trim().replace(/^@/, "");
   let binit = null;
@@ -18066,8 +18156,9 @@ onUnmounted(() => {
                     <span>@{{ metadata.username || metadata.name || channelName }}</span>
                   </p>
 
-                  <!-- Channel Classification Badge (SystemOne AI) -->
-                  <div v-if="channelClassification || isClassifyingChannel" class="mb-4 flex items-center gap-2 flex-wrap">
+                  <!-- Channel Classification Badge (SystemOne AI) & Channel Language Tag Div -->
+                  <div v-if="channelClassification || isClassifyingChannel || channelLanguage || isFetchingChannelLanguage" class="mb-4 flex items-center gap-2 flex-wrap">
+                    <!-- Primary Topics tag div -->
                     <div
                       v-if="channelClassification"
                       class="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold border shadow-3xs transition-all"
@@ -18090,6 +18181,28 @@ onUnmounted(() => {
                     >
                       <Loader2 class="h-3 w-3 animate-spin text-teal-500" />
                       <span class="text-[11px]">Classifying topic...</span>
+                    </div>
+
+                    <!-- Channel Language Tag Div (in icon) after Primary Topics tag div -->
+                    <div
+                      v-if="channelLanguage"
+                      class="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold border shadow-3xs transition-all bg-violet-50 text-violet-700 dark:bg-violet-950/70 dark:text-violet-300 border-violet-200 dark:border-violet-800/80 hover:scale-105 cursor-default select-none"
+                      :title="`${t('explorer.primaryLanguage') || 'Primary Language'}: ${getLanguageDisplayName(channelLanguage)} (${channelLanguage})`"
+                    >
+                      <Languages class="h-3.5 w-3.5 shrink-0 text-violet-600 dark:text-violet-400" />
+                      <span v-if="getLanguageFlag(channelLanguage)" class="text-xs leading-none select-none">{{ getLanguageFlag(channelLanguage) }}</span>
+                      <span>{{ getLanguageDisplayName(channelLanguage) }}</span>
+                      <span class="text-[10px] opacity-75 font-mono uppercase ml-0.5 font-bold">
+                        ({{ formatLanguageCode(channelLanguage) }})
+                      </span>
+                    </div>
+                    <div
+                      v-else-if="isFetchingChannelLanguage"
+                      class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-semibold bg-gray-50 dark:bg-gray-800/60 text-gray-500 dark:text-gray-400 border border-gray-200/60 dark:border-gray-700/60 animate-pulse select-none"
+                      :title="t('explorer.detectingLanguage') || 'Detecting channel language...'"
+                    >
+                      <Languages class="h-3.5 w-3.5 animate-pulse text-violet-500 shrink-0" />
+                      <span class="text-[11px]">{{ t('explorer.detectingLanguage') || 'Detecting language...' }}</span>
                     </div>
                   </div>
 
@@ -18904,6 +19017,17 @@ onUnmounted(() => {
                   >
                     <Loader2 class="h-2.5 w-2.5 animate-spin text-teal-500" />
                     <span>Classifying topic...</span>
+                  </span>
+
+                  <!-- Channel Language Badge in Feed Header -->
+                  <span
+                    v-if="channelLanguage"
+                    class="ml-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-bold shadow-xs transition-colors select-none bg-violet-50 text-violet-700 dark:bg-violet-950/70 dark:text-violet-300 border-violet-200 dark:border-violet-800/80"
+                    :title="`${t('explorer.primaryLanguage') || 'Primary Language'}: ${getLanguageDisplayName(channelLanguage)} (${channelLanguage})`"
+                  >
+                    <Languages class="h-3 w-3 shrink-0 text-violet-600 dark:text-violet-400" />
+                    <span v-if="getLanguageFlag(channelLanguage)" class="text-[10px] leading-none">{{ getLanguageFlag(channelLanguage) }}</span>
+                    <span>{{ formatLanguageCode(channelLanguage) }}</span>
                   </span>
                 </h3>
 

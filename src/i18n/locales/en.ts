@@ -168,6 +168,8 @@ export default {
     rawJson: "Raw JSON",
     channelNotFound: "Channel not found or private.",
     noPostsFound: "No posts found for this channel.",
+    primaryLanguage: "Primary Language",
+    detectingLanguage: "Detecting language...",
     loadEarlierPosts: "Load Earlier Posts",
     loadingPosts: "Loading earlier posts...",
     channelStats: "Channel Statistics",

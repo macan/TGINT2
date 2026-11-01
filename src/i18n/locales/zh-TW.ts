@@ -168,6 +168,8 @@ export default {
     rawJson: "原始 JSON",
     channelNotFound: "頻道不存在或設為私人。",
     noPostsFound: "未找到此頻道的訊息動態。",
+    primaryLanguage: "主要語言",
+    detectingLanguage: "正在識別語言...",
     loadEarlierPosts: "載入更早貼文",
     loadingPosts: "正在載入歷史貼文...",
     channelStats: "頻道綜合統計",

@@ -168,6 +168,8 @@ export default {
     rawJson: "生JSON",
     channelNotFound: "チャンネルが見つからないか非公開です。",
     noPostsFound: "このチャンネルの投稿は見つかりませんでした。",
+    primaryLanguage: "主要言語",
+    detectingLanguage: "言語を検出中...",
     loadEarlierPosts: "以前の投稿を読み込む",
     loadingPosts: "投稿を読み込み中...",
     channelStats: "チャンネル統計",

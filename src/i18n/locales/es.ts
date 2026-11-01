@@ -168,6 +168,8 @@ export default {
     rawJson: "JSON sin procesar",
     channelNotFound: "Canal no encontrado o privado.",
     noPostsFound: "No se encontraron publicaciones para este canal.",
+    primaryLanguage: "Idioma principal",
+    detectingLanguage: "Detectando idioma...",
     loadEarlierPosts: "Cargar Publicaciones Anteriores",
     loadingPosts: "Cargando publicaciones...",
     channelStats: "Estadísticas del Canal",

@@ -168,6 +168,8 @@ export default {
     rawJson: "原始 JSON",
     channelNotFound: "频道不存在或设为私密。",
     noPostsFound: "未找到该频道的消息动态。",
+    primaryLanguage: "主要语言",
+    detectingLanguage: "正在识别语言...",
     loadEarlierPosts: "加载更早消息",
     loadingPosts: "正在加载更早历史消息...",
     channelStats: "频道综合统计",

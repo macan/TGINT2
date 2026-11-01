@@ -168,6 +168,8 @@ export default {
     rawJson: "Исходный JSON",
     channelNotFound: "Канал не найден или закрыт.",
     noPostsFound: "Нет постов в данном канале.",
+    primaryLanguage: "Основной язык",
+    detectingLanguage: "Определение языка...",
     loadEarlierPosts: "Загрузить более ранние",
     loadingPosts: "Загрузка ранних постов...",
     channelStats: "Статистика канала",
