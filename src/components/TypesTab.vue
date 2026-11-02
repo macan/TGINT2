@@ -82,12 +82,13 @@ export interface ClassifiedChannel {
 
 // Ingestion and Streaming State
 const items = ref<ClassifiedChannel[]>([]);
+const channelIndexMap = new Map<string, number>();
 const isStreaming = ref(false);
 const isPaused = ref(false);
 const isCompleted = ref(false);
 const streamError = ref<string | null>(null);
 const loadedBytes = ref(0);
-const totalBytesEstimated = ref(88906687); // Exact size on i.gogingko.net: 88,906,687 bytes (~88.9 MB)
+const totalBytesEstimated = ref(139125200); // Exact size on i.gogingko.net: 139125200 bytes (~139.13 MB)
 const totalParsedLines = ref(0);
 
 // Memory safety limit for multi-million scaling
@@ -516,6 +517,7 @@ const startStreaming = async (resume = false) => {
 
   if (!resume) {
     items.value = [];
+    channelIndexMap.clear();
     loadedBytes.value = 0;
     decompressedBytesCount.value = 0;
     totalParsedLines.value = 0;
@@ -575,7 +577,18 @@ const startStreaming = async (resume = false) => {
 
   const flushBatch = () => {
     if (batch.length > 0) {
-      items.value.push(...batch);
+      for (let i = 0; i < batch.length; i++) {
+        const item = batch[i];
+        const channelKey = item.channel.replace(/^@/, "").trim().toLowerCase();
+        const existingIdx = channelIndexMap.get(channelKey);
+        if (existingIdx !== undefined) {
+          // Channel already exists: update existing entry with latest classification data
+          items.value[existingIdx] = item;
+        } else {
+          channelIndexMap.set(channelKey, items.value.length);
+          items.value.push(item);
+        }
+      }
       batch.length = 0;
       lastFlushTime = Date.now();
     }
@@ -688,6 +701,7 @@ const startStreaming = async (resume = false) => {
       if (resume && loadedBytes.value > 0 && !isUsingLz4.value) {
         console.warn("Server responded with 200 OK instead of 206 Partial Content. Resetting offset to 0 to prevent duplicates.");
         items.value = [];
+        channelIndexMap.clear();
         loadedBytes.value = 0;
         decompressedBytesCount.value = 0;
         totalParsedLines.value = 0;
@@ -1002,8 +1016,17 @@ const filteredItems = computed(() => {
   const rvPreset = readValuePreset.value;
   const minRv = readValueMinScore.value;
 
+  const seenChannels = new Set<string>();
+
   return items.value
     .filter((item) => {
+      // Defensive uniqueness check: ensure no duplicate channels ever reach VNode rendering
+      const chKey = item.channel.replace(/^@/, "").trim().toLowerCase();
+      if (!chKey || seenChannels.has(chKey)) {
+        return false;
+      }
+      seenChannels.add(chKey);
+
       // 0. Natural Language Distribution-Aware Filter (Kev SystemOne)
       if (activeNlFilter.value && !matchesDistributionAwareFilter(item, activeNlFilter.value)) {
         return false;
