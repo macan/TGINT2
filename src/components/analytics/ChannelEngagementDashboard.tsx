@@ -243,6 +243,22 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
 
         const fwdDetails = extractForwardDetails(pData);
 
+        // Extract author/user to evaluate group conversational diversity
+        const author = String(
+          pData.author ||
+          pData.user ||
+          (pData.from_id ? String(pData.from_id) : "") ||
+          (p as any).author ||
+          (p as any).user ||
+          ""
+        ).trim();
+
+        // Check if message is a reply to another post (conversational dialogue)
+        const hasReply = Boolean(
+          pData.reply &&
+          (Array.isArray(pData.reply) ? pData.reply.length > 0 : Boolean(pData.reply))
+        );
+
         // Map d.getDay() (0=Sun, 1=Mon, ..., 6=Sat) into fixed canonical day keys
         const dayIdx = d.getDay();
         const weekdayKey = WEEKDAY_KEYS[dayIdx]; // "Sun" | "Mon" | "Tue" | "Wed" | "Thu" | "Fri" | "Sat"
@@ -262,7 +278,9 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           forwardSource: fwdDetails.source,
           forwardUsername: fwdDetails.username,
           forwardUrl: fwdDetails.url,
-          snippet: cleanSnippet
+          snippet: cleanSnippet,
+          author,
+          hasReply
         };
       })
       .filter((p): p is NonNullable<typeof p> => p !== null && !isNaN(p.timestamp));
@@ -549,7 +567,44 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
         peakH = Number(h);
       }
     }
-    const peakHour = `${String(peakH).padStart(2, "0")}:00 - ${String((peakH + 1) % 24).padStart(2, "0")}:00`;
+    const peakHour = `${String(peakH).padStart(2, "0")}:00`;
+    // Community & User Participation Analytics
+    const authorCounts: Record<string, number> = {};
+    let repliesCount = 0;
+
+    for (const p of processedData) {
+      if (p.hasReply) {
+        repliesCount += 1;
+      }
+      if (p.author) {
+        authorCounts[p.author] = (authorCounts[p.author] || 0) + 1;
+      }
+    }
+
+    const uniqueAuthorsCount = Object.keys(authorCounts).length;
+    // Recurring active contributors who posted >= 2 times in the sample
+    const rawCoreUsersCount = Object.values(authorCounts).filter((cnt) => cnt >= 2).length;
+
+    // Target categorization: discussion group vs broadcast channel
+    // When there is only one core user (or <= 1 unique author), this means it is a channel that broadcasts posts.
+    // Discussion groups strictly require multiple recurring core users (rawCoreUsersCount >= 2) and multiple participants.
+    const metaType = String(metadata?.type || "").toLowerCase();
+    const isExplicitChannel = metaType.includes("channel") || metaType.includes("broadcast");
+    const isExplicitGroup = (metaType.includes("group") || metaType.includes("supergroup") || metaType.includes("chat")) && !isExplicitChannel;
+
+    // A target is ONLY a multi-user group if there are at least 2 recurring core users AND at least 2 unique authors.
+    // If rawCoreUsersCount <= 1 or uniqueAuthorsCount <= 1 or isExplicitChannel, it is a broadcast channel.
+    const isMultiUserGroup = !isExplicitChannel && rawCoreUsersCount >= 2 && uniqueAuthorsCount >= 2 && (isExplicitGroup || uniqueAuthorsCount >= 3 || repliesCount >= 2);
+
+    // For a broadcast channel (only 1 broadcaster), community peer core user base is 0.
+    const coreUsersCount = isMultiUserGroup ? rawCoreUsersCount : 0;
+    const postsPerUser = uniqueAuthorsCount > 0 ? (totalPosts / uniqueAuthorsCount).toFixed(1) : "1.0";
+    const replyRatio = totalPosts > 0 ? ((repliesCount / totalPosts) * 100).toFixed(1) : "0";
+
+    const topAuthors = Object.entries(authorCounts)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
 
     return {
       totalPosts,
@@ -565,25 +620,46 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
       uniqueSourcesCount: topSources.length,
       topSources,
       maxPost,
-      peakHour
+      peakHour,
+      uniqueAuthorsCount,
+      coreUsersCount,
+      postsPerUser,
+      replyRatio,
+      topAuthors,
+      isMultiUserGroup
     };
-  }, [processedData, locale]);
+  }, [processedData, metadata, locale]);
 
   // Channel Impact & Audience Viability Evaluator
-  // Synthesizes Average Views and Subscriber/Member count to evaluate Popularity, Importance, Utility, and Attractability
+  // Synthesizes Average Views, Subscriber/Member count, and Community Dynamics to evaluate Popularity, Importance, Utility, and Attractability
   const assessment = useMemo(() => {
     const subs = effectiveSubscribers;
     const avgV = kpis.avgViews;
     const hasSubscribers = subs > 0;
 
+    const isGroup = kpis.isMultiUserGroup;
+    const uniqueAuthors = kpis.uniqueAuthorsCount;
+    const coreUsers = kpis.coreUsersCount;
+    const ppu = parseFloat(kpis.postsPerUser) || 1;
+    const replyPct = parseFloat(kpis.replyRatio) || 0;
+
     // View-to-Subscriber Ratio (Engagement Penetration Rate per Post)
     const vsr = hasSubscribers ? (avgV / subs) * 100 : 0;
     const vsrFormatted = hasSubscribers ? vsr.toFixed(1) : "--";
 
-    // 1. Popularity Score (0 - 100): Absolute audience size + absolute view volume
+    // 1. Popularity Score (0 - 100)
     let popularityScore = 0;
     let popularityTier = "";
-    if (hasSubscribers) {
+    if (isGroup) {
+      // In a group, per-post views reflect instant chat turns; popularity is formed by:
+      // - overall community scale (subscribers/members)
+      // - broad active participant pool (unique authors talking in group)
+      // - daily chat turnover views
+      const subsLog = hasSubscribers ? Math.min(45, (Math.log10(Math.max(10, subs)) / 4.8) * 45) : 25;
+      const authorsPts = Math.min(35, (uniqueAuthors / 18) * 35);
+      const viewsPts = Math.min(20, (Math.log10(Math.max(10, avgV)) / 3.2) * 20);
+      popularityScore = Math.round(Math.min(100, Math.max(25, subsLog + authorsPts + viewsPts)));
+    } else if (hasSubscribers) {
       // 0 to 1M subscribers = 0 to 50 pts; 0 to 100k avg views = 0 to 50 pts
       const subsLog = Math.min(50, (Math.log10(Math.max(10, subs)) / 6) * 50);
       const viewsLog = Math.min(50, (Math.log10(Math.max(10, avgV)) / 5) * 50);
@@ -598,11 +674,18 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
     else if (popularityScore >= 25) popularityTier = t("analytics.popularityTiers.tier4");
     else popularityTier = t("analytics.popularityTiers.tier5");
 
-    // 2. Importance & Authority Score (0 - 100): High VSR penetration + original reporting
+    // 2. Importance & Authority Score (0 - 100)
     const nativeRatio = Number(kpis.nativeCount) / Math.max(1, kpis.totalPosts);
     let importanceScore = 0;
     let importanceTier = "";
-    if (hasSubscribers) {
+    if (isGroup) {
+      // In a group, importance is Core User Base Vitality + Discussion Depth + Community Scale:
+      // Recurring active contributors debating topics + replies connecting thoughts
+      const corePts = Math.min(45, (coreUsers / 6) * 30 + (uniqueAuthors / 15) * 15);
+      const replyPts = Math.min(30, (replyPct / 30) * 30);
+      const scalePts = hasSubscribers ? Math.min(25, (Math.log10(Math.max(10, subs)) / 5) * 25) : 20;
+      importanceScore = Math.round(Math.min(100, Math.max(30, corePts + replyPts + scalePts)));
+    } else if (hasSubscribers) {
       // Standard healthy Telegram VSR is 15-35%. VSR >= 35% gives top engagement score.
       const vsrPts = Math.min(60, (vsr / 35) * 60);
       const nativePts = nativeRatio * 25; // Original reporting vs forward aggregation
@@ -617,13 +700,20 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
     else if (importanceScore >= 45) importanceTier = t("analytics.importanceTiers.tier3");
     else importanceTier = t("analytics.importanceTiers.tier4");
 
-    // 3. Utility & Signal-to-Noise Score (0 - 100): Predictable attention, active retention
+    // 3. Utility & Signal-to-Noise Score (0 - 100)
     let utilityScore = 0;
     let utilityTier = "";
     const peakMulti = avgV > 0 && kpis.maxPost ? kpis.maxPost.views / avgV : 1;
     // Lower volatility signals consistent reliable utility
     const consistencyScore = Math.max(10, 40 - Math.min(25, (peakMulti - 1) * 8));
-    if (hasSubscribers) {
+
+    if (isGroup) {
+      // High utility: real-time peer discussion, Q&A, problem-solving, and conversational density
+      const densityPts = Math.min(40, (ppu / 2.8) * 40);
+      const replyPts = Math.min(35, (replyPct / 25) * 35);
+      const breadthPts = Math.min(25, (uniqueAuthors / 12) * 25);
+      utilityScore = Math.round(Math.min(100, Math.max(35, densityPts + replyPts + breadthPts)));
+    } else if (hasSubscribers) {
       const activeScore = Math.min(40, (vsr / 30) * 40);
       utilityScore = Math.round(Math.min(100, Math.max(10, activeScore + consistencyScore + nativeRatio * 20)));
     } else {
@@ -635,12 +725,19 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
     else if (utilityScore >= 40) utilityTier = t("analytics.utilityTiers.tier3");
     else utilityTier = t("analytics.utilityTiers.tier4");
 
-    // 4. Attractability & Virality Score (0 - 100): Outward viral expansion, external pull
+    // 4. Attractability & Community Stickiness Score (0 - 100)
     let attractabilityScore = 0;
     let attractabilityTier = "";
     const viralPeakPts = Math.min(40, (peakMulti / 4) * 40);
     const forwardInBonus = (Number(kpis.forwardInRatio) / 100) * 15;
-    if (hasSubscribers) {
+
+    if (isGroup) {
+      // In groups, attractability reflects Community Stickiness & Return Rate (conversational gravity)
+      const authorPullPts = Math.min(45, (uniqueAuthors / 10) * 45);
+      const stickinessPts = Math.min(35, (replyPct / 25) * 20 + (ppu / 2.5) * 15);
+      const forwardPts = (Number(kpis.forwardInRatio) / 100) * 20;
+      attractabilityScore = Math.round(Math.min(100, Math.max(30, authorPullPts + stickinessPts + forwardPts)));
+    } else if (hasSubscribers) {
       // If VSR >= 50%, content is heavily forwarded to external channels
       const externalExpansionPts = Math.min(45, (vsr / 50) * 45);
       attractabilityScore = Math.round(Math.min(100, Math.max(10, externalExpansionPts + viralPeakPts + forwardInBonus)));
@@ -653,6 +750,19 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
     else if (attractabilityScore >= 40) attractabilityTier = t("analytics.attractabilityTiers.tier3");
     else attractabilityTier = t("analytics.attractabilityTiers.tier4");
 
+    // Dedicated Community Vitality Score (0 - 100) based on core user retention, replies, and discussion density
+    const communityVitalityScore = Math.round(
+      Math.min(
+        100,
+        Math.max(
+          20,
+          Math.min(45, (coreUsers / 6) * 30 + (uniqueAuthors / 15) * 15) +
+          Math.min(35, (replyPct / 25) * 35) +
+          Math.min(20, (ppu / 2.5) * 20)
+        )
+      )
+    );
+
     // Qualitative Verdict & Health Assessment
     let verdictTitle = "";
     let verdictBadge = "";
@@ -660,9 +770,47 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
     let audienceQuality = "";
     let explanation = "";
 
-    if (hasSubscribers) {
+    if (isGroup) {
+      if (uniqueAuthors >= 8 || coreUsers >= 4 || (uniqueAuthors >= 5 && replyPct >= 20)) {
+        verdictTitle = t("analytics.verdictTitles.vibrantCommunity") || "Vibrant Conversational Community";
+        verdictBadge = t("analytics.badgeCoreCommunity") || "Active Core Community 👥";
+        verdictColor = "emerald";
+        audienceQuality = t("analytics.qualityDedicatedCore") || "High-Retention Core User Base";
+        explanation = t("analytics.explanationGroupVibrant", {
+          authors: uniqueAuthors,
+          msgs: kpis.postsPerUser,
+          replies: kpis.replyRatio,
+          vsr: vsrFormatted,
+          subs: formatNumber(subs),
+          avg: formatNumber(avgV)
+        });
+      } else if (uniqueAuthors >= 3 || coreUsers >= 2 || replyPct >= 10) {
+        verdictTitle = t("analytics.verdictTitles.activeGroup") || "Active Discussion Group";
+        verdictBadge = t("analytics.badgeCommunityDialogue") || "Community Dialogue 💬";
+        verdictColor = "sky";
+        audienceQuality = t("analytics.qualityEngagedCircle") || "Engaged Discussion Circle";
+        explanation = t("analytics.explanationGroupActive", {
+          authors: uniqueAuthors,
+          replies: kpis.replyRatio,
+          vsr: vsrFormatted,
+          subs: formatNumber(subs),
+          avg: formatNumber(avgV)
+        });
+      } else {
+        verdictTitle = t("analytics.verdictTitles.emergingGroup") || "Emerging Group Chat";
+        verdictBadge = t("analytics.badgeQuietGroup") || "Quiet Group 👥";
+        verdictColor = "amber";
+        audienceQuality = t("analytics.qualityNascentCommunity") || "Nascent Community";
+        explanation = t("analytics.explanationGroupQuiet", {
+          authors: uniqueAuthors,
+          vsr: vsrFormatted,
+          subs: formatNumber(subs),
+          avg: formatNumber(avgV)
+        });
+      }
+    } else if (hasSubscribers) {
       if (vsr >= 100) {
-        verdictTitle = "Viral Outward Sensation";
+        verdictTitle = t("analytics.verdictTitles.viralOutward") || "Viral Outward Sensation";
         verdictBadge = t("analytics.badgeHyperViral");
         verdictColor = "purple";
         audienceQuality = t("analytics.qualityViralSpillover");
@@ -672,7 +820,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           vsr: vsrFormatted
         });
       } else if (vsr >= 40) {
-        verdictTitle = "High-Authority Powerhouse";
+        verdictTitle = t("analytics.verdictTitles.highAuthority") || "High-Authority Powerhouse";
         verdictBadge = t("analytics.badgeTopEngagement");
         verdictColor = "emerald";
         audienceQuality = t("analytics.qualityHyperActiveCore");
@@ -680,7 +828,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           vsr: vsrFormatted
         });
       } else if (vsr >= 15) {
-        verdictTitle = "Established & Popular Hub";
+        verdictTitle = t("analytics.verdictTitles.establishedHub") || "Established & Popular Hub";
         verdictBadge = t("analytics.badgeHealthyBenchmark");
         verdictColor = "sky";
         audienceQuality = t("analytics.qualityAuthenticSteady");
@@ -688,7 +836,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           vsr: vsrFormatted
         });
       } else if (vsr >= 5) {
-        verdictTitle = "Broad Broadcast / Muted Audience";
+        verdictTitle = t("analytics.verdictTitles.broadBroadcast") || "Broad Broadcast / Muted Audience";
         verdictBadge = t("analytics.badgeModerateReach");
         verdictColor = "amber";
         audienceQuality = t("analytics.qualityPassiveFollowing");
@@ -696,7 +844,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
           vsr: vsrFormatted
         });
       } else {
-        verdictTitle = "Low-Penetration / Inactive Risk";
+        verdictTitle = t("analytics.verdictTitles.lowPenetration") || "Low-Penetration / Inactive Risk";
         verdictBadge = t("analytics.badgeLowEngagement");
         verdictColor = "rose";
         audienceQuality = t("analytics.qualityGhostAudienceRisk");
@@ -706,7 +854,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
         });
       }
     } else {
-      verdictTitle = "Active Post Stream";
+      verdictTitle = t("analytics.verdictTitles.activePostStream") || "Active Post Stream";
       verdictBadge = t("analytics.badgeViewsActive");
       verdictColor = "blue";
       audienceQuality = t("analytics.qualityUnlistedSubscribers");
@@ -718,6 +866,11 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
     }
 
     return {
+      isGroup,
+      uniqueAuthors,
+      coreUsers,
+      postsPerUser: kpis.postsPerUser,
+      replyRatio: kpis.replyRatio,
       subs,
       hasSubscribers,
       avgViews: avgV,
@@ -735,7 +888,8 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
       verdictBadge,
       verdictColor,
       audienceQuality,
-      explanation
+      explanation,
+      communityVitalityScore
     };
   }, [effectiveSubscribers, kpis, locale]);
 
@@ -1061,7 +1215,20 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                 <h3 className="text-sm font-extrabold text-gray-900 dark:text-white uppercase tracking-tight">
                   {t("analytics.assessmentTitle")}
                 </h3>
+                {/* Target Type Mode Badge: Group vs Channel */}
                 <span
+                  className={`px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold tracking-wide border shadow-2xs flex items-center gap-1 ${
+                    kpis.isMultiUserGroup
+                      ? "bg-indigo-100 text-indigo-800 border-indigo-300 dark:bg-indigo-950/80 dark:text-indigo-300 dark:border-indigo-700"
+                      : "bg-gray-100 text-gray-700 border-gray-300 dark:bg-gray-800 dark:text-gray-300 dark:border-gray-700"
+                  }`}
+                  title={kpis.isMultiUserGroup ? "Optimized for Multi-User Group Discussion & Core Base" : "Optimized for Broadcast Channel"}
+                >
+                  <span>{kpis.isMultiUserGroup ? "👥" : "📢"}</span>
+                  <span>{kpis.isMultiUserGroup ? t("analytics.groupMode") : t("analytics.channelMode")}</span>
+                </span>
+                <span
+                  title={assessment.verdictTitle}
                   className={`px-2.5 py-0.5 rounded-full text-[10px] font-black tracking-wide border shadow-2xs ${
                     assessment.verdictColor === "purple"
                       ? "bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-950/80 dark:text-purple-300 dark:border-purple-700"
@@ -1078,7 +1245,9 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                 </span>
               </div>
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                {assessment.hasSubscribers
+                {kpis.isMultiUserGroup
+                  ? `${assessment.hasSubscribers ? `VSR: ${assessment.vsrFormatted}% (${formatNumber(kpis.avgViews)} / ${formatNumber(assessment.subs)}) · ` : ""}${t("analytics.coreUserBase")}: ${kpis.coreUsersCount} · ${t("analytics.activeVoices", { count: kpis.uniqueAuthorsCount })} · ${t("analytics.msgsPerUser", { count: kpis.postsPerUser })} (${kpis.replyRatio}% ${t("analytics.conversationFlow")})`
+                  : assessment.hasSubscribers
                   ? t("analytics.synthesizingWithSubscribers", {
                       avg: formatNumber(kpis.avgViews),
                       subs: formatNumber(assessment.subs)
@@ -1198,6 +1367,54 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
 
         {isAssessmentExpanded && (
           <div className="mt-5 space-y-5">
+            {/* Community Core Dynamics Metric Bar (for Discussion Groups) */}
+            {kpis.isMultiUserGroup && (
+              <div className="p-3.5 rounded-2xl bg-gradient-to-r from-indigo-50/70 via-purple-50/50 to-sky-50/70 dark:from-indigo-950/40 dark:via-purple-950/30 dark:to-sky-950/40 border border-indigo-200/60 dark:border-indigo-800/60 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-2.5">
+                  <span className="p-2 rounded-xl bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 font-bold text-base">
+                    👥
+                  </span>
+                  <div>
+                    <span className="font-extrabold text-indigo-950 dark:text-indigo-200 block text-xs uppercase tracking-wide">
+                      {t("analytics.coreUserBase")}: {t("analytics.coreRegulars", { count: kpis.coreUsersCount })}
+                    </span>
+                    <span className="text-[11px] text-indigo-700/80 dark:text-indigo-300/80 font-medium">
+                      {t("analytics.communityVitalityDesc")}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2.5 sm:gap-4 flex-wrap">
+                  <div className="bg-white/90 dark:bg-gray-800/90 px-3 py-1.5 rounded-xl border border-indigo-100 dark:border-indigo-900/40 shadow-3xs text-center">
+                    <span className="text-[9px] uppercase tracking-wider text-gray-400 block font-bold">
+                      {t("analytics.activeContributors")}
+                    </span>
+                    <span className="text-xs font-black text-indigo-600 dark:text-indigo-400 tabular-nums">
+                      {kpis.uniqueAuthorsCount} <span className="text-[10px] font-normal text-gray-400">users</span>
+                    </span>
+                  </div>
+
+                  <div className="bg-white/90 dark:bg-gray-800/90 px-3 py-1.5 rounded-xl border border-indigo-100 dark:border-indigo-900/40 shadow-3xs text-center">
+                    <span className="text-[9px] uppercase tracking-wider text-gray-400 block font-bold">
+                      {t("analytics.discussionDensity")}
+                    </span>
+                    <span className="text-xs font-black text-purple-600 dark:text-purple-400 tabular-nums">
+                      {kpis.postsPerUser} <span className="text-[10px] font-normal text-gray-400">msgs/user</span>
+                    </span>
+                  </div>
+
+                  <div className="bg-white/90 dark:bg-gray-800/90 px-3 py-1.5 rounded-xl border border-indigo-100 dark:border-indigo-900/40 shadow-3xs text-center">
+                    <span className="text-[9px] uppercase tracking-wider text-gray-400 block font-bold">
+                      {t("analytics.conversationFlow")}
+                    </span>
+                    <span className="text-xs font-black text-sky-600 dark:text-sky-400 tabular-nums">
+                      {kpis.replyRatio}% <span className="text-[10px] font-normal text-gray-400">replies</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* 4 Core Dimensions Matrix: Popular, Important, Useful, Attractable */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
               {/* Dimension 1: Popularity */}
@@ -1224,7 +1441,9 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                     />
                   </div>
                   <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-1.5 block">
-                    {assessment.hasSubscribers
+                    {kpis.isMultiUserGroup
+                      ? `${t("analytics.activeVoices", { count: kpis.uniqueAuthorsCount })} · ${t("analytics.avgViewsMsg", { avg: formatNumber(kpis.avgViews) })}`
+                      : assessment.hasSubscribers
                       ? t("analytics.membersAndAvgViews", {
                           members: formatNumber(assessment.subs),
                           avg: formatNumber(kpis.avgViews)
@@ -1260,7 +1479,9 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                     />
                   </div>
                   <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-1.5 block">
-                    {assessment.hasSubscribers
+                    {kpis.isMultiUserGroup
+                      ? `${t("analytics.coreRegulars", { count: kpis.coreUsersCount })} · ${t("analytics.dialogueRatio", { ratio: kpis.replyRatio })}`
+                      : assessment.hasSubscribers
                       ? t("analytics.viewPenetrationNative", {
                           vsr: assessment.vsrFormatted,
                           count: kpis.nativeCount
@@ -1297,7 +1518,9 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                     />
                   </div>
                   <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-1.5 block">
-                    {t("analytics.peakViewsSteady", { peak: formatNumber(kpis.maxPost?.views || 0) })}
+                    {kpis.isMultiUserGroup
+                      ? t("analytics.qaPeerSolving", { msgs: kpis.postsPerUser })
+                      : t("analytics.peakViewsSteady", { peak: formatNumber(kpis.maxPost?.views || 0) })}
                   </span>
                 </div>
               </div>
@@ -1326,7 +1549,11 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                     />
                   </div>
                   <span className="text-[10px] text-gray-400 dark:text-gray-500 font-mono mt-1.5 block">
-                    {assessment.vsr >= 50 ? t("analytics.viralReachBeyond") : t("analytics.organicCirculation")}
+                    {kpis.isMultiUserGroup
+                      ? t("analytics.highStickinessReturn")
+                      : assessment.vsr >= 50
+                      ? t("analytics.viralReachBeyond")
+                      : t("analytics.organicCirculation")}
                   </span>
                 </div>
               </div>
@@ -1335,7 +1562,7 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
             {/* View-to-Subscriber Ratio (VSR) Benchmark Spectrum & Authenticity Callout */}
             <div className="p-4 rounded-2xl bg-white dark:bg-gray-800/90 border border-gray-200/70 dark:border-gray-700/70 flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div className="space-y-1.5 max-w-xl">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-xs font-black uppercase tracking-wider text-gray-800 dark:text-gray-200">
                     {t("analytics.audienceHealthDiagnosis")}
                   </span>
@@ -1343,24 +1570,52 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
                     {assessment.audienceQuality}
                   </span>
                 </div>
+                {assessment.verdictTitle && (
+                  <h4 className="text-sm font-extrabold text-gray-900 dark:text-white">
+                    {assessment.verdictTitle}
+                  </h4>
+                )}
                 <p className="text-xs text-gray-600 dark:text-gray-300 leading-relaxed font-sans">
                   {assessment.explanation}
                 </p>
               </div>
 
-              {/* VSR Gauge Meter */}
-              {assessment.hasSubscribers && (
-                <div className="shrink-0 p-3 rounded-xl bg-gray-50 dark:bg-gray-900 border border-gray-200/80 dark:border-gray-700/80 text-center min-w-[210px]">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400 dark:text-gray-500 block">
-                    {t("analytics.vsrTitle")}
-                  </span>
-                  <div className="text-2xl font-black text-gray-900 dark:text-white tabular-nums tracking-tight my-0.5">
-                    {assessment.vsrFormatted}%
-                  </div>
-                  <div className="text-[10px] font-mono text-gray-500 dark:text-gray-400 flex items-center justify-center gap-1">
-                    <span>{t("analytics.healthyBenchmark")}</span>
-                    <strong className="text-emerald-600 dark:text-emerald-400">{t("analytics.benchmarkRange")}</strong>
-                  </div>
+              {/* Dual Health Gauges: View-to-Subscriber Ratio (VSR) AND Core Community Vitality */}
+              {(assessment.hasSubscribers || kpis.isMultiUserGroup) && (
+                <div className="shrink-0 flex items-center gap-2.5 sm:gap-3 flex-wrap lg:flex-nowrap">
+                  {/* Gauge 1: View-to-Subscriber Ratio (VSR) - reflects content view healthy */}
+                  {assessment.hasSubscribers && (
+                    <div className="p-3 rounded-xl bg-sky-50/70 dark:bg-sky-950/40 border border-sky-200/80 dark:border-sky-800/80 text-center min-w-[155px] sm:min-w-[170px] flex-1 sm:flex-none">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-sky-700 dark:text-sky-300 block truncate" title={t("analytics.vsrTitle")}>
+                        {t("analytics.vsrTitle")}
+                      </span>
+                      <div className="text-2xl font-black text-sky-950 dark:text-sky-100 tabular-nums tracking-tight my-0.5">
+                        {assessment.vsrFormatted}%
+                      </div>
+                      <div className="text-[10px] font-mono text-sky-700/80 dark:text-sky-300/80 flex items-center justify-center gap-1">
+                        <span>{t("analytics.healthyBenchmark")}</span>
+                        <strong className="text-emerald-600 dark:text-emerald-400 font-bold">{t("analytics.benchmarkRange")}</strong>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Gauge 2: Core Community Vitality (when multi-user group or active community) */}
+                  {kpis.isMultiUserGroup && (
+                    <div className="p-3 rounded-xl bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200/80 dark:border-indigo-800/80 text-center min-w-[155px] sm:min-w-[175px] flex-1 sm:flex-none">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-700 dark:text-indigo-300 block truncate" title={t("analytics.communityVitality")}>
+                        {t("analytics.communityVitality")}
+                      </span>
+                      <div className="text-2xl font-black text-indigo-950 dark:text-indigo-100 tabular-nums tracking-tight my-0.5">
+                        {assessment.communityVitalityScore}%
+                      </div>
+                      <div className="text-[10px] font-mono text-indigo-700/80 dark:text-indigo-300/80 flex items-center justify-center gap-1">
+                        <span>{t("analytics.coreUserBase")}:</span>
+                        <strong className="text-indigo-600 dark:text-indigo-400 font-bold">
+                          {t("analytics.coreRegulars", { count: kpis.coreUsersCount })}
+                        </strong>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
