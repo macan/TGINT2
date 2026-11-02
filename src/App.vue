@@ -13796,10 +13796,34 @@ const handleKeydown = (e: KeyboardEvent) => {
   }
 };
 
+// Reactive states to synchronize fetched photos across List mode and lightboxes
+const fetchedPhotoUrls = ref<Record<string, string>>({});
+const isPhotoRetrying = ref<Record<string, boolean>>({});
+const isPhotoInFallback = ref<Record<string, boolean>>({});
+
+const onPhotoFetchedSuccess = (e: any) => {
+  const { cleanUrl, src } = e.detail || {};
+  if (cleanUrl && src) {
+    fetchedPhotoUrls.value[cleanUrl] = src;
+    isPhotoInFallback.value[cleanUrl] = false;
+    isPhotoRetrying.value[cleanUrl] = false;
+  }
+};
+
+const onPhotoFallback = (e: any) => {
+  const { cleanUrl } = e.detail || {};
+  if (cleanUrl) {
+    isPhotoInFallback.value[cleanUrl] = true;
+    isPhotoRetrying.value[cleanUrl] = false;
+  }
+};
+
 let observer: IntersectionObserver | null = null;
 
 onMounted(() => {
   window.addEventListener("keydown", handleKeydown);
+  window.addEventListener("photo-fetched-success", onPhotoFetchedSuccess);
+  window.addEventListener("photo-fallback", onPhotoFallback);
 
   observer = new IntersectionObserver(
     (entries) => {
@@ -13839,6 +13863,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener("keydown", handleKeydown);
+  window.removeEventListener("photo-fetched-success", onPhotoFetchedSuccess);
+  window.removeEventListener("photo-fallback", onPhotoFallback);
   if (listenObserver) {
     listenObserver.disconnect();
   }
@@ -13868,6 +13894,89 @@ const openLightbox = (url: string) => {
   lightboxPhoto.value = url;
   lightboxScale.value = 1;
   document.body.style.overflow = "hidden";
+};
+
+const getCleanPhotoUrl = (url: string): string => {
+  if (!url) return '';
+  try {
+    const u = new URL(url, window.location.href);
+    u.searchParams.delete('retry_attempt');
+    u.searchParams.delete('_cb');
+    u.searchParams.delete('_retry');
+    u.searchParams.delete('_t');
+    u.searchParams.delete('t');
+    return u.origin + u.pathname;
+  } catch {
+    return url.split('?')[0];
+  }
+};
+
+const getPostPhotoUrl = (postKey: string, suffix: string = '0'): string => {
+  const defaultUrl = `https://i.gogingko.net/api/v1/v/telegram-photo/${postKey}_${suffix}`;
+  const clean = getCleanPhotoUrl(defaultUrl);
+  return fetchedPhotoUrls.value[clean] || fetchedPhotoUrls.value[defaultUrl] || defaultUrl;
+};
+
+// Retry fetch for a photo: creates a background Image fetch with cache-buster and updates placeholders on success
+const retryFetchPhoto = (url: string, postKey?: string) => {
+  if (!url) return;
+  const clean = getCleanPhotoUrl(url);
+  isPhotoRetrying.value[clean] = true;
+  if (postKey) isPhotoRetrying.value[postKey] = true;
+
+  const separator = url.includes('?') ? '&' : '?';
+  const freshUrl = `${clean}${separator}_retry=${Date.now()}`;
+
+  const preloader = new Image();
+  preloader.referrerPolicy = 'no-referrer';
+  preloader.onload = () => {
+    isPhotoRetrying.value[clean] = false;
+    if (postKey) isPhotoRetrying.value[postKey] = false;
+    isPhotoInFallback.value[clean] = false;
+    fetchedPhotoUrls.value[clean] = freshUrl;
+    if (postKey) fetchedPhotoUrls.value[postKey] = freshUrl;
+
+    if ((window as any).restorePlaceholdersForUrl) {
+      (window as any).restorePlaceholdersForUrl(clean, freshUrl);
+    }
+  };
+  preloader.onerror = () => {
+    isPhotoRetrying.value[clean] = false;
+    if (postKey) isPhotoRetrying.value[postKey] = false;
+  };
+  preloader.src = freshUrl;
+};
+
+// Handles clicking on a post photo: triggers fresh fetch if fallback occurred and opens lightbox
+const handlePostPhotoClick = (url: string, postKey?: string) => {
+  if (!url) return;
+  const clean = getCleanPhotoUrl(url);
+  const inFallback = isPhotoInFallback.value[clean] || isPhotoInFallback.value[postKey || ''];
+
+  let activeUrl = url;
+  if (inFallback || !fetchedPhotoUrls.value[clean]) {
+    const separator = url.includes('?') ? '&' : '?';
+    activeUrl = `${clean}${separator}_retry=${Date.now()}`;
+    retryFetchPhoto(url, postKey);
+  } else if (fetchedPhotoUrls.value[clean]) {
+    activeUrl = fetchedPhotoUrls.value[clean];
+  }
+
+  openLightbox(activeUrl);
+};
+
+// Called when lightbox image finishes loading
+const onLightboxImageLoad = (e: Event) => {
+  const target = e.target as HTMLImageElement;
+  if (target && target.src && !target.src.startsWith('data:')) {
+    const clean = getCleanPhotoUrl(lightboxPhoto.value || target.src);
+    fetchedPhotoUrls.value[clean] = target.src;
+    isPhotoInFallback.value[clean] = false;
+    isPhotoRetrying.value[clean] = false;
+    if ((window as any).restorePlaceholdersForUrl) {
+      (window as any).restorePlaceholdersForUrl(clean, target.src);
+    }
+  }
 };
 
 const handleImageError = (e: Event) => {
@@ -19656,36 +19765,73 @@ onUnmounted(() => {
                     <!-- Media Embeds -->
                     <div
                       v-if="post.data?.photos && post.data.photos.length > 0"
-                      class="mb-4 rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center"
+                      class="mb-4 rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center relative min-h-[160px]"
                       @click="
-                        openLightbox(
-                          `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`
+                        handlePostPhotoClick(
+                          `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`,
+                          post.key
                         )
                       "
                     >
                       <img
-                        :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`"
+                        :src="getPostPhotoUrl(post.key, '0')"
+                        :data-original-src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`"
                         class="w-full h-auto max-h-[500px] object-contain mx-auto transition-transform duration-700 group-hover/media:scale-105"
                         alt="Post photo"
                         referrerpolicy="no-referrer"
                       />
+                      <!-- Click-to-retry overlay indicator if in fallback or retrying -->
+                      <div
+                        v-if="isPhotoRetrying[getCleanPhotoUrl(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`)] || isPhotoRetrying[post.key]"
+                        class="absolute inset-0 bg-black/30 backdrop-blur-[2px] flex items-center justify-center gap-2 text-white text-xs font-semibold rounded-3xl z-10 transition-opacity"
+                      >
+                        <Loader2 class="h-5 w-5 animate-spin text-teal-400" />
+                        <span>{{ t('common.loading') || 'Loading photo...' }}</span>
+                      </div>
+                      <button
+                        v-else-if="isPhotoInFallback[getCleanPhotoUrl(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`)]"
+                        @click.stop="retryFetchPhoto(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`, post.key)"
+                        class="absolute bottom-3 right-3 px-2.5 py-1.5 bg-gray-900/80 hover:bg-teal-600 text-white text-[11px] font-bold rounded-xl backdrop-blur-sm shadow-md flex items-center gap-1.5 transition-all z-10 hover:scale-105"
+                        title="Click to retry photo fetch"
+                      >
+                        <RefreshCw class="h-3 w-3" />
+                        <span>Click to retry</span>
+                      </button>
                     </div>
 
                     <div
                       v-if="post.data?.documents && post.data.documents.length > 0 && post.data.documents[0].mime_type && post.data.documents[0].mime_type.startsWith('image/')"
-                      class="mb-4 rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center"
+                      class="mb-4 rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center relative min-h-[160px]"
                       @click="
-                        openLightbox(
-                          `https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`
+                        handlePostPhotoClick(
+                          `https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`,
+                          post.key
                         )
                       "
                     >
                       <img
-                        :src="`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`"
+                        :src="fetchedPhotoUrls[getCleanPhotoUrl(`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`)] || `https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`"
+                        :data-original-src="`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`"
                         class="w-full h-auto max-h-[500px] object-contain mx-auto transition-transform duration-700 group-hover/media:scale-105"
                         alt="Post photo by document"
                         referrerpolicy="no-referrer"
                       />
+                      <div
+                        v-if="isPhotoRetrying[getCleanPhotoUrl(`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`)] || isPhotoRetrying[post.key]"
+                        class="absolute inset-0 bg-black/30 backdrop-blur-[2px] flex items-center justify-center gap-2 text-white text-xs font-semibold rounded-3xl z-10 transition-opacity"
+                      >
+                        <Loader2 class="h-5 w-5 animate-spin text-teal-400" />
+                        <span>{{ t('common.loading') || 'Loading photo...' }}</span>
+                      </div>
+                      <button
+                        v-else-if="isPhotoInFallback[getCleanPhotoUrl(`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`)]"
+                        @click.stop="retryFetchPhoto(`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`, post.key)"
+                        class="absolute bottom-3 right-3 px-2.5 py-1.5 bg-gray-900/80 hover:bg-teal-600 text-white text-[11px] font-bold rounded-xl backdrop-blur-sm shadow-md flex items-center gap-1.5 transition-all z-10 hover:scale-105"
+                        title="Click to retry photo fetch"
+                      >
+                        <RefreshCw class="h-3 w-3" />
+                        <span>Click to retry</span>
+                      </button>
                     </div>
 
                     <div
@@ -19709,19 +19855,27 @@ onUnmounted(() => {
                     >
                       <div
                         v-if="post.data.linkPreview.image"
-                        class="sm:w-32 sm:h-32 flex-shrink-0 bg-gray-200 dark:bg-gray-800 overflow-hidden cursor-zoom-in"
+                        class="sm:w-32 sm:h-32 flex-shrink-0 bg-gray-200 dark:bg-gray-800 overflow-hidden cursor-zoom-in relative"
                         @click="
-                          openLightbox(
-                            `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`
+                          handlePostPhotoClick(
+                            `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`,
+                            post.key
                           )
                         "
                       >
                         <img
-                          :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`"
+                          :src="fetchedPhotoUrls[getCleanPhotoUrl(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)] || `https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`"
+                          :data-original-src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`"
                           class="w-full h-full object-cover transition-transform duration-700 hover:scale-105"
                           alt="Link preview"
                           referrerpolicy="no-referrer"
                         />
+                        <div
+                          v-if="isPhotoRetrying[getCleanPhotoUrl(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)]"
+                          class="absolute inset-0 bg-black/30 backdrop-blur-[2px] flex items-center justify-center text-white z-10"
+                        >
+                          <Loader2 class="h-4 w-4 animate-spin text-teal-400" />
+                        </div>
                       </div>
                       <div
                         class="p-4 sm:p-5 flex flex-col justify-center flex-1 min-w-0"
@@ -21837,15 +21991,32 @@ onUnmounted(() => {
                 <!-- Media Embeds -->
                 <div
                   v-if="selectedPost.data?.photos && selectedPost.data.photos.length > 0"
-                  class="rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center"
-                  @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_0`)"
+                  class="rounded-3xl overflow-hidden shadow-sm border border-gray-100 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 group/media cursor-zoom-in flex items-center justify-center relative min-h-[160px]"
+                  @click="handlePostPhotoClick(`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_0`, selectedPost.key)"
                 >
                   <img
-                    :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_0`"
+                    :src="getPostPhotoUrl(selectedPost.key, '0')"
+                    :data-original-src="`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_0`"
                     class="w-full h-auto max-h-[450px] object-contain mx-auto transition-transform duration-700 group-hover/media:scale-105"
                     alt="Post photo"
                     referrerpolicy="no-referrer"
                   />
+                  <div
+                    v-if="isPhotoRetrying[getCleanPhotoUrl(`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_0`)] || isPhotoRetrying[selectedPost.key]"
+                    class="absolute inset-0 bg-black/30 backdrop-blur-[2px] flex items-center justify-center gap-2 text-white text-xs font-semibold rounded-3xl z-10 transition-opacity"
+                  >
+                    <Loader2 class="h-5 w-5 animate-spin text-teal-400" />
+                    <span>{{ t('common.loading') || 'Loading photo...' }}</span>
+                  </div>
+                  <button
+                    v-else-if="isPhotoInFallback[getCleanPhotoUrl(`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_0`)]"
+                    @click.stop="retryFetchPhoto(`https://i.gogingko.net/api/v1/v/telegram-photo/${selectedPost.key}_0`, selectedPost.key)"
+                    class="absolute bottom-3 right-3 px-2.5 py-1.5 bg-gray-900/80 hover:bg-teal-600 text-white text-[11px] font-bold rounded-xl backdrop-blur-sm shadow-md flex items-center gap-1.5 transition-all z-10 hover:scale-105"
+                    title="Click to retry photo fetch"
+                  >
+                    <RefreshCw class="h-3 w-3" />
+                    <span>Click to retry</span>
+                  </button>
                 </div>
 
                 <div
@@ -22041,6 +22212,7 @@ onUnmounted(() => {
                 referrerpolicy="no-referrer"
                 :alt="t('search.linkPreviewImage')"
                 @click.stop
+                @load="onLightboxImageLoad"
               />
             </div>
           </div>
