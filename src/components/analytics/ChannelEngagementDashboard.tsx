@@ -14,6 +14,7 @@ import {
   Cell
 } from "recharts";
 import { t } from "../../i18n";
+import { getPostSenderIdentifier } from "../../utils/helpers";
 
 export interface PostItem {
   _index?: number;
@@ -179,6 +180,14 @@ const extractForwardDetails = (
   return { isForwardIn: false, source: "" };
 };
 
+// Helper to extract and normalize post sender identity for core user tracking:
+// 1. Try to compare the parsed username from the .user field
+// 2. If the .user field is null / empty, treat post.data.author as the second user identifier to compare as a new user id
+const parsePostSender = (p: any, pData: any): string => {
+  const senderId = getPostSenderIdentifier(p, pData);
+  return senderId ? senderId.toLowerCase() : "";
+};
+
 export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProps> = ({
   posts = [],
   channelName,
@@ -243,15 +252,10 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
 
         const fwdDetails = extractForwardDetails(pData);
 
-        // Extract author/user to evaluate group conversational diversity
-        const author = String(
-          pData.author ||
-          pData.user ||
-          (pData.from_id ? String(pData.from_id) : "") ||
-          (p as any).author ||
-          (p as any).user ||
-          ""
-        ).trim();
+        // Extract sender identity for core user tracking:
+        // 1. Compare parsed username from .user field
+        // 2. If null, use .author field to compare
+        const author = parsePostSender(p, pData);
 
         // Check if message is a reply to another post (conversational dialogue)
         const hasReply = Boolean(
@@ -585,21 +589,58 @@ export const ChannelEngagementDashboard: React.FC<ChannelEngagementDashboardProp
     // Recurring active contributors who posted >= 2 times in the sample
     const rawCoreUsersCount = Object.values(authorCounts).filter((cnt) => cnt >= 2).length;
 
+    // 2. Send time pattern analysis: distinguish co-broadcasters from conversational group members
+    // In broadcast channels, multiple broadcasters post scheduled/spaced articles (slow intervals, zero/rare replies).
+    // In groups, members chat dynamically: they send faster (short inter-message intervals) and send more replies.
+    let fastConversationalTurnsCount = 0; // Number of times different authors posted within 10 minutes (600s)
+    let totalInterAuthorTransitions = 0;
+
+    for (let i = 0; i < processedData.length - 1; i++) {
+      const cur = processedData[i];
+      const nxt = processedData[i + 1];
+      if (cur.author && nxt.author && cur.author !== nxt.author) {
+        totalInterAuthorTransitions += 1;
+        const intervalSec = Math.max(0, (nxt.timestamp - cur.timestamp) / 1000);
+        // Group members "send more fast" during discussions (conversational turns within 10 minutes = 600s)
+        if (intervalSec <= 600) {
+          fastConversationalTurnsCount += 1;
+        }
+      }
+    }
+
+    const fastTurnsRatio = totalInterAuthorTransitions > 0
+      ? (fastConversationalTurnsCount / totalInterAuthorTransitions) * 100
+      : 0;
+
+    const postsPerUser = uniqueAuthorsCount > 0 ? (totalPosts / uniqueAuthorsCount).toFixed(1) : "1.0";
+    const replyRatio = totalPosts > 0 ? ((repliesCount / totalPosts) * 100).toFixed(1) : "0";
+
     // Target categorization: discussion group vs broadcast channel
-    // When there is only one core user (or <= 1 unique author), this means it is a channel that broadcasts posts.
-    // Discussion groups strictly require multiple recurring core users (rawCoreUsersCount >= 2) and multiple participants.
+    // For a broadcast channel, there might be more than one broadcaster.
+    // Use send time pattern and replies to distinguish broadcasters and group members:
+    // - Group members "send more fast" (rapid conversational chat turns) or send "more replies"
+    // - Broadcasters post at spaced intervals (hours apart) with no or rare replies
     const metaType = String(metadata?.type || "").toLowerCase();
     const isExplicitChannel = metaType.includes("channel") || metaType.includes("broadcast");
     const isExplicitGroup = (metaType.includes("group") || metaType.includes("supergroup") || metaType.includes("chat")) && !isExplicitChannel;
 
-    // A target is ONLY a multi-user group if there are at least 2 recurring core users AND at least 2 unique authors.
-    // If rawCoreUsersCount <= 1 or uniqueAuthorsCount <= 1 or isExplicitChannel, it is a broadcast channel.
-    const isMultiUserGroup = !isExplicitChannel && rawCoreUsersCount >= 2 && uniqueAuthorsCount >= 2 && (isExplicitGroup || uniqueAuthorsCount >= 3 || repliesCount >= 2);
+    const hasMoreReplies = repliesCount >= 2 && (totalPosts > 0 && (repliesCount / totalPosts) >= 0.05);
+    const hasFastSendPattern = fastConversationalTurnsCount >= 2 && (fastTurnsRatio >= 15 || fastConversationalTurnsCount >= 4);
+    const hasGroupChatDynamic = hasMoreReplies || hasFastSendPattern;
 
-    // For a broadcast channel (only 1 broadcaster), community peer core user base is 0.
+    // Distinguish broadcasters vs group members:
+    // 1. If explicitly a channel, or <= 1 core user / author: strictly broadcast channel.
+    // 2. If there are multiple authors/core users, but they don't have fast send times or replies,
+    //    they are co-broadcasters in a broadcast channel.
+    // 3. Only when there are at least 2 recurring core users AND genuine group chat patterns (faster sending or more replies)
+    //    is it classified as a multi-user group community.
+    const isMultiUserGroup = !isExplicitChannel &&
+      rawCoreUsersCount >= 2 &&
+      uniqueAuthorsCount >= 2 &&
+      (isExplicitGroup ? (hasGroupChatDynamic || repliesCount >= 1 || fastConversationalTurnsCount >= 1) : hasGroupChatDynamic);
+
+    // For a broadcast channel (even with multiple broadcasters), community peer core user base is 0.
     const coreUsersCount = isMultiUserGroup ? rawCoreUsersCount : 0;
-    const postsPerUser = uniqueAuthorsCount > 0 ? (totalPosts / uniqueAuthorsCount).toFixed(1) : "1.0";
-    const replyRatio = totalPosts > 0 ? ((repliesCount / totalPosts) * 100).toFixed(1) : "0";
 
     const topAuthors = Object.entries(authorCounts)
       .map(([name, count]) => ({ name, count }))

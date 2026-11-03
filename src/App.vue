@@ -123,6 +123,8 @@ import {
   getInitials,
   truncateString,
   getSha1HexDigest,
+  extractUserIdFromField,
+  getPostSenderIdentifier,
   callSystemOne,
   querySystemOne,
   postEngagementTracker,
@@ -3795,13 +3797,7 @@ const formatPostsForSystemOne = (rawPosts: any[], maxPosts: number = 50) => {
       continue;
     }
 
-    let sender = "";
-    if (post?.data?.author !== null && post?.data?.author !== undefined && String(post.data.author).trim() !== "") {
-      sender = String(post.data.author).trim();
-    } else if (post?.data?.user) {
-      const parts = String(post.data.user).split("/");
-      sender = parts[parts.length - 1] || "";
-    }
+    const sender = getPostSenderIdentifier(post, post?.data) || "";
 
     result.push({
       sender,
@@ -7464,9 +7460,35 @@ const fetchNodeMetadata = async (nodeType: string, nodeId: string) => {
         if (nodeType === 'user' && nodeId.includes('Telegram User')) {
           return;
         }
-        const response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-${nodeType}/${nodeId}`);
-        if (!response.ok) throw new Error('Failed to fetch');
-        const data = await response.json();
+        let response = await fetch(`https://i.gogingko.net/api/v1/v/telegram-${nodeType}/${nodeId}`);
+        if (!response.ok) {
+          if (nodeType === 'user' && response.status === 404) {
+            const channelResponse = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${nodeId}`);
+            if (channelResponse.ok) {
+              response = channelResponse;
+              if (editingNodeData.value) {
+                editingNodeData.value.type = 'channel';
+              }
+            } else {
+              throw new Error('Failed to fetch');
+            }
+          } else {
+            throw new Error('Failed to fetch');
+          }
+        }
+        let data = await response.json();
+        if (nodeType === 'user' && data && data.state === 1 && !data.username && !data.first_name && !data.title) {
+          const channelResponse = await fetch(`https://i.gogingko.net/api/v1/v/telegram-channel/${nodeId}`);
+          if (channelResponse.ok) {
+            const channelData = await channelResponse.json();
+            if (channelData && channelData.state !== 1) {
+              data = channelData;
+              if (editingNodeData.value) {
+                editingNodeData.value.type = 'channel';
+              }
+            }
+          }
+        }
         
         if (data.title) {
           editingNodeData.value.label = data.title;
@@ -7799,29 +7821,33 @@ const addForwardFrom = async () => {
       const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${nodeId}`);
       if (profileRes.ok) {
         const profileData = await profileRes.json();
-        const forwards = profileData.forwards || [];
-        const fto = profileData.fto || [];
+        const forwards = Array.isArray(profileData.forwards) ? profileData.forwards : [];
+        const fto = Array.isArray(profileData.fto) ? profileData.fto : [];
 
         // Add forwards
-        forwards.forEach(item => {
-          addNode(item, 'channel', {
-            id: item,
-            username: item,
-            link: `https://t.me/${item}`,
+        forwards.forEach((item: any) => {
+          const rawId = typeof item === 'string' ? item.trim() : (item?.id || item?.username || '');
+          if (!rawId) return;
+          addNode(rawId, 'channel', {
+            id: rawId,
+            username: rawId,
+            link: `https://t.me/${rawId}`,
             facts: ''
           });
-          addEdge(nodeId, item, { label: 'forward from' });
+          addEdge(nodeId, rawId, { label: 'forward from' });
         });
 
         // Add fto
-        fto.forEach(item => {
-          addNode(item, 'channel', {
-            id: item,
-            username: item,
-            link: `https://t.me/${item}`,
+        fto.forEach((item: any) => {
+          const rawId = typeof item === 'string' ? item.trim() : (item?.id || item?.username || '');
+          if (!rawId) return;
+          addNode(rawId, 'channel', {
+            id: rawId,
+            username: rawId,
+            link: `https://t.me/${rawId}`,
             facts: ''
           });
-          addEdge(item, nodeId, { label: 'forward to' });
+          addEdge(rawId, nodeId, { label: 'forward to' });
         });
 
         toastMessage.value = t('workspace.expandedForwardsAndFto', { forwards: forwards.length, fto: fto.length, id: nodeId });
@@ -8098,6 +8124,11 @@ watch(isDark, () => {
 const addNode = (label: string, type: 'person' | 'user' | 'channel', data: any = {}) => {
   if (!workspaceGraph.value) return;
   const id = data.id || ('n' + Date.now());
+  const existing = workspaceGraph.value.getElementById(id);
+  if (existing && existing.length > 0) {
+    existing.data({ label, type, ...data });
+    return existing;
+  }
   workspaceGraph.value.add({
     group: 'nodes',
     data: { id, label, type, ...data }
@@ -8160,7 +8191,22 @@ const addToWorkspace = () => {
 
 const addEdge = (source: string, target: string, data: any = {}) => {
   if (!workspaceGraph.value) return;
+  if (!source || !target) return;
+  // Ensure both endpoints exist in the graph
+  if (
+    workspaceGraph.value.getElementById(source).length === 0 ||
+    workspaceGraph.value.getElementById(target).length === 0
+  ) {
+    return;
+  }
   const edgeData = { label: '', ...data };
+  const existingEdges = workspaceGraph.value.edges(`[source="${source}"][target="${target}"]`);
+  if (existingEdges && existingEdges.length > 0) {
+    const duplicate = existingEdges.filter((e: any) => e.data('label') === edgeData.label);
+    if (duplicate.length > 0) {
+      return;
+    }
+  }
   workspaceGraph.value.add({
     group: 'edges',
     data: { source, target, createdAt: new Date().toISOString(), ...edgeData }
@@ -11038,15 +11084,46 @@ const getVideoUrl = (post: any) => {
 };
 
 const getUsername = (post: any) => {
-  const rawUser = post.data?.user;
-  if (!rawUser || typeof rawUser !== "string") {
-    if (post.data?.uid !== undefined) {
-      return post.data?.uid;
-    }
+  if (!post) return "Telegram User";
+
+  // Must only return the TRUE username if data.url exists, otherwise return 'Telegram User'
+  const dataUrl = post.data?.url || post.url;
+  if (!dataUrl) {
     return "Telegram User";
   }
-  const parts = rawUser.split("/");
-  return parts[parts.length - 1];
+
+  // Restore the default 'Telegram User' displaying when post.data.user is null
+  const rawUser = post.data?.user;
+  if (!rawUser || typeof rawUser !== "string") {
+    return "Telegram User";
+  }
+
+  const trimmed = rawUser.trim();
+  if (
+    !trimmed ||
+    trimmed.toLowerCase() === "null" ||
+    trimmed.toLowerCase() === "undefined" ||
+    trimmed.toLowerCase() === "none" ||
+    trimmed === "{}"
+  ) {
+    return "Telegram User";
+  }
+
+  // Extract true username from path or handle
+  const clean = trimmed.replace(/\/+$/, "");
+  const parts = clean.split("/").filter(Boolean);
+  const lastPart = parts[parts.length - 1] || "";
+  const trueUsername = lastPart.split("?")[0].split("#")[0].replace(/^@+/, "").trim();
+
+  if (
+    !trueUsername ||
+    trueUsername.toLowerCase() === "null" ||
+    trueUsername.toLowerCase() === "undefined"
+  ) {
+    return "Telegram User";
+  }
+
+  return trueUsername;
 };
 
 const getToolName = (post: any) => {
@@ -11064,12 +11141,8 @@ const searchPostListenHints = ref<Record<string, string>>({});
 const getPostChannelIdentifier = (post: any): { username: string; title: string } => {
   if (!post) return { username: "", title: "" };
   const keyPart = post.key ? String(post.key).split(".")[0].trim() : "";
-  let userPart = "";
-  if (typeof post.data?.user === "string") {
-    const raw = post.data.user.trim();
-    userPart = raw.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").split("/").pop() || "";
-  }
-  const authorPart = typeof post.data?.author === "string" ? post.data.author.trim() : "";
+  const userPart = extractUserIdFromField(post.data?.user);
+  const authorPart = extractUserIdFromField(post.data?.author);
   const ownerPart = typeof post.data?.owner === "string" ? post.data.owner.trim() : "";
 
   const username = keyPart || userPart || authorPart || ownerPart || "";
