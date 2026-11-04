@@ -150,6 +150,7 @@ export default {
   explorer: {
     placeholder: "Enter channel name (e.g. durov) (?b=PID)",
     subscribers: "Subscribers",
+    online: "Online",
     photos: "Photos",
     videos: "Videos",
     documents: "Documents",

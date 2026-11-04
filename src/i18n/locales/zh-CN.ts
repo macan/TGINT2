@@ -150,6 +150,7 @@ export default {
   explorer: {
     placeholder: "输入频道用户名 (如 durov) (?b=PID)",
     subscribers: "订阅者",
+    online: "在线人数",
     photos: "图片",
     videos: "视频",
     documents: "文档",

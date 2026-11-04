@@ -150,6 +150,7 @@ export default {
   explorer: {
     placeholder: "輸入頻道使用者名稱 (如 durov) (?b=PID)",
     subscribers: "訂閱者",
+    online: "在線人數",
     photos: "相片",
     videos: "影片",
     documents: "檔案",

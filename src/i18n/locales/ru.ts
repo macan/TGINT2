@@ -150,6 +150,7 @@ export default {
   explorer: {
     placeholder: "Введите имя канала (напр., durov) (?b=PID)",
     subscribers: "Подписчики",
+    online: "В сети",
     photos: "Фото",
     videos: "Видео",
     documents: "Файлы",

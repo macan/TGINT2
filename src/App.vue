@@ -7503,6 +7503,7 @@ const fetchNodeMetadata = async (nodeType: string, nodeId: string) => {
         if (data.subscribers) facts.push(`Subscribers: ${data.subscribers}`);
         if (data.members) facts.push(`Members: ${data.members}`);
         if (data.participants_count) facts.push(`Members: ${data.participants_count}`);
+        if (data.online !== undefined && data.online !== null) facts.push(`Online: ${data.online}`);
         editingNodeData.value.facts = facts.join('\n');
         
         saveChanges();
@@ -8170,6 +8171,7 @@ const addToWorkspace = () => {
     if (m.subscribers) facts.push(`Subscribers: ${m.subscribers}`);
     if (m.members) facts.push(`Members: ${m.members}`);
     if (m.participants_count) facts.push(`Members: ${m.participants_count}`);
+    if (m.online !== undefined && m.online !== null) facts.push(`Online: ${m.online}`);
     
     addNode(label, 'channel', {
       id: username, // Custom ID used by Cytoscape graph
@@ -18665,6 +18667,27 @@ onUnmounted(() => {
                     </div>
 
                     <div
+                      v-if="(metadata.online !== undefined && metadata.online !== null && metadata.online !== '') || (metadata.online_count !== undefined && metadata.online_count !== null && metadata.online_count !== '')"
+                      class="bg-gray-50/70 dark:bg-gray-900/40 p-3.5 rounded-2xl border border-gray-150 dark:border-gray-750/70 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300 shadow-3xs"
+                    >
+                      <Activity
+                        class="h-4.5 w-4.5 mb-1.5 text-emerald-500"
+                      />
+                      <span
+                        class="text-sm font-black text-gray-900 dark:text-white font-mono tracking-tight"
+                        >{{
+                          !isNaN(Number(metadata.online ?? metadata.online_count))
+                            ? Number(metadata.online ?? metadata.online_count).toLocaleString()
+                            : (metadata.online ?? metadata.online_count)
+                        }}</span
+                      >
+                      <span
+                        class="text-[9px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5"
+                        >{{ t('explorer.online') }}</span
+                      >
+                    </div>
+
+                    <div
                       v-if="metadata.date || metadata.createdAt"
                       class="bg-gray-50/70 dark:bg-gray-900/40 p-3.5 rounded-2xl border border-gray-150 dark:border-gray-750/70 flex flex-col items-center justify-center text-center transition-all hover:-translate-y-0.5 duration-300 shadow-3xs"
                     >
@@ -25283,6 +25306,10 @@ onUnmounted(() => {
                       <span v-if="selectedChannelMetadata.subscribers || selectedChannelMetadata.members || selectedChannelMetadata.participants_count" class="inline-flex items-center gap-1 text-[10px] bg-teal-50 dark:bg-teal-950/50 text-teal-600 dark:text-teal-400 font-black px-2 py-0.5 rounded-full uppercase tracking-wider scale-95 border border-teal-100/50 dark:border-teal-900/20">
                         <Users class="h-3 w-3" />
                         {{ (selectedChannelMetadata.subscribers || selectedChannelMetadata.members || selectedChannelMetadata.participants_count).toLocaleString() }}
+                      </span>
+                      <span v-if="(selectedChannelMetadata.online !== undefined && selectedChannelMetadata.online !== null && selectedChannelMetadata.online !== '') || (selectedChannelMetadata.online_count !== undefined && selectedChannelMetadata.online_count !== null && selectedChannelMetadata.online_count !== '')" class="inline-flex items-center gap-1 text-[10px] bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 font-black px-2 py-0.5 rounded-full uppercase tracking-wider scale-95 border border-emerald-100/50 dark:border-emerald-900/20 ml-1">
+                        <Activity class="h-3 w-3" />
+                        {{ Number(selectedChannelMetadata.online ?? selectedChannelMetadata.online_count).toLocaleString() }} {{ t('explorer.online') }}
                       </span>
                     </div>
                   </div>

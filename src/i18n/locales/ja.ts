@@ -150,6 +150,7 @@ export default {
   explorer: {
     placeholder: "チャンネル名を入力 (例: durov) (?b=PID)",
     subscribers: "登録者",
+    online: "オンライン",
     photos: "画像",
     videos: "動画",
     documents: "ドキュメント",
