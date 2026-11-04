@@ -1,6 +1,6 @@
 {
-  "summary":  "Detailed implementation plan for adding an interactive Telegram channel engagement growth and activity pattern visualization feature in the Explorer tab using a React bridge container and Recharts with views growth, forward momentum, and 24-hour activity rhythm charts.",
-  "updatedAt":  "2026-10-31T01:58:26.069496438Z",
-  "requestFeedback":  true,
-  "userFacing":  true
+  "summary": "Architectural blueprint for the new Hots Mode in the Listen tab. Covers multi-range date filtering (Today, Yesterday, Last 3 Days, Last Week), semantic topic clustering with link-preview integration, view-sorted hot posts, activity-ranked hot channels, and a unified executive dashboard with modal/drawer drill-downs.",
+  "updatedAt": "2026-11-04T07:38:56.972706103Z",
+  "requestFeedback": true,
+  "userFacing": true
 }

@@ -112,6 +112,8 @@ import {
   Tag,
   Check,
   PieChart,
+  Flame,
+  TrendingUp,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -144,6 +146,7 @@ const AutoClassDistributionChart = defineAsyncComponent(() => import("./componen
 const TypesTab = defineAsyncComponent(() => import("./components/TypesTab.vue"));
 const ArticleReaderView = defineAsyncComponent(() => import("./components/ArticleReaderView.vue"));
 const ChannelAnalyticsWrapper = defineAsyncComponent(() => import("./components/ChannelAnalyticsWrapper.vue"));
+const HotsDashboard = defineAsyncComponent(() => import("./components/listen/HotsDashboard.vue"));
 
 const preloadSecondaryViews = () => {
   if (typeof window === "undefined") return;
@@ -153,6 +156,7 @@ const preloadSecondaryViews = () => {
     import("./components/ArticleReaderView.vue");
     import("./components/AutoClassDistributionChart.vue");
     import("./components/ChannelAnalyticsWrapper.vue");
+    import("./components/listen/HotsDashboard.vue");
     import("cytoscape");
   } catch {
     // Ignore preload errors
@@ -2716,10 +2720,13 @@ const isFetchingListenPosts = ref(false);
 const listenAutoRefreshActive = ref(false);
 let listenRefreshInterval: any = null;
 
-// Listen Layout Modes: 'view' (Reading focus) vs 'rearrange' (Reorganization focus) vs 'flexible' (Multi-stream workdesk)
-const listenLayoutMode = ref<'view' | 'rearrange' | 'flexible'>(
-  (localStorage.getItem("listen_layout_mode") as 'view' | 'rearrange' | 'flexible') || 'view'
+// Listen Layout Modes: 'view' (Reading focus) vs 'rearrange' (Reorganization focus) vs 'flexible' (Multi-stream workdesk) vs 'hots' (Hot trends & intelligence)
+const listenLayoutMode = ref<'view' | 'rearrange' | 'flexible' | 'hots'>(
+  (localStorage.getItem("listen_layout_mode") as 'view' | 'rearrange' | 'flexible' | 'hots') || 'view'
 );
+
+// Reactive tracker for IndexedDB posts updates for progressive Hots calculation
+const lastListenPostsDbSyncTime = ref(Date.now());
 
 // Directory Display Sorting (Without modifying low-level JSON data order)
 export type ListenSortOrder = 'original' | 'freshness-desc' | 'freshness-asc' | 'name-asc' | 'name-desc';
@@ -2761,13 +2768,15 @@ const handleDocumentClickForSortMenu = () => {
   }
 };
 
-const setListenLayoutMode = (mode: 'view' | 'rearrange' | 'flexible') => {
+const setListenLayoutMode = (mode: 'view' | 'rearrange' | 'flexible' | 'hots') => {
   listenLayoutMode.value = mode;
   localStorage.setItem("listen_layout_mode", mode);
   if (mode === 'flexible') {
     nextTick(() => {
       initFlexibleWorkdesk();
     });
+  } else if (mode === 'hots') {
+    // Hots mode initialized
   } else {
     nextTick(() => {
       initRelationsGraph();
@@ -5531,6 +5540,7 @@ const setCachedPostsIndexedDB = async (nodeId: string, posts: any[]): Promise<vo
       const store = transaction.objectStore("posts");
       const request = store.put(posts, nodeId);
       request.onsuccess = () => {
+        lastListenPostsDbSyncTime.value = Date.now();
         resolve();
       };
       request.onerror = () => {
@@ -8301,6 +8311,43 @@ const jumpToExplorerFromListen = (channel: string, postKey?: string) => {
   activeTab.value = 'explorer';
   channelName.value = channel;
   searchChannel();
+};
+
+const handleHotsSelectChannel = (channelId: string) => {
+  const cleanId = channelId.replace(/^@/, '');
+  const leaf = allListenLeafItems.value.find(item =>
+    item.id === channelId ||
+    item.id === cleanId ||
+    item.argument === channelId ||
+    item.argument === cleanId ||
+    (item.argument && item.argument.replace(/^@/, '') === cleanId) ||
+    item.name.toLowerCase() === cleanId.toLowerCase()
+  );
+  if (leaf) {
+    selectListenItem(leaf);
+    setListenLayoutMode('view');
+  } else {
+    jumpToExplorerFromListen(cleanId);
+  }
+};
+
+const handleHotsOpenPost = (payload: { channelId: string; postId: string | number; postUrl?: string }) => {
+  const cleanId = payload.channelId.replace(/^@/, '');
+  const leaf = allListenLeafItems.value.find(item =>
+    item.id === payload.channelId ||
+    item.id === cleanId ||
+    item.argument === payload.channelId ||
+    item.argument === cleanId ||
+    (item.argument && item.argument.replace(/^@/, '') === cleanId)
+  );
+  if (leaf) {
+    selectListenItem(leaf);
+    setListenLayoutMode('view');
+  } else if (payload.postUrl) {
+    window.open(payload.postUrl, '_blank');
+  } else {
+    jumpToExplorerFromListen(cleanId, payload.postId ? `${cleanId}.${payload.postId}` : undefined);
+  }
 };
 
 const lastSearchScrollY = ref(0);
@@ -23425,7 +23472,7 @@ onUnmounted(() => {
         <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/70 dark:border-gray-700/70 shadow-sm p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div class="flex items-center gap-3.5 min-w-0">
             <div class="h-10 w-10 sm:h-11 sm:w-11 rounded-2xl bg-teal-50 dark:bg-teal-950/50 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 shrink-0 shadow-xs">
-              <component :is="listenLayoutMode === 'view' ? Eye : (listenLayoutMode === 'rearrange' ? FolderTree : LayoutGrid)" class="h-5 w-5" />
+              <component :is="listenLayoutMode === 'view' ? Eye : (listenLayoutMode === 'rearrange' ? FolderTree : (listenLayoutMode === 'hots' ? Flame : LayoutGrid))" class="h-5 w-5" />
             </div>
             <div class="min-w-0">
               <div class="flex items-center gap-2 flex-wrap">
@@ -23440,7 +23487,7 @@ onUnmounted(() => {
                 </span>
               </div>
               <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5 truncate max-w-2xl">
-                {{ listenLayoutMode === 'view' ? t('listen.modeViewHint') : (listenLayoutMode === 'rearrange' ? t('listen.modeRearrangeHint') : t('listen.modeFlexibleHint')) }}
+                {{ listenLayoutMode === 'view' ? t('listen.modeViewHint') : (listenLayoutMode === 'rearrange' ? t('listen.modeRearrangeHint') : (listenLayoutMode === 'hots' ? t('listen.modeHotsHint') : t('listen.modeFlexibleHint'))) }}
               </p>
             </div>
           </div>
@@ -23570,20 +23617,47 @@ onUnmounted(() => {
                 <LayoutGrid class="h-3.5 w-3.5" />
                 <span>{{ t('listen.modeFlexible') }}</span>
               </button>
+              <button
+                @click="setListenLayoutMode('hots')"
+                class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer select-none"
+                :class="[
+                  listenLayoutMode === 'hots'
+                    ? 'bg-white dark:bg-gray-800 text-amber-600 dark:text-amber-400 shadow-xs'
+                    : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+                ]"
+              >
+                <Flame class="h-3.5 w-3.5" :class="listenLayoutMode === 'hots' ? 'text-amber-500' : ''" />
+                <span>{{ t('listen.modeHots') || 'Hots' }}</span>
+              </button>
             </div>
           </div>
         </div>
 
         <!-- Topic / Category Distribution Summary Component -->
         <AutoClassDistributionChart
-          v-if="isCategoryChartVisible && allListenLeafItems.length > 0"
+          v-if="isCategoryChartVisible && allListenLeafItems.length > 0 && listenLayoutMode !== 'hots'"
           :items="allListenLeafItems"
           :active-category="selectedAutoClassFilter"
           @select-category="handleAutoClassCategorySelect"
         />
 
+        <!-- Hots Mode (Hot Intelligence: Topics, Posts & Channels) -->
+        <template v-if="listenLayoutMode === 'hots'">
+          <HotsDashboard
+            :is-dark="isDark"
+            :last-db-update="lastListenPostsDbSyncTime"
+            :listen-items="allListenLeafItems"
+            :channel-metadata-cache="listenChannelMetadataCache"
+            @select-channel="handleHotsSelectChannel"
+            @open-post="handleHotsOpenPost"
+            @add-to-workspace="addToWorkspaceFromPost"
+            @share-post="sharePost"
+            @open-lightbox="openLightbox"
+          />
+        </template>
+
         <!-- Flexible Mode (Multi-Stream Workdesk Canvas) -->
-        <template v-if="listenLayoutMode === 'flexible'">
+        <template v-else-if="listenLayoutMode === 'flexible'">
           <div class="space-y-6 w-full">
             <!-- Workdesk Toolbar: Quick Item Filter & Selector, Active Chips, Columns, Batch Actions -->
             <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 shadow-sm p-4 sm:p-5 flex flex-col gap-4">
