@@ -279,6 +279,7 @@ export interface HotsAnalysisResult {
   hotPosts: HotPostItem[];
   hotChannels: HotChannelItem[];
   computedAt: number;
+  isTopicsComputing?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -878,14 +879,16 @@ export function extractClusterMetadata(clusterPosts: HotPostItem[]): ExtractedCl
 }
 
 /**
- * Sanitizes titles and text fragments by removing un-displayed UTF-8 replacement characters ('')
- * and normalizing spacing and corrupted punctuation.
+ * Sanitizes titles and text fragments by removing un-displayed UTF-8 replacement characters (),
+ * corrupted emoji codes, stray unicode symbols, and normalizing spacing.
  */
 export function sanitizeTitle(text: string): string {
   if (!text) return '';
   return String(text)
-    .replace(/\uFFFD/g, '') // remove replacement characters ''
-    .replace(/[]+/g, '')
+    .replace(/\uFFFD+/g, '') // remove all  replacement characters
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '') // control chars
+    // Remove isolated single-character artifacts left behind by broken emoji encodings
+    .replace(/(?:^|\s)[?\ufffd](?:\s|$)/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -1005,12 +1008,13 @@ function summarizeSinglePost(
   const lines = fullText.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
   if (lines.length > 1) {
     const firstLine = lines[0];
-    const headerMatch = firstLine.match(/^(?:#+\s+|\*\*(.+?)\*\*|[⚡🔥🚀📢🚨]\s*)(.+)$/);
-    const candidate = (headerMatch ? (headerMatch[1] || headerMatch[2]) : firstLine)
+    const headerMatch = firstLine.match(/^(?:#+\s+|\*\*(.+?)\*\*|[^\s\w]\s*)(.+)$/);
+    const rawCandidate = (headerMatch ? (headerMatch[1] || headerMatch[2]) : firstLine)
       .replace(/[#*`_]/g, '')
       .trim();
+    const candidate = sanitizeTitle(rawCandidate);
 
-    if (candidate.length >= 12 && candidate.length <= 95 && !isGenericLead(candidate)) {
+    if (candidate.length >= 10 && candidate.length <= 95 && !isGenericLead(candidate)) {
       const remaining = lines.slice(1).join(' ');
       const summary = generateCleanSummary(remaining.length > 40 ? remaining : fullText, cleanSnippet);
       return { title: candidate, summary };
@@ -1097,10 +1101,11 @@ function synthesizeClusterTitle(
     const rawLines = bestPost.text.split(/[\n\r]+/);
     for (const line of rawLines) {
       const trimmed = line.trim();
-      const headerMatch = trimmed.match(/^(?:#+\s+|\*\*(.+?)\*\*|[⚡🔥🚀📢🚨]\s*)(.+)$/);
+      const headerMatch = trimmed.match(/^(?:#+\s+|\*\*(.+?)\*\*|[^\s\w]\s*)(.+)$/);
       if (headerMatch) {
-        const cand = (headerMatch[1] || headerMatch[2] || '').replace(/[#*`_]/g, '').trim();
-        if (cand.length >= 12 && cand.length <= 95 && !isGenericLead(cand)) {
+        const rawCand = (headerMatch[1] || headerMatch[2] || '').replace(/[#*`_]/g, '').trim();
+        const cand = sanitizeTitle(rawCand);
+        if (cand.length >= 10 && cand.length <= 95 && !isGenericLead(cand)) {
           return {
             title: cand,
             summary: generateCleanSummary(bestPost.text, bestPost.cleanSnippet)
@@ -1112,8 +1117,9 @@ function synthesizeClusterTitle(
     // 4. Try lead sentence from best post
     const sentences = splitIntoSentences(bestPost.text);
     for (const s of sentences) {
-      const cleanS = s.replace(/^[#\s*•\->⚡🔥🚀📢🚨]+/, '').trim();
-      if (cleanS.length >= 15 && cleanS.length <= 85 && !isGenericLead(cleanS)) {
+      const rawCleanS = s.replace(/^[#\s*•\->\p{Emoji}\p{So}]+/gu, '').trim();
+      const cleanS = sanitizeTitle(rawCleanS);
+      if (cleanS.length >= 12 && cleanS.length <= 85 && !isGenericLead(cleanS)) {
         return {
           title: cleanS,
           summary: generateCleanSummary(bestPost.text, bestPost.cleanSnippet)
@@ -1321,8 +1327,16 @@ export async function processListenHotsData(options: {
   listenItems?: any[];
   channelMetadataCache?: Record<string, any>;
   onProgress?: (p: HotsEngineProgress) => void;
+  onPartialResult?: (partial: {
+    hotPosts: HotPostItem[];
+    hotChannels: HotChannelItem[];
+    totalPostsAnalyzed: number;
+    filteredPostsCount: number;
+    totalChannelsScanned: number;
+    activeChannelsCount: number;
+  }) => void;
 }): Promise<HotsAnalysisResult> {
-  const { cachedChannels, dateRange, geminiApiKey, useAiMode, listenItems, channelMetadataCache, onProgress } = options;
+  const { cachedChannels, dateRange, geminiApiKey, useAiMode, listenItems, channelMetadataCache, onProgress, onPartialResult } = options;
   const bounds = getDateRangeBounds(dateRange);
 
   onProgress?.({
@@ -1567,6 +1581,16 @@ export async function processListenHotsData(options: {
   }
 
   hotChannels.sort((a, b) => b.activityScore - a.activityScore);
+
+  // Early partial result notification: allows immediate rendering of posts and channels while topic clustering proceeds in background
+  onPartialResult?.({
+    hotPosts,
+    hotChannels,
+    totalPostsAnalyzed,
+    filteredPostsCount: inRangePosts.length,
+    totalChannelsScanned: cachedChannels.length,
+    activeChannelsCount: channelStatsMap.size,
+  });
 
   // 4. Hot Topics Clustering (Optimized for Substantive Topic Intelligence)
   onProgress?.({

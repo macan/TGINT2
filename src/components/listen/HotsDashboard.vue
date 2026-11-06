@@ -36,9 +36,13 @@ import {
   HotTopicCluster,
   HotChannelItem,
   HotsEngineProgress,
-  HotsAnalysisResult,
-  processListenHotsData
+  HotsAnalysisResult
 } from "../../utils/hotsEngine";
+import {
+  computeListenHotsInBackground,
+  getCachedHotsAnalysis,
+  setCachedHotsAnalysis
+} from "../../utils/hotsWorkerClient";
 import { getAllCachedPostsIndexedDB } from "../../utils/indexedDbPosts";
 import PostItemView from "./PostItemView.vue";
 import ChannelViewCard from "./ChannelViewCard.vue";
@@ -69,6 +73,7 @@ const selectedDateRange = ref<HotsDateRange>(
 );
 
 const isComputing = ref(false);
+const isTopicsComputing = ref(false);
 const computeProgress = ref<HotsEngineProgress>({
   step: "done",
   percent: 100,
@@ -187,11 +192,19 @@ const filteredDrillDownChannels = computed(() => {
 
 async function runAnalysis(force: boolean = false) {
   if (isComputing.value && !force) return;
+
+  const isAi = isAiModeEnabled.value && (serverHasGemini.value || !!geminiApiKey.value);
+  const cached = getCachedHotsAnalysis(selectedDateRange.value, isAi);
+  if (cached && !force) {
+    analysisResult.value = cached;
+  }
+
   isComputing.value = true;
+  isTopicsComputing.value = true;
   computeProgress.value = {
     step: "scanning",
     percent: 5,
-    message: "Opening IndexedDB posts cache..."
+    message: "Scanning IndexedDB posts cache in background..."
   };
 
   try {
@@ -207,28 +220,63 @@ async function runAnalysis(force: boolean = false) {
         hotTopics: [],
         hotPosts: [],
         hotChannels: [],
-        computedAt: Date.now()
+        computedAt: Date.now(),
+        isTopicsComputing: false
       };
+      isTopicsComputing.value = false;
       return;
     }
 
-    const res = await processListenHotsData({
+    const res = await computeListenHotsInBackground({
       cachedChannels,
       dateRange: selectedDateRange.value,
       geminiApiKey: geminiApiKey.value,
-      useAiMode: isAiModeEnabled.value && (serverHasGemini.value || !!geminiApiKey.value),
+      useAiMode: isAi,
       listenItems: props.listenItems,
       channelMetadataCache: props.channelMetadataCache,
       onProgress: p => {
         computeProgress.value = p;
+        if (p.step === 'clustering' || p.step === 'ai_clustering') {
+          isTopicsComputing.value = true;
+        }
+      },
+      onPartialResult: partial => {
+        // Progressive UI: Immediately show Hot Posts & Hot Channels without waiting for topic clustering
+        if (!analysisResult.value) {
+          analysisResult.value = {
+            dateRange: selectedDateRange.value,
+            timeWindow: { start: 0, end: Date.now() },
+            totalPostsAnalyzed: partial.totalPostsAnalyzed,
+            filteredPostsCount: partial.filteredPostsCount,
+            totalChannelsScanned: partial.totalChannelsScanned,
+            activeChannelsCount: partial.activeChannelsCount,
+            hotTopics: [],
+            hotPosts: partial.hotPosts,
+            hotChannels: partial.hotChannels,
+            computedAt: Date.now(),
+            isTopicsComputing: true
+          };
+        } else {
+          analysisResult.value = {
+            ...analysisResult.value,
+            totalPostsAnalyzed: partial.totalPostsAnalyzed,
+            filteredPostsCount: partial.filteredPostsCount,
+            totalChannelsScanned: partial.totalChannelsScanned,
+            activeChannelsCount: partial.activeChannelsCount,
+            hotPosts: partial.hotPosts,
+            hotChannels: partial.hotChannels,
+            isTopicsComputing: true
+          };
+        }
       }
     });
 
     analysisResult.value = res;
   } catch (err) {
-    console.error("Failed to run listen hots analysis:", err);
+    console.error("Failed to run listen hots analysis in background:", err);
   } finally {
     isComputing.value = false;
+    isTopicsComputing.value = false;
   }
 }
 
@@ -416,7 +464,25 @@ watch(
 
 onMounted(() => {
   checkServerGeminiStatus();
-  runAnalysis();
+  // Instant restore from in-memory cache if available (0ms render time)
+  const isAi = isAiModeEnabled.value && (serverHasGemini.value || !!geminiApiKey.value);
+  const cached = getCachedHotsAnalysis(selectedDateRange.value, isAi);
+  if (cached) {
+    analysisResult.value = cached;
+  }
+
+  // Defer background computing slightly so main UI paint completes without any frame drops
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        runAnalysis();
+      }, 50);
+    });
+  } else {
+    setTimeout(() => {
+      runAnalysis();
+    }, 50);
+  }
 });
 
 onUnmounted(() => {
@@ -561,8 +627,8 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Progressive Computing Progress Bar -->
-    <div v-if="isComputing" class="w-full bg-teal-50 dark:bg-teal-950/40 border border-teal-200/70 dark:border-teal-800/60 rounded-2xl p-3 flex items-center justify-between gap-3 animate-pulse">
+    <!-- Progressive Computing Progress Bar (Initial Cold Load Only) -->
+    <div v-if="isComputing && !analysisResult" class="w-full bg-teal-50 dark:bg-teal-950/40 border border-teal-200/70 dark:border-teal-800/60 rounded-2xl p-3 flex items-center justify-between gap-3 animate-pulse">
       <div class="flex items-center gap-2 text-xs font-bold text-teal-900 dark:text-teal-200 truncate">
         <RefreshCw class="h-3.5 w-3.5 animate-spin text-teal-600 dark:text-teal-400 shrink-0" />
         <span class="truncate">{{ computeProgress.message }}</span>
@@ -608,7 +674,13 @@ onUnmounted(() => {
                 {{ t('listen.hots.hotTopics') || 'Hot Topics' }}
               </h4>
               <p class="text-[11px] text-gray-400 dark:text-gray-500 font-mono tabular-nums truncate">
-                {{ analysisResult.hotTopics.length }} topics clustered
+                <span v-if="isTopicsComputing" class="text-amber-600 dark:text-amber-400 font-medium inline-flex items-center gap-1">
+                  <RefreshCw class="h-2.5 w-2.5 animate-spin" />
+                  Clustering in background...
+                </span>
+                <span v-else>
+                  {{ analysisResult.hotTopics.length }} topics clustered
+                </span>
               </p>
             </div>
           </div>
@@ -624,8 +696,37 @@ onUnmounted(() => {
 
         <!-- Topics Cards List (Top 5) -->
         <div class="p-4 space-y-3 divide-y divide-gray-100 dark:divide-gray-700/50">
+          <!-- Background Updating Banner when previous topics exist -->
           <div
-            v-if="analysisResult.hotTopics.length === 0"
+            v-if="isTopicsComputing && analysisResult.hotTopics.length > 0"
+            class="mb-2 p-2 rounded-xl bg-amber-50/70 dark:bg-amber-950/40 border border-amber-200/60 dark:border-amber-800/50 text-[11px] text-amber-800 dark:text-amber-300 flex items-center justify-between gap-2"
+          >
+            <span class="inline-flex items-center gap-1.5 font-medium truncate">
+              <RefreshCw class="h-3 w-3 animate-spin text-amber-600 dark:text-amber-400 shrink-0" />
+              <span class="truncate">{{ computeProgress.message || 'Updating topics in background...' }}</span>
+            </span>
+            <span class="font-mono font-bold tabular-nums shrink-0">{{ computeProgress.percent }}%</span>
+          </div>
+
+          <!-- Non-blocking Skeleton Loader when topics are computing for the first time -->
+          <div
+            v-if="isTopicsComputing && analysisResult.hotTopics.length === 0"
+            class="space-y-3 py-1"
+          >
+            <div v-for="i in 3" :key="i" class="animate-pulse space-y-2 p-2.5 -mx-1 rounded-2xl bg-gray-50/70 dark:bg-gray-750/30">
+              <div class="flex items-center gap-2">
+                <div class="h-3 w-6 bg-amber-200/70 dark:bg-amber-800/50 rounded-md"></div>
+                <div class="h-3 w-12 bg-gray-200 dark:bg-gray-700 rounded-md"></div>
+                <div class="h-3 w-16 bg-gray-200 dark:bg-gray-700 rounded-md"></div>
+              </div>
+              <div class="h-4 bg-gray-200 dark:bg-gray-700 rounded-md w-5/6"></div>
+              <div class="h-3 bg-gray-100 dark:bg-gray-750 rounded-md w-full"></div>
+              <div class="h-2.5 bg-gray-100 dark:bg-gray-750 rounded-md w-1/3"></div>
+            </div>
+          </div>
+
+          <div
+            v-else-if="!isTopicsComputing && analysisResult.hotTopics.length === 0"
             class="py-8 px-3 text-center"
           >
             <p class="text-xs text-gray-500 dark:text-gray-400">
