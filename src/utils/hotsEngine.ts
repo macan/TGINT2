@@ -1469,13 +1469,14 @@ export async function processListenHotsData(options: {
     let channelTitle = '';
 
     // Check listenItems
+    let matchedListenItem: any = null;
     if (Array.isArray(listenItems)) {
-      const match = listenItems.find(
+      matchedListenItem = listenItems.find(
         (it: any) => it.id === channelId || it.argument === channelId
       );
-      if (match) {
-        channelUsername = (match.argument || '').replace(/^@/, '').trim();
-        channelTitle = match.name || channelUsername;
+      if (matchedListenItem) {
+        channelUsername = (matchedListenItem.argument || '').replace(/^@/, '').trim();
+        channelTitle = matchedListenItem.name || channelUsername;
       }
     }
 
@@ -1502,6 +1503,19 @@ export async function processListenHotsData(options: {
 
     if (!channelUsername) {
       channelUsername = channelId.startsWith('@') ? channelId.slice(1) : channelId;
+    }
+
+    // Secondary match by resolved channelUsername if not matched by ID
+    if (!matchedListenItem && Array.isArray(listenItems) && channelUsername) {
+      matchedListenItem = listenItems.find((it: any) => {
+        const arg = (it?.argument || '').replace(/^@/, '').trim().toLowerCase();
+        return arg && arg === channelUsername.toLowerCase();
+      });
+    }
+
+    // Exclude channel from hot topics computation if disabled in configuration
+    if (matchedListenItem && matchedListenItem.enableHotTopics === false) {
+      continue;
     }
 
     // Check channelMetadataCache

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, computed, nextTick, defineAsyncComponent } from "vue";
+import { ref, shallowRef, markRaw, onMounted, onUnmounted, watch, computed, nextTick, defineAsyncComponent } from "vue";
 import DOMPurify from "dompurify";
 import pako from "pako";
 import {
@@ -142,6 +142,7 @@ import {
   getLanguageFlag,
   formatLanguageCode
 } from "./utils/channelLanguage";
+import { pruneOldPostsIndexedDB } from "./utils/indexedDbPosts";
 const AutoClassDistributionChart = defineAsyncComponent(() => import("./components/AutoClassDistributionChart.vue"));
 const TypesTab = defineAsyncComponent(() => import("./components/TypesTab.vue"));
 const ArticleReaderView = defineAsyncComponent(() => import("./components/ArticleReaderView.vue"));
@@ -989,6 +990,16 @@ onMounted(() => {
     document.addEventListener('keydown', handleGlobalKeyDown);
     window.addEventListener('blur', handleWindowBlur);
     window.addEventListener('focus', handleWindowFocus);
+
+    // Background idle IndexedDB retention compaction (60 days + latest 30 posts safeguard)
+    const runIdlePruner = () => {
+      pruneOldPostsIndexedDB(60, 30).catch(() => {});
+    };
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(runIdlePruner);
+    } else {
+      setTimeout(runIdlePruner, 5000);
+    }
 });
 
 onUnmounted(() => {
@@ -2667,6 +2678,7 @@ const listenDirectory = ref<ListenItem[]>([
         argument: "durov",
         description: "Official channel of Telegram founder Pavel Durov",
         tags: ["founder", "telegram", "official"],
+        enableHotTopics: true,
         auto_class: {
           class: "technology",
           confidence: 0.94
@@ -2681,6 +2693,7 @@ const listenDirectory = ref<ListenItem[]>([
         argument: "artificial intelligence, deepmind, gemini",
         description: "Post stream containing key AI phrases",
         tags: ["ai", "deepmind", "research"],
+        enableHotTopics: true,
         auto_class: {
           class: "technology",
           confidence: 0.98
@@ -2697,6 +2710,7 @@ const listenDirectory = ref<ListenItem[]>([
     argument: "toncoin",
     description: "Updates about TON network",
     tags: ["crypto", "ton", "web3"],
+    enableHotTopics: true,
     auto_class: {
       class: "financial",
       confidence: 0.91
@@ -2712,7 +2726,7 @@ const expandedFolders = ref<Record<string, boolean>>({
   "folder-1": true
 });
 
-const listenPosts = ref<any[]>([]);
+const listenPosts = shallowRef<any[]>([]);
 const selectedChannelMetadata = ref<any | null>(null);
 const isFetchingChannelMetadata = ref(false);
 const newlyFetchedListenKeys = ref<Set<string>>(new Set());
@@ -2920,7 +2934,8 @@ const listenItemForm = ref({
   argument: "",
   description: "",
   parentId: "",
-  tags: [] as string[]
+  tags: [] as string[],
+  enableHotTopics: true
 });
 
 // Tag configuration state within Add/Edit Item modal
@@ -3659,7 +3674,8 @@ const openAddModal = (parentId: string = "", isFolder: boolean = false) => {
     argument: "",
     description: "",
     parentId,
-    tags: []
+    tags: [],
+    enableHotTopics: true
   };
   isListenModalOpen.value = true;
 };
@@ -3677,7 +3693,8 @@ const openEditModal = (item: ListenItem) => {
     argument: item.argument || "",
     description: item.description || "",
     parentId: "",
-    tags: item.tags && Array.isArray(item.tags) ? [...item.tags] : []
+    tags: item.tags && Array.isArray(item.tags) ? [...item.tags] : [],
+    enableHotTopics: item.enableHotTopics !== false
   };
   isListenModalOpen.value = true;
 };
@@ -3694,6 +3711,8 @@ const saveListenItemForm = () => {
     ? [...listenItemForm.value.tags]
     : undefined;
 
+  const enableHotTopicsValue = listenItemForm.value.isFolder ? undefined : (listenItemForm.value.enableHotTopics !== false);
+
   if (isEditingListenItem.value) {
     findNodeAndPerform(listenDirectory.value, listenItemForm.value.id, (nodes, idx) => {
       const original = nodes[idx];
@@ -3703,7 +3722,8 @@ const saveListenItemForm = () => {
         type: listenItemForm.value.type,
         argument: listenItemForm.value.argument,
         description: listenItemForm.value.description,
-        tags: itemTags
+        tags: itemTags,
+        enableHotTopics: enableHotTopicsValue
       };
       if (selectedListenNode.value && selectedListenNode.value.id === original.id) {
         selectedListenNode.value = nodes[idx];
@@ -3720,7 +3740,8 @@ const saveListenItemForm = () => {
       argument: listenItemForm.value.isFolder ? undefined : listenItemForm.value.argument,
       description: listenItemForm.value.description,
       children: listenItemForm.value.isFolder ? [] : undefined,
-      tags: itemTags
+      tags: itemTags,
+      enableHotTopics: enableHotTopicsValue
     };
 
     if (listenItemForm.value.parentId) {
@@ -6136,30 +6157,48 @@ const scheduleScrapeForListen = async (channelName: string, showToast: boolean =
   cleanName = cleanName.split("?")[0].split("#")[0].replace(/^@+/, "").trim();
   if (!cleanName) return;
 
+  const headers: Record<string, string> = {};
+  if (loginToken.value) {
+    headers["x-gos-token"] = loginToken.value;
+  }
+
   try {
     let res: Response;
     try {
-      // 1. Same-origin proxy route (no CORS preflight issues)
-      const headers: Record<string, string> = {};
-      if (loginToken.value) {
-        headers["x-gos-token"] = loginToken.value;
-      }
-      res = await fetch(`/api/lq/${encodeURIComponent(cleanName)}`, {
-        method: "POST",
-        headers
-      });
-    } catch {
-      // 2. Direct endpoint fallback: Do NOT pass custom headers to avoid CORS preflight rejection
+      // 1. Direct call using PUT (the remote server explicitly allows Access-Control-Allow-Methods: PUT, OPTIONS and x-gos-token)
       res = await fetch(
         `https://i.gogingko.net/api/v1/lq/${encodeURIComponent(cleanName)}`,
         {
-          method: "POST"
+          method: "PUT",
+          headers
         }
       );
+      if (!res.ok && res.status !== 405) {
+        throw new Error(`Direct scrape PUT status: ${res.status}`);
+      }
+    } catch {
+      // 2. If direct call failed (e.g. adblocker or strict offline), try server proxy if running in Node.js dev environment
+      try {
+        res = await fetch(`/api/lq/${encodeURIComponent(cleanName)}`, {
+          method: "PUT",
+          headers
+        });
+        if (!res.ok) {
+          throw new Error(`Proxy status: ${res.status}`);
+        }
+      } catch {
+        // 3. Fallback: simple POST without custom headers
+        res = await fetch(
+          `https://i.gogingko.net/api/v1/lq/${encodeURIComponent(cleanName)}`,
+          {
+            method: "POST"
+          }
+        );
+      }
     }
 
-    if (!res.ok)
-      throw new Error(`Failed to schedule scrape: ${res.statusText}`);
+    if (!res.ok && res.status !== 405)
+      throw new Error(`Failed to schedule scrape: ${res.status} ${res.statusText}`);
   } catch (err: any) {
     console.warn("Could not schedule scrape for channel:", cleanName, err);
     if (showToast) {
@@ -6441,7 +6480,7 @@ const syncSingleListenItem = async (
 
       // If this item is currently selected, update view in real-time
       if (selectedListenNode.value && selectedListenNode.value.id === node.id) {
-        listenPosts.value = finalPosts;
+        listenPosts.value = markRaw(finalPosts);
         for (const p of fetchedPosts) {
           const id = getPostId(p);
           if (id && (!hasPreviousCache || !cachedKeys.has(id))) {
@@ -6592,6 +6631,13 @@ const startManualBackgroundSync = async (forceAll = false) => {
       toastType.value = "success";
       setTimeout(() => { toastMessage.value = ""; }, 4000);
     }
+
+    // Schedule background compaction after sync
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => pruneOldPostsIndexedDB(60, 30));
+    } else {
+      setTimeout(() => pruneOldPostsIndexedDB(60, 30), 3000);
+    }
   }
 };
 
@@ -6663,9 +6709,9 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
   if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
   if (isNewSelection) {
     listenPostsRenderLimit.value = 30;
-    listenPosts.value = cached;
+    listenPosts.value = markRaw(cached);
   } else if (!listenPosts.value || listenPosts.value.length === 0) {
-    listenPosts.value = cached;
+    listenPosts.value = markRaw(cached);
   }
   isFetchingListenPosts.value = true;
   if (isNewSelection) {
@@ -6897,7 +6943,7 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
       }
 
       freshlyAdded.forEach(id => newlyFetchedListenKeys.value.add(id));
-      listenPosts.value = finalPosts;
+      listenPosts.value = markRaw(finalPosts);
 
       // Trigger SystemOne auto topic classification when new posts were fetched
       // or when the listen item has NOT been auto_class yet
@@ -10632,7 +10678,8 @@ const openAddChannelModalWithDetails = (name: string, username: string, parentId
     argument: username,
     description: `Channel: @${username}`,
     parentId,
-    tags: []
+    tags: [],
+    enableHotTopics: true
   };
   isListenModalOpen.value = true;
 };
@@ -11843,15 +11890,20 @@ const handleScrapeClick = async () => {
 const scheduleScrape = async () => {
   if (!currentChannelName.value || isScrapingDisabled.value) return;
   try {
+    const headers: Record<string, string> = {};
+    if (loginToken.value) {
+      headers["x-gos-token"] = loginToken.value;
+    }
     const res = await fetch(
       `https://i.gogingko.net/api/v1/lq/${encodeURIComponent(
         currentChannelName.value
       )}`,
       {
-        method: "POST",
+        method: "PUT",
+        headers
       }
     );
-    if (!res.ok)
+    if (!res.ok && res.status !== 405)
       throw new Error(`Failed to schedule scrape: ${res.statusText}`);
 
     isScrapingDisabled.value = true;
@@ -11859,23 +11911,27 @@ const scheduleScrape = async () => {
       isScrapingDisabled.value = false;
     }, 5000);
   } catch (err: any) {
-    console.error(err);
-    alert("Failed to schedule scrape: " + err.message);
+    console.warn("Failed to schedule scrape:", err);
   }
 };
 
 const scheduleScrapeRepeatly = async () => {
   if (!currentChannelName.value || isScrapingDisabled.value) return;
   try {
+    const headers: Record<string, string> = {};
+    if (loginToken.value) {
+      headers["x-gos-token"] = loginToken.value;
+    }
     const res = await fetch(
       `https://i.gogingko.net/api/v1/lq/${encodeURIComponent(
         currentChannelName.value
       )}?qn=q1`,
       {
-        method: "POST",
+        method: "PUT",
+        headers
       }
     );
-    if (!res.ok)
+    if (!res.ok && res.status !== 405)
       throw new Error(`Failed to schedule scrape repeatly: ${res.statusText}`);
 
     toastMessage.value = `Schedule scrape ${currentChannelName.value} repeatly.`;
@@ -11887,8 +11943,7 @@ const scheduleScrapeRepeatly = async () => {
       isScrapingDisabled.value = false;
     }, 5000);
   } catch (err: any) {
-    console.error(err);
-    alert("Failed to schedule scrape repeatly: " + err.message);
+    console.warn("Failed to schedule scrape repeatly:", err);
   }
 };
 
@@ -25004,6 +25059,16 @@ onUnmounted(() => {
                     <span class="hidden sm:inline">Classifying...</span>
                   </span>
 
+                  <!-- Excluded from Hots Badge in Directory Tree Node -->
+                  <span
+                    v-if="!node.item.isFolder && node.item.enableHotTopics === false"
+                    class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-750 inline-flex items-center gap-1 select-none shrink-0"
+                    :title="t('listen.excludedFromHots') || 'Excluded from Hot Topics'"
+                  >
+                    <Flame class="h-2.5 w-2.5 opacity-40" />
+                    <span class="hidden xl:inline text-[8px] uppercase tracking-wider font-semibold">{{ t('listen.excludedFromHots') || 'No Hots' }}</span>
+                  </span>
+
                   <!-- Item Tags in Rearrange Mode (Proper style) -->
                   <div 
                     v-if="listenLayoutMode === 'rearrange' && !node.item.isFolder && node.item.tags && node.item.tags.length > 0"
@@ -27122,6 +27187,41 @@ onUnmounted(() => {
                       + #{{ item.tag }}
                     </button>
                   </div>
+                </div>
+
+                <!-- Hot Topics Clustering Participation Toggle -->
+                <div class="p-3.5 bg-gray-50/80 dark:bg-gray-900/40 rounded-2xl border border-gray-150 dark:border-gray-700/80 flex items-center justify-between gap-3">
+                  <div class="flex items-start gap-2.5 min-w-0 flex-1">
+                    <div class="p-2 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200/50 dark:border-amber-800/40 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5">
+                      <Flame class="h-4 w-4" />
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center gap-2">
+                        <label for="enable-hot-topics-toggle" class="text-xs font-bold text-gray-800 dark:text-gray-200 cursor-pointer">
+                          {{ t('listen.enableHotTopicsLabel') || 'Include in Hot Topics Computation' }}
+                        </label>
+                        <span
+                          v-if="!listenItemForm.enableHotTopics"
+                          class="px-1.5 py-0.5 text-[10px] font-bold rounded-md bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 border border-rose-200/60 dark:border-rose-900/60 shrink-0"
+                        >
+                          {{ t('listen.excludedFromHots') || 'Excluded' }}
+                        </span>
+                      </div>
+                      <p class="text-[11px] text-gray-400 dark:text-gray-500 mt-0.5 leading-relaxed">
+                        {{ t('listen.enableHotTopicsDesc') || "Allow this channel's posts to participate in hot topics clustering and emerging trend analysis." }}
+                      </p>
+                    </div>
+                  </div>
+                  <!-- Switch Toggle -->
+                  <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                    <input
+                      id="enable-hot-topics-toggle"
+                      v-model="listenItemForm.enableHotTopics"
+                      type="checkbox"
+                      class="sr-only peer"
+                    />
+                    <div class="w-10 h-5.5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4.5 after:w-4.5 after:transition-all dark:border-gray-600 peer-checked:bg-teal-600"></div>
+                  </label>
                 </div>
               </div>
 

@@ -1,192 +1,120 @@
-# Listen Tab Hots Mode: Hot Topics, Posts & Channels Analytics
+# Performance Optimization Plan: Ultra-High Volume Post Engine (200K–500K Posts)
 
-A high-performance intelligence dashboard integrated into the Listen tab that scans and aggregates all local posts stored in IndexedDB (`GingkoListenPostsDB`). Computes semantic topic clusters, top-performing posts by view count, and channel activity rankings across flexible time horizons (Today, Yesterday, Last 3 Days, Last Week).
+A high-throughput architectural overhaul targeting extreme memory efficiency, zero-jank DOM rendering, and instant responsiveness when IndexedDB caches accumulate 200,000 to 500,000+ Telegram posts.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following product decisions were confirmed during the interactive interview:
-> - **Topic Clustering & Summaries**: Hybrid client-side semantic clustering analyzing post text content, hashtags, and extracted link-preview domains/metadata with fast heuristic title synthesis and an optional server-side Gemini AI summarization trigger.
-> - **Hot Channel Ranking Formula**: Multi-factor activity score blending post publishing volume ($W_{\text{vol}} = 0.4$) and aggregate engagement views/forwards ($W_{\text{eng}} = 0.6$) normalized over the selected date range.
-> - **Visual Dashboard Layout**: Unified executive command center presenting Hot Topics, Hot Posts, and Hot Channels side-by-side in responsive Bento cards, each supporting 1-click drill-down to a full modal/drawer list with message jump-to links and search.
+> The following architectural parameters were selected during the interactive interview:
+> - **Optimization Scope**: Dual-target optimization covering both the main feed rendering (`PostItemView` list) and the background Hots analytics engine.
+> - **Feed Architecture**: Virtualized windowing with shallow reactive state (`shallowRef` / `markRaw`) to eliminate deep Vue proxy allocation and limit live DOM nodes to only those visible in the viewport.
+> - **Cache Retention Policy**: Intelligent 60-day time-window pruning per channel with a **Latest-Posts Safeguard** (retaining at least the newest 30 posts per channel so inactive channels never become blank).
 
 ---
 
-## 1. Overview & Core Concept
+## 1. System Bottleneck Analysis
 
-- **What It Does**: Unlocks the dormant intelligence in the background-fetched IndexedDB post cache (`GingkoListenPostsDB`). Rather than browsing channel by channel, users can switch the Listen tab to **Hots Mode** to see:
-  1. **Hot Topics**: Post clusters grouped by semantic lexical patterns, common URL domains, and shared hashtags, ranked by cumulative cluster heat score.
-  2. **Hot Posts**: Top messages ordered in descending order of view count (`views`) with quick previews, channel badges, and direct channel jump actions.
-  3. **Hot Channels**: Most active and high-impact channels within the selected time window, ranked by publishing frequency and total impressions.
-  4. **Dynamic Time Windows**: Instant client-side switching between **Today**, **Yesterday**, **Last 3 Days**, and **Last Week** (plus **All Cached Time**).
-- **Target Audience / Persona**: OSINT researchers, media curators, and community managers who monitor dozens of Telegram channels and need an executive daily brief on what narrative is trending without manual message scanning.
-- **Key Value**: Transforms passive background archiving into proactive situational awareness.
+When local storage scales to 200,000–500,000 posts, the system experiences three distinct compounding performance bottlenecks:
 
----
+1. **Deep Vue Reactivity Heap Bloat (~800MB–1.5GB RAM)**:
+   - Assigning large post arrays to standard Vue `ref<any[]>` causes Vue 3's reactivity engine to recursively traverse every post object, its nested `data`, `attributes`, and media arrays, creating millions of reactive `Proxy` instances.
+   - This triggers frequent, lengthy Garbage Collection (GC) pauses (200ms–800ms) that freeze scrolling and user input.
 
-## 2. User Experience & Visual Design
+2. **Monolithic IndexedDB Reads (`store.getAll()`)**:
+   - `getAllCachedPostsIndexedDB()` currently reads all channels and posts into memory at once. At 500K posts, deserializing 500MB+ of structured clone data blocks the main thread for seconds and leads to out-of-memory (OOM) risks on mobile/low-memory devices.
+   - Sanitizing these objects for Web Worker transfer using `JSON.parse(JSON.stringify(channels))` doubles the peak memory footprint.
 
-- **Navigation Integration**:
-  - In the Listen tab mode switcher (`listenLayoutMode`), a fourth segmented control item is added: **Hots** (`Flame` icon) alongside **View** (`Eye`), **Rearrange** (`FolderTree`), and **Flexible** (`LayoutGrid`).
-- **Date Range Filter Ribbon**:
-  - Compact, single-line segmented control at the top:
-    - `Today` (midnight to now)
-    - `Yesterday` (yesterday's 24h window)
-    - `Last 3 Days` (rolling 72h)
-    - `Last Week` (rolling 7d)
-    - `All Time` (all cached posts)
-  - Live metric count indicator showing total posts analyzed (e.g., `4,210 posts analyzed across 38 channels`).
-- **Unified Executive Dashboard (3-Column / Bento Grid)**:
-  - **Column 1: Hot Topics**:
-    - Cards displaying cluster title, post count, total views, top keywords/domains, and a visual heat bar.
-    - Clickable card header: `"View All Topics"` opening a detailed topic drawer/modal showing all member posts and full text.
-  - **Column 2: Hot Posts**:
-    - Cards displaying author/channel handle, post snippet, view count with tabular figures, forward counts, media badges, and date.
-    - Clickable to view the full post modal and navigate directly to that message in Explorer or Listen view.
-  - **Column 3: Hot Channels**:
-    - Cards displaying channel name, avatar initials, recent post volume in range, total views, and activity velocity badge.
-    - Clickable to select and inspect the channel in Listen directory or Explorer.
-- **Full-List Modal / Drawer**:
-  - Clicking any section's `"See All"` or card opens a dedicated slide-over / dialog with search filtering, sort toggles, and rich post previews.
-- **Visual Styling & Dual Theme**:
-  - Light mode: crisp slate borders (`border-slate-200`), clean typography, emerald/amber heat indicators.
-  - Dark mode: deep obsidian surfaces (`dark:bg-gray-800`), high-contrast tabular typography, subtle borders.
-  - Strict adherence to zero-pill rules for static metadata (unboxed text with `·` separators) and single-elevation containers.
+3. **DOM Element Overload in Feed View**:
+   - Scrolling through a channel with thousands of posts currently appends hundreds of full `PostItemView` components into the DOM tree. Each card contains avatars, badges, text parsers, reaction chips, and media previews, resulting in 10,000+ active DOM elements that degrade layout calculation and repaint performance.
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
-
-- **Decision 1: Direct IndexedDB Bulk Reader (`getAllCachedPostsIndexedDB`)**
-  - *Chosen Approach*: Implement a single indexed scan iterating over `GingkoListenPostsDB`'s `posts` store to extract all posts with channel identifiers in a single indexed read.
-  - *Why*: Eliminates thousands of separate queries, loading hundreds of cached channels in <100ms.
-  - *Alternatives Considered*: Iterating channel by channel sequentially (slow, high UI jank).
-
-- **Decision 2: Semantic Clustering Pipeline (Local TF-IDF & URL Domain Clustering)**
-  - *Chosen Approach*:
-    1. Extract tokens, hashtags, and normalized link-preview URLs (`host` + canonical path).
-    2. Compute pairwise Jaccard / Cosine similarity on frequent terms and shared links.
-    3. Form agglomerative clusters with a minimum threshold.
-    4. Generate cluster titles using key n-grams and prominent link domains.
-    5. Provide an optional `"Enhance Titles with AI"` button that calls server-side Gemini (`gemini-3.8-flash`) to generate human-grade editorial headlines for the top clusters.
-  - *Why*: Instant, zero-cost, works completely offline with no API key required, while allowing AI enhancement on demand.
-  - *Alternatives Considered*: Requiring Gemini API for every cluster (fails offline, adds latency and token costs).
-
-- **Decision 3: Hot Score Calculation Formulas**
-  - *Hot Post Score*: $S_{\text{post}} = \text{views} + (\text{forwards} \times 5)$.
-  - *Hot Topic Score*: $S_{\text{topic}} = \sum_{p \in C} S_{\text{post}} \times \log_2(|C| + 1)$.
-  - *Hot Channel Activity*: $A_{\text{channel}} = (\text{postsCount} \times 100) + \sqrt{\sum \text{views}}$.
-
----
-
-## 4. Technical Architecture & Data Strategy
-
-### Component & Data Flow Diagram
+## 2. Technical Architecture & Optimization Strategy
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        Listen Tab (src/App.vue)                        │
-│   • listenLayoutMode: 'view' | 'rearrange' | 'flexible' | 'hots'       │
+│                        Listen View & Feed UI                           │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ Virtual Windowing Container (renders only 8–15 visible cards)    │  │
+│  │  • Dynamic height tracking via ResizeObserver                    │  │
+│  │  • Overscan buffer: 3–5 items above and below viewport           │  │
+│  │  • Absolute translateY positioning with virtual spacer container │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
-                         Active mode === 'hots'
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│               HotsDashboard.vue (New Dedicated Component)              │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ 1. Time Range Selector [Today | Yesterday | 3 Days | Week | All] │  │
-│  │ 2. Aggregate Status Strip (Total posts, channels, last sync)     │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-│                                   │                                    │
-│       ┌───────────────────────────┼───────────────────────────┐        │
-│       ▼                           ▼                           ▼        │
-│ ┌───────────────┐         ┌───────────────┐         ┌───────────────┐  │
-│ │  Hot Topics   │         │   Hot Posts   │         │ Hot Channels  │  │
-│ │  Top 5 Cards  │         │  Top 5 Cards  │         │  Top 5 Cards  │  │
-│ │  [See All ➔]  │         │  [See All ➔]  │         │  [See All ➔]  │  │
-│ └───────┬───────┘         └───────┬───────┘         └───────┬───────┘  │
-│         │                         │                         │          │
-│         └─────────────────────────┼─────────────────────────┘          │
-│                                   ▼                                    │
-│             Drill-down Modal / Drawer (Full Filterable List)           │
-└────────────────────────────────────────────────────────────────────────┘
-                                    ▲
-                                    │ Reads bulk posts
-┌───────────────────────────────────┴────────────────────────────────────┐
-│                    IndexedDB: GingkoListenPostsDB                      │
-│             Object Store: 'posts' (Key: nodeId -> Post[])              │
+│                     Shallow Reactivity Layer                           │
+│   • listenPosts: shallowRef<HotPostItem[]>                             │
+│   • Raw post objects wrapped with markRaw() / Object.freeze()          │
+│   • Zero recursive Proxy allocation -> Saves 75–85% Heap Memory        │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+          ┌─────────────────────────┴─────────────────────────┐
+          ▼                                                   ▼
+┌───────────────────────────────────┐   ┌────────────────────────────────┐
+│   IndexedDB Intelligent Pruner    │   │   Streamed Hots Aggregator     │
+│ • Runs during idle callback       │   │ • Cursor/batch channel reads   │
+│ • Prunes posts older than 60 days │   │ • Lightweight field projection │
+│ • Safeguard: Preserves latest 30  │   │   (timestamp, views, snippet)  │
+│   posts per channel unconditionally│  │ • Discards raw payload early   │
+└─────────────────┬─────────────────┘   └─────────────────┬──────────────┘
+                  │                                       │
+                  └───────────────────┬───────────────────┘
+                                      ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                  IndexedDB: GingkoListenPostsDB                        │
+│               Object Store: 'posts' (Key: nodeId)                      │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Data Structures & State Model
+---
 
-```typescript
-export type HotsDateRange = 'today' | 'yesterday' | '3days' | 'week' | 'all';
+## 3. Detailed Component Plan
 
-export interface HotTopicCluster {
-  id: string;
-  title: string;
-  aiTitle?: string;
-  summary?: string;
-  keywords: string[];
-  domains: string[];
-  posts: any[];
-  postCount: number;
-  totalViews: number;
-  totalForwards: number;
-  hotScore: number;
-  channels: string[];
-  timeRange: { start: number; end: number };
-}
+### Deliverable 1: Virtualized Feed Windowing (`src/components/listen/VirtualPostList.vue`)
+- **Virtual Viewport Manager**:
+  - Replaces flat `v-for` loops in `App.vue` (`visibleListenPosts`) with a high-performance virtualized viewport.
+  - Automatically measures item heights using a lightweight `ResizeObserver` cache to support variable text lengths, media previews, and quoted replies without layout popping.
+  - Calculates start/end indices based on scroll offset with an overscan margin of 4 items for seamless 60fps scrolling.
+  - Provides a total height spacer so native scrollbars and scroll jumps maintain precise visual position.
 
-export interface HotPostItem {
-  id: string | number;
-  channelId: string;
-  channelName: string;
-  text: string;
-  views: number;
-  forwards: number;
-  date: number;
-  dateStr: string;
-  url?: string;
-  linkPreview?: any;
-  hasMedia: boolean;
-  score: number;
-}
+### Deliverable 2: Shallow Reactivity & Memory De-bloat (`src/App.vue`)
+- **Convert Deep Refs to Shallow Refs**:
+  - Update `listenPosts` from `ref<any[]>([])` to `shallowRef<any[]>([])`.
+  - When loading posts from IndexedDB or remote scrape batches, pass post arrays through `markRaw()` or `Object.freeze()`.
+  - Mutate `listenPosts.value` by replacing the array reference (e.g., `listenPosts.value = [...updatedPosts]`), ensuring Vue re-renders instantly without creating deep reactive proxies for individual message keys.
 
-export interface HotChannelItem {
-  channelId: string;
-  channelName: string;
-  title: string;
-  avatar?: string;
-  postCount: number;
-  totalViews: number;
-  totalForwards: number;
-  avgViews: number;
-  activityScore: number;
-  subscribers?: number;
-  latestPostTime: number;
-}
-```
+### Deliverable 3: Lightweight Projection Streaming for Hots Mode (`src/utils/indexedDbPosts.ts` & `src/utils/hotsEngine.ts`)
+- **Batch Cursor Traversal**:
+  - Refactor `getAllCachedPostsIndexedDB()` to support batched/cursor streaming rather than a single monolithic `store.getAll()`.
+  - Read channels iteratively in manageable chunks (e.g., 50 channels per transaction).
+- **Early Projection & Payload Pruning**:
+  - Filter by date range at the earliest stage: if a channel's newest post is older than the selected date range start, bypass the entire channel collection immediately.
+  - Extract only the minimal fields required for hot score and topic clustering (`timestamp`, `views`, `forwards`, `replies`, `cleanSnippet`, `channelName`, `key`, `linkPreview`).
+  - Drop heavy binary arrays, full text HTML, and raw protocol attributes before passing data to the background Web Worker, cutting postMessage payload size by over 80%.
 
-### Planned Implementation Steps
+### Deliverable 4: Intelligent 60-Day Cache Pruner (`src/utils/indexedDbPosts.ts`)
+- **Retention Policy Rules**:
+  - Cutoff timestamp: $T_{\text{cutoff}} = \text{Date.now()} - (60 \times 24 \times 60 \times 60 \times 1000)$.
+  - **Latest-Post Safeguard**: Always retain the newest 30 posts for any channel, regardless of age. If a channel has $\le 30$ posts in total, or its posts are all older than 60 days, the newest 30 are preserved intact so channels never show as empty.
+  - Posts beyond the newest 30 that are older than 60 days are purged during idle cycles (`requestIdleCallback`).
+- **Compaction & Diagnostics**:
+  - Added safe cleanup trigger after background synchronization finishes.
+  - Provides a clean utility function to inspect current cache storage statistics (total posts, channel count, estimated storage footprint).
 
-1. **Storage Utility (`src/utils/indexedDbPosts.ts`)**:
-   - Add `getAllCachedPostsIndexedDB(): Promise<{ channelId: string; posts: any[] }[]>`.
-2. **Clustering & Ranking Engine (`src/utils/hotsEngine.ts`)**:
-   - Implement date filtering according to the 4 user-requested ranges.
-   - Implement lexical tokenization, link-domain extraction, cluster aggregation, and scoring.
-   - Implement hot posts sorting by views (`DSC`) and hot channels activity sorting (`DSC`).
-3. **UI Component (`src/components/listen/HotsDashboard.vue`)**:
-   - Build responsive 3-column dashboard matching existing aesthetic.
-   - Add date range buttons (`Today`, `Yesterday`, `Last 3 Days`, `Last Week`).
-   - Implement interactive cards with hover states, tabular numbers, and modal drill-down.
-   - Implement drill-down modal for full topic/post/channel exploration.
-4. **Integration in `src/App.vue`**:
-   - Add `'hots'` to `listenLayoutMode` type and switcher bar with `Flame` icon.
-   - Render `<HotsDashboard />` when `listenLayoutMode === 'hots'`.
-   - Add internationalization strings for all 6 supported locales (`en`, `zh-CN`, `zh-TW`, `es`, `ja`, `ru`).
-5. **Verification & Optimization Deliverables**:
-   - Run `lint_applet` (`tsc --noEmit`) and `compile_applet`.
-   - **Meaningless Posts Filter Count Display**: Rendered distinct badge for filtered-out noise/media-only/short posts alongside in-range count in the top control strip and column header.
-   - **Foreign Title Chinese Translation Subtitles**: Automatic detection of foreign headlines with dual Gemini and neural MT translation displaying `中译` subtitle across all topic views.
+---
+
+## 4. Verification & Benchmarking Strategy
+
+1. **Memory & Heap Verification**:
+   - Verify with Chrome DevTools Memory Profiler that opening a channel with 10,000+ posts does not cause heap spikes or long GC pauses.
+   - Confirm `listenPosts` shallow reactivity holds raw objects without Vue Proxy wrapping.
+2. **Scrolling Frame Rate**:
+   - Verify smooth 60fps scrolling inside `VirtualPostList` with zero layout thrashing or blank flash frames.
+3. **Retention Pruning Test**:
+   - Verify unit test scenarios:
+     - Channel with 500 posts over 90 days $\rightarrow$ Pruned to posts within 60 days (keeping $\ge 30$).
+     - Inactive channel with 20 posts from 180 days ago $\rightarrow$ All 20 posts preserved (safeguard active).
+4. **Compilation & Linting**:
+   - Run `compile_applet` and `lint_applet` to ensure full TypeScript typing and zero regressions across existing Explorer and Listen workflows.

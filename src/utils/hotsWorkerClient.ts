@@ -69,12 +69,13 @@ export function clearHotsAnalysisCache(): void {
 
 function sanitizeListenItems(
   items: any[] | undefined
-): Array<{ id: string; name: string; argument?: string }> {
+): Array<{ id: string; name: string; argument?: string; enableHotTopics?: boolean }> {
   if (!Array.isArray(items)) return [];
   return items.map(it => ({
     id: String(it?.id || ''),
     name: String(it?.name || it?.title || it?.argument || ''),
-    argument: it?.argument ? String(it.argument) : undefined
+    argument: it?.argument ? String(it.argument) : undefined,
+    enableHotTopics: it?.enableHotTopics !== false
   }));
 }
 

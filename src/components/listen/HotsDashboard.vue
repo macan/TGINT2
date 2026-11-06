@@ -46,7 +46,9 @@ import {
 } from "../../utils/hotsWorkerClient";
 import { getAllCachedPostsIndexedDB } from "../../utils/indexedDbPosts";
 import PostItemView from "./PostItemView.vue";
+import VirtualPostList from "./VirtualPostList.vue";
 import ChannelViewCard from "./ChannelViewCard.vue";
+import PostVolumeTrendCard from "./PostVolumeTrendCard.vue";
 
 export interface ListenDbSyncPayload {
   timestamp: number;
@@ -225,7 +227,12 @@ async function runAnalysis(force: boolean = false) {
   };
 
   try {
-    const cachedChannels = await getAllCachedPostsIndexedDB();
+    const bounds = getDateRangeBounds(selectedDateRange.value);
+    const cachedChannels = await getAllCachedPostsIndexedDB({
+      dateRangeStart: bounds.start,
+      dateRangeEnd: bounds.end,
+      lightweightProjection: true
+    });
     if (cachedChannels.length === 0) {
       analysisResult.value = {
         dateRange: selectedDateRange.value,
@@ -796,9 +803,18 @@ onUnmounted(() => {
       </p>
     </div>
 
+    <!-- Trend Line Chart: Volume of Posts Over Time (Recharts) -->
+    <PostVolumeTrendCard
+      v-if="analysisResult && analysisResult.hotPosts.length > 0"
+      :posts="analysisResult.hotPosts"
+      :date-range="selectedDateRange"
+      :is-dark="isDark"
+      :is-computing="isComputing"
+    />
+
     <!-- Main 3-Column Bento Grid: Hot Topics, Hot Posts, Hot Channels -->
     <div
-      v-else-if="analysisResult"
+      v-if="analysisResult && analysisResult.hotPosts.length > 0"
       class="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start w-full"
     >
       <!-- =================================================================== -->
@@ -1235,20 +1251,32 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <!-- Cluster Member Posts (Uses full PostItemView matching View Mode) -->
-              <div class="space-y-4">
-                <PostItemView
-                  v-for="post in inspectedTopic.posts"
-                  :key="post.key || post.id"
-                  :post="post"
-                  :compact="false"
+              <!-- Cluster Member Posts (Uses Virtualized List for performance) -->
+              <div>
+                <VirtualPostList
+                  v-if="inspectedTopic.posts.length > 5"
+                  :posts="inspectedTopic.posts"
                   :is-dark="isDark"
                   @open-lightbox="url => emit('open-lightbox', url)"
                   @add-to-workspace="p => emit('add-to-workspace', p)"
                   @share-post="p => emit('share-post', p)"
-                  @jump-to-channel="(u, k) => handlePostJump({ ...post, channelUsername: u, key: k })"
+                  @jump-to-channel="(u, k) => handlePostJump({ channelUsername: u, key: k })"
                   @click-post="p => inspectPost(p)"
                 />
+                <div v-else class="space-y-4">
+                  <PostItemView
+                    v-for="post in inspectedTopic.posts"
+                    :key="post.key || post.id"
+                    :post="post"
+                    :compact="false"
+                    :is-dark="isDark"
+                    @open-lightbox="url => emit('open-lightbox', url)"
+                    @add-to-workspace="p => emit('add-to-workspace', p)"
+                    @share-post="p => emit('share-post', p)"
+                    @jump-to-channel="(u, k) => handlePostJump({ ...post, channelUsername: u, key: k })"
+                    @click-post="p => inspectPost(p)"
+                  />
+                </div>
               </div>
             </div>
 
@@ -1351,22 +1379,35 @@ onUnmounted(() => {
             </div>
           </template>
 
-          <!-- POSTS TAB (Uses full PostItemView matching View Mode) -->
+          <!-- POSTS TAB (Uses Virtualized List for performance) -->
           <template v-else-if="drillDownTab === 'posts'">
-            <div class="space-y-4">
-              <PostItemView
-                v-for="(post, idx) in filteredDrillDownPosts"
-                :key="post.key || post.id"
-                :post="post"
-                :compact="false"
-                :rank="idx + 1"
+            <div>
+              <VirtualPostList
+                v-if="filteredDrillDownPosts.length > 5"
+                :posts="filteredDrillDownPosts"
                 :is-dark="isDark"
+                :show-rank="true"
                 @open-lightbox="url => emit('open-lightbox', url)"
                 @add-to-workspace="p => emit('add-to-workspace', p)"
                 @share-post="p => emit('share-post', p)"
-                @jump-to-channel="(u, k) => handlePostJump({ ...post, channelUsername: u, key: k })"
+                @jump-to-channel="(u, k) => handlePostJump({ channelUsername: u, key: k })"
                 @click-post="p => inspectPost(p)"
               />
+              <div v-else class="space-y-4">
+                <PostItemView
+                  v-for="(post, idx) in filteredDrillDownPosts"
+                  :key="post.key || post.id"
+                  :post="post"
+                  :compact="false"
+                  :rank="idx + 1"
+                  :is-dark="isDark"
+                  @open-lightbox="url => emit('open-lightbox', url)"
+                  @add-to-workspace="p => emit('add-to-workspace', p)"
+                  @share-post="p => emit('share-post', p)"
+                  @jump-to-channel="(u, k) => handlePostJump({ ...post, channelUsername: u, key: k })"
+                  @click-post="p => inspectPost(p)"
+                />
+              </div>
             </div>
           </template>
 

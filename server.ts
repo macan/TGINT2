@@ -191,7 +191,7 @@ app.post('/api/gemini/generate-stream', async (req, res) => {
 // Server Proxy Routes for Listen Scrape Queue & SystemOne
 // ---------------------------------------------------------------------------
 
-app.post('/api/lq/:channel', async (req, res) => {
+app.all('/api/lq/:channel', async (req, res) => {
   try {
     const channel = req.params.channel;
     const url = `https://i.gogingko.net/api/v1/lq/${encodeURIComponent(channel)}`;
@@ -200,7 +200,7 @@ app.post('/api/lq/:channel', async (req, res) => {
       headers['x-gos-token'] = String(req.headers['x-gos-token']);
     }
     const response = await fetch(url, {
-      method: 'POST',
+      method: 'PUT',
       headers,
     });
     const data = await response.text();
