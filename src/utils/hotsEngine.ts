@@ -46,6 +46,7 @@ export interface ClusterTag {
 export interface HotTopicCluster {
   id: string;
   title: string;
+  titleZh?: string; // Chinese translation of title when original title is not in English or Chinese
   summary: string;
   isAiGenerated?: boolean;
   category?: string;
@@ -273,6 +274,8 @@ export interface HotsAnalysisResult {
   timeWindow: { start: number; end: number };
   totalPostsAnalyzed: number;
   filteredPostsCount: number;
+  meaninglessPostsCount: number;
+  substantivePostsCount: number;
   totalChannelsScanned: number;
   activeChannelsCount: number;
   hotTopics: HotTopicCluster[];
@@ -1267,43 +1270,126 @@ export async function clusterWithGeminiAI(
         }
       }
 
-      const clusterCategory = item.category || detectTopicCategory(sortedPosts.map(p => p.text).join(' '), Array.from(domainsSet));
+        const clusterCategory = item.category || detectTopicCategory(sortedPosts.map(p => p.text).join(' '), Array.from(domainsSet));
+        const titleZh = (item.titleZh && typeof item.titleZh === 'string' && item.titleZh.trim() !== '' && item.titleZh.trim() !== item.title?.trim()) ? item.titleZh.trim() : undefined;
 
-      clusters.push({
-        id: `ai-cluster-${i}-${Date.now()}`,
-        title: item.title || `Trending Topic ${i + 1}`,
-        summary: item.summary || sortedPosts[0]?.cleanSnippet || '',
-        isAiGenerated: true,
-        category: clusterCategory,
-        keywords: kws,
-        domains: Array.from(domainsSet),
-        persons,
-        entities,
-        facts,
-        options,
-        tags,
-        posts: sortedPosts,
-        postCount: clusterPosts.length,
-        totalViews,
-        totalForwards,
-        totalReplies,
-        channels: Array.from(channelsSet),
-        hotScore,
-        representativePost: sortedPosts[0],
-        timeSpan: {
-          start: minTime === Infinity ? Date.now() : minTime,
-          end: maxTime === 0 ? Date.now() : maxTime
-        }
-      });
+        clusters.push({
+          id: `ai-cluster-${i}-${Date.now()}`,
+          title: item.title || `Trending Topic ${i + 1}`,
+          titleZh,
+          summary: item.summary || sortedPosts[0]?.cleanSnippet || '',
+          isAiGenerated: true,
+          category: clusterCategory,
+          keywords: kws,
+          domains: Array.from(domainsSet),
+          persons,
+          entities,
+          facts,
+          options,
+          tags,
+          posts: sortedPosts,
+          postCount: clusterPosts.length,
+          totalViews,
+          totalForwards,
+          totalReplies,
+          channels: Array.from(channelsSet),
+          hotScore,
+          representativePost: sortedPosts[0],
+          timeSpan: {
+            start: minTime === Infinity ? Date.now() : minTime,
+            end: maxTime === 0 ? Date.now() : maxTime
+          }
+        });
+      }
+
+      clusters.sort((a, b) => b.hotScore - a.hotScore);
+      return clusters;
+    } catch (err) {
+      console.warn("AI clustering with Gemini failed, falling back to local clustering:", err);
+      return [];
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Topic Title Language Detection & Translation Helper
+  // ---------------------------------------------------------------------------
+
+  export function isNonEnglishNonChinese(text: string): boolean {
+    if (!text || typeof text !== 'string') return false;
+    const clean = text.trim();
+    if (clean.length < 2) return false;
+
+    // 1. If text contains 2 or more Chinese characters, it is already in Chinese
+    const cjkMatches = clean.match(/[\u4E00-\u9FFF]/g) || [];
+    if (cjkMatches.length >= 2) {
+      return false;
     }
 
-    clusters.sort((a, b) => b.hotScore - a.hotScore);
-    return clusters;
-  } catch (err) {
-    console.warn("AI clustering with Gemini failed, falling back to local clustering:", err);
-    return [];
+    // 2. Check for distinct non-Latin, non-CJK alphabets:
+    // Cyrillic (Russian, Ukrainian, etc.), Arabic/Persian, Japanese Kana, Korean Hangul, Thai, Hebrew, Greek, Hindi
+    if (/[\u0400-\u04FF\u0600-\u06FF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF\u0E00-\u0E7F\u0590-\u05FF\u0370-\u03FF\u0900-\u097F]/.test(clean)) {
+      return true;
+    }
+
+    // 3. Check for specific accented characters common in European languages (French, German, Spanish, Portuguese, etc.)
+    if (/[àâäéèêëîïôöùûüÿçñáíóú¿¡ßøåæœ]/i.test(clean)) {
+      return true;
+    }
+
+    // 4. Check for distinct non-English European stop words in Latin text
+    const lowerWords = clean.toLowerCase().split(/[\s,.:;!?"'()\[\]{}<>\/\\~`@#$%^&*+=|_-]+/).filter(w => w.length > 1);
+    const foreignStopwords = new Set([
+      'le', 'la', 'les', 'des', 'du', 'une', 'pour', 'dans', 'sur', 'avec', 'qui', 'que', 'ce', 'cette', 'est', 'sont',
+      'der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'und', 'oder', 'nicht', 'mit', 'auf', 'für', 'von', 'ist', 'sind',
+      'el', 'los', 'las', 'del', 'al', 'por', 'para', 'con', 'una', 'uno', 'unas', 'unos', 'que', 'este', 'esta', 'como',
+      'il', 'lo', 'gli', 'per', 'degli', 'delle', 'sono', 'della',
+      'novosti', 'skidki', 'rossii', 'moskve'
+    ]);
+
+    let foreignWordCount = 0;
+    for (const w of lowerWords) {
+      if (foreignStopwords.has(w)) {
+        foreignWordCount++;
+      }
+    }
+
+    if (foreignWordCount >= 2 || (lowerWords.length <= 4 && foreignWordCount >= 1)) {
+      return true;
+    }
+
+    return false;
   }
-}
+
+  export async function attachChineseTranslationsForForeignTitles(topics: HotTopicCluster[]): Promise<void> {
+    if (!Array.isArray(topics) || topics.length === 0) return;
+
+    const toTranslate = topics.filter(t => isNonEnglishNonChinese(t.title) && (!t.titleZh || t.titleZh === t.title));
+    if (toTranslate.length === 0) return;
+
+    try {
+      const titles = Array.from(new Set(toTranslate.map(t => t.title.trim())));
+      const res = await fetch('/api/translate-titles', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ titles })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        const translations: Record<string, string> = data.translations || {};
+        for (const topic of toTranslate) {
+          const trans = translations[topic.title.trim()] || translations[topic.title];
+          if (trans && typeof trans === 'string' && trans.trim() && trans.trim() !== topic.title.trim()) {
+            topic.titleZh = trans.trim();
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to fetch Chinese translations for foreign titles:", err);
+    }
+  }
 
 // ---------------------------------------------------------------------------
 // Main Pipeline Execution: Progressive & Responsive
@@ -1332,6 +1418,8 @@ export async function processListenHotsData(options: {
     hotChannels: HotChannelItem[];
     totalPostsAnalyzed: number;
     filteredPostsCount: number;
+    meaninglessPostsCount?: number;
+    substantivePostsCount?: number;
     totalChannelsScanned: number;
     activeChannelsCount: number;
   }) => void;
@@ -1582,12 +1670,19 @@ export async function processListenHotsData(options: {
 
   hotChannels.sort((a, b) => b.activityScore - a.activityScore);
 
+  // Filter out posts that only contain media or have shorter/meaningless text content
+  const substantivePosts = inRangePosts.filter(isSubstantivePostForTopicClustering);
+  const meaninglessPostsCount = Math.max(0, inRangePosts.length - substantivePosts.length);
+  const substantivePostsCount = substantivePosts.length;
+
   // Early partial result notification: allows immediate rendering of posts and channels while topic clustering proceeds in background
   onPartialResult?.({
     hotPosts,
     hotChannels,
     totalPostsAnalyzed,
     filteredPostsCount: inRangePosts.length,
+    meaninglessPostsCount,
+    substantivePostsCount,
     totalChannelsScanned: cachedChannels.length,
     activeChannelsCount: channelStatsMap.size,
   });
@@ -1600,9 +1695,6 @@ export async function processListenHotsData(options: {
   });
 
   let hotTopics: HotTopicCluster[] = [];
-
-  // Filter out posts that only contain media or have shorter/meaningless text content
-  const substantivePosts = inRangePosts.filter(isSubstantivePostForTopicClustering);
 
   // Check if AI-powered clustering is requested (server handles API key or uses custom key)
   if (useAiMode && substantivePosts.length > 0) {
@@ -1772,6 +1864,16 @@ export async function processListenHotsData(options: {
     hotTopics.sort((a, b) => b.hotScore - a.hotScore);
   }
 
+  // 5. Translate foreign-language topic titles into Chinese if title is not in English or Chinese
+  if (hotTopics.length > 0) {
+    onProgress?.({
+      step: 'clustering',
+      percent: 94,
+      message: 'Translating foreign topic titles into Chinese...'
+    });
+    await attachChineseTranslationsForForeignTitles(hotTopics);
+  }
+
   onProgress?.({
     step: 'done',
     percent: 100,
@@ -1783,6 +1885,8 @@ export async function processListenHotsData(options: {
     timeWindow: bounds,
     totalPostsAnalyzed,
     filteredPostsCount: inRangePosts.length,
+    meaninglessPostsCount,
+    substantivePostsCount,
     totalChannelsScanned: cachedChannels.length,
     activeChannelsCount: channelStatsMap.size,
     hotTopics,

@@ -36,7 +36,8 @@ import {
   HotTopicCluster,
   HotChannelItem,
   HotsEngineProgress,
-  HotsAnalysisResult
+  HotsAnalysisResult,
+  getDateRangeBounds
 } from "../../utils/hotsEngine";
 import {
   computeListenHotsInBackground,
@@ -47,9 +48,18 @@ import { getAllCachedPostsIndexedDB } from "../../utils/indexedDbPosts";
 import PostItemView from "./PostItemView.vue";
 import ChannelViewCard from "./ChannelViewCard.vue";
 
+export interface ListenDbSyncPayload {
+  timestamp: number;
+  nodeId: string;
+  count: number;
+  minPostTimestamp: number;
+  maxPostTimestamp: number;
+}
+
 const props = defineProps<{
   isDark?: boolean;
   lastDbUpdate?: number;
+  lastDbSyncEvent?: ListenDbSyncPayload;
   listenItems?: any[];
   channelMetadataCache?: Record<string, any>;
 }>();
@@ -112,8 +122,15 @@ const postSortOrder = ref<"views" | "score" | "date">("views");
 const inspectedTopic = ref<HotTopicCluster | null>(null);
 const inspectedPost = ref<HotPostItem | null>(null);
 
-// Incremental computing debounce timer
+// Incremental computing debounce & pending state
 let debounceTimer: any = null;
+let maxWaitTimer: any = null;
+let countdownInterval: any = null;
+const isRecalculationPending = ref(false);
+const pendingCountdownSeconds = ref(0);
+const pendingBatchesCount = ref(0);
+const DEBOUNCE_DELAY_MS = 10000; // 10 seconds trailing debounce (triggered a little later when receiving new posts)
+const MAX_WAIT_MS = 25000; // 25 seconds maximum wait boundary for continuous streams
 
 // ---------------------------------------------------------------------------
 // Computed properties
@@ -215,6 +232,8 @@ async function runAnalysis(force: boolean = false) {
         timeWindow: { start: 0, end: Date.now() },
         totalPostsAnalyzed: 0,
         filteredPostsCount: 0,
+        meaninglessPostsCount: 0,
+        substantivePostsCount: 0,
         totalChannelsScanned: 0,
         activeChannelsCount: 0,
         hotTopics: [],
@@ -248,6 +267,8 @@ async function runAnalysis(force: boolean = false) {
             timeWindow: { start: 0, end: Date.now() },
             totalPostsAnalyzed: partial.totalPostsAnalyzed,
             filteredPostsCount: partial.filteredPostsCount,
+            meaninglessPostsCount: partial.meaninglessPostsCount || 0,
+            substantivePostsCount: partial.substantivePostsCount || 0,
             totalChannelsScanned: partial.totalChannelsScanned,
             activeChannelsCount: partial.activeChannelsCount,
             hotTopics: [],
@@ -261,6 +282,8 @@ async function runAnalysis(force: boolean = false) {
             ...analysisResult.value,
             totalPostsAnalyzed: partial.totalPostsAnalyzed,
             filteredPostsCount: partial.filteredPostsCount,
+            meaninglessPostsCount: partial.meaninglessPostsCount ?? analysisResult.value.meaninglessPostsCount ?? 0,
+            substantivePostsCount: partial.substantivePostsCount ?? analysisResult.value.substantivePostsCount ?? 0,
             totalChannelsScanned: partial.totalChannelsScanned,
             activeChannelsCount: partial.activeChannelsCount,
             hotPosts: partial.hotPosts,
@@ -324,6 +347,7 @@ async function fetchChannelMetadataAsync(cleanUsername: string) {
 }
 
 function handleDateRangeChange(range: HotsDateRange) {
+  clearPendingRecalculation();
   selectedDateRange.value = range;
   localStorage.setItem("listen_hots_date_range", range);
   runAnalysis();
@@ -446,19 +470,107 @@ function getTagBadgeClass(type: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle & Reactive Watchers (Incremental Computing)
+// Lifecycle & Reactive Watchers (Incremental Computing & Smart Date Filtering)
 // ---------------------------------------------------------------------------
 
-// Debounce-watch for background database updates from listen sync
+function doesSyncEventMatchDateRange(event: ListenDbSyncPayload | undefined, range: HotsDateRange): boolean {
+  if (!event) return true; // Fallback to safe trigger if event details omitted
+  if (range === 'all') return true;
+  if (event.count === 0) return false;
+
+  // If min and max post timestamp are both 0 (no timestamps found), allow to be safe
+  if (event.minPostTimestamp === 0 && event.maxPostTimestamp === 0) return true;
+
+  const bounds = getDateRangeBounds(range);
+  // Perform check on the received posts' date to filter out unmatched posts with respect to current date range selector
+  if (event.maxPostTimestamp < bounds.start || event.minPostTimestamp > bounds.end) {
+    return false;
+  }
+  return true;
+}
+
+function clearPendingRecalculation() {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  if (maxWaitTimer) {
+    clearTimeout(maxWaitTimer);
+    maxWaitTimer = null;
+  }
+  if (countdownInterval) {
+    clearInterval(countdownInterval);
+    countdownInterval = null;
+  }
+  isRecalculationPending.value = false;
+  pendingCountdownSeconds.value = 0;
+  pendingBatchesCount.value = 0;
+}
+
+function triggerImmediateRecalculation() {
+  clearPendingRecalculation();
+  runAnalysis(true);
+}
+
+function scheduleDeferredRecalculation() {
+  isRecalculationPending.value = true;
+  pendingBatchesCount.value++;
+  pendingCountdownSeconds.value = Math.round(DEBOUNCE_DELAY_MS / 1000);
+
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+  }
+
+  // Trailing debounce timer (triggered a little later when receiving new posts)
+  debounceTimer = setTimeout(() => {
+    executePendingRecalculation();
+  }, DEBOUNCE_DELAY_MS);
+
+  // Leading max-wait boundary timer
+  if (!maxWaitTimer) {
+    maxWaitTimer = setTimeout(() => {
+      executePendingRecalculation();
+    }, MAX_WAIT_MS);
+  }
+
+  // Countdown timer interval for live UI feedback
+  if (!countdownInterval) {
+    countdownInterval = setInterval(() => {
+      if (pendingCountdownSeconds.value > 1) {
+        pendingCountdownSeconds.value--;
+      }
+    }, 1000);
+  }
+}
+
+function executePendingRecalculation() {
+  clearPendingRecalculation();
+  runAnalysis(false);
+}
+
+// Watch for background database updates from listen sync with date range filtering & extended debounce
+watch(
+  () => props.lastDbSyncEvent,
+  (syncEvent) => {
+    if (!syncEvent) return;
+
+    // Perform check on the received posts' date to filter out unmatched posts with respect to current date range
+    if (!doesSyncEventMatchDateRange(syncEvent, selectedDateRange.value)) {
+      // Discard event: new posts do not fall within the active date range
+      return;
+    }
+
+    // Trigger calculation later when receiving new fetched posts
+    scheduleDeferredRecalculation();
+  }
+);
+
+// Fallback watch for direct timestamp updates if lastDbSyncEvent wasn't provided
 watch(
   () => props.lastDbUpdate,
   (newVal) => {
-    if (!newVal) return;
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      // Re-run computation progressively with batched updates
-      runAnalysis();
-    }, 3000);
+    if (!newVal || props.lastDbSyncEvent) return;
+    scheduleDeferredRecalculation();
   }
 );
 
@@ -486,7 +598,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  if (debounceTimer) clearTimeout(debounceTimer);
+  clearPendingRecalculation();
 });
 </script>
 
@@ -509,9 +621,17 @@ onUnmounted(() => {
                 <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-teal-50 dark:bg-teal-950/70 text-teal-700 dark:text-teal-300 font-bold border border-teal-200/70 dark:border-teal-800/70">
                   {{ formatNumber(analysisResult.filteredPostsCount) }} in range
                 </span>
+                <span
+                  v-if="analysisResult.meaninglessPostsCount != null"
+                  class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 font-medium border border-amber-200/60 dark:border-amber-800/60"
+                  :title="'Filtered out media-only or short text posts'"
+                >
+                  <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                  {{ formatNumber(analysisResult.meaninglessPostsCount) }} meaningless filtered
+                </span>
                 <span class="text-gray-400 dark:text-gray-500">/</span>
                 <span class="text-gray-600 dark:text-gray-300 font-medium">
-                  {{ formatNumber(analysisResult.totalPostsAnalyzed) }} total cached posts
+                  {{ formatNumber(analysisResult.totalPostsAnalyzed) }} total cached
                 </span>
                 <span aria-hidden="true" class="text-gray-300 dark:text-gray-600">·</span>
                 <span>{{ analysisResult.activeChannelsCount }} channels</span>
@@ -613,10 +733,32 @@ onUnmounted(() => {
           </span>
         </button>
 
+        <!-- Pending Recalculation Notification Chip & Instant Update Trigger -->
+        <div
+          v-if="isRecalculationPending && !isComputing"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200/80 dark:border-amber-800/80 text-amber-800 dark:text-amber-200 text-xs font-semibold shadow-2xs"
+        >
+          <span class="relative flex h-2 w-2">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+            <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+          </span>
+          <span class="whitespace-nowrap">
+            New posts synced · Updating in {{ pendingCountdownSeconds }}s
+          </span>
+          <button
+            type="button"
+            @click="triggerImmediateRecalculation"
+            class="ml-1 px-2 py-0.5 rounded-xl bg-amber-200/80 hover:bg-amber-300 dark:bg-amber-900/80 dark:hover:bg-amber-800 text-amber-900 dark:text-amber-100 text-[11px] font-bold cursor-pointer transition-colors whitespace-nowrap active:scale-95"
+            title="Update hot topics immediately"
+          >
+            Update now
+          </button>
+        </div>
+
         <!-- Refresh / Recompute Button -->
         <button
           type="button"
-          @click="runAnalysis(true)"
+          @click="triggerImmediateRecalculation"
           :disabled="isComputing"
           class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-bold bg-white hover:bg-teal-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-teal-700 dark:text-teal-300 border border-teal-200/80 dark:border-teal-800/60 transition-all cursor-pointer select-none shadow-2xs active:scale-95 disabled:opacity-50"
           :title="t('listen.hots.refresh') || 'Re-calculate'"
@@ -679,7 +821,7 @@ onUnmounted(() => {
                   Clustering in background...
                 </span>
                 <span v-else>
-                  {{ analysisResult.hotTopics.length }} topics clustered
+                  {{ analysisResult.hotTopics.length }} topics · {{ formatNumber(analysisResult.substantivePostsCount || (analysisResult.filteredPostsCount - (analysisResult.meaninglessPostsCount || 0))) }} posts
                 </span>
               </p>
             </div>
@@ -793,6 +935,19 @@ onUnmounted(() => {
                 <h5 class="text-xs sm:text-sm font-bold text-gray-900 dark:text-white leading-snug group-hover:text-teal-600 dark:group-hover:text-teal-400 transition-colors line-clamp-2">
                   {{ topic.title }}
                 </h5>
+
+                <!-- Chinese Translation Subtitle (When original is not in English or Chinese) -->
+                <div
+                  v-if="topic.titleZh && topic.titleZh !== topic.title"
+                  class="flex items-start gap-1.5 text-xs font-semibold text-teal-700 dark:text-teal-300 mt-1 mb-0.5"
+                >
+                  <span class="text-[9px] uppercase font-bold tracking-wider px-1 py-0.5 rounded bg-teal-100/80 dark:bg-teal-900/60 text-teal-800 dark:text-teal-200 shrink-0">
+                    中译
+                  </span>
+                  <span class="line-clamp-1 leading-snug">
+                    {{ topic.titleZh }}
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -1059,6 +1214,17 @@ onUnmounted(() => {
                   <h4 class="text-base sm:text-lg font-black text-gray-900 dark:text-white leading-tight">
                     {{ inspectedTopic.title }}
                   </h4>
+                  <div
+                    v-if="inspectedTopic.titleZh && inspectedTopic.titleZh !== inspectedTopic.title"
+                    class="flex items-start gap-1.5 text-xs sm:text-sm font-semibold text-teal-700 dark:text-teal-300 mt-1 mb-1"
+                  >
+                    <span class="text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-teal-100/80 dark:bg-teal-900/60 text-teal-800 dark:text-teal-200 shrink-0">
+                      中译
+                    </span>
+                    <span class="leading-snug">
+                      {{ inspectedTopic.titleZh }}
+                    </span>
+                  </div>
                   <p class="text-xs text-gray-600 dark:text-gray-300 mt-1 leading-relaxed">
                     {{ inspectedTopic.summary }}
                   </p>
@@ -1151,6 +1317,17 @@ onUnmounted(() => {
                       <h4 class="text-sm font-bold text-gray-900 dark:text-white group-hover:text-teal-600 dark:group-hover:text-teal-400 transition-colors">
                         {{ topic.title }}
                       </h4>
+                      <div
+                        v-if="topic.titleZh && topic.titleZh !== topic.title"
+                        class="flex items-start gap-1.5 text-xs font-semibold text-teal-700 dark:text-teal-300 mt-1 mb-0.5"
+                      >
+                        <span class="text-[9px] uppercase font-bold tracking-wider px-1 py-0.5 rounded bg-teal-100/80 dark:bg-teal-900/60 text-teal-800 dark:text-teal-200 shrink-0">
+                          中译
+                        </span>
+                        <span class="line-clamp-1 leading-snug">
+                          {{ topic.titleZh }}
+                        </span>
+                      </div>
                       <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 leading-relaxed">
                         {{ topic.summary }}
                       </p>

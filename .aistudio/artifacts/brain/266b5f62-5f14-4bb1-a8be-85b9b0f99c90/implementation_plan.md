@@ -186,5 +186,7 @@ export interface HotChannelItem {
    - Add `'hots'` to `listenLayoutMode` type and switcher bar with `Flame` icon.
    - Render `<HotsDashboard />` when `listenLayoutMode === 'hots'`.
    - Add internationalization strings for all 6 supported locales (`en`, `zh-CN`, `zh-TW`, `es`, `ja`, `ru`).
-5. **Verification**:
+5. **Verification & Optimization Deliverables**:
    - Run `lint_applet` (`tsc --noEmit`) and `compile_applet`.
+   - **Meaningless Posts Filter Count Display**: Rendered distinct badge for filtered-out noise/media-only/short posts alongside in-range count in the top control strip and column header.
+   - **Foreign Title Chinese Translation Subtitles**: Automatic detection of foreign headlines with dual Gemini and neural MT translation displaying `中译` subtitle across all topic views.

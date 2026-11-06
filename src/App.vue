@@ -2726,7 +2726,16 @@ const listenLayoutMode = ref<'view' | 'rearrange' | 'flexible' | 'hots'>(
 );
 
 // Reactive tracker for IndexedDB posts updates for progressive Hots calculation
+export interface ListenDbSyncPayload {
+  timestamp: number;
+  nodeId: string;
+  count: number;
+  minPostTimestamp: number;
+  maxPostTimestamp: number;
+}
+
 const lastListenPostsDbSyncTime = ref(Date.now());
+const lastListenPostsDbSyncEvent = ref<ListenDbSyncPayload | null>(null);
 
 // Directory Display Sorting (Without modifying low-level JSON data order)
 export type ListenSortOrder = 'original' | 'freshness-desc' | 'freshness-asc' | 'name-asc' | 'name-desc';
@@ -3909,8 +3918,9 @@ const triggerListenItemSystemOneClassification = async (
   };
 
   try {
-    const response = await callSystemOne<any>(formattedPosts, SYSTEM_ONE_CLASSIFICATION_QUESTIONS, {
-      timeoutMs: 120000
+    const samplePosts = formattedPosts.slice(0, 20);
+    const response = await callSystemOne<any>(samplePosts, SYSTEM_ONE_CLASSIFICATION_QUESTIONS, {
+      timeoutMs: 60000
     });
 
     const l1 = response?.answers?.L1 || response?.answers?.choice || response?.answers;
@@ -3958,7 +3968,7 @@ const triggerListenItemSystemOneClassification = async (
       saveListenDirectory();
     }
   } catch (err) {
-    console.error(`SystemOne auto classification failed for listen item ${nodeId}:`, err);
+    console.warn(`SystemOne auto classification deferred for listen item ${nodeId}:`, err);
   } finally {
     const updated = { ...isClassifyingListenItemMap.value };
     delete updated[nodeId];
@@ -5540,7 +5550,30 @@ const setCachedPostsIndexedDB = async (nodeId: string, posts: any[]): Promise<vo
       const store = transaction.objectStore("posts");
       const request = store.put(posts, nodeId);
       request.onsuccess = () => {
+        let minPostTimestamp = Infinity;
+        let maxPostTimestamp = 0;
+        if (Array.isArray(posts) && posts.length > 0) {
+          for (const p of posts) {
+            const raw = p?.data?.date ?? p?.date ?? p?.data?.created_at ?? p?.created_at ?? p?.data?.timestamp ?? p?.timestamp ?? p?.message?.date;
+            if (raw != null) {
+              const ts = typeof raw === "number" ? (raw < 10000000000 ? raw * 1000 : raw) : new Date(raw).getTime();
+              if (!isNaN(ts) && ts > 0) {
+                if (ts < minPostTimestamp) minPostTimestamp = ts;
+                if (ts > maxPostTimestamp) maxPostTimestamp = ts;
+              }
+            }
+          }
+        }
+        if (minPostTimestamp === Infinity) minPostTimestamp = 0;
+
         lastListenPostsDbSyncTime.value = Date.now();
+        lastListenPostsDbSyncEvent.value = {
+          timestamp: Date.now(),
+          nodeId,
+          count: Array.isArray(posts) ? posts.length : 0,
+          minPostTimestamp,
+          maxPostTimestamp
+        };
         resolve();
       };
       request.onerror = () => {
@@ -6093,6 +6126,119 @@ const cancelBackgroundSync = () => {
   activeBackgroundSyncItemId.value = null;
 };
 
+const scheduleScrapeForListen = async (channelName: string, showToast: boolean = false) => {
+  if (!channelName) return;
+  let cleanName = channelName.trim();
+  if (cleanName.includes("t.me/")) {
+    const parts = cleanName.split("t.me/");
+    cleanName = parts[parts.length - 1];
+  }
+  cleanName = cleanName.split("?")[0].split("#")[0].replace(/^@+/, "").trim();
+  if (!cleanName) return;
+
+  try {
+    let res: Response;
+    try {
+      // 1. Same-origin proxy route (no CORS preflight issues)
+      const headers: Record<string, string> = {};
+      if (loginToken.value) {
+        headers["x-gos-token"] = loginToken.value;
+      }
+      res = await fetch(`/api/lq/${encodeURIComponent(cleanName)}`, {
+        method: "POST",
+        headers
+      });
+    } catch {
+      // 2. Direct endpoint fallback: Do NOT pass custom headers to avoid CORS preflight rejection
+      res = await fetch(
+        `https://i.gogingko.net/api/v1/lq/${encodeURIComponent(cleanName)}`,
+        {
+          method: "POST"
+        }
+      );
+    }
+
+    if (!res.ok)
+      throw new Error(`Failed to schedule scrape: ${res.statusText}`);
+  } catch (err: any) {
+    console.warn("Could not schedule scrape for channel:", cleanName, err);
+    if (showToast) {
+      toastMessage.value = t("listen.failedScheduleScrape", { error: err.message || err });
+      toastType.value = "error";
+      setTimeout(() => { toastMessage.value = ""; }, 3000);
+    }
+  }
+};
+
+const checkAndScheduleScrapeForListenItem = async (item: ListenItem): Promise<boolean> => {
+  if (!item || item.isFolder) return false;
+
+  // 1. Must have valid loginToken
+  if (!isLoginTokenValid.value || !loginToken.value) {
+    return false;
+  }
+
+  // Scrape task is for channels, not keyword queries
+  if (item.type === "keyword") {
+    return false;
+  }
+
+  let channelTarget = (item.argument?.trim() || item.name?.trim() || "");
+  if (channelTarget.includes("t.me/")) {
+    const parts = channelTarget.split("t.me/");
+    channelTarget = parts[parts.length - 1];
+  }
+  channelTarget = channelTarget.split("?")[0].split("#")[0].replace(/^@+/, "").trim();
+  if (!channelTarget) return false;
+
+  // Fast cache resolve check
+  if (listenResolveCache.has(channelTarget)) {
+    channelTarget = listenResolveCache.get(channelTarget)!;
+  }
+
+  // Determine the date (timestamp ms) of the last cached post of this listen item
+  let lastCachedPostTimestamp = 0;
+  const freshness = getItemOrFolderFreshness(item);
+  if (freshness && freshness.timestamp > 0) {
+    lastCachedPostTimestamp = freshness.timestamp;
+  } else {
+    try {
+      const cached = await getCachedPostsIndexedDB(item.id);
+      if (cached && cached.length > 0) {
+        for (const p of cached) {
+          const raw = p?.data?.date ?? p?.date ?? p?.data?.created_at ?? p?.created_at ?? p?.data?.timestamp ?? p?.timestamp ?? p?.message?.date;
+          if (raw != null) {
+            const ts = typeof raw === "number" ? (raw < 10000000000 ? raw * 1000 : raw) : new Date(raw).getTime();
+            if (!isNaN(ts) && ts > lastCachedPostTimestamp) {
+              lastCachedPostTimestamp = ts;
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const ONE_MONTH_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+  const now = Date.now();
+  const isWithinOneMonth = lastCachedPostTimestamp > 0 && (now - lastCachedPostTimestamp) <= ONE_MONTH_MS;
+
+  // Rule 1: If the date of last cached post of the to be scheduled listen item is within one month
+  // and the loginToken is valid, call scheduleScrapeForListen() to trigger a new scrape task;
+  if (isWithinOneMonth) {
+    await scheduleScrapeForListen(channelTarget, false);
+    return true;
+  }
+
+  // Rule 2: If the date of last cached post of the to be scheduled listen item exceeds one month
+  // and the loginToken is valid, call scheduleScrapeForListen() to trigger a new scrape task with a probability less than 0.2.
+  if (Math.random() < 0.2) {
+    await scheduleScrapeForListen(channelTarget, false);
+    return true;
+  }
+
+  return false;
+};
+
 const syncSingleListenItem = async (
   node: ListenItem,
   signal?: AbortSignal
@@ -6404,6 +6550,10 @@ const startManualBackgroundSync = async (forceAll = false) => {
       activeBackgroundSyncItemId.value = item.id;
       backgroundSyncProgress.value.current = i + 1;
       backgroundSyncProgress.value.currentItemName = item.name;
+
+      // Smart background fetch: If date of last cached post is within 1 month and loginToken is valid,
+      // trigger scrape task; if exceeds 1 month and loginToken is valid, trigger scrape task with probability < 0.2
+      await checkAndScheduleScrapeForListenItem(item);
 
       try {
         const res = await syncSingleListenItem(item, signal);
@@ -6784,26 +6934,6 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
   }
 };
 
-const scheduleScrapeForListen = async (channelName) => {
-  if (!channelName) return;
-  try {
-    const res = await fetch(
-      `https://i.gogingko.net/api/v1/lq/${encodeURIComponent(
-        channelName
-      )}`,
-      {
-        method: "POST",
-      }
-    );
-    if (!res.ok)
-      throw new Error(`Failed to schedule scrape: ${res.statusText}`);
-  } catch (err: any) {
-    console.error(err);
-    toastMessage.value = t("listen.failedScheduleScrape", { error: err.message || err });
-    toastType.value = "error";
-    setTimeout(() => { toastMessage.value = ""; }, 3000);
-  }
-};
 
 const startListenPolling = () => {
   if (listenRefreshInterval) {
@@ -23646,6 +23776,7 @@ onUnmounted(() => {
           <HotsDashboard
             :is-dark="isDark"
             :last-db-update="lastListenPostsDbSyncTime"
+            :last-db-sync-event="lastListenPostsDbSyncEvent || undefined"
             :listen-items="allListenLeafItems"
             :channel-metadata-cache="listenChannelMetadataCache"
             @select-channel="handleHotsSelectChannel"

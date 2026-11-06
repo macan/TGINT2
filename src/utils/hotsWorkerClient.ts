@@ -27,6 +27,8 @@ export interface ComputeHotsBackgroundOptions {
     hotChannels: HotChannelItem[];
     totalPostsAnalyzed: number;
     filteredPostsCount: number;
+    meaninglessPostsCount?: number;
+    substantivePostsCount?: number;
     totalChannelsScanned: number;
     activeChannelsCount: number;
   }) => void;

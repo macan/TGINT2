@@ -83,16 +83,31 @@ export async function callSystemOne<T = any>(
   }
 
   try {
-    const response = await fetch(endpointUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        ...(options?.headers || {})
-      },
-      body: JSON.stringify(payload),
-      signal
-    });
+    let response: Response;
+    try {
+      response = await fetch('/api/systemone', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...(options?.headers || {})
+        },
+        body: JSON.stringify(payload),
+        signal
+      });
+    } catch {
+      // Fallback to direct endpoint if server proxy is unreachable
+      response = await fetch(endpointUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...(options?.headers || {})
+        },
+        body: JSON.stringify(payload),
+        signal
+      });
+    }
 
     if (!response.ok) {
       let errText = '';
