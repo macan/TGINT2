@@ -45,6 +45,7 @@ const isWindowScroll = ref<boolean>(false);
 // Cache true rendered heights measured by ResizeObserver
 const itemHeights = ref<Record<string | number, number>>({});
 let resizeObserver: ResizeObserver | null = null;
+let resizeRafId: number | null = null;
 let scrollListenerTarget: HTMLElement | Window | null = null;
 let rafId: number | null = null;
 
@@ -233,20 +234,25 @@ onMounted(() => {
   // Initialize ResizeObserver to measure true rendered heights dynamically
   if (typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver((entries) => {
-      let changed = false;
-      for (const entry of entries) {
-        const key = (entry.target as any)?.__virtualKey;
-        if (key != null) {
-          const height = Math.ceil(entry.contentRect.height);
-          if (height > 20 && itemHeights.value[key] !== height) {
-            itemHeights.value[key] = height;
-            changed = true;
+      // Defer measurements to next animation frame to prevent "ResizeObserver loop completed with undelivered notifications"
+      if (resizeRafId) cancelAnimationFrame(resizeRafId);
+      resizeRafId = window.requestAnimationFrame(() => {
+        resizeRafId = null;
+        let changed = false;
+        for (const entry of entries) {
+          const key = (entry.target as any)?.__virtualKey;
+          if (key != null) {
+            const height = Math.ceil(entry.contentRect.height);
+            if (height > 20 && itemHeights.value[key] !== height) {
+              itemHeights.value[key] = height;
+              changed = true;
+            }
           }
         }
-      }
-      if (changed) {
-        handleScroll();
-      }
+        if (changed) {
+          handleScroll();
+        }
+      });
     });
   }
 
@@ -257,6 +263,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   cleanupScrollListener();
+  if (resizeRafId) {
+    cancelAnimationFrame(resizeRafId);
+    resizeRafId = null;
+  }
   if (resizeObserver) {
     resizeObserver.disconnect();
     resizeObserver = null;

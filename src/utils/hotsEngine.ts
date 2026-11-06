@@ -359,10 +359,10 @@ export function extractPostReplies(p: any): number {
 
 export function extractPostText(p: any): string {
   if (!p) return '';
-  const text = p.data?.message ?? p.data?.text ?? p.data?.content ?? p.message ?? '';
+  const text = p.content ?? p.rawcontent ?? p.data?.content ?? p.data?.rawcontent ?? p.data?.message ?? p.data?.text ?? p.message ?? p.text ?? '';
   if (typeof text === 'string') return text;
   if (typeof text === 'object' && text !== null) {
-    return String(text.text || text.caption || JSON.stringify(text));
+    return String(text.text || text.caption || text.content || JSON.stringify(text));
   }
   return '';
 }
@@ -1573,7 +1573,7 @@ export async function processListenHotsData(options: {
         channelName: channelUsername,
         channelTitle: postAuthorTitle,
         text,
-        cleanSnippet: cleanSnippet || (linkPreview?.title ? `[Link] ${linkPreview.title}` : '[Media Post]'),
+        cleanSnippet: cleanSnippet || text || (linkPreview?.title ? `[Link] ${linkPreview.title}` : '[Media Post]'),
         views,
         forwards,
         replies,

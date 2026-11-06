@@ -9548,11 +9548,13 @@ onMounted(() => {
         listenTreeContainerHeight.value = container.clientHeight || 800;
         if (typeof ResizeObserver !== 'undefined') {
           treeResizeObserver = new ResizeObserver((entries) => {
-            for (const entry of entries) {
-              if (entry.contentRect.height > 0) {
-                listenTreeContainerHeight.value = entry.contentRect.height;
+            window.requestAnimationFrame(() => {
+              for (const entry of entries) {
+                if (entry.contentRect.height > 0) {
+                  listenTreeContainerHeight.value = entry.contentRect.height;
+                }
               }
-            }
+            });
           });
           treeResizeObserver.observe(container);
         }
@@ -10735,25 +10737,27 @@ watch(graphCanvasContainer, (containerEl) => {
   
   if (containerEl) {
     graphResizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const width = entry.contentRect.width || 300;
-        const height = isGraphEnlarged.value ? 540 : (entry.contentRect.height > 0 ? Math.round(entry.contentRect.height) : 300);
-        graphCanvasWidth.value = width;
-        graphCanvasHeight.value = height;
-        
-        if (graphCanvas.value) {
-          const dpr = window.devicePixelRatio || 1;
-          graphCanvas.value.width = width * dpr;
-          graphCanvas.value.height = height * dpr;
-          graphCanvas.value.style.width = `${width}px`;
-          graphCanvas.value.style.height = `${height}px`;
+      window.requestAnimationFrame(() => {
+        for (const entry of entries) {
+          const width = entry.contentRect.width || 300;
+          const height = isGraphEnlarged.value ? 540 : (entry.contentRect.height > 0 ? Math.round(entry.contentRect.height) : 300);
+          graphCanvasWidth.value = width;
+          graphCanvasHeight.value = height;
           
-          const ctx = graphCanvas.value.getContext("2d");
-          if (ctx) {
-            ctx.scale(dpr, dpr);
+          if (graphCanvas.value) {
+            const dpr = window.devicePixelRatio || 1;
+            graphCanvas.value.width = width * dpr;
+            graphCanvas.value.height = height * dpr;
+            graphCanvas.value.style.width = `${width}px`;
+            graphCanvas.value.style.height = `${height}px`;
+            
+            const ctx = graphCanvas.value.getContext("2d");
+            if (ctx) {
+              ctx.scale(dpr, dpr);
+            }
           }
         }
-      }
+      });
     });
     graphResizeObserver.observe(containerEl);
 
@@ -16288,12 +16292,14 @@ watch(activeTab, (newTab) => {
           canvasResizeObserver.disconnect();
         }
         canvasResizeObserver = new ResizeObserver((entries) => {
-          for (const entry of entries) {
-            const { width, height } = entry.contentRect;
-            canvas.width = width;
-            canvas.height = height;
-            drawNetworkGraph();
-          }
+          window.requestAnimationFrame(() => {
+            for (const entry of entries) {
+              const { width, height } = entry.contentRect;
+              canvas.width = width;
+              canvas.height = height;
+              drawNetworkGraph();
+            }
+          });
         });
         canvasResizeObserver.observe(container);
       }

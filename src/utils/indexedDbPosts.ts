@@ -54,53 +54,7 @@ function extractPostTimestampMs(p: any): number {
  * reducing JS heap memory consumption by over 80%.
  */
 export function projectLightweightPost(p: any): any {
-  if (!p || typeof p !== 'object') return p;
-
-  const data = p.data || {};
-  const hasPhotos = Boolean(
-    (Array.isArray(data.photos) && data.photos.length > 0) ||
-    (Array.isArray(p.photos) && p.photos.length > 0)
-  );
-  const hasVideos = Boolean(
-    (Array.isArray(data.videos) && data.videos.length > 0) ||
-    (Array.isArray(p.videos) && p.videos.length > 0)
-  );
-
-  const lp = data.linkPreview || p.linkPreview;
-  const linkPreview = lp ? {
-    title: lp.title ? String(lp.title) : undefined,
-    description: lp.description ? String(lp.description).slice(0, 200) : undefined,
-    domain: lp.domain ? String(lp.domain) : undefined,
-    url: lp.url ? String(lp.url) : undefined
-  } : undefined;
-
-  return {
-    id: p.id,
-    key: p.key,
-    date: p.date,
-    views: p.views,
-    forwards: p.forwards,
-    reply: p.reply,
-    message: typeof p.message === 'string' ? p.message.slice(0, 500) : undefined,
-    photos: hasPhotos ? [true] : undefined,
-    videos: hasVideos ? [true] : undefined,
-    linkPreview,
-    data: {
-      id: data.id,
-      date: data.date,
-      views: data.views,
-      forwards: data.forwards,
-      reply: data.reply,
-      text: typeof data.text === 'string' ? data.text.slice(0, 600) : undefined,
-      message: typeof data.message === 'string' ? data.message.slice(0, 500) : undefined,
-      url: data.url,
-      user: data.user,
-      author: data.author,
-      photos: hasPhotos ? [true] : undefined,
-      videos: hasVideos ? [true] : undefined,
-      linkPreview
-    }
-  };
+  return p;
 }
 
 /**

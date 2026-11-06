@@ -1086,9 +1086,10 @@ onUnmounted(() => {
     <div
       v-if="isDrillDownOpen"
       class="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200"
+      @click.self="isDrillDownOpen = false"
     >
       <div
-        class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden"
+        class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-2xl w-full max-w-6xl xl:max-w-7xl max-h-[95vh] flex flex-col overflow-hidden"
       >
         <!-- Modal Top Bar -->
         <div class="p-4 sm:p-5 border-b border-gray-100 dark:border-gray-700/80 flex items-center justify-between gap-3 shrink-0">
@@ -1391,7 +1392,6 @@ onUnmounted(() => {
                 @add-to-workspace="p => emit('add-to-workspace', p)"
                 @share-post="p => emit('share-post', p)"
                 @jump-to-channel="(u, k) => handlePostJump({ channelUsername: u, key: k })"
-                @click-post="p => inspectPost(p)"
               />
               <div v-else class="space-y-4">
                 <PostItemView
@@ -1405,7 +1405,6 @@ onUnmounted(() => {
                   @add-to-workspace="p => emit('add-to-workspace', p)"
                   @share-post="p => emit('share-post', p)"
                   @jump-to-channel="(u, k) => handlePostJump({ ...post, channelUsername: u, key: k })"
-                  @click-post="p => inspectPost(p)"
                 />
               </div>
             </div>

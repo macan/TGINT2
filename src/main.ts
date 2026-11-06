@@ -82,10 +82,34 @@ window.addEventListener(
   true // Use capture phase so load events are caught reliably
 )
 
+// Suppress benign ResizeObserver loop limit notifications per W3C specification
+const isResizeObserverError = (msg?: string | null) => {
+  if (!msg || typeof msg !== 'string') return false
+  return (
+    msg.includes('ResizeObserver loop completed with undelivered notifications') ||
+    msg.includes('ResizeObserver loop limit exceeded')
+  )
+}
+
+const prevOnError = window.onerror
+window.onerror = (message, source, lineno, colno, error) => {
+  if (typeof message === 'string' && isResizeObserverError(message)) {
+    return true // Suppress benign notification
+  }
+  if (prevOnError) {
+    return prevOnError(message, source, lineno, colno, error)
+  }
+}
+
 // Global image load error interceptor for '/telegram-photo/' and '/telegram-doc/' resources
 window.addEventListener(
   'error',
   (event) => {
+    if (isResizeObserverError(event?.message)) {
+      event.stopImmediatePropagation()
+      event.preventDefault()
+      return
+    }
     const target = event.target
     if (target instanceof HTMLImageElement) {
       const src = target.src
