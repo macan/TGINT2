@@ -578,6 +578,7 @@ export default {
     share: "Share",
     scrapedAt: "Scraped {time}",
     newBadge: "NEW",
+    edited: "edited",
     viewTg: "View TG",
     replyToMessage: "Reply to Message",
     forward: "Forward",

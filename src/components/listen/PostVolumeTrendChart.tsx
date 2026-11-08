@@ -117,7 +117,7 @@ export const PostVolumeTrendChart: React.FC<TrendChartProps> = ({
 
   return (
     <div className="w-full h-full min-h-[220px] select-none">
-      <ResponsiveContainer width="100%" height={230}>
+      <ResponsiveContainer width="100%" height={230} minWidth={100} debounce={50}>
         <AreaChart
           data={dataPoints}
           margin={{ top: 12, right: 12, left: -16, bottom: 0 }}

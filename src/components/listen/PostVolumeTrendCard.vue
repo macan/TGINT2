@@ -43,6 +43,8 @@ let chartInstance: {
   update: (p: any) => void;
   destroy: () => void;
 } | null = null;
+let currentContainerEl: HTMLElement | null = null;
+let resizeObserver: ResizeObserver | null = null;
 
 // Compute trend data and stats
 const processedData = computed(() => {
@@ -83,7 +85,16 @@ function updateChart() {
     dateRange: props.dateRange
   };
 
-  if (!chartInstance) {
+  if (!chartInstance || chartContainer.value !== currentContainerEl) {
+    if (chartInstance) {
+      try {
+        chartInstance.destroy();
+      } catch (e) {
+        console.warn('Post trend chart destroy warning:', e);
+      }
+      chartInstance = null;
+    }
+    currentContainerEl = chartContainer.value;
     chartInstance = mountTrendChart(chartContainer.value, chartProps);
   } else {
     chartInstance.update(chartProps);
@@ -102,14 +113,27 @@ function toggleCollapse() {
 onMounted(() => {
   nextTick(() => {
     updateChart();
+    if (chartContainer.value && typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => {
+        if (!isCollapsed.value && stats.value.totalPosts > 0) {
+          updateChart();
+        }
+      });
+      resizeObserver.observe(chartContainer.value);
+    }
   });
 });
 
 onBeforeUnmount(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
   if (chartInstance) {
     chartInstance.destroy();
     chartInstance = null;
   }
+  currentContainerEl = null;
 });
 
 watch(
@@ -117,7 +141,8 @@ watch(
     () => props.posts,
     () => props.dateRange,
     () => props.isDark,
-    currentViewMode
+    currentViewMode,
+    () => stats.value.totalPosts
   ],
   () => {
     nextTick(() => {
@@ -263,9 +288,9 @@ watch(
         </div>
       </div>
 
-      <!-- Zero Posts Empty State -->
+      <!-- Zero Posts Empty State (only when not computing) -->
       <div
-        v-else-if="stats.totalPosts === 0"
+        v-else-if="!isComputing && stats.totalPosts === 0"
         class="h-40 flex flex-col items-center justify-center text-center p-4 text-xs text-gray-400 dark:text-gray-500 space-y-1"
       >
         <BarChart2 class="h-8 w-8 text-gray-300 dark:text-gray-600 stroke-1" />
@@ -277,8 +302,12 @@ watch(
         </p>
       </div>
 
-      <!-- Recharts Canvas Mounted Target -->
-      <div v-else ref="chartContainer" class="w-full min-h-[230px] pt-1"></div>
+      <!-- Recharts Canvas Mounted Target: Always preserved in DOM with v-show -->
+      <div
+        ref="chartContainer"
+        v-show="stats.totalPosts > 0"
+        class="w-full min-h-[230px] pt-1"
+      ></div>
     </div>
   </div>
 </template>

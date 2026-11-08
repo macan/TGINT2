@@ -545,6 +545,7 @@ export default {
     share: "Поделиться",
     scrapedAt: "Собрано {time}",
     newBadge: "НОВОЕ",
+    edited: "изменено",
     viewTg: "Открыть в TG",
     replyToMessage: "Ответ на сообщение",
     forward: "Переслать",

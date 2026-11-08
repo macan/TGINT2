@@ -545,6 +545,7 @@ export default {
     share: "共有",
     scrapedAt: "{time} にスクレイピング",
     newBadge: "NEW",
+    edited: "編集済み",
     viewTg: "TGで表示",
     replyToMessage: "メッセージに返信",
     forward: "転送",

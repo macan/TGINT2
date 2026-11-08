@@ -545,6 +545,7 @@ export default {
     share: "分享",
     scrapedAt: "擷取於 {time}",
     newBadge: "新",
+    edited: "已編輯",
     viewTg: "在 TG 中檢視",
     replyToMessage: "回覆訊息",
     forward: "轉發",

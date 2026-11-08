@@ -96,8 +96,14 @@ export function extractPostTimestampMs(p: any): number {
     if (typeof raw === 'number') {
       return raw < 10000000000 ? raw * 1000 : raw;
     }
-    const parsed = Date.parse(raw);
-    if (!isNaN(parsed)) return parsed;
+    if (typeof raw === 'string') {
+      const num = Number(raw);
+      if (!isNaN(num) && num > 0) {
+        return num < 10000000000 ? num * 1000 : num;
+      }
+      const parsed = Date.parse(raw);
+      if (!isNaN(parsed)) return parsed;
+    }
   }
   return 0;
 }
@@ -803,6 +809,68 @@ export const getAllCachedPostsIndexedDB = async (
       const transaction = db.transaction("posts", "readonly");
       const store = transaction.objectStore("posts");
 
+      // Direct store cursor traversal across all records (legacy arrays and unindexed records fallback)
+      const scanDirectStore = () => {
+        const resultsMap = new Map<string, any[]>();
+        const cursorReq = store.openCursor();
+
+        cursorReq.onsuccess = (event: any) => {
+          const cursor = event.target.result;
+          if (cursor) {
+            const val = cursor.value;
+
+            // Case 1: Legacy monolithic array
+            if (Array.isArray(val)) {
+              const nodeId = String(cursor.key);
+              let filteredPosts = val;
+              if (dateRangeStart != null || dateRangeEnd != null) {
+                filteredPosts = val.filter((p: any) => {
+                  const ts = extractPostTimestampMs(p);
+                  if (dateRangeStart != null && ts < dateRangeStart) return false;
+                  if (dateRangeEnd != null && ts > dateRangeEnd) return false;
+                  return true;
+                });
+              }
+              if (filteredPosts.length > 0) {
+                const finalPosts = lightweightProjection
+                  ? filteredPosts.map(projectLightweightPost)
+                  : filteredPosts;
+                resultsMap.set(nodeId, finalPosts);
+              }
+            }
+            // Case 2: Individual indexed record
+            else if (val && typeof val === 'object') {
+              const ts = typeof val.timestamp === 'number' && val.timestamp > 0 ? val.timestamp : extractPostTimestampMs(val);
+              let keep = true;
+              if (dateRangeStart != null && ts < dateRangeStart) keep = false;
+              if (dateRangeEnd != null && ts > dateRangeEnd) keep = false;
+
+              if (keep) {
+                const channelKey = val.channel_id || (Array.isArray(val.listen_items) && val.listen_items[0]) || 'channel';
+                let list = resultsMap.get(channelKey);
+                if (!list) {
+                  list = [];
+                  resultsMap.set(channelKey, list);
+                }
+                list.push(lightweightProjection ? projectLightweightPost(val) : val);
+              }
+            }
+
+            cursor.continue();
+          } else {
+            const results: CachedChannelPosts[] = [];
+            for (const [nodeId, posts] of resultsMap.entries()) {
+              results.push({ nodeId, posts });
+            }
+            resolve(results);
+          }
+        };
+
+        cursorReq.onerror = () => {
+          resolve([]);
+        };
+      };
+
       // High-performance path: use 'timestamp' index range if bounds are specified
       if ((dateRangeStart != null || dateRangeEnd != null) && store.indexNames.contains("timestamp")) {
         const index = store.index("timestamp");
@@ -826,77 +894,28 @@ export const getAllCachedPostsIndexedDB = async (
             list.push(lightweightProjection ? projectLightweightPost(rec) : rec);
             cursor.continue();
           } else {
-            const results: CachedChannelPosts[] = [];
-            for (const [nodeId, posts] of channelMap.entries()) {
-              results.push({ nodeId, posts });
+            // If indexed records matched, return them
+            if (channelMap.size > 0) {
+              const results: CachedChannelPosts[] = [];
+              for (const [nodeId, posts] of channelMap.entries()) {
+                results.push({ nodeId, posts });
+              }
+              resolve(results);
+            } else {
+              // Fallback to direct scanning in case records are legacy arrays or unindexed
+              scanDirectStore();
             }
-            resolve(results);
           }
         };
 
-        cursorReq.onerror = () => resolve([]);
+        cursorReq.onerror = () => {
+          scanDirectStore();
+        };
         return;
       }
 
-      // Cursor stream traversal across all records
-      const resultsMap = new Map<string, any[]>();
-      const cursorReq = store.openCursor();
-
-      cursorReq.onsuccess = (event: any) => {
-        const cursor = event.target.result;
-        if (cursor) {
-          const val = cursor.value;
-
-          // Case 1: Legacy monolithic array
-          if (Array.isArray(val)) {
-            const nodeId = String(cursor.key);
-            let filteredPosts = val;
-            if (dateRangeStart != null || dateRangeEnd != null) {
-              filteredPosts = val.filter((p: any) => {
-                const ts = extractPostTimestampMs(p);
-                if (dateRangeStart != null && ts < dateRangeStart) return false;
-                if (dateRangeEnd != null && ts > dateRangeEnd) return false;
-                return true;
-              });
-            }
-            if (filteredPosts.length > 0) {
-              const finalPosts = lightweightProjection
-                ? filteredPosts.map(projectLightweightPost)
-                : filteredPosts;
-              resultsMap.set(nodeId, finalPosts);
-            }
-          }
-          // Case 2: Individual indexed record
-          else if (val && typeof val === 'object') {
-            const ts = typeof val.timestamp === 'number' ? val.timestamp : extractPostTimestampMs(val);
-            let keep = true;
-            if (dateRangeStart != null && ts < dateRangeStart) keep = false;
-            if (dateRangeEnd != null && ts > dateRangeEnd) keep = false;
-
-            if (keep) {
-              const channelKey = val.channel_id || (Array.isArray(val.listen_items) && val.listen_items[0]) || 'channel';
-              let list = resultsMap.get(channelKey);
-              if (!list) {
-                list = [];
-                resultsMap.set(channelKey, list);
-              }
-              list.push(lightweightProjection ? projectLightweightPost(val) : val);
-            }
-          }
-
-          cursor.continue();
-        } else {
-          const results: CachedChannelPosts[] = [];
-          for (const [nodeId, posts] of resultsMap.entries()) {
-            results.push({ nodeId, posts });
-          }
-          resolve(results);
-        }
-      };
-
-      cursorReq.onerror = () => {
-        resolve([]);
-      };
+      // No bounds or no index: scan store directly
+      scanDirectStore();
     });
   } catch (err) {
     console.error("Failed to getAllCachedPostsIndexedDB:", err);

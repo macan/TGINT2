@@ -545,6 +545,7 @@ export default {
     share: "Compartir",
     scrapedAt: "Extraído {time}",
     newBadge: "NUEVO",
+    edited: "editado",
     viewTg: "Ver TG",
     replyToMessage: "Responder al Mensaje",
     forward: "Reenviar",

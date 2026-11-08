@@ -560,6 +560,7 @@ export default {
     share: "分享",
     scrapedAt: "抓取于 {time}",
     newBadge: "新",
+    edited: "已编辑",
     viewTg: "在 TG 中查看",
     replyToMessage: "回复消息",
     forward: "转发",

@@ -35,13 +35,26 @@ function normalizeTimestampMs(ts: any): number {
   }
   if (typeof ts === 'string') {
     const num = Number(ts);
-    if (!isNaN(num)) {
+    if (!isNaN(num) && num > 0) {
       return num < 10000000000 ? num * 1000 : num;
     }
     const parsed = Date.parse(ts);
     if (!isNaN(parsed)) return parsed;
   }
   return 0;
+}
+
+export function extractPostTrendTimestamp(post: any): number {
+  if (!post) return 0;
+  const raw =
+    post.date ??
+    post.data?.date ??
+    post.created_at ??
+    post.data?.created_at ??
+    post.timestamp ??
+    post.data?.timestamp ??
+    post.message?.date;
+  return normalizeTimestampMs(raw);
 }
 
 export function generatePostTrendData(
@@ -152,15 +165,18 @@ export function generatePostTrendData(
   let mediaOnlyPosts = 0;
 
   for (const post of posts) {
-    const pTime = normalizeTimestampMs(post.date);
-    if (pTime < startTime || pTime > endTime) {
+    const pTime = extractPostTrendTimestamp(post);
+    if (!pTime) {
       continue;
     }
 
-    const bucketIdx = Math.floor((pTime - startTime) / bucketDurationMs);
-    if (bucketIdx < 0 || bucketIdx >= buckets.length) {
+    // Grace window of 60 seconds around range bounds
+    if (pTime < startTime - 60000 || pTime > endTime + 60000) {
       continue;
     }
+
+    const rawIdx = Math.floor((pTime - startTime) / bucketDurationMs);
+    const bucketIdx = Math.max(0, Math.min(buckets.length - 1, rawIdx));
 
     const b = bucketMap.get(bucketIdx);
     if (!b) continue;

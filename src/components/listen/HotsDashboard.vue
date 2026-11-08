@@ -28,8 +28,7 @@ import {
   Building2,
   BarChart2,
   Scale,
-  Hash,
-  Database
+  Hash
 } from "lucide-vue-next";
 import {
   HotsDateRange,
@@ -50,7 +49,6 @@ import PostItemView from "./PostItemView.vue";
 import VirtualPostList from "./VirtualPostList.vue";
 import ChannelViewCard from "./ChannelViewCard.vue";
 import PostVolumeTrendCard from "./PostVolumeTrendCard.vue";
-import StorageMonitorWidget from "./StorageMonitorWidget.vue";
 
 export interface ListenDbSyncPayload {
   timestamp: number;
@@ -96,6 +94,10 @@ const computeProgress = ref<HotsEngineProgress>({
 
 const analysisResult = ref<HotsAnalysisResult | null>(null);
 
+const effectiveChartDateRange = computed<HotsDateRange>(() => {
+  return analysisResult.value?.dateRange || selectedDateRange.value;
+});
+
 // AI Mode & Gemini Token State
 const geminiApiKey = ref<string>(localStorage.getItem("gemini_api_key") || "");
 const serverHasGemini = ref(false);
@@ -103,7 +105,6 @@ const isAiModeEnabled = ref<boolean>(localStorage.getItem("listen_hots_ai_mode")
 const isApiKeyModalOpen = ref(false);
 const apiKeyInput = ref(geminiApiKey.value);
 const apiKeyFeedback = ref("");
-const isStorageMonitorVisible = ref<boolean>(false);
 
 const checkServerGeminiStatus = async () => {
   try {
@@ -219,6 +220,9 @@ async function runAnalysis(force: boolean = false) {
   const cached = getCachedHotsAnalysis(selectedDateRange.value, isAi);
   if (cached && !force) {
     analysisResult.value = cached;
+  } else {
+    // Clear stale analysisResult so previous range metrics do not conflict with the newly selected range
+    analysisResult.value = null;
   }
 
   isComputing.value = true;
@@ -767,22 +771,6 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <!-- Storage Monitor (500K Limit) Toggle Button -->
-        <button
-          type="button"
-          @click="isStorageMonitorVisible = !isStorageMonitorVisible"
-          class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-bold transition-all cursor-pointer select-none shadow-2xs border"
-          :class="[
-            isStorageMonitorVisible
-              ? 'bg-teal-50 hover:bg-teal-100/80 dark:bg-teal-950/60 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 border-teal-300/80 dark:border-teal-700/70'
-              : 'bg-white hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700'
-          ]"
-          :title="t('listen.toggleStorageMonitor') || 'Toggle IndexedDB Storage Monitor (500K Limit)'"
-        >
-          <Database class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
-          <span class="hidden sm:inline">{{ t('listen.storageMonitor') || 'Storage' }}</span>
-        </button>
-
         <!-- Refresh / Recompute Button -->
         <button
           type="button"
@@ -796,15 +784,6 @@ onUnmounted(() => {
         </button>
       </div>
     </div>
-
-    <!-- Storage Monitor Widget (500K Limit & IndexedDB Footprint) -->
-    <StorageMonitorWidget
-      v-if="isStorageMonitorVisible"
-      :is-dark="isDark"
-      :last-db-update="lastDbUpdate"
-      :last-db-sync-event="lastDbSyncEvent"
-      @close="isStorageMonitorVisible = false"
-    />
 
     <!-- Progressive Computing Progress Bar (Initial Cold Load Only) -->
     <div v-if="isComputing && !analysisResult" class="w-full bg-teal-50 dark:bg-teal-950/40 border border-teal-200/70 dark:border-teal-800/60 rounded-2xl p-3 flex items-center justify-between gap-3 animate-pulse">
@@ -837,7 +816,7 @@ onUnmounted(() => {
     <PostVolumeTrendCard
       v-if="analysisResult && analysisResult.hotPosts.length > 0"
       :posts="analysisResult.hotPosts"
-      :date-range="selectedDateRange"
+      :date-range="effectiveChartDateRange"
       :is-dark="isDark"
       :is-computing="isComputing"
     />

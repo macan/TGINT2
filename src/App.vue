@@ -6230,42 +6230,129 @@ const checkAndScheduleScrapeForListenItem = async (item: ListenItem): Promise<bo
     channelTarget = listenResolveCache.get(channelTarget)!;
   }
 
-  // Determine the date (timestamp ms) of the last cached post of this listen item
-  let lastCachedPostTimestamp = 0;
-  const freshness = getItemOrFolderFreshness(item);
-  if (freshness && freshness.timestamp > 0) {
-    lastCachedPostTimestamp = freshness.timestamp;
-  } else {
-    try {
-      const cached = await getCachedPostsIndexedDB(item.id);
-      if (cached && cached.length > 0) {
-        for (const p of cached) {
-          const raw = p?.data?.date ?? p?.date ?? p?.data?.created_at ?? p?.created_at ?? p?.data?.timestamp ?? p?.timestamp ?? p?.message?.date;
-          if (raw != null) {
-            const ts = typeof raw === "number" ? (raw < 10000000000 ? raw * 1000 : raw) : new Date(raw).getTime();
-            if (!isNaN(ts) && ts > lastCachedPostTimestamp) {
-              lastCachedPostTimestamp = ts;
-            }
-          }
-        }
+  // Parse post timestamp normalizing numbers and timezone strings (Telegram channel posts are in UTC)
+  const parsePostTimestamp = (p: any): number => {
+    if (!p) return 0;
+    const raw =
+      p?.data?.date ??
+      p?.date ??
+      p?.data?.created_at ??
+      p?.created_at ??
+      p?.data?.timestamp ??
+      p?.timestamp ??
+      p?.message?.date;
+    if (raw == null) return 0;
+
+    if (typeof raw === "number") {
+      return raw < 10000000000 ? raw * 1000 : raw;
+    }
+    if (typeof raw === "string") {
+      const num = Number(raw);
+      if (!isNaN(num) && num > 0) {
+        return num < 10000000000 ? num * 1000 : num;
       }
-    } catch {}
+      let str = raw.trim();
+      // If date string has no timezone offset (e.g. "YYYY-MM-DD HH:mm:ss" or "YYYY-MM-DDTHH:mm:ss"),
+      // Telegram channel dates are UTC. Append Z to prevent local browser timezone offset skew.
+      if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(str)) {
+        str = str.replace(' ', 'T') + 'Z';
+      }
+      const parsed = new Date(str).getTime();
+      if (!isNaN(parsed)) return parsed;
+    }
+    return 0;
+  };
+
+  // Lookup cached posts for this listen item
+  let cached: any[] = [];
+  try {
+    cached = (await getCachedPostsIndexedDB(item.id)) || [];
+  } catch {
+    cached = [];
   }
 
-  const ONE_MONTH_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-  const now = Date.now();
-  const isWithinOneMonth = lastCachedPostTimestamp > 0 && (now - lastCachedPostTimestamp) <= ONE_MONTH_MS;
-
-  // Rule 1: If the date of last cached post of the to be scheduled listen item is within one month
-  // and the loginToken is valid, call scheduleScrapeForListen() to trigger a new scrape task;
-  if (isWithinOneMonth) {
+  // If there are no cached posts for this channel yet, trigger an initial scrape
+  if (!cached || cached.length === 0) {
     await scheduleScrapeForListen(channelTarget, false);
     return true;
   }
 
-  // Rule 2: If the date of last cached post of the to be scheduled listen item exceeds one month
-  // and the loginToken is valid, call scheduleScrapeForListen() to trigger a new scrape task with a probability less than 0.2.
-  if (Math.random() < 0.2) {
+  // Collect and sort timestamps descending (newest first)
+  const timestamps: number[] = [];
+  for (const p of cached) {
+    const ts = parsePostTimestamp(p);
+    if (ts > 0) {
+      timestamps.push(ts);
+    }
+  }
+
+  if (timestamps.length === 0) {
+    // No valid timestamps parsed, trigger scrape to refresh
+    await scheduleScrapeForListen(channelTarget, false);
+    return true;
+  }
+
+  timestamps.sort((a, b) => b - a);
+
+  // Latest N posts sample (N = 20)
+  const N = 20;
+  const sample = timestamps.slice(0, N);
+  const latestPostTimestamp = sample[0];
+
+  const now = Date.now();
+  const elapsedMs = Math.max(0, now - latestPostTimestamp);
+
+  const ONE_MONTH_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+  const MIN_SCRAPE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes safety floor
+
+  // If the latest post is older than 30 days, avoid spamming scrapes for dormant channels (20% sample rate)
+  if (elapsedMs > ONE_MONTH_MS) {
+    if (Math.random() < 0.2) {
+      await scheduleScrapeForListen(channelTarget, false);
+      return true;
+    }
+    return false;
+  }
+
+  // If we only have 1 post, we cannot calculate inter-post gaps
+  if (sample.length < 2) {
+    // If more than 2 hours since the single post, schedule scrape
+    if (elapsedMs > 2 * 60 * 60 * 1000) {
+      await scheduleScrapeForListen(channelTarget, false);
+      return true;
+    }
+    return false;
+  }
+
+  // Calculate consecutive time gaps between the latest N posts
+  const gaps: number[] = [];
+  for (let i = 0; i < sample.length - 1; i++) {
+    const gap = sample[i] - sample[i + 1];
+    if (gap > 0) {
+      gaps.push(gap);
+    }
+  }
+
+  if (gaps.length === 0) {
+    if (elapsedMs > 60 * 60 * 1000) {
+      await scheduleScrapeForListen(channelTarget, false);
+      return true;
+    }
+    return false;
+  }
+
+  // Estimate average time gap (mean) and standard deviation (stdev)
+  const avgGap = gaps.reduce((sum, g) => sum + g, 0) / gaps.length;
+  const variance = gaps.reduce((sum, g) => sum + Math.pow(g - avgGap, 2), 0) / gaps.length;
+  const stdev = Math.sqrt(variance);
+
+  // Threshold: When current timestamp - latest post timestamp (considering timezone offset)
+  // is larger than the average time gap (or at least M stdev)
+  const M = 1.0; // Standard deviation multiplier
+  const dynamicThreshold = Math.max(avgGap, M * stdev);
+  const effectiveThreshold = Math.max(MIN_SCRAPE_INTERVAL_MS, dynamicThreshold);
+
+  if (elapsedMs >= effectiveThreshold) {
     await scheduleScrapeForListen(channelTarget, false);
     return true;
   }
