@@ -532,7 +532,7 @@ export default {
     manualSync: "Sincronización Manual",
     fetchingChannelProfile: "Obteniendo perfil del canal...",
     private: "Privado",
-    joinChannel: "Unirse al Canal",
+    joinChannel: "Ver en TG",
     noChannelDescription: "No se proporcionó descripción para este canal.",
     firstSeen: "Visto por primera vez",
     type: "Tipo",

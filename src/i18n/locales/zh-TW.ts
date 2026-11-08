@@ -532,7 +532,7 @@ export default {
     manualSync: "手動同步",
     fetchingChannelProfile: "正在取得頻道資料...",
     private: "私人",
-    joinChannel: "加入頻道",
+    joinChannel: "在 TG 中檢視",
     noChannelDescription: "此頻道未提供簡介。",
     firstSeen: "首次發現",
     type: "類型",

@@ -532,7 +532,7 @@ export default {
     manualSync: "手動同期",
     fetchingChannelProfile: "チャンネル情報を取得中...",
     private: "プライベート",
-    joinChannel: "チャンネルに参加",
+    joinChannel: "TG で表示",
     noChannelDescription: "このチャンネルには説明がありません。",
     firstSeen: "初検出",
     type: "タイプ",

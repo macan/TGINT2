@@ -547,7 +547,7 @@ export default {
     manualSync: "手动同步",
     fetchingChannelProfile: "正在获取频道资料...",
     private: "私密",
-    joinChannel: "加入频道",
+    joinChannel: "在 TG 中查看",
     noChannelDescription: "此频道未提供简介。",
     firstSeen: "首次发现",
     type: "类型",

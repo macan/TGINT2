@@ -211,23 +211,6 @@ app.all('/api/lq/:channel', async (req, res) => {
   }
 });
 
-app.post('/api/systemone', async (req, res) => {
-  try {
-    const response = await fetch('https://kev.gogingko.net/v1/systemone', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify(req.body),
-    });
-    const data = await response.text();
-    res.status(response.status).type('application/json').send(data);
-  } catch (err: any) {
-    console.warn('Proxy /api/systemone error:', err);
-    res.status(502).json({ error: 'Failed to proxy SystemOne request' });
-  }
-});
 
 // Endpoint to translate non-English, non-Chinese topic titles into Chinese
 app.post('/api/translate-titles', async (req, res) => {

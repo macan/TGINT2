@@ -532,7 +532,7 @@ export default {
     manualSync: "Ручная синхронизация",
     fetchingChannelProfile: "Загрузка профиля канала...",
     private: "Приватный",
-    joinChannel: "Перейти в канал",
+    joinChannel: "Смотреть в TG",
     noChannelDescription: "У этого канала нет описания.",
     firstSeen: "Впервые обнаружен",
     type: "Тип",

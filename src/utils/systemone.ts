@@ -83,35 +83,16 @@ export async function callSystemOne<T = any>(
   }
 
   try {
-    let response: Response;
-    try {
-      response = await fetch('/api/systemone', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          ...(options?.headers || {})
-        },
-        body: JSON.stringify(payload),
-        signal
-      });
-    } catch {
-      response = new Response(null, { status: 502 });
-    }
-
-    if (!response.ok && (response.status === 405 || response.status === 404 || response.status >= 500)) {
-      // Fallback to direct endpoint if proxy returns 405 (Method Not Allowed), 404, or server error (e.g. on Cloudflare Worker static deployment)
-      response = await fetch(endpointUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          ...(options?.headers || {})
-        },
-        body: JSON.stringify(payload),
-        signal
-      });
-    }
+    const response = await fetch(endpointUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        ...(options?.headers || {})
+      },
+      body: JSON.stringify(payload),
+      signal
+    });
 
     if (!response.ok) {
       let errText = '';

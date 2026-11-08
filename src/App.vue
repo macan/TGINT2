@@ -142,12 +142,20 @@ import {
   getLanguageFlag,
   formatLanguageCode
 } from "./utils/channelLanguage";
-import { pruneOldPostsIndexedDB } from "./utils/indexedDbPosts";
+import {
+  pruneOldPostsIndexedDB,
+  initListenPostsIndexedDB,
+  getCachedPostsIndexedDB as getCachedPostsFromIndexedDB,
+  setCachedPostsIndexedDB as setCachedPostsToIndexedDB,
+  clearCachedPostsIndexedDB as clearCachedPostsFromIndexedDB,
+  extractPostTimestampMs
+} from "./utils/indexedDbPosts";
 const AutoClassDistributionChart = defineAsyncComponent(() => import("./components/AutoClassDistributionChart.vue"));
 const TypesTab = defineAsyncComponent(() => import("./components/TypesTab.vue"));
 const ArticleReaderView = defineAsyncComponent(() => import("./components/ArticleReaderView.vue"));
 const ChannelAnalyticsWrapper = defineAsyncComponent(() => import("./components/ChannelAnalyticsWrapper.vue"));
 const HotsDashboard = defineAsyncComponent(() => import("./components/listen/HotsDashboard.vue"));
+const StorageMonitorWidget = defineAsyncComponent(() => import("./components/listen/StorageMonitorWidget.vue"));
 
 const preloadSecondaryViews = () => {
   if (typeof window === "undefined") return;
@@ -5525,82 +5533,40 @@ function formatDateForSearch(date) {
 }
 
 const initIndexedDB = (): Promise<IDBDatabase> => {
-  return new Promise((resolve, reject) => {
-    // Open (or create) database for caching listen posts
-    const request = indexedDB.open("GingkoListenPostsDB", 1);
-    request.onupgradeneeded = (event: any) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains("posts")) {
-        db.createObjectStore("posts");
-      }
-    };
-    request.onsuccess = (event: any) => {
-      resolve(event.target.result);
-    };
-    request.onerror = (event: any) => {
-      reject(request.target?.error || new Error("Failed to open IndexedDB"));
-    };
-  });
+  return initListenPostsIndexedDB();
 };
 
 const getCachedPostsIndexedDB = async (nodeId: string): Promise<any[]> => {
-  try {
-    const db = await initIndexedDB();
-    return new Promise((resolve) => {
-      const transaction = db.transaction("posts", "readonly");
-      const store = transaction.objectStore("posts");
-      const request = store.get(nodeId);
-      request.onsuccess = () => {
-        resolve(request.result || []);
-      };
-      request.onerror = () => {
-        resolve([]);
-      };
-    });
-  } catch (err) {
-    console.error("IndexedDB get cached posts error:", err);
-    return [];
-  }
+  return getCachedPostsFromIndexedDB(nodeId);
 };
 
 const setCachedPostsIndexedDB = async (nodeId: string, posts: any[]): Promise<void> => {
   try {
-    const db = await initIndexedDB();
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction("posts", "readwrite");
-      const store = transaction.objectStore("posts");
-      const request = store.put(posts, nodeId);
-      request.onsuccess = () => {
-        let minPostTimestamp = Infinity;
-        let maxPostTimestamp = 0;
-        if (Array.isArray(posts) && posts.length > 0) {
-          for (const p of posts) {
-            const raw = p?.data?.date ?? p?.date ?? p?.data?.created_at ?? p?.created_at ?? p?.data?.timestamp ?? p?.timestamp ?? p?.message?.date;
-            if (raw != null) {
-              const ts = typeof raw === "number" ? (raw < 10000000000 ? raw * 1000 : raw) : new Date(raw).getTime();
-              if (!isNaN(ts) && ts > 0) {
-                if (ts < minPostTimestamp) minPostTimestamp = ts;
-                if (ts > maxPostTimestamp) maxPostTimestamp = ts;
-              }
-            }
+    await setCachedPostsToIndexedDB(nodeId, posts);
+    let minPostTimestamp = Infinity;
+    let maxPostTimestamp = 0;
+    if (Array.isArray(posts) && posts.length > 0) {
+      for (const p of posts) {
+        const raw = p?.data?.date ?? p?.date ?? p?.data?.created_at ?? p?.created_at ?? p?.data?.timestamp ?? p?.timestamp ?? p?.message?.date;
+        if (raw != null) {
+          const ts = typeof raw === "number" ? (raw < 10000000000 ? raw * 1000 : raw) : new Date(raw).getTime();
+          if (!isNaN(ts) && ts > 0) {
+            if (ts < minPostTimestamp) minPostTimestamp = ts;
+            if (ts > maxPostTimestamp) maxPostTimestamp = ts;
           }
         }
-        if (minPostTimestamp === Infinity) minPostTimestamp = 0;
+      }
+    }
+    if (minPostTimestamp === Infinity) minPostTimestamp = 0;
 
-        lastListenPostsDbSyncTime.value = Date.now();
-        lastListenPostsDbSyncEvent.value = {
-          timestamp: Date.now(),
-          nodeId,
-          count: Array.isArray(posts) ? posts.length : 0,
-          minPostTimestamp,
-          maxPostTimestamp
-        };
-        resolve();
-      };
-      request.onerror = () => {
-        reject(request.target?.error || new Error("Failed to save to IndexedDB"));
-      };
-    });
+    lastListenPostsDbSyncTime.value = Date.now();
+    lastListenPostsDbSyncEvent.value = {
+      timestamp: Date.now(),
+      nodeId,
+      count: Array.isArray(posts) ? posts.length : 0,
+      minPostTimestamp,
+      maxPostTimestamp
+    };
   } catch (err) {
     console.error("IndexedDB set cached posts error:", err);
   }
@@ -5608,18 +5574,7 @@ const setCachedPostsIndexedDB = async (nodeId: string, posts: any[]): Promise<vo
 
 const clearCachedPostsIndexedDB = async (nodeId: string): Promise<void> => {
   try {
-    const db = await initIndexedDB();
-    return new Promise((resolve, reject) => {
-      const transaction = db.transaction("posts", "readwrite");
-      const store = transaction.objectStore("posts");
-      const request = store.delete(nodeId);
-      request.onsuccess = () => {
-        resolve();
-      };
-      request.onerror = () => {
-        reject(request.target?.error || new Error("Failed to delete from IndexedDB"));
-      };
-    });
+    await clearCachedPostsFromIndexedDB(nodeId);
   } catch (err) {
     console.error("IndexedDB clear cached posts error:", err);
   }
@@ -5785,21 +5740,52 @@ const loadAllListenPostsFreshnessFromIndexedDB = async () => {
     const transaction = db.transaction("posts", "readonly");
     const store = transaction.objectStore("posts");
     const freshness: Record<string, ListenItemFreshness> = {};
+    const itemMaxTimes: Record<string, { maxTime: number; rawDateVal: any }> = {};
 
     const request = store.openCursor();
     request.onsuccess = (event: any) => {
       const cursor = event.target.result;
       if (cursor) {
-        const nodeId = String(cursor.key);
-        const posts = cursor.value;
-        if (Array.isArray(posts) && posts.length > 0) {
-          const res = computeItemFreshnessFromPosts(posts);
+        const val = cursor.value;
+        if (Array.isArray(val) && val.length > 0) {
+          const nodeId = String(cursor.key);
+          const res = computeItemFreshnessFromPosts(val);
           if (res) {
             freshness[nodeId] = res;
+          }
+        } else if (val && typeof val === 'object') {
+          const ts = typeof val.timestamp === 'number' ? val.timestamp : extractPostTimestampMs(val);
+          if (ts > 0 && Array.isArray(val.listen_items)) {
+            for (const id of val.listen_items) {
+              if (!itemMaxTimes[id] || ts > itemMaxTimes[id].maxTime) {
+                itemMaxTimes[id] = { maxTime: ts, rawDateVal: val.data?.date ?? val.date ?? ts };
+              }
+            }
           }
         }
         cursor.continue();
       } else {
+        const now = Date.now();
+        const ONE_HOUR = 3600 * 1000;
+        const ONE_DAY = 24 * ONE_HOUR;
+
+        for (const [nodeId, info] of Object.entries(itemMaxTimes)) {
+          if (!freshness[nodeId]) {
+            const ageMs = Math.max(0, now - info.maxTime);
+            let level: FreshnessLevel;
+            if (ageMs <= ONE_DAY) level = 'today';
+            else if (ageMs <= 3 * ONE_DAY) level = 'recent';
+            else if (ageMs <= 7 * ONE_DAY) level = 'week';
+            else if (ageMs <= 30 * ONE_DAY) level = 'month';
+            else level = 'stale';
+
+            freshness[nodeId] = {
+              timestamp: info.maxTime,
+              level,
+              rawDate: info.rawDateVal
+            };
+          }
+        }
         hasLoadedListenFreshnessOnce = true;
         listenItemsFreshnessMap.value = {
           ...listenItemsFreshnessMap.value,
@@ -6083,6 +6069,15 @@ const isCategoryChartVisible = ref<boolean>(
 const toggleCategoryChartVisible = () => {
   isCategoryChartVisible.value = !isCategoryChartVisible.value;
   localStorage.setItem("listen_category_chart_visible", String(isCategoryChartVisible.value));
+};
+
+const isStorageMonitorVisible = ref<boolean>(
+  localStorage.getItem("listen_storage_monitor_visible") !== "false"
+);
+
+const toggleStorageMonitorVisible = () => {
+  isStorageMonitorVisible.value = !isStorageMonitorVisible.value;
+  localStorage.setItem("listen_storage_monitor_visible", String(isStorageMonitorVisible.value));
 };
 
 const selectedAutoClassFilter = computed(() => {
@@ -6579,22 +6574,26 @@ const startManualBackgroundSync = async (forceAll = false) => {
     errorCount: 0
   };
 
-  try {
-    for (let i = 0; i < itemsToSync.length; i++) {
-      if (!isListenBackgroundSyncEnabled.value || signal.aborted) {
-        break;
-      }
+  const cpuCores = typeof navigator !== 'undefined' && navigator.hardwareConcurrency ? navigator.hardwareConcurrency : 4;
+  const maxConcurrency = Math.min(6, Math.max(2, Math.floor(cpuCores / 2) || 3));
 
-      const item = itemsToSync[i];
+  let currentIndex = 0;
+  let completedCount = 0;
+
+  const runWorker = async () => {
+    while (currentIndex < itemsToSync.length && !signal.aborted && isListenBackgroundSyncEnabled.value) {
+      if (signal.aborted || !isListenBackgroundSyncEnabled.value) break;
+
+      const idx = currentIndex++;
+      const item = itemsToSync[idx];
+      if (!item) continue;
+
       activeBackgroundSyncItemId.value = item.id;
-      backgroundSyncProgress.value.current = i + 1;
       backgroundSyncProgress.value.currentItemName = item.name;
 
-      // Smart background fetch: If date of last cached post is within 1 month and loginToken is valid,
-      // trigger scrape task; if exceeds 1 month and loginToken is valid, trigger scrape task with probability < 0.2
-      await checkAndScheduleScrapeForListenItem(item);
-
+      // Smart background fetch check
       try {
+        await checkAndScheduleScrapeForListenItem(item);
         const res = await syncSingleListenItem(item, signal);
         if (res.newPosts > 0) {
           backgroundSyncProgress.value.updatedChannelsCount++;
@@ -6603,16 +6602,20 @@ const startManualBackgroundSync = async (forceAll = false) => {
       } catch (err) {
         console.error(`Background sync failed for ${item.name}:`, err);
         backgroundSyncProgress.value.errorCount++;
+      } finally {
+        completedCount++;
+        backgroundSyncProgress.value.current = completedCount;
       }
 
-      // Page Performance Optimization:
-      // 1. Give main thread a chance to yield via requestIdleCallback
-      if (typeof window !== "undefined" && "requestIdleCallback" in window) {
-        await new Promise((resolve) => (window as any).requestIdleCallback(resolve, { timeout: 150 }));
-      }
-      // 2. Controlled delay between requests (650ms) to avoid network congestion and API 429 rate limits
-      await new Promise((resolve) => setTimeout(resolve, 650));
+      // Brief pacing delay to balance performance and network rate limits
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
+  };
+
+  try {
+    const workerCount = Math.min(maxConcurrency, itemsToSync.length);
+    const workers = Array.from({ length: workerCount }, () => runWorker());
+    await Promise.all(workers);
   } finally {
     const finalUpdated = backgroundSyncProgress.value.updatedChannelsCount;
     const finalPosts = backgroundSyncProgress.value.newPostsCount;
@@ -8490,20 +8493,28 @@ const jumpToExplorerFromListen = (channel: string, postKey?: string) => {
 };
 
 const handleHotsSelectChannel = (channelId: string) => {
-  const cleanId = channelId.replace(/^@/, '');
+  if (!channelId) return;
+  const cleanId = channelId.replace(/^@/, '').trim();
+  const dotIdx = cleanId.indexOf('.');
+  const chName = dotIdx > 0 ? cleanId.slice(0, dotIdx) : cleanId;
+
   const leaf = allListenLeafItems.value.find(item =>
     item.id === channelId ||
     item.id === cleanId ||
+    item.id === chName ||
     item.argument === channelId ||
     item.argument === cleanId ||
+    item.argument === chName ||
     (item.argument && item.argument.replace(/^@/, '') === cleanId) ||
-    item.name.toLowerCase() === cleanId.toLowerCase()
+    (item.argument && item.argument.replace(/^@/, '') === chName) ||
+    item.name.toLowerCase() === cleanId.toLowerCase() ||
+    item.name.toLowerCase() === chName.toLowerCase()
   );
   if (leaf) {
     selectListenItem(leaf);
     setListenLayoutMode('view');
   } else {
-    jumpToExplorerFromListen(cleanId);
+    jumpToExplorerFromListen(chName || cleanId);
   }
 };
 
@@ -23770,6 +23781,25 @@ onUnmounted(() => {
               </span>
             </button>
 
+            <!-- Storage Monitor (500K Limit) Toggle Button -->
+            <button
+              type="button"
+              @click="toggleStorageMonitorVisible"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-bold transition-all cursor-pointer select-none shadow-2xs border"
+              :class="[
+                isStorageMonitorVisible
+                  ? 'bg-teal-50 hover:bg-teal-100/80 dark:bg-teal-950/60 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 border-teal-300/80 dark:border-teal-700/70'
+                  : 'bg-white hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 border-gray-200/80 dark:border-gray-700/80'
+              ]"
+              :title="t('listen.toggleStorageMonitor') || 'Toggle IndexedDB Storage Monitor (500K Limit)'"
+            >
+              <Database class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+              <span class="hidden sm:inline">{{ t('listen.storageMonitor') || 'Storage' }}</span>
+              <span class="font-mono text-[10px] text-teal-700 dark:text-teal-300 bg-teal-100/70 dark:bg-teal-900/60 px-1.5 py-0.2 rounded-md tabular-nums">
+                500K
+              </span>
+            </button>
+
             <!-- Mode Segmented Control -->
             <div class="flex items-center gap-1 bg-gray-100/80 dark:bg-gray-900/60 p-1 rounded-2xl border border-gray-200/60 dark:border-gray-700/60 max-w-full overflow-x-auto">
               <button
@@ -23823,6 +23853,15 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+
+        <!-- IndexedDB Storage & 500K Post Capacity Monitor Widget -->
+        <StorageMonitorWidget
+          v-if="isStorageMonitorVisible"
+          :is-dark="isDark"
+          :last-db-update="lastListenPostsDbSyncTime"
+          :last-db-sync-event="lastListenPostsDbSyncEvent || undefined"
+          @close="toggleStorageMonitorVisible"
+        />
 
         <!-- Topic / Category Distribution Summary Component -->
         <AutoClassDistributionChart

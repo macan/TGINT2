@@ -28,7 +28,8 @@ import {
   Building2,
   BarChart2,
   Scale,
-  Hash
+  Hash,
+  Database
 } from "lucide-vue-next";
 import {
   HotsDateRange,
@@ -49,6 +50,7 @@ import PostItemView from "./PostItemView.vue";
 import VirtualPostList from "./VirtualPostList.vue";
 import ChannelViewCard from "./ChannelViewCard.vue";
 import PostVolumeTrendCard from "./PostVolumeTrendCard.vue";
+import StorageMonitorWidget from "./StorageMonitorWidget.vue";
 
 export interface ListenDbSyncPayload {
   timestamp: number;
@@ -101,6 +103,7 @@ const isAiModeEnabled = ref<boolean>(localStorage.getItem("listen_hots_ai_mode")
 const isApiKeyModalOpen = ref(false);
 const apiKeyInput = ref(geminiApiKey.value);
 const apiKeyFeedback = ref("");
+const isStorageMonitorVisible = ref<boolean>(false);
 
 const checkServerGeminiStatus = async () => {
   try {
@@ -420,8 +423,10 @@ function inspectPost(post: HotPostItem) {
 }
 
 function handleChannelClick(channelId: string) {
+  if (!channelId) return;
   emit("select-channel", channelId);
   isDrillDownOpen.value = false;
+  inspectedPost.value = null;
 }
 
 function handlePostJump(post: HotPostItem) {
@@ -762,6 +767,22 @@ onUnmounted(() => {
           </button>
         </div>
 
+        <!-- Storage Monitor (500K Limit) Toggle Button -->
+        <button
+          type="button"
+          @click="isStorageMonitorVisible = !isStorageMonitorVisible"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-bold transition-all cursor-pointer select-none shadow-2xs border"
+          :class="[
+            isStorageMonitorVisible
+              ? 'bg-teal-50 hover:bg-teal-100/80 dark:bg-teal-950/60 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 border-teal-300/80 dark:border-teal-700/70'
+              : 'bg-white hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700'
+          ]"
+          :title="t('listen.toggleStorageMonitor') || 'Toggle IndexedDB Storage Monitor (500K Limit)'"
+        >
+          <Database class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
+          <span class="hidden sm:inline">{{ t('listen.storageMonitor') || 'Storage' }}</span>
+        </button>
+
         <!-- Refresh / Recompute Button -->
         <button
           type="button"
@@ -775,6 +796,15 @@ onUnmounted(() => {
         </button>
       </div>
     </div>
+
+    <!-- Storage Monitor Widget (500K Limit & IndexedDB Footprint) -->
+    <StorageMonitorWidget
+      v-if="isStorageMonitorVisible"
+      :is-dark="isDark"
+      :last-db-update="lastDbUpdate"
+      :last-db-sync-event="lastDbSyncEvent"
+      @close="isStorageMonitorVisible = false"
+    />
 
     <!-- Progressive Computing Progress Bar (Initial Cold Load Only) -->
     <div v-if="isComputing && !analysisResult" class="w-full bg-teal-50 dark:bg-teal-950/40 border border-teal-200/70 dark:border-teal-800/60 rounded-2xl p-3 flex items-center justify-between gap-3 animate-pulse">
@@ -1029,7 +1059,7 @@ onUnmounted(() => {
             @open-lightbox="url => emit('open-lightbox', url)"
             @add-to-workspace="p => emit('add-to-workspace', p)"
             @share-post="p => emit('share-post', p)"
-            @jump-to-channel="(u, k) => handlePostJump({ ...post, channelUsername: u, key: k })"
+            @jump-to-channel="(u, k) => handleChannelClick(u || post.channelUsername || post.channelId || post.channelName)"
             @click-post="p => inspectPost(p)"
           />
         </div>
@@ -1261,7 +1291,7 @@ onUnmounted(() => {
                   @open-lightbox="url => emit('open-lightbox', url)"
                   @add-to-workspace="p => emit('add-to-workspace', p)"
                   @share-post="p => emit('share-post', p)"
-                  @jump-to-channel="(u, k) => handlePostJump({ channelUsername: u, key: k })"
+                  @jump-to-channel="(u, k) => handleChannelClick(u || '')"
                   @click-post="p => inspectPost(p)"
                 />
                 <div v-else class="space-y-4">
@@ -1274,7 +1304,7 @@ onUnmounted(() => {
                     @open-lightbox="url => emit('open-lightbox', url)"
                     @add-to-workspace="p => emit('add-to-workspace', p)"
                     @share-post="p => emit('share-post', p)"
-                    @jump-to-channel="(u, k) => handlePostJump({ ...post, channelUsername: u, key: k })"
+                    @jump-to-channel="(u, k) => handleChannelClick(u || post.channelUsername || post.channelId || post.channelName)"
                     @click-post="p => inspectPost(p)"
                   />
                 </div>
@@ -1391,7 +1421,7 @@ onUnmounted(() => {
                 @open-lightbox="url => emit('open-lightbox', url)"
                 @add-to-workspace="p => emit('add-to-workspace', p)"
                 @share-post="p => emit('share-post', p)"
-                @jump-to-channel="(u, k) => handlePostJump({ channelUsername: u, key: k })"
+                @jump-to-channel="(u, k) => handleChannelClick(u || '')"
               />
               <div v-else class="space-y-4">
                 <PostItemView
@@ -1404,7 +1434,7 @@ onUnmounted(() => {
                   @open-lightbox="url => emit('open-lightbox', url)"
                   @add-to-workspace="p => emit('add-to-workspace', p)"
                   @share-post="p => emit('share-post', p)"
-                  @jump-to-channel="(u, k) => handlePostJump({ ...post, channelUsername: u, key: k })"
+                  @jump-to-channel="(u, k) => handleChannelClick(u || post.channelUsername || post.channelId || post.channelName)"
                 />
               </div>
             </div>
@@ -1458,7 +1488,7 @@ onUnmounted(() => {
             @open-lightbox="url => emit('open-lightbox', url)"
             @add-to-workspace="p => emit('add-to-workspace', p)"
             @share-post="p => emit('share-post', p)"
-            @jump-to-channel="(u, k) => handlePostJump({ ...inspectedPost!, channelUsername: u, key: k })"
+            @jump-to-channel="(u, k) => handleChannelClick(u || inspectedPost?.channelUsername || inspectedPost?.channelId || inspectedPost?.channelName || '')"
           />
         </div>
 
@@ -1472,7 +1502,7 @@ onUnmounted(() => {
           </button>
           <button
             type="button"
-            @click="handlePostJump(inspectedPost)"
+            @click="handleChannelClick(inspectedPost?.channelUsername || inspectedPost?.channelId || inspectedPost?.channelName || '')"
             class="px-4 py-2 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white shadow-xs flex items-center gap-1.5 cursor-pointer"
           >
             <span>{{ t('listen.hots.jumpToChannel') || 'Jump to Channel' }}</span>
