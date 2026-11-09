@@ -526,6 +526,8 @@ export default {
     target: "Objetivo",
     created: "Creado",
     newest: "Más reciente",
+    cacheLookup: "Consulta",
+    fetchTime: "Obtención",
     cachedPosts: "{count} en caché",
     clearCachedPosts: "Borrar publicaciones en caché",
     livePolling: "Sondeo en vivo de {interval}: {status}",

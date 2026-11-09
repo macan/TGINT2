@@ -526,6 +526,8 @@ export default {
     target: "ターゲット",
     created: "作成日時",
     newest: "最新",
+    cacheLookup: "参照時間",
+    fetchTime: "取得時間",
     cachedPosts: "{count} 件キャッシュ済み",
     clearCachedPosts: "キャッシュされた投稿をクリア",
     livePolling: "{interval} ライブポーリング: {status}",

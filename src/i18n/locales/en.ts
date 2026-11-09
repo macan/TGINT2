@@ -542,6 +542,8 @@ export default {
     target: "Target",
     created: "Created",
     newest: "Newest",
+    cacheLookup: "Lookup",
+    fetchTime: "Fetch",
     cachedPosts: "{count} cached",
     storageMonitor: "Storage",
     toggleStorageMonitor: "Toggle Storage Monitor (500K Limit)",

@@ -526,6 +526,8 @@ export default {
     target: "目標",
     created: "建立時間",
     newest: "最新",
+    cacheLookup: "查詢耗時",
+    fetchTime: "抓取耗時",
     cachedPosts: "{count} 則已快取",
     clearCachedPosts: "清除已快取訊息",
     livePolling: "{interval} 即時輪詢：{status}",

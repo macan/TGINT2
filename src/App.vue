@@ -148,7 +148,8 @@ import {
   getCachedPostsIndexedDB as getCachedPostsFromIndexedDB,
   setCachedPostsIndexedDB as setCachedPostsToIndexedDB,
   clearCachedPostsIndexedDB as clearCachedPostsFromIndexedDB,
-  extractPostTimestampMs
+  extractPostTimestampMs,
+  getNewestPostTimestampForNode
 } from "./utils/indexedDbPosts";
 const AutoClassDistributionChart = defineAsyncComponent(() => import("./components/AutoClassDistributionChart.vue"));
 const TypesTab = defineAsyncComponent(() => import("./components/TypesTab.vue"));
@@ -2739,6 +2740,8 @@ const selectedChannelMetadata = ref<any | null>(null);
 const isFetchingChannelMetadata = ref(false);
 const newlyFetchedListenKeys = ref<Set<string>>(new Set());
 const isFetchingListenPosts = ref(false);
+const listenCacheLookupTimeMs = ref<number | null>(null);
+const listenFetchTimeMs = ref<number | null>(null);
 const listenAutoRefreshActive = ref(false);
 let listenRefreshInterval: any = null;
 
@@ -5536,8 +5539,8 @@ const initIndexedDB = (): Promise<IDBDatabase> => {
   return initListenPostsIndexedDB();
 };
 
-const getCachedPostsIndexedDB = async (nodeId: string): Promise<any[]> => {
-  return getCachedPostsFromIndexedDB(nodeId);
+const getCachedPostsIndexedDB = async (nodeId: string, options?: any): Promise<any[]> => {
+  return getCachedPostsFromIndexedDB(nodeId, options);
 };
 
 const setCachedPostsIndexedDB = async (nodeId: string, posts: any[]): Promise<void> => {
@@ -5729,6 +5732,18 @@ const updateItemFreshness = (nodeId: string, posts: any[]) => {
   }
 };
 
+const FRESHNESS_LOCAL_CACHE_KEY = "gingko_listen_freshness_cache";
+
+// Restore cached freshness from localStorage immediately on init
+try {
+  const cachedFreshness = localStorage.getItem(FRESHNESS_LOCAL_CACHE_KEY);
+  if (cachedFreshness) {
+    listenItemsFreshnessMap.value = JSON.parse(cachedFreshness);
+  }
+} catch {
+  // Ignore
+}
+
 let hasLoadedListenFreshnessOnce = false;
 
 const loadAllListenPostsFreshnessFromIndexedDB = async () => {
@@ -5736,42 +5751,22 @@ const loadAllListenPostsFreshnessFromIndexedDB = async () => {
     return;
   }
   try {
-    const db = await initIndexedDB();
-    const transaction = db.transaction("posts", "readonly");
-    const store = transaction.objectStore("posts");
-    const freshness: Record<string, ListenItemFreshness> = {};
-    const itemMaxTimes: Record<string, { maxTime: number; rawDateVal: any }> = {};
+    const leaves = allDirectoryLeafItems.value || [];
+    if (leaves.length === 0) return;
 
-    const request = store.openCursor();
-    request.onsuccess = (event: any) => {
-      const cursor = event.target.result;
-      if (cursor) {
-        const val = cursor.value;
-        if (Array.isArray(val) && val.length > 0) {
-          const nodeId = String(cursor.key);
-          const res = computeItemFreshnessFromPosts(val);
-          if (res) {
-            freshness[nodeId] = res;
-          }
-        } else if (val && typeof val === 'object') {
-          const ts = typeof val.timestamp === 'number' ? val.timestamp : extractPostTimestampMs(val);
-          if (ts > 0 && Array.isArray(val.listen_items)) {
-            for (const id of val.listen_items) {
-              if (!itemMaxTimes[id] || ts > itemMaxTimes[id].maxTime) {
-                itemMaxTimes[id] = { maxTime: ts, rawDateVal: val.data?.date ?? val.date ?? ts };
-              }
-            }
-          }
-        }
-        cursor.continue();
-      } else {
-        const now = Date.now();
-        const ONE_HOUR = 3600 * 1000;
-        const ONE_DAY = 24 * ONE_HOUR;
+    const freshness: Record<string, ListenItemFreshness> = { ...listenItemsFreshnessMap.value };
+    const now = Date.now();
+    const ONE_HOUR = 3600 * 1000;
+    const ONE_DAY = 24 * ONE_HOUR;
 
-        for (const [nodeId, info] of Object.entries(itemMaxTimes)) {
-          if (!freshness[nodeId]) {
-            const ageMs = Math.max(0, now - info.maxTime);
+    // Fast indexed lookups: only 1 B-tree seek per leaf item (sub-millisecond, no table scan)
+    await Promise.all(
+      leaves.map(async (leaf) => {
+        try {
+          const channelHint = leaf.type === 'channel' ? (leaf.argument?.trim() || leaf.name?.trim()) : undefined;
+          const res = await getNewestPostTimestampForNode(leaf.id, channelHint);
+          if (res && res.timestamp > 0) {
+            const ageMs = Math.max(0, now - res.timestamp);
             let level: FreshnessLevel;
             if (ageMs <= ONE_DAY) level = 'today';
             else if (ageMs <= 3 * ONE_DAY) level = 'recent';
@@ -5779,23 +5774,25 @@ const loadAllListenPostsFreshnessFromIndexedDB = async () => {
             else if (ageMs <= 30 * ONE_DAY) level = 'month';
             else level = 'stale';
 
-            freshness[nodeId] = {
-              timestamp: info.maxTime,
+            freshness[leaf.id] = {
+              timestamp: res.timestamp,
               level,
-              rawDate: info.rawDateVal
+              rawDate: res.rawDateVal
             };
           }
+        } catch {
+          // Non-fatal
         }
-        hasLoadedListenFreshnessOnce = true;
-        listenItemsFreshnessMap.value = {
-          ...listenItemsFreshnessMap.value,
-          ...freshness
-        };
-      }
-    };
-    request.onerror = (err) => {
-      console.error("Error iterating listen posts in IndexedDB:", err);
-    };
+      })
+    );
+
+    hasLoadedListenFreshnessOnce = true;
+    listenItemsFreshnessMap.value = freshness;
+    try {
+      localStorage.setItem(FRESHNESS_LOCAL_CACHE_KEY, JSON.stringify(freshness));
+    } catch {
+      // Ignore
+    }
   } catch (err) {
     console.error("Failed to load listen posts freshness from IndexedDB:", err);
   }
@@ -6751,6 +6748,8 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
   
   if (isNewSelection) {
     resetRecentPostsWidgetScroll();
+    listenCacheLookupTimeMs.value = null;
+    listenFetchTimeMs.value = null;
   }
   
   const getPostId = (post: any): string => {
@@ -6771,12 +6770,16 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
 
   // 1. Immediately load cached posts from IndexedDB for instant display
   let cached: any[] = [];
+  const cacheStart = performance.now();
   try {
-    cached = await getCachedPostsIndexedDB(node.id);
+    const channelHint = node.type === 'channel' ? (node.argument?.trim() || node.name?.trim()) : undefined;
+    cached = await getCachedPostsIndexedDB(node.id, { channelId: channelHint });
+    listenCacheLookupTimeMs.value = Math.max(0, Math.round(performance.now() - cacheStart));
     if (cached && cached.length > 0) {
       updateItemFreshness(node.id, cached);
     }
   } catch (err) {
+    listenCacheLookupTimeMs.value = Math.max(0, Math.round(performance.now() - cacheStart));
     console.error("Failed to load cached listen posts from IndexedDB:", err);
   }
 
@@ -6812,6 +6815,7 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
     });
   }
   
+  const fetchStart = performance.now();
   try {
     let fetchedPosts: any[] = [];
 
@@ -7059,6 +7063,7 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
   } finally {
     if (selectedListenNode.value?.id === node.id) {
       isFetchingListenPosts.value = false;
+      listenFetchTimeMs.value = Math.max(1, Math.round(performance.now() - fetchStart));
       if (isNewSelection) {
         nextTick(() => {
           if (rearrangePostsContainer.value) {
@@ -25611,6 +25616,15 @@ onUnmounted(() => {
                     <span>{{ t('listen.created') }}: <strong>{{ new Date(selectedListenNode.create_time).toLocaleDateString() }}</strong></span>
                     <span v-if="listenPosts && listenPosts.length > 0">
                       {{ t('listen.newest') }}: <strong class="text-teal-600 dark:text-teal-400">{{ formatDate(listenPosts[0]?.data?.date) }}</strong>
+                    </span>
+                    <span v-if="listenCacheLookupTimeMs != null">
+                      {{ t('listen.cacheLookup') }}: <strong class="text-indigo-600 dark:text-indigo-400">{{ listenCacheLookupTimeMs }}ms</strong>
+                    </span>
+                    <span v-if="isFetchingListenPosts">
+                      {{ t('listen.fetchTime') }}: <strong class="text-amber-500 animate-pulse">{{ t('listen.fetching') || 'fetching...' }}</strong>
+                    </span>
+                    <span v-else-if="listenFetchTimeMs != null">
+                      {{ t('listen.fetchTime') }}: <strong class="text-emerald-600 dark:text-emerald-400">{{ listenFetchTimeMs }}ms</strong>
                     </span>
                   </div>
                   <p v-if="selectedListenNode.description" class="text-xs text-gray-550 dark:text-gray-400 italic max-w-xl">

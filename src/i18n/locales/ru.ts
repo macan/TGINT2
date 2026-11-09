@@ -526,6 +526,8 @@ export default {
     target: "Цель",
     created: "Создано",
     newest: "Новейшие",
+    cacheLookup: "Поиск",
+    fetchTime: "Загрузка",
     cachedPosts: "{count} в кэше",
     clearCachedPosts: "Очистить кэшированные посты",
     livePolling: "Опрос каждые {interval}: {status}",

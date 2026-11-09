@@ -541,6 +541,8 @@ export default {
     target: "目标",
     created: "创建时间",
     newest: "最新",
+    cacheLookup: "查询耗时",
+    fetchTime: "抓取耗时",
     cachedPosts: "{count} 条已缓存",
     clearCachedPosts: "清除已缓存消息",
     livePolling: "{interval} 实时轮询：{status}",
