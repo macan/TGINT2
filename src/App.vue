@@ -1068,13 +1068,20 @@ const formatNamespaceMillion = (nkeys?: number) => {
   return `${val.toFixed(2)}M`;
 };
 
+const isAbortError = (err: any): boolean => {
+  if (!err) return false;
+  return err.name === 'AbortError' || 
+         err.name === 'TimeoutError' || 
+         (typeof err.message === 'string' && (err.message.includes('aborted') || err.message.includes('AbortError')));
+};
+
 const fetchNamespaceStats = async () => {
   const namespaces = ['telegram-post', 'telegram-photo', 'telegram-channel', 'telegram-video'];
   try {
     await Promise.allSettled(
       namespaces.map(async (ns) => {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
         try {
           const res = await fetch(`https://i.gogingko.net/api/v1/vn/${ns}`, {
             signal: controller.signal,
@@ -1085,21 +1092,25 @@ const fetchNamespaceStats = async () => {
               namespaceStats.value[ns] = data.nkeys;
             }
           }
-        } catch (e) {
-          console.warn(`[Telemetry] Failed to fetch namespace stat for ${ns}, using default fallback:`, e);
+        } catch (e: any) {
+          if (!isAbortError(e)) {
+            console.warn(`[Telemetry] Failed to fetch namespace stat for ${ns}:`, e);
+          }
         } finally {
           clearTimeout(timeoutId);
         }
       })
     );
-  } catch (err) {
-    console.warn("[Telemetry] Failed to fetch namespace stats:", err);
+  } catch (err: any) {
+    if (!isAbortError(err)) {
+      console.warn("[Telemetry] Failed to fetch namespace stats:", err);
+    }
   }
 };
 
 const fetchCounters = async () => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6000);
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
   try {
     const yyyymmdd = format(new Date(), "yyyyMMdd");
     const response = await fetch(`https://i.gogingko.net/api/v1/v/counter/${yyyymmdd}`, {
@@ -1114,8 +1125,10 @@ const fetchCounters = async () => {
       }
       counters.value = newCounters;
     }
-  } catch (err) {
-    console.warn("[Telemetry] Failed to fetch counters:", err);
+  } catch (err: any) {
+    if (!isAbortError(err)) {
+      console.warn("[Telemetry] Failed to fetch counters:", err);
+    }
   } finally {
     clearTimeout(timeoutId);
   }
@@ -1123,7 +1136,7 @@ const fetchCounters = async () => {
 
 const fetchChannelNamesByLang = async (langCode: string) => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6000);
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
   try {
     const response = await fetch(`https://i.gogingko.net/api/v1/lang/${langCode}`, {
       method: "GET",
@@ -1132,8 +1145,10 @@ const fetchChannelNamesByLang = async (langCode: string) => {
     if (!response.ok) throw new Error("Failed to fetch channel names: " + response.status);
     const text = await response.text();
     return text.split(',').map(name => name.trim()).filter(name => name.length > 0);
-  } catch (err) {
-    console.warn("[Telemetry] Failed to fetch channel names:", err);
+  } catch (err: any) {
+    if (!isAbortError(err)) {
+      console.warn("[Telemetry] Failed to fetch channel names:", err);
+    }
     return [];
   } finally {
     clearTimeout(timeoutId);
@@ -1142,7 +1157,7 @@ const fetchChannelNamesByLang = async (langCode: string) => {
 
 const fetchPendingJobs = async () => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6000);
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
   try {
     const response = await fetch("https://i.gogingko.net/api/v1/z/test2/set0", {
       method: "PUT",
@@ -1154,8 +1169,10 @@ const fetchPendingJobs = async () => {
       const data = await response.json();
       pendingJobs.value = data.gso?.result ?? 0;
     }
-  } catch (err) {
-    console.warn("[Telemetry] Failed to fetch pending jobs:", err);
+  } catch (err: any) {
+    if (!isAbortError(err)) {
+      console.warn("[Telemetry] Failed to fetch pending jobs:", err);
+    }
   } finally {
     clearTimeout(timeoutId);
   }
@@ -1163,7 +1180,7 @@ const fetchPendingJobs = async () => {
 
 const fetchQ0Jobs = async () => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6000);
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
   try {
     const response = await fetch("https://i.gogingko.net/api/v1/z/test2/q0", {
       method: "PUT",
@@ -1175,8 +1192,10 @@ const fetchQ0Jobs = async () => {
       const data = await response.json();
       pendingQ0Jobs.value = data.gso?.result ?? 0;
     }
-  } catch (err) {
-    console.warn("[Telemetry] Failed to fetch q0 pending jobs:", err);
+  } catch (err: any) {
+    if (!isAbortError(err)) {
+      console.warn("[Telemetry] Failed to fetch q0 pending jobs:", err);
+    }
   } finally {
     clearTimeout(timeoutId);
   }
@@ -1184,7 +1203,7 @@ const fetchQ0Jobs = async () => {
 
 const fetchQ1Jobs = async () => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 6000);
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
   try {
     const response = await fetch("https://i.gogingko.net/api/v1/z/test2/q1", {
       method: "PUT",
@@ -1196,8 +1215,10 @@ const fetchQ1Jobs = async () => {
       const data = await response.json();
       pendingQ1Jobs.value = data.gso?.result ?? 0;
     }
-  } catch (err) {
-    console.warn("[Telemetry] Failed to fetch q1 pending jobs:", err);
+  } catch (err: any) {
+    if (!isAbortError(err)) {
+      console.warn("[Telemetry] Failed to fetch q1 pending jobs:", err);
+    }
   } finally {
     clearTimeout(timeoutId);
   }
