@@ -335,7 +335,27 @@ export function extractPostTimestamp(p: any): number {
 export function extractPostViews(p: any): number {
   if (!p) return 0;
   const v = p.data?.views ?? p.views ?? p.data?.view_count ?? 0;
-  if (typeof v === 'number') return v;
+  if (typeof v === 'number') return isNaN(v) ? 0 : v;
+  if (typeof v === 'string') {
+    const trimmed = v.trim().toUpperCase();
+    if (!trimmed) return 0;
+    // Check for K or M suffix (e.g. "9.5K", "1.2M")
+    let multiplier = 1;
+    let cleanStr = trimmed;
+    if (trimmed.endsWith('K')) {
+      multiplier = 1000;
+      cleanStr = trimmed.slice(0, -1);
+    } else if (trimmed.endsWith('M')) {
+      multiplier = 1000000;
+      cleanStr = trimmed.slice(0, -1);
+    }
+    // Remove commas and any remaining non-numeric chars except dot
+    cleanStr = cleanStr.replace(/,/g, '').replace(/[^\d.]/g, '');
+    const parsed = parseFloat(cleanStr);
+    if (!isNaN(parsed)) {
+      return Math.round(parsed * multiplier);
+    }
+  }
   const num = parseInt(String(v).replace(/[^\d]/g, ''), 10);
   return isNaN(num) ? 0 : num;
 }

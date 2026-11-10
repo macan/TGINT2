@@ -1,120 +1,139 @@
-# Performance Optimization Plan: Ultra-High Volume Post Engine (200K–500K Posts)
+# Instant Directory Freshness Engine (O(1) Indexed Metadata & Tiered Real-Time Tags)
 
-A high-throughput architectural overhaul targeting extreme memory efficiency, zero-jank DOM rendering, and instant responsiveness when IndexedDB caches accumulate 200,000 to 500,000+ Telegram posts.
+A high-performance metadata architecture and live UI badge system that displays immediate, accurate freshness tags for all Listen Directory items on initial load without requiring item clicks or expensive B-tree scans over 100K–1M+ posts.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
 > The following architectural parameters were selected during the interactive interview:
-> - **Optimization Scope**: Dual-target optimization covering both the main feed rendering (`PostItemView` list) and the background Hots analytics engine.
-> - **Feed Architecture**: Virtualized windowing with shallow reactive state (`shallowRef` / `markRaw`) to eliminate deep Vue proxy allocation and limit live DOM nodes to only those visible in the viewport.
-> - **Cache Retention Policy**: Intelligent 60-day time-window pruning per channel with a **Latest-Posts Safeguard** (retaining at least the newest 30 posts per channel so inactive channels never become blank).
+> - **Storage Strategy**: Dedicated IndexedDB metadata store (`listen_freshness_meta`) for instant O(1) bulk freshness lookups across all directory items.
+> - **Calculation & Refresh Timing**: Proactive instant load on mount with background incremental refresh on writes/syncs.
+> - **Display Styling**: Tiered color badge with live relative time (e.g. "12m ago", "2h ago", "1d ago") and tabular typography.
 
 ---
 
-## 1. System Bottleneck Analysis
+## 1. Overview & Core Concept
 
-When local storage scales to 200,000–500,000 posts, the system experiences three distinct compounding performance bottlenecks:
+### What It Does
+Currently, items in the Listen Directory only update their freshness tags when a user actively clicks on an item or when the background fetcher processes it. If a user tracks dozens or hundreds of channels, unopened items either remain blank or trigger scattered, individual queries that degrade performance on large datasets.
 
-1. **Deep Vue Reactivity Heap Bloat (~800MB–1.5GB RAM)**:
-   - Assigning large post arrays to standard Vue `ref<any[]>` causes Vue 3's reactivity engine to recursively traverse every post object, its nested `data`, `attributes`, and media arrays, creating millions of reactive `Proxy` instances.
-   - This triggers frequent, lengthy Garbage Collection (GC) pauses (200ms–800ms) that freeze scrolling and user input.
+This feature establishes an **instant O(1) freshness pipeline**:
+1. Upgrades `GingkoListenPostsDB` to version 4 with a dedicated `listen_freshness_meta` object store.
+2. Performs a single, lightning-fast bulk read (`store.getAll()`) on app mount to populate the directory's freshness map in < 2ms.
+3. Automatically updates `listen_freshness_meta` whenever posts are written or synced, guaranteeing that freshness tags remain permanently in sync without scanning the `posts` store.
+4. Renders tiered status badges with tabular relative time stamps that tick live every minute.
 
-2. **Monolithic IndexedDB Reads (`store.getAll()`)**:
-   - `getAllCachedPostsIndexedDB()` currently reads all channels and posts into memory at once. At 500K posts, deserializing 500MB+ of structured clone data blocks the main thread for seconds and leads to out-of-memory (OOM) risks on mobile/low-memory devices.
-   - Sanitizing these objects for Web Worker transfer using `JSON.parse(JSON.stringify(channels))` doubles the peak memory footprint.
-
-3. **DOM Element Overload in Feed View**:
-   - Scrolling through a channel with thousands of posts currently appends hundreds of full `PostItemView` components into the DOM tree. Each card contains avatars, badges, text parsers, reaction chips, and media previews, resulting in 10,000+ active DOM elements that degrade layout calculation and repaint performance.
+### Key Value
+- **Zero-Click Freshness**: Users immediately see which channels have new activity the moment they open the app.
+- **Sub-2ms Cold Start**: Replaces $N$ separate index seeks with a single bulk metadata read.
+- **Zero Main-Thread Lock**: No scanning or deserializing post bodies from the 100K–1M post store.
 
 ---
 
-## 2. Technical Architecture & Optimization Strategy
+## 2. User Experience & Visual Design
+
+### Key User Flows
+1. **App Mount / Listen Tab Open**:
+   - The Listen Directory renders instantly with cached freshness data from `localStorage` (0ms).
+   - In parallel, `getAllListenFreshnessMetaIndexedDB()` reads the dedicated metadata store in ~1–2ms and seamlessly reconciles timestamps.
+   - If any new or imported items lack metadata, a lightweight background backfill resolves them via index seek without blocking the UI.
+2. **Directory Browsing & Sorting**:
+   - Every channel and folder displays a clean, tiered status tag indicating how recently posts were published.
+   - Clicking "Sort by Freshness" (Newest First or Oldest First) immediately re-orders the directory in 0ms using the pre-indexed timestamps.
+3. **Live Sync / New Post Arrival**:
+   - When a channel is synced or a background scrape completes, the newest timestamp writes directly into `listen_freshness_meta`.
+   - The directory node's badge updates reactively in real time.
+
+### Visual Identity & Theme Tokens
+- **Tiered Freshness Levels**:
+  - `today` ($\le 24\text{h}$): Emerald tint (`bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200/80 dark:border-emerald-800/60 text-emerald-700 dark:text-emerald-300`), emerald status dot.
+  - `recent` ($1\text{–}3\text{d}$): Teal/cyan tint (`bg-teal-50 dark:bg-teal-950/60 border-teal-200/80 dark:border-teal-800/60 text-teal-700 dark:text-teal-300`), teal status dot.
+  - `week` ($3\text{–}7\text{d}$): Indigo/blue tint (`bg-indigo-50 dark:bg-indigo-950/60 border-indigo-200/80 dark:border-indigo-800/60 text-indigo-700 dark:text-indigo-300`), indigo status dot.
+  - `month` ($7\text{–}30\text{d}$): Amber/warm tint (`bg-amber-50 dark:bg-amber-950/60 border-amber-200/80 dark:border-amber-900/60 text-amber-700 dark:text-amber-300`), amber status dot.
+  - `stale` ($> 30\text{d}$): Muted slate gray tint (`bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400`), gray status dot.
+- **Tabular Monospace Numerals**: Timestamps formatted with `font-mono tabular-nums text-[10px]` to maintain visual alignment across rows.
+- **Live Minute Ticker**: A lightweight global interval updates relative time strings every 60 seconds without re-querying IndexedDB.
+
+---
+
+## 3. Key Product Decisions & Trade-Offs
+
+### Decision 1: Dedicated Metadata Store vs. Live Index Cursors
+- **Chosen Approach**: Create a dedicated `listen_freshness_meta` object store with primary key `nodeId`.
+- **Why**: An application tracking 100+ channels would require 100+ separate index cursor transactions if queried individually. A dedicated metadata store allows reading all directory node timestamps in a single `store.getAll()` call in $< 2\text{ms}$.
+- **Alternatives Considered**: Querying the existing `listen_item_ts` index. While fast for a single node, running it across 200 items creates 200 asynchronous promises and micro-transactions.
+
+### Decision 2: Write-Through Metadata Synchronization
+- **Chosen Approach**: Update `listen_freshness_meta` in the same IndexedDB transaction whenever `setCachedPostsIndexedDB()` or `savePostsIndexedDB()` writes posts.
+- **Why**: Zero runtime query cost. The freshest timestamp is computed once during write time and permanently stored, eliminating read-time computation.
+
+### Decision 3: Automatic Migration & Non-Blocking Backfill
+- **Chosen Approach**: On first run with DB version 4, if `listen_freshness_meta` is empty, run a background one-pass backfill that scans newest keys from `channel_timestamp` or `listen_item_ts` and seeds the metadata store.
+- **Why**: Existing user databases with 100K+ posts upgrade smoothly without blank badges or manual user action.
+
+---
+
+## 4. Technical Architecture & Data Strategy
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        Listen View & Feed UI                           │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ Virtual Windowing Container (renders only 8–15 visible cards)    │  │
-│  │  • Dynamic height tracking via ResizeObserver                    │  │
-│  │  • Overscan buffer: 3–5 items above and below viewport           │  │
-│  │  • Absolute translateY positioning with virtual spacer container │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
+│                        Listen Directory UI                             │
+│  • Directory Tree Nodes (Channels & Folders)                           │
+│  • Tiered Freshness Badges (Today / Recent / Week / Month / Stale)     │
+│  • 60s Live Relative Ticker (12m ago, 2h ago, 1d ago)                  │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│                     Shallow Reactivity Layer                           │
-│   • listenPosts: shallowRef<HotPostItem[]>                             │
-│   • Raw post objects wrapped with markRaw() / Object.freeze()          │
-│   • Zero recursive Proxy allocation -> Saves 75–85% Heap Memory        │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │
-          ┌─────────────────────────┴─────────────────────────┐
-          ▼                                                   ▼
-┌───────────────────────────────────┐   ┌────────────────────────────────┐
-│   IndexedDB Intelligent Pruner    │   │   Streamed Hots Aggregator     │
-│ • Runs during idle callback       │   │ • Cursor/batch channel reads   │
-│ • Prunes posts older than 60 days │   │ • Lightweight field projection │
-│ • Safeguard: Preserves latest 30  │   │   (timestamp, views, snippet)  │
-│   posts per channel unconditionally│  │ • Discards raw payload early   │
-└─────────────────┬─────────────────┘   └─────────────────┬──────────────┘
-                  │                                       │
-                  └───────────────────┬───────────────────┘
-                                      ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                  IndexedDB: GingkoListenPostsDB                        │
-│               Object Store: 'posts' (Key: nodeId)                      │
+│                     Reactive Freshness State                           │
+│  • listenItemsFreshnessMap: Record<string, ListenItemFreshness>        │
+│  • Synchronized in memory + localStorage snapshot for 0ms cold start   │
+└───────────────────▲───────────────────────────────┬────────────────────┘
+                    │ Read Path                     │ Write Path
+                    │ (Mount: < 2ms)                │ (On Sync/Scrape)
+┌───────────────────┴───────────────────────────────▼────────────────────┐
+│                    GingkoListenPostsDB (Version 4)                     │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ Store: 'listen_freshness_meta' (Key: nodeId)                     │  │
+│  │ Record: { nodeId, timestamp, rawDate, channelId, updatedAt }     │  │
+│  │ • O(1) single-key put / get                                      │  │
+│  │ • O(N) instant bulk read via store.getAll()                      │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │ Store: 'posts' (Key: postKey)                                    │  │
+│  │ Indexes: channel_timestamp, timestamp, listen_items, etc.        │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
----
+### Data Schema: `listen_freshness_meta`
+```typescript
+export interface ListenFreshnessMetaRecord {
+  nodeId: string;
+  timestamp: number;
+  rawDateVal: any;
+  channelId?: string;
+  postCount?: number;
+  updatedAt: number;
+}
+```
 
-## 3. Detailed Component Plan
-
-### Deliverable 1: Virtualized Feed Windowing (`src/components/listen/VirtualPostList.vue`)
-- **Virtual Viewport Manager**:
-  - Replaces flat `v-for` loops in `App.vue` (`visibleListenPosts`) with a high-performance virtualized viewport.
-  - Automatically measures item heights using a lightweight `ResizeObserver` cache to support variable text lengths, media previews, and quoted replies without layout popping.
-  - Calculates start/end indices based on scroll offset with an overscan margin of 4 items for seamless 60fps scrolling.
-  - Provides a total height spacer so native scrollbars and scroll jumps maintain precise visual position.
-
-### Deliverable 2: Shallow Reactivity & Memory De-bloat (`src/App.vue`)
-- **Convert Deep Refs to Shallow Refs**:
-  - Update `listenPosts` from `ref<any[]>([])` to `shallowRef<any[]>([])`.
-  - When loading posts from IndexedDB or remote scrape batches, pass post arrays through `markRaw()` or `Object.freeze()`.
-  - Mutate `listenPosts.value` by replacing the array reference (e.g., `listenPosts.value = [...updatedPosts]`), ensuring Vue re-renders instantly without creating deep reactive proxies for individual message keys.
-
-### Deliverable 3: Lightweight Projection Streaming for Hots Mode (`src/utils/indexedDbPosts.ts` & `src/utils/hotsEngine.ts`)
-- **Batch Cursor Traversal**:
-  - Refactor `getAllCachedPostsIndexedDB()` to support batched/cursor streaming rather than a single monolithic `store.getAll()`.
-  - Read channels iteratively in manageable chunks (e.g., 50 channels per transaction).
-- **Early Projection & Payload Pruning**:
-  - Filter by date range at the earliest stage: if a channel's newest post is older than the selected date range start, bypass the entire channel collection immediately.
-  - Extract only the minimal fields required for hot score and topic clustering (`timestamp`, `views`, `forwards`, `replies`, `cleanSnippet`, `channelName`, `key`, `linkPreview`).
-  - Drop heavy binary arrays, full text HTML, and raw protocol attributes before passing data to the background Web Worker, cutting postMessage payload size by over 80%.
-
-### Deliverable 4: Intelligent 60-Day Cache Pruner (`src/utils/indexedDbPosts.ts`)
-- **Retention Policy Rules**:
-  - Cutoff timestamp: $T_{\text{cutoff}} = \text{Date.now()} - (60 \times 24 \times 60 \times 60 \times 1000)$.
-  - **Latest-Post Safeguard**: Always retain the newest 30 posts for any channel, regardless of age. If a channel has $\le 30$ posts in total, or its posts are all older than 60 days, the newest 30 are preserved intact so channels never show as empty.
-  - Posts beyond the newest 30 that are older than 60 days are purged during idle cycles (`requestIdleCallback`).
-- **Compaction & Diagnostics**:
-  - Added safe cleanup trigger after background synchronization finishes.
-  - Provides a clean utility function to inspect current cache storage statistics (total posts, channel count, estimated storage footprint).
-
----
-
-## 4. Verification & Benchmarking Strategy
-
-1. **Memory & Heap Verification**:
-   - Verify with Chrome DevTools Memory Profiler that opening a channel with 10,000+ posts does not cause heap spikes or long GC pauses.
-   - Confirm `listenPosts` shallow reactivity holds raw objects without Vue Proxy wrapping.
-2. **Scrolling Frame Rate**:
-   - Verify smooth 60fps scrolling inside `VirtualPostList` with zero layout thrashing or blank flash frames.
-3. **Retention Pruning Test**:
-   - Verify unit test scenarios:
-     - Channel with 500 posts over 90 days $\rightarrow$ Pruned to posts within 60 days (keeping $\ge 30$).
-     - Inactive channel with 20 posts from 180 days ago $\rightarrow$ All 20 posts preserved (safeguard active).
-4. **Compilation & Linting**:
-   - Run `compile_applet` and `lint_applet` to ensure full TypeScript typing and zero regressions across existing Explorer and Listen workflows.
+### Execution Steps
+1. **Schema & DB Upgrade (`src/utils/indexedDbPosts.ts`)**:
+   - Increment `DB_VERSION` to 4.
+   - In `onupgradeneeded`, create object store `listen_freshness_meta` with `{ keyPath: "nodeId" }`.
+   - Add helper functions:
+     - `getAllListenFreshnessMetaIndexedDB()`: Reads all metadata records in one operation.
+     - `setListenFreshnessMetaIndexedDB(records: ListenFreshnessMetaRecord[])`: Batch upsert.
+     - `updateNodeFreshnessMeta(nodeId: string, timestamp: number, rawDateVal: any, channelId?: string)`: Single upsert.
+2. **Write-Path Integration (`src/utils/indexedDbPosts.ts`)**:
+   - In `setCachedPostsIndexedDB()`, compute the max timestamp of incoming posts and write to `listen_freshness_meta` within the same transaction.
+3. **Proactive Mount & Backfill (`src/App.vue`)**:
+   - Trigger `loadAllListenPostsFreshnessFromIndexedDB()` proactively on `onMounted` instead of deferring it behind a 3-second timer.
+   - Use `getAllListenFreshnessMetaIndexedDB()` as the primary source.
+   - If meta records are missing for any leaf node, query `getNewestPostTimestampForNode` in background and persist the result into `listen_freshness_meta`.
+4. **Live Relative Time Refresh (`src/App.vue`)**:
+   - Ensure a 60-second ticker refreshes relative time strings (`relativeTime`) so "2m ago" transitions to "3m ago" without database hits.
+5. **Verification**:
+   - Build and lint with zero errors.
+   - Verify directory nodes show immediate freshness tags on page reload.

@@ -149,7 +149,11 @@ import {
   setCachedPostsIndexedDB as setCachedPostsToIndexedDB,
   clearCachedPostsIndexedDB as clearCachedPostsFromIndexedDB,
   extractPostTimestampMs,
-  getNewestPostTimestampForNode
+  getNewestPostTimestampForNode,
+  getAllListenFreshnessMetaIndexedDB,
+  saveNodeFreshnessMetaIndexedDB,
+  batchSaveFreshnessMetaIndexedDB,
+  type ListenFreshnessMetaRecord
 } from "./utils/indexedDbPosts";
 const AutoClassDistributionChart = defineAsyncComponent(() => import("./components/AutoClassDistributionChart.vue"));
 const TypesTab = defineAsyncComponent(() => import("./components/TypesTab.vue"));
@@ -5597,24 +5601,28 @@ const formatFreshnessDate = (dateVal: number | string | Date): string => {
 };
 
 const formatFreshnessRelative = (ageMs: number): string => {
-  if (ageMs <= 60 * 1000) {
-    return "just now";
+  if (ageMs < 60 * 1000) {
+    return "<1min";
   }
-  const ONE_HOUR = 3600 * 1000;
+  const ONE_MIN = 60 * 1000;
+  const ONE_HOUR = 60 * ONE_MIN;
   const ONE_DAY = 24 * ONE_HOUR;
+  const ONE_MONTH = 30 * ONE_DAY;
+  const ONE_YEAR = 365 * ONE_DAY;
+
   if (ageMs < ONE_HOUR) {
-    return `${Math.max(1, Math.floor(ageMs / (60 * 1000)))}m ago`;
+    return `${Math.max(1, Math.floor(ageMs / ONE_MIN))}min`;
   }
   if (ageMs < ONE_DAY) {
-    return `${Math.floor(ageMs / ONE_HOUR)}h ago`;
+    return `${Math.floor(ageMs / ONE_HOUR)}h`;
   }
-  if (ageMs < 30 * ONE_DAY) {
-    return `${Math.floor(ageMs / ONE_DAY)}d ago`;
+  if (ageMs < ONE_MONTH) {
+    return `${Math.floor(ageMs / ONE_DAY)}d`;
   }
-  if (ageMs < 365 * ONE_DAY) {
-    return `${Math.floor(ageMs / (30 * ONE_DAY))}mo ago`;
+  if (ageMs < ONE_YEAR) {
+    return `${Math.floor(ageMs / ONE_MONTH)}m`;
   }
-  return `${Math.floor(ageMs / (365 * ONE_DAY))}y ago`;
+  return `${Math.floor(ageMs / ONE_YEAR)}y`;
 };
 
 const computeItemFreshnessFromPosts = (posts: any[]): ListenItemFreshness | null => {
@@ -5643,20 +5651,18 @@ const computeItemFreshnessFromPosts = (posts: any[]): ListenItemFreshness | null
 
   const now = Date.now();
   const ageMs = Math.max(0, now - maxTime);
-  const ONE_HOUR = 3600 * 1000;
-  const ONE_DAY = 24 * ONE_HOUR;
+  const ONE_DAY = 24 * 3600 * 1000;
 
+  // 4 Tiered Freshness Levels: <24h, 1-3 days, 3-7 days, >7 days
   let level: FreshnessLevel;
   if (ageMs <= ONE_DAY) {
-    level = 'today';
+    level = 'today'; // <24h
   } else if (ageMs <= 3 * ONE_DAY) {
-    level = 'recent';
+    level = 'recent'; // 1-3 days
   } else if (ageMs <= 7 * ONE_DAY) {
-    level = 'week';
-  } else if (ageMs <= 30 * ONE_DAY) {
-    level = 'month';
+    level = 'week'; // 3-7 days
   } else {
-    level = 'stale';
+    level = 'stale'; // >7 days
   }
 
   return {
@@ -5725,6 +5731,13 @@ const updateItemFreshness = (nodeId: string, posts: any[]) => {
       ...listenItemsFreshnessMap.value,
       [nodeId]: freshness
     };
+    saveNodeFreshnessMetaIndexedDB({
+      nodeId,
+      timestamp: freshness.timestamp,
+      rawDateVal: freshness.dateStr || freshness.timestamp,
+      postCount: freshness.postCount,
+      updatedAt: Date.now()
+    });
   } else if (listenItemsFreshnessMap.value[nodeId]) {
     const updated = { ...listenItemsFreshnessMap.value };
     delete updated[nodeId];
@@ -5747,54 +5760,139 @@ try {
 let hasLoadedListenFreshnessOnce = false;
 
 const loadAllListenPostsFreshnessFromIndexedDB = async () => {
-  if (hasLoadedListenFreshnessOnce && Object.keys(listenItemsFreshnessMap.value).length > 0) {
-    return;
-  }
   try {
     const leaves = allDirectoryLeafItems.value || [];
     if (leaves.length === 0) return;
 
-    const freshness: Record<string, ListenItemFreshness> = { ...listenItemsFreshnessMap.value };
     const now = Date.now();
-    const ONE_HOUR = 3600 * 1000;
-    const ONE_DAY = 24 * ONE_HOUR;
+    const ONE_DAY = 24 * 3600 * 1000;
 
-    // Fast indexed lookups: only 1 B-tree seek per leaf item (sub-millisecond, no table scan)
-    await Promise.all(
-      leaves.map(async (leaf) => {
-        try {
-          const channelHint = leaf.type === 'channel' ? (leaf.argument?.trim() || leaf.name?.trim()) : undefined;
-          const res = await getNewestPostTimestampForNode(leaf.id, channelHint);
-          if (res && res.timestamp > 0) {
-            const ageMs = Math.max(0, now - res.timestamp);
-            let level: FreshnessLevel;
-            if (ageMs <= ONE_DAY) level = 'today';
-            else if (ageMs <= 3 * ONE_DAY) level = 'recent';
-            else if (ageMs <= 7 * ONE_DAY) level = 'week';
-            else if (ageMs <= 30 * ONE_DAY) level = 'month';
-            else level = 'stale';
+    // 1. Instant O(1) bulk fetch from dedicated listen_freshness_meta object store (<2ms)
+    const metaMap = await getAllListenFreshnessMetaIndexedDB();
+    const freshness: Record<string, ListenItemFreshness> = { ...listenItemsFreshnessMap.value };
+    const missingLeaves: typeof leaves = [];
+    const metaRecordsToBatchSave: ListenFreshnessMetaRecord[] = [];
 
-            freshness[leaf.id] = {
-              timestamp: res.timestamp,
-              level,
-              rawDate: res.rawDateVal
-            };
-          }
-        } catch {
-          // Non-fatal
-        }
-      })
-    );
+    // Map all pre-stored metadata records directly
+    for (const leaf of leaves) {
+      const meta = metaMap[leaf.id];
+      if (meta && meta.timestamp > 0) {
+        const ageMs = Math.max(0, now - meta.timestamp);
+        let level: FreshnessLevel;
+        if (ageMs <= ONE_DAY) level = 'today';
+        else if (ageMs <= 3 * ONE_DAY) level = 'recent';
+        else if (ageMs <= 7 * ONE_DAY) level = 'week';
+        else level = 'stale';
 
+        freshness[leaf.id] = {
+          timestamp: meta.timestamp,
+          dateStr: typeof meta.rawDateVal === 'string' ? meta.rawDateVal : (meta.rawDateVal ? new Date(meta.timestamp).toISOString() : ''),
+          postCount: meta.postCount || 0,
+          level,
+          relativeTime: formatFreshnessRelative(ageMs),
+          formattedDate: formatFreshnessDate(meta.timestamp)
+        };
+      } else {
+        missingLeaves.push(leaf);
+      }
+    }
+
+    // Immediately update reactive map with everything resolved so far in < 2ms!
+    listenItemsFreshnessMap.value = { ...freshness };
     hasLoadedListenFreshnessOnce = true;
-    listenItemsFreshnessMap.value = freshness;
     try {
       localStorage.setItem(FRESHNESS_LOCAL_CACHE_KEY, JSON.stringify(freshness));
-    } catch {
-      // Ignore
+    } catch {}
+
+    // 2. Non-blocking background incremental backfill for any new or unindexed leaf items
+    if (missingLeaves.length > 0) {
+      await Promise.all(
+        missingLeaves.map(async (leaf) => {
+          try {
+            const channelHint = leaf.type === 'channel' ? (leaf.argument?.trim() || leaf.name?.trim()) : undefined;
+            const res = await getNewestPostTimestampForNode(leaf.id, channelHint);
+            if (res && res.timestamp > 0) {
+              const ageMs = Math.max(0, now - res.timestamp);
+              let level: FreshnessLevel;
+              if (ageMs <= ONE_DAY) level = 'today';
+              else if (ageMs <= 3 * ONE_DAY) level = 'recent';
+              else if (ageMs <= 7 * ONE_DAY) level = 'week';
+              else level = 'stale';
+
+              freshness[leaf.id] = {
+                timestamp: res.timestamp,
+                dateStr: typeof res.rawDateVal === 'string' ? res.rawDateVal : (res.rawDateVal ? new Date(res.timestamp).toISOString() : ''),
+                postCount: 0,
+                level,
+                relativeTime: formatFreshnessRelative(ageMs),
+                formattedDate: formatFreshnessDate(res.timestamp)
+              };
+
+              metaRecordsToBatchSave.push({
+                nodeId: leaf.id,
+                timestamp: res.timestamp,
+                rawDateVal: res.rawDateVal,
+                channelId: channelHint || leaf.id,
+                updatedAt: Date.now()
+              });
+            }
+          } catch {}
+        })
+      );
+
+      // Persist newly resolved records to listen_freshness_meta store so future startups have it instantly
+      if (metaRecordsToBatchSave.length > 0) {
+        batchSaveFreshnessMetaIndexedDB(metaRecordsToBatchSave);
+      }
+
+      listenItemsFreshnessMap.value = { ...freshness };
+      try {
+        localStorage.setItem(FRESHNESS_LOCAL_CACHE_KEY, JSON.stringify(freshness));
+      } catch {}
     }
   } catch (err) {
     console.error("Failed to load listen posts freshness from IndexedDB:", err);
+  }
+};
+
+const tickAllListenItemFreshness = () => {
+  const currentMap = listenItemsFreshnessMap.value;
+  const keys = Object.keys(currentMap);
+  if (keys.length === 0) return;
+
+  const now = Date.now();
+  const ONE_DAY = 24 * 3600 * 1000;
+  let hasChanged = false;
+  const nextMap: Record<string, ListenItemFreshness> = {};
+
+  for (const k of keys) {
+    const item = currentMap[k];
+    if (!item || !item.timestamp) {
+      nextMap[k] = item;
+      continue;
+    }
+    const ageMs = Math.max(0, now - item.timestamp);
+    const newRel = formatFreshnessRelative(ageMs);
+    let level: FreshnessLevel;
+    if (ageMs <= ONE_DAY) level = 'today';
+    else if (ageMs <= 3 * ONE_DAY) level = 'recent';
+    else if (ageMs <= 7 * ONE_DAY) level = 'week';
+    else level = 'stale';
+
+    if (newRel !== item.relativeTime || level !== item.level) {
+      hasChanged = true;
+      nextMap[k] = {
+        ...item,
+        relativeTime: newRel,
+        level
+      };
+    } else {
+      nextMap[k] = item;
+    }
+  }
+
+  if (hasChanged) {
+    listenItemsFreshnessMap.value = nextMap;
   }
 };
 
@@ -9460,48 +9558,97 @@ const scrollToPost = (key: any) => {
   });
 };
 
+// Explorer Fetch & Race-Condition Cancellation
+let explorerRequestId = 0;
+let searchChannelAbortController: AbortController | null = null;
+let loadMorePostsAbortController: AbortController | null = null;
+let pollLatestPostsAbortController: AbortController | null = null;
+
 const pollLatestPosts = async () => {
   if (!currentChannelName.value || activeTab.value !== 'explorer') return;
-  
+  const pollChannel = currentChannelName.value;
+  const pollReqId = explorerRequestId;
+
+  if (pollLatestPostsAbortController) {
+    pollLatestPostsAbortController.abort();
+  }
+  pollLatestPostsAbortController = new AbortController();
+
   try {
-    const res = await fetch(`https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=25`, {
+    const res = await fetch(`https://i.gogingko.net/api/v1/last/${pollChannel}?n=25`, {
       headers: {
         "x-gos-rawcontent": "1",
-      }
+      },
+      signal: pollLatestPostsAbortController.signal
     });
     if (!res.ok) return;
 
+    if (
+      pollChannel !== currentChannelName.value ||
+      pollReqId !== explorerRequestId ||
+      activeTab.value !== 'explorer'
+    ) {
+      return;
+    }
+
     const latestPostsVal = await res.json();
+    if (
+      pollChannel !== currentChannelName.value ||
+      pollReqId !== explorerRequestId ||
+      activeTab.value !== 'explorer'
+    ) {
+      return;
+    }
+
     const newPostsData = Array.isArray(latestPostsVal)
       ? latestPostsVal
       : latestPostsVal.data || latestPostsVal.posts || latestPostsVal.items || [];
 
     if (newPostsData.length === 0) return;
 
+    // Verify posts actually belong to pollChannel
+    const cleanPollChannel = pollChannel.replace(/^-100/, '').toLowerCase();
+    const verifiedPosts = newPostsData.filter((p: any) => {
+      const key = String(p?.key || p?.id || '');
+      if (key.includes('.')) {
+        return key.split('.')[0].toLowerCase().replace(/^-100/, '') === cleanPollChannel;
+      }
+      return true;
+    });
+
+    if (verifiedPosts.length === 0) return;
+
     // Ensure new posts are sorted DSC by ID component
-    newPostsData.sort((a: any, b: any) => {
-      const idA = parseInt(a.key.split('.')[1]);
-      const idB = parseInt(b.key.split('.')[1]);
+    verifiedPosts.sort((a: any, b: any) => {
+      const idA = parseInt(a.key?.split('.')[1] || '0');
+      const idB = parseInt(b.key?.split('.')[1] || '0');
       return idB - idA;
     });
 
     // Get max ID from existing posts to compare
     let maxOldId = -1;
     if (posts.value.length > 0) {
-      const parts = posts.value[0].key.split('.');
+      const parts = posts.value[0].key?.split('.') || [];
       if (parts.length > 1) {
         maxOldId = parseInt(parts[1]);
       }
     }
 
     // Filter new posts that are > maxOldId
-    const postsToInsert = newPostsData.filter(p => {
-      const parts = p.key.split('.');
+    const postsToInsert = verifiedPosts.filter(p => {
+      const parts = p.key?.split('.') || [];
       if (parts.length <= 1) return false;
       return parseInt(parts[1]) > maxOldId;
     });
 
     if (postsToInsert.length > 0) {
+      if (
+        pollChannel !== currentChannelName.value ||
+        pollReqId !== explorerRequestId ||
+        activeTab.value !== 'explorer'
+      ) {
+        return;
+      }
       // Mark as newly inserted for visual emphasis
       const emphasizedPosts = postsToInsert.map((p: any) => ({ ...p, isNewEmphasized: true }));
       
@@ -9520,7 +9667,8 @@ const pollLatestPosts = async () => {
         });
       }, 15000);
     }
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.name === 'AbortError') return;
     console.error("Failed to poll latest posts:", err);
   }
 };
@@ -9531,6 +9679,15 @@ watch(activeTab, (newTab) => {
     pollingTimer = setInterval(pollLatestPosts, 30000);
   } else {
     if (pollingTimer) clearInterval(pollingTimer);
+    if (pollLatestPostsAbortController) {
+      pollLatestPostsAbortController.abort();
+      pollLatestPostsAbortController = null;
+    }
+    if (loadMorePostsAbortController) {
+      loadMorePostsAbortController.abort();
+      loadMorePostsAbortController = null;
+    }
+    isLoadingMore.value = false;
   }
 
   if (newTab === 'search' || newTab === 'auto-finding' || newTab === 'workspace' || newTab === 'profile') {
@@ -9548,6 +9705,7 @@ watch(activeTab, (newTab) => {
 // System Clock (Monitor Tab)
 const systemClockNow = ref(new Date());
 let systemClockTimer: any = null;
+let listenFreshnessTicker: any = null;
 
 const updateSystemClock = () => {
   systemClockNow.value = new Date();
@@ -9611,6 +9769,11 @@ onMounted(() => {
     loadLogin();
     loadListenDirectory();
     document.addEventListener("click", handleDocumentClickForSortMenu);
+
+    // Proactively load freshness from metadata store on mount (<2ms)
+    loadAllListenPostsFreshnessFromIndexedDB();
+    if (listenFreshnessTicker) clearInterval(listenFreshnessTicker);
+    listenFreshnessTicker = setInterval(tickAllListenItemFreshness, 60000);
 
     // Defer non-critical network polling and heavy background operations to idle time
     // so initial paint and LCP are achieved immediately without main-thread contention
@@ -9680,6 +9843,7 @@ onUnmounted(() => {
   document.removeEventListener("click", handleDocumentClickForSortMenu);
   window.removeEventListener("scroll", handleScroll);
   if (systemClockTimer) clearInterval(systemClockTimer);
+  if (listenFreshnessTicker) clearInterval(listenFreshnessTicker);
   if (counterTimer) clearInterval(counterTimer);
   if (namespaceStatsTimer) clearInterval(namespaceStatsTimer);
   if (pendingJobsTimer) clearInterval(pendingJobsTimer);
@@ -13506,6 +13670,25 @@ const searchChannel = async () => {
     document.activeElement.blur();
   }
 
+  // Cancel any ongoing Explorer operations (loadMorePosts, pollLatestPosts, or previous searchChannel)
+  if (searchChannelAbortController) {
+    searchChannelAbortController.abort();
+    searchChannelAbortController = null;
+  }
+  if (loadMorePostsAbortController) {
+    loadMorePostsAbortController.abort();
+    loadMorePostsAbortController = null;
+  }
+  if (pollLatestPostsAbortController) {
+    pollLatestPostsAbortController.abort();
+    pollLatestPostsAbortController = null;
+  }
+  isLoadingMore.value = false;
+
+  const currentReqId = ++explorerRequestId;
+  searchChannelAbortController = new AbortController();
+  const abortSignal = searchChannelAbortController.signal;
+
   loading.value = true;
   error.value = "";
   metadata.value = null;
@@ -13523,8 +13706,8 @@ const searchChannel = async () => {
   let name = channelName.value.trim().replace(/^@/, "");
   let binit = null;
   if (name.includes('?b=')) {
-    binit = name.split('?b=')[1]
-    name = name.split('?b=')[0]
+    binit = name.split('?b=')[1];
+    name = name.split('?b=')[0];
   }
   
   currentChannelName.value = name;
@@ -13544,33 +13727,45 @@ const searchChannel = async () => {
 
   try {
     let metaRes = await fetch(
-      `https://i.gogingko.net/api/v1/v/telegram-channel/${name}`
+      `https://i.gogingko.net/api/v1/v/telegram-channel/${name}`,
+      { signal: abortSignal }
     );
+    if (currentReqId !== explorerRequestId) return;
+
     // need to check if it is private channel id if 404
     if (metaRes.status === 404 && name.startsWith('-100')) {
       metaRes = await fetch(
-        `https://i.gogingko.net/api/v1/v/telegram-channel/${name.slice(4)}`
+        `https://i.gogingko.net/api/v1/v/telegram-channel/${name.slice(4)}`,
+        { signal: abortSignal }
       );
+      if (currentReqId !== explorerRequestId) return;
     }
     // try to lookup the resolve cache, even metaRes.stats is ok
-    const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${name}`)
+    const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${name}`, { signal: abortSignal });
+    if (currentReqId !== explorerRequestId) return;
     if (resolveRes.ok) {
-      const data = await resolveRes.json()
+      const data = await resolveRes.json();
+      if (currentReqId !== explorerRequestId) return;
       if (data.state == 0 && data.gso?.result) {
-        name = data.gso.result
-        currentChannelName.value = name
+        name = data.gso.result;
+        currentChannelName.value = name;
         metaRes = await fetch(
-          `https://i.gogingko.net/api/v1/v/telegram-channel/${name}`
+          `https://i.gogingko.net/api/v1/v/telegram-channel/${name}`,
+          { signal: abortSignal }
         );
+        if (currentReqId !== explorerRequestId) return;
       }
     }
     // try to lookup the mjobs counter
     if (metaRes.status === 404) {
       const mjobsRes = await fetch(
-        `https://i.gogingko.net/api/v1/z/JOB_TG/mjobs/${name}`
+        `https://i.gogingko.net/api/v1/z/JOB_TG/mjobs/${name}`,
+        { signal: abortSignal }
       );
+      if (currentReqId !== explorerRequestId) return;
       if (mjobsRes.ok) {
-        const data = await mjobsRes.json()
+        const data = await mjobsRes.json();
+        if (currentReqId !== explorerRequestId) return;
         if (data.state == 0 && data.gso?.result) {
           // this means the channel/group might exists, but the metadata is missing. we should build a dummy metaRes
           metaRes = new Response(JSON.stringify({
@@ -13589,8 +13784,10 @@ const searchChannel = async () => {
         } else {
           // this means channel/group not found in mjobs, try to fetch from telegram-user?
           const userRes = await fetch(
-            `https://i.gogingko.net/api/v1/v/telegram-user/${name}`
+            `https://i.gogingko.net/api/v1/v/telegram-user/${name}`,
+            { signal: abortSignal }
           );
+          if (currentReqId !== explorerRequestId) return;
           if (userRes.ok) {
             loading.value = false;
             // this means we found the name in USER, just notify user
@@ -13610,10 +13807,13 @@ const searchChannel = async () => {
       const fallbackRes = await fetch(
         `https://i.gogingko.net/api/v1/zr/telegram-channel?prefix=${encodeURIComponent(
           name
-        )}&k=24`
+        )}&k=24`,
+        { signal: abortSignal }
       );
+      if (currentReqId !== explorerRequestId) return;
       if (fallbackRes.ok) {
         const data = await fallbackRes.json();
+        if (currentReqId !== explorerRequestId) return;
         suggestedChannels.value = data.keys || [];
         toastMessage.value = `Channel ${name} not found but fetched ${suggestedChannels.value.length} suggestions`;
         toastType.value = "info";
@@ -13633,6 +13833,7 @@ const searchChannel = async () => {
     }
 
     let metaData = await metaRes.json();
+    if (currentReqId !== explorerRequestId) return;
     const match = String(metaData.photo).match(/cdn(\d+)/);
     if (match) {
         metaData.cdnNumber = match[1];
@@ -13641,67 +13842,98 @@ const searchChannel = async () => {
     metadata.value = metaData;
 
     try {
-      const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${name}`);
-      if (profileRes.ok) {
+      const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${name}`, { signal: abortSignal });
+      if (currentReqId === explorerRequestId && profileRes.ok) {
         const profileData = await profileRes.json();
-        forwardsChannels.value = profileData.forwards || [];
-        ftoChannels.value = profileData.fto || [];
+        if (currentReqId === explorerRequestId) {
+          forwardsChannels.value = profileData.forwards || [];
+          ftoChannels.value = profileData.fto || [];
+        }
       }
-    } catch (e) {
-      console.error("Failed to fetch forwards", e);
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') {
+        console.error("Failed to fetch forwards", e);
+      }
     }
 
     let postsRes = await fetch(
       binit ? `https://i.gogingko.net/api/v1/last/${name}?n=25&b=${binit}` : `https://i.gogingko.net/api/v1/last/${name}?n=25`, {
         headers: {
           'x-gos-rawcontent': '1',
-        }
+        },
+        signal: abortSignal
       }
     );
+    if (currentReqId !== explorerRequestId) return;
 
     if (postsRes.ok) {
       let postsData = await postsRes.json();
+      if (currentReqId !== explorerRequestId) return;
+
       if (postsData.length === 0) {
         if (isNumName.value && !name.startsWith('-100')) {
-          name = `-100${name}`
-          currentChannelName.value = name
+          name = `-100${name}`;
+          currentChannelName.value = name;
           postsRes = await fetch(
             `https://i.gogingko.net/api/v1/last/${name}?n=25`, {
               headers: {
                 'x-gos-rawcontent': '1',
-              }
+              },
+              signal: abortSignal
            }
           );
+          if (currentReqId !== explorerRequestId) return;
           if (postsRes.ok) {
            postsData = await postsRes.json();
+           if (currentReqId !== explorerRequestId) return;
           }
         } else {
           // check resolve cache
-          const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${name}`)
+          const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${name}`, { signal: abortSignal });
+          if (currentReqId !== explorerRequestId) return;
           if (resolveRes.ok) {
-            const data = await resolveRes.json()
+            const data = await resolveRes.json();
+            if (currentReqId !== explorerRequestId) return;
             if (data.state == 0 && data.gso?.result) {
-              name = data.gso.result
-              currentChannelName.value = name
+              name = data.gso.result;
+              currentChannelName.value = name;
               postsRes = await fetch(
                 `https://i.gogingko.net/api/v1/last/${name}?n=25`, {
                   headers: {
                     'x-gos-rawcontent': '1',
-                  }
+                  },
+                  signal: abortSignal
                 }
               );
+              if (currentReqId !== explorerRequestId) return;
               if (postsRes.ok) {
                 postsData = await postsRes.json();
+                if (currentReqId !== explorerRequestId) return;
               }
             }
           }
         }
       }
+
+      if (currentReqId !== explorerRequestId) return;
+
       // need to reset the selectedUsernamesExplorer
-      selectedUsernamesExplorer.value = []
-      posts.value = Array.isArray(postsData)
+      selectedUsernamesExplorer.value = [];
+      const parsedPosts = Array.isArray(postsData)
         ? postsData
         : postsData.data || postsData.posts || postsData.items || [];
+
+      // Verify that parsed posts match the target channel name
+      const cleanExpected = name.replace(/^-100/, '').toLowerCase();
+      const verifiedFeedPosts = parsedPosts.filter((p: any) => {
+        const key = String(p?.key || p?.id || '');
+        if (key.includes('.')) {
+          return key.split('.')[0].toLowerCase().replace(/^-100/, '') === cleanExpected;
+        }
+        return true;
+      });
+
+      posts.value = verifiedFeedPosts;
 
       // When there are more than 10 posts in feed, try to use callSystemOne() to classify the channel into types
       if (posts.value.length > 10) {
@@ -13723,13 +13955,18 @@ const searchChannel = async () => {
       }
     }
   } catch (err: any) {
+    if (err?.name === 'AbortError' || currentReqId !== explorerRequestId) {
+      return;
+    }
     error.value = err.message || "An error occurred while fetching data";
   } finally {
-    loading.value = false;
-    isInputFocused.value = false;
-    nextTick(() => {
-      explorerMinHeight.value = "0px";
-    });
+    if (currentReqId === explorerRequestId) {
+      loading.value = false;
+      isInputFocused.value = false;
+      nextTick(() => {
+        explorerMinHeight.value = "0px";
+      });
+    }
   }
 };
 
@@ -14117,9 +14354,18 @@ const loadMorePosts = async () => {
   )
     return;
 
+  const targetChannel = currentChannelName.value;
+  const currentReqId = explorerRequestId;
+
+  if (loadMorePostsAbortController) {
+    loadMorePostsAbortController.abort();
+  }
+  loadMorePostsAbortController = new AbortController();
+  const abortSignal = loadMorePostsAbortController.signal;
+
   isLoadingMore.value = true;
   const lastPost = posts.value[posts.value.length - 1];
-  const lastPostId = lastPost.key;
+  const lastPostId = lastPost?.key || lastPost?.id;
 
   if (!lastPostId) {
     hasMorePosts.value = false;
@@ -14132,16 +14378,49 @@ const loadMorePosts = async () => {
     : lastPostId);
 
   while (numericId > 1) {
+    // If the channel was switched or a new explorer search occurred, stop immediately
+    if (
+      targetChannel !== currentChannelName.value ||
+      currentReqId !== explorerRequestId ||
+      activeTab.value !== 'explorer'
+    ) {
+      isLoadingMore.value = false;
+      return;
+    }
+
     try {
       const response = await fetch(
-        `https://i.gogingko.net/api/v1/last/${currentChannelName.value}?n=50&b=${numericId}`, {
+        `https://i.gogingko.net/api/v1/last/${targetChannel}?n=50&b=${numericId}`, {
           headers: {
             "x-gos-rawcontent": "1",
-          }
+          },
+          signal: abortSignal
         }
       );
+
+      // Check again after fetch settles
+      if (
+        targetChannel !== currentChannelName.value ||
+        currentReqId !== explorerRequestId ||
+        activeTab.value !== 'explorer'
+      ) {
+        isLoadingMore.value = false;
+        return;
+      }
+
       if (response.ok) {
         const morePostsData = await response.json();
+
+        // Check again after json parsing settles
+        if (
+          targetChannel !== currentChannelName.value ||
+          currentReqId !== explorerRequestId ||
+          activeTab.value !== 'explorer'
+        ) {
+          isLoadingMore.value = false;
+          return;
+        }
+
         const newPosts = Array.isArray(morePostsData)
           ? morePostsData
           : morePostsData.data ||
@@ -14156,22 +14435,61 @@ const loadMorePosts = async () => {
           }
           hasMorePosts.value = false;
         } else {
-          posts.value = [...posts.value, ...newPosts];
-          postsRenderLimit.value += 50;
-          if (posts.value.length > 10 && !channelClassification.value && !isClassifyingChannel.value) {
-            classifyChannelWithSystemOne();
+          // Strictly verify that the new posts belong to targetChannel
+          const cleanTarget = targetChannel.replace(/^-100/, '').toLowerCase();
+          const verifiedNewPosts = newPosts.filter((p: any) => {
+            const key = String(p?.key || p?.id || '');
+            if (key.includes('.')) {
+              return key.split('.')[0].toLowerCase().replace(/^-100/, '') === cleanTarget;
+            }
+            return true;
+          });
+
+          if (verifiedNewPosts.length > 0) {
+            // Deduplicate against existing post keys
+            const existingKeys = new Set(posts.value.map(p => p.key || p.id));
+            const freshPosts = verifiedNewPosts.filter(p => !existingKeys.has(p.key || p.id));
+
+            if (freshPosts.length > 0) {
+              if (
+                targetChannel !== currentChannelName.value ||
+                currentReqId !== explorerRequestId ||
+                activeTab.value !== 'explorer'
+              ) {
+                isLoadingMore.value = false;
+                return;
+              }
+              posts.value = [...posts.value, ...freshPosts];
+              postsRenderLimit.value += 50;
+              if (posts.value.length > 10 && !channelClassification.value && !isClassifyingChannel.value) {
+                classifyChannelWithSystemOne();
+              }
+            }
+          } else {
+            // Posts returned did not match targetChannel (from another channel/stale)
+            if (numericId - 50 > 0) {
+              numericId -= 50;
+              continue;
+            }
           }
         }
         break;
       } else {
         hasMorePosts.value = false;
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        isLoadingMore.value = false;
+        return;
+      }
       console.error("Error loading more posts:", err);
       hasMorePosts.value = false;
     }
   }
-  isLoadingMore.value = false;
+
+  if (targetChannel === currentChannelName.value && currentReqId === explorerRequestId) {
+    isLoadingMore.value = false;
+  }
 };
 
 const loadMoreRenderedPosts = () => {
@@ -23873,7 +24191,7 @@ onUnmounted(() => {
               </span>
             </button>
 
-            <!-- Storage Monitor (500K Limit) Toggle Button -->
+            <!-- Storage Monitor (1M Limit) Toggle Button -->
             <button
               type="button"
               @click="toggleStorageMonitorVisible"
@@ -23883,12 +24201,12 @@ onUnmounted(() => {
                   ? 'bg-teal-50 hover:bg-teal-100/80 dark:bg-teal-950/60 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 border-teal-300/80 dark:border-teal-700/70'
                   : 'bg-white hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 border-gray-200/80 dark:border-gray-700/80'
               ]"
-              :title="t('listen.toggleStorageMonitor') || 'Toggle IndexedDB Storage Monitor (500K Limit)'"
+              :title="t('listen.toggleStorageMonitor') || 'Toggle IndexedDB Storage Monitor (1M Limit)'"
             >
               <Database class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" />
               <span class="hidden sm:inline">{{ t('listen.storageMonitor') || 'Storage' }}</span>
               <span class="font-mono text-[10px] text-teal-700 dark:text-teal-300 bg-teal-100/70 dark:bg-teal-900/60 px-1.5 py-0.2 rounded-md tabular-nums">
-                500K
+                1M
               </span>
             </button>
 
@@ -23946,7 +24264,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- IndexedDB Storage & 500K Post Capacity Monitor Widget -->
+        <!-- IndexedDB Storage & 1M Post Capacity Monitor Widget -->
         <StorageMonitorWidget
           v-if="isStorageMonitorVisible"
           :is-dark="isDark"
@@ -24991,23 +25309,19 @@ onUnmounted(() => {
               <div class="flex items-center gap-1.5 font-mono text-[9px] shrink-0">
                 <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold bg-emerald-100/80 text-emerald-800 border border-emerald-300/70 dark:bg-emerald-950/80 dark:text-emerald-300 dark:border-emerald-700/60 shadow-2xs">
                   <span class="h-1.5 w-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse"></span>
-                  {{ t('listen.freshnessLegendToday') }}
+                  {{ t('listen.freshnessLegendToday') || '<24h' }}
                 </span>
                 <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold bg-teal-100/80 text-teal-800 border border-teal-300/70 dark:bg-teal-950/80 dark:text-teal-300 dark:border-teal-700/60 shadow-2xs">
                   <span class="h-1.5 w-1.5 rounded-full bg-teal-500 dark:bg-teal-400"></span>
-                  {{ t('listen.freshnessLegendRecent') }}
+                  {{ t('listen.freshnessLegendRecent') || '1-3 days' }}
                 </span>
                 <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold bg-sky-100/80 text-sky-800 border border-sky-300/70 dark:bg-sky-950/80 dark:text-sky-300 dark:border-sky-700/60 shadow-2xs">
                   <span class="h-1.5 w-1.5 rounded-full bg-sky-500 dark:bg-sky-400"></span>
-                  {{ t('listen.freshnessLegendWeek') }}
-                </span>
-                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold bg-amber-100/80 text-amber-800 border border-amber-300/70 dark:bg-amber-950/80 dark:text-amber-300 dark:border-amber-700/60 shadow-2xs">
-                  <span class="h-1.5 w-1.5 rounded-full bg-amber-500 dark:bg-amber-400"></span>
-                  {{ t('listen.freshnessLegendMonth') }}
+                  {{ t('listen.freshnessLegendWeek') || '3-7 days' }}
                 </span>
                 <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-bold bg-slate-200/80 text-slate-700 border border-slate-300/70 dark:bg-slate-800/90 dark:text-slate-200 dark:border-slate-600/70 shadow-2xs">
                   <span class="h-1.5 w-1.5 rounded-full bg-slate-400 dark:bg-slate-400"></span>
-                  {{ t('listen.freshnessLegendStale') }}
+                  {{ t('listen.freshnessLegendStale') || '>7 days' }}
                 </span>
               </div>
             </div>

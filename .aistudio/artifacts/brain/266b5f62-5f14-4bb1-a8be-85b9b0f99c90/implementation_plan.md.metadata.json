@@ -1,6 +1,6 @@
 {
-  "summary": "Comprehensive performance optimization plan for handling 200K-500K posts in IndexedDB. Covers virtualized windowing, shallow reactivity with markRaw/shallowRef, lightweight projection streaming in Hots mode, and an intelligent 60-day retention pruner with latest-post safeguards.",
-  "updatedAt": "2026-11-06T10:37:12.189976286Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Implementation plan for instant Listen Directory freshness badges using a dedicated IndexedDB metadata store and proactive background refresh.",
+  "updatedAt":  "2026-11-10T05:28:56.426466098Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }

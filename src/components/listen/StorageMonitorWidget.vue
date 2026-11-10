@@ -18,8 +18,10 @@ import {
   Sparkles
 } from "lucide-vue-next";
 import {
+  POST_LIMIT_1M,
   POST_LIMIT_500K,
   getCacheStorageStatsIndexedDB,
+  getCachedStorageStatsSync,
   pruneOldPostsIndexedDB,
   type CacheStorageStats,
   type PruneStats
@@ -49,7 +51,8 @@ const { t } = useI18n();
 // State
 // ---------------------------------------------------------------------------
 
-const isLoading = ref(true);
+const initialCached = getCachedStorageStatsSync();
+const isLoading = ref(!initialCached);
 const isPruning = ref(false);
 const pruneMessage = ref<string | null>(null);
 const pruneMessageTimer = ref<any>(null);
@@ -58,29 +61,31 @@ const isCollapsed = ref<boolean>(
   localStorage.getItem("listen_storage_monitor_collapsed") === "true"
 );
 
-const stats = ref<CacheStorageStats>({
-  channelCount: 0,
-  totalPostCount: 0,
-  oldestPostTimestamp: 0,
-  newestPostTimestamp: 0,
-  multiListenItemPostCount: 0,
-  postLimit: POST_LIMIT_500K,
-  percentOfLimit: 0,
-  storageEstimate: {
-    usageBytes: 0,
-    quotaBytes: 0,
-    usageFormatted: "0 B",
-    quotaFormatted: "Unknown",
-    percentQuotaUsed: 0
+const stats = ref<CacheStorageStats>(
+  initialCached || {
+    channelCount: 0,
+    totalPostCount: 0,
+    oldestPostTimestamp: 0,
+    newestPostTimestamp: 0,
+    multiListenItemPostCount: 0,
+    postLimit: POST_LIMIT_1M,
+    percentOfLimit: 0,
+    storageEstimate: {
+      usageBytes: 0,
+      quotaBytes: 0,
+      usageFormatted: "0 B",
+      quotaFormatted: "Unknown",
+      percentQuotaUsed: 0
+    }
   }
-});
+);
 
 // ---------------------------------------------------------------------------
 // Computed Metrics & Limit Thresholds
 // ---------------------------------------------------------------------------
 
 const postCount = computed(() => stats.value.totalPostCount);
-const postLimit = computed(() => stats.value.postLimit || POST_LIMIT_500K);
+const postLimit = computed(() => stats.value.postLimit || POST_LIMIT_1M);
 const usagePercent = computed(() => {
   if (!postLimit.value) return 0;
   return Math.min(100, (postCount.value / postLimit.value) * 100);
@@ -92,8 +97,8 @@ const remainingHeadroom = computed(() => {
 
 // Three-tier health status
 const healthLevel = computed<'healthy' | 'warning' | 'critical'>(() => {
-  if (usagePercent.value >= 90 || postCount.value >= 450000) return 'critical';
-  if (usagePercent.value >= 70 || postCount.value >= 350000) return 'warning';
+  if (usagePercent.value >= 90 || postCount.value >= 900000) return 'critical';
+  if (usagePercent.value >= 70 || postCount.value >= 700000) return 'warning';
   return 'healthy';
 });
 
@@ -101,7 +106,7 @@ const healthBadgeInfo = computed(() => {
   switch (healthLevel.value) {
     case 'critical':
       return {
-        label: t('listen.storage.nearLimit') || 'Near 500K Limit',
+        label: t('listen.storage.nearLimit') || 'Near 1M Limit',
         desc: t('listen.storage.criticalDesc') || 'Database capacity exceeds 90%. Prune older posts to maintain optimal B-tree index performance.',
         bgClass: 'bg-rose-50 dark:bg-rose-950/60 border-rose-200 dark:border-rose-900/60 text-rose-700 dark:text-rose-300',
         dotClass: 'bg-rose-500 animate-pulse',
@@ -167,10 +172,12 @@ const averagePostSizeFormatted = computed(() => {
 // Actions
 // ---------------------------------------------------------------------------
 
-async function fetchStats(fast: boolean = false) {
-  isLoading.value = true;
+async function fetchStats(fast: boolean = false, force: boolean = false) {
+  if (!stats.value.totalPostCount) {
+    isLoading.value = true;
+  }
   try {
-    const data = await getCacheStorageStatsIndexedDB({ fast });
+    const data = await getCacheStorageStatsIndexedDB({ fast, forceRefresh: force });
     stats.value = data;
   } catch (err) {
     console.error("Failed to load storage monitor stats:", err);
@@ -296,7 +303,7 @@ watch(
         <!-- Refresh Button -->
         <button
           type="button"
-          @click="() => fetchStats(false)"
+          @click="() => fetchStats(false, true)"
           :disabled="isLoading || isPruning"
           class="h-8 w-8 rounded-xl bg-white hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 flex items-center justify-center cursor-pointer transition-all active:scale-95 shadow-2xs disabled:opacity-50"
           title="Refresh storage statistics"
@@ -389,9 +396,9 @@ watch(
         <!-- Progress Milestones / Threshold Legend -->
         <div class="flex items-center justify-between text-[10px] text-gray-400 font-mono pt-0.5">
           <span>0 posts</span>
-          <span class="hidden sm:inline">350K (70% warning)</span>
-          <span class="hidden sm:inline">450K (90% critical)</span>
-          <span>500K ceiling</span>
+          <span class="hidden sm:inline">700K (70% warning)</span>
+          <span class="hidden sm:inline">900K (90% critical)</span>
+          <span>1M ceiling</span>
         </div>
       </div>
     </div>
