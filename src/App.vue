@@ -5675,6 +5675,49 @@ const computeItemFreshnessFromPosts = (posts: any[]): ListenItemFreshness | null
   };
 };
 
+interface ItemGapStats {
+  avgGap: number;
+  stdev: number;
+  calculatedAt: number;
+}
+
+const itemGapStatsMap = ref<Record<string, ItemGapStats>>({});
+
+const computeItemGapStatsFromPosts = (posts: any[]): { avgGap: number; stdev: number } | null => {
+  if (!Array.isArray(posts) || posts.length < 2) return null;
+  const timestamps: number[] = [];
+  for (const p of posts) {
+    if (!p) continue;
+    const raw = p.data?.date ?? p.date ?? p.data?.created_at ?? p.created_at ?? p.data?.timestamp ?? p.timestamp ?? p.message?.date;
+    if (raw == null) continue;
+    let t = 0;
+    if (typeof raw === "number") {
+      t = raw < 10000000000 ? raw * 1000 : raw;
+    } else {
+      let str = typeof raw === 'string' ? raw.trim() : String(raw);
+      if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(str)) {
+        str = str.replace(' ', 'T') + 'Z';
+      }
+      const parsed = new Date(str).getTime();
+      t = isNaN(parsed) ? 0 : parsed;
+    }
+    if (t > 0) timestamps.push(t);
+  }
+  if (timestamps.length < 2) return null;
+  timestamps.sort((a, b) => b - a);
+  const sample = timestamps.slice(0, 20);
+  const gaps: number[] = [];
+  for (let i = 0; i < sample.length - 1; i++) {
+    const gap = sample[i] - sample[i + 1];
+    if (gap > 0) gaps.push(gap);
+  }
+  if (gaps.length === 0) return null;
+  const avgGap = gaps.reduce((sum, g) => sum + g, 0) / gaps.length;
+  const variance = gaps.reduce((sum, g) => sum + Math.pow(g - avgGap, 2), 0) / gaps.length;
+  const stdev = Math.sqrt(variance);
+  return { avgGap, stdev };
+};
+
 const listenItemsFreshnessMap = ref<Record<string, ListenItemFreshness>>({});
 // Tracks newly fetched posts count per listen item ID to visually badge updated channels & folders
 const newlyFetchedPostsCountMap = ref<Record<string, number>>({});
@@ -5738,6 +5781,18 @@ const updateItemFreshness = (nodeId: string, posts: any[]) => {
       postCount: freshness.postCount,
       updatedAt: Date.now()
     });
+
+    const gapStats = computeItemGapStatsFromPosts(posts);
+    if (gapStats) {
+      itemGapStatsMap.value = {
+        ...itemGapStatsMap.value,
+        [nodeId]: {
+          avgGap: gapStats.avgGap,
+          stdev: gapStats.stdev,
+          calculatedAt: Date.now()
+        }
+      };
+    }
   } else if (listenItemsFreshnessMap.value[nodeId]) {
     const updated = { ...listenItemsFreshnessMap.value };
     delete updated[nodeId];
@@ -6103,8 +6158,44 @@ watch(isListenBackgroundSyncEnabled, (newVal) => {
 });
 const isBackgroundSyncRunning = ref<boolean>(false);
 const activeBackgroundSyncItemId = ref<string | null>(null);
+const activeBackgroundSyncItemIds = ref<Record<string, boolean>>({});
 let backgroundSyncAbortController: AbortController | null = null;
 const lastItemSyncTimeMap = ref<Record<string, number>>({});
+const itemSyncErrorCountMap = ref<Record<string, number>>({});
+
+// Tracks latest fetch duration in ms for each individual listen item
+const itemLastFetchDurationMap = ref<Record<string, number>>({});
+
+// Dynamic priority score adjustments computed by the Priority Re-evaluator hook
+const itemDynamicPriorityModifiersMap = ref<Record<string, number>>({});
+
+// Fallback Google Translate endpoint latency and availability tracking
+interface FallbackTranslateEndpointStats {
+  lastLatencyMs: number | null;
+  lastProbedAt: number;
+  status: 'optimal' | 'moderate' | 'degraded' | 'offline';
+  errorCount: number;
+  endpoint: string;
+}
+
+const fallbackTranslateStats = ref<FallbackTranslateEndpointStats>({
+  lastLatencyMs: null,
+  lastProbedAt: 0,
+  status: 'optimal',
+  errorCount: 0,
+  endpoint: 'https://translate.googleapis.com/translate_a/single'
+});
+
+interface PriorityReevaluatorResult {
+  lastReevaluatedAt: number;
+  itemsEvaluatedCount: number;
+  avgFetchDurationMs: number;
+  fallbackTranslateLatencyMs: number | null;
+  translateStatus: 'optimal' | 'moderate' | 'degraded' | 'offline';
+  topBoostedItems: { id: string; name: string; score: number; modifier: number }[];
+}
+
+const lastPriorityReevaluatorResult = ref<PriorityReevaluatorResult | null>(null);
 
 const clearAllNewlyFetchedBadges = () => {
   newlyFetchedPostsCountMap.value = {};
@@ -6122,6 +6213,18 @@ interface BackgroundSyncProgress {
   newPostsCount: number;
   errorCount: number;
   lastCompletedAt?: string | null;
+  channelTotal?: number;
+  channelCurrent?: number;
+  keywordTotal?: number;
+  keywordCurrent?: number;
+  keywordRound?: number;
+  kwCountdownSeconds?: number | null;
+  isChannelActive?: boolean;
+  isKeywordActive?: boolean;
+  lastReevaluatedAt?: string | null;
+  translateFallbackLatencyMs?: number | null;
+  translateFallbackStatus?: 'optimal' | 'moderate' | 'degraded' | 'offline';
+  avgFetchDurationMs?: number | null;
 }
 
 const backgroundSyncProgress = ref<BackgroundSyncProgress>({
@@ -6131,7 +6234,19 @@ const backgroundSyncProgress = ref<BackgroundSyncProgress>({
   updatedChannelsCount: 0,
   newPostsCount: 0,
   errorCount: 0,
-  lastCompletedAt: null
+  lastCompletedAt: null,
+  channelTotal: 0,
+  channelCurrent: 0,
+  keywordTotal: 0,
+  keywordCurrent: 0,
+  keywordRound: 1,
+  kwCountdownSeconds: null,
+  isChannelActive: false,
+  isKeywordActive: false,
+  lastReevaluatedAt: null,
+  translateFallbackLatencyMs: null,
+  translateFallbackStatus: undefined,
+  avgFetchDurationMs: null
 });
 
 const getAllListenLeafItems = (nodes: ListenItem[]): ListenItem[] => {
@@ -6198,26 +6313,293 @@ const handleAutoClassCategorySelect = (category: string | null) => {
   }
 };
 
-const getItemSyncPriorityScore = (item: ListenItem): number => {
+/**
+ * Record measured latency and health status for the fallback Google Translate API endpoint
+ */
+const recordFallbackTranslateLatency = (latencyMs: number, success: boolean) => {
+  let status: 'optimal' | 'moderate' | 'degraded' | 'offline' = 'optimal';
+  if (!success) {
+    status = 'degraded';
+  } else if (latencyMs > 1500) {
+    status = 'degraded';
+  } else if (latencyMs > 600) {
+    status = 'moderate';
+  }
+
+  fallbackTranslateStats.value = {
+    lastLatencyMs: latencyMs,
+    lastProbedAt: Date.now(),
+    status,
+    errorCount: success ? 0 : fallbackTranslateStats.value.errorCount + 1,
+    endpoint: 'https://translate.googleapis.com/translate_a/single'
+  };
+};
+
+/**
+ * Actively probe the fallback Google Translate API endpoint latency
+ */
+const probeGoogleTranslateFallbackLatency = async (): Promise<number | null> => {
+  const probeStart = performance.now();
+  const query = 'client=gtx&sl=auto&tl=zh-CN&dt=t&q=ok';
+  const url = `https://translate.googleapis.com/translate_a/single?${query}`;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+    const res = await fetch(url, {
+      method: 'GET',
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    const latency = Math.round(performance.now() - probeStart);
+
+    let status: 'optimal' | 'moderate' | 'degraded' = 'optimal';
+    if (!res.ok || latency > 1500) status = 'degraded';
+    else if (latency > 600) status = 'moderate';
+
+    fallbackTranslateStats.value = {
+      lastLatencyMs: latency,
+      lastProbedAt: Date.now(),
+      status,
+      errorCount: res.ok ? 0 : fallbackTranslateStats.value.errorCount + 1,
+      endpoint: 'https://translate.googleapis.com/translate_a/single'
+    };
+    return latency;
+  } catch (err: any) {
+    const latency = Math.round(performance.now() - probeStart);
+    fallbackTranslateStats.value = {
+      lastLatencyMs: latency,
+      lastProbedAt: Date.now(),
+      status: 'offline',
+      errorCount: fallbackTranslateStats.value.errorCount + 1,
+      endpoint: 'https://translate.googleapis.com/translate_a/single'
+    };
+    return null;
+  }
+};
+
+/**
+ * Priority Re-evaluator Hook
+ * Triggers when a background sync cycle completes.
+ * Dynamically re-evaluates all listen directory items, adjusting queue scores based on:
+ * 1. The latest fetch duration (latency) of each individual listen item.
+ * 2. The measured latency and health status of the fallback Google Translate API endpoint
+ *    (https://translate.googleapis.com/translate_a/single).
+ */
+const runPriorityReevaluatorHook = async () => {
+  try {
+    // 1. Probe the fallback Google Translate API endpoint to update its latest latency & health status
+    await probeGoogleTranslateFallbackLatency();
+
+    const leaves = getAllListenLeafItems(listenDirectory.value);
+    if (leaves.length === 0) return;
+
+    // 2. Calculate baseline average fetch duration across items
+    const recordedDurations = Object.values(itemLastFetchDurationMap.value).filter(d => typeof d === 'number' && d > 0);
+    const avgFetchDurationMs = recordedDurations.length > 0
+      ? recordedDurations.reduce((sum, d) => sum + d, 0) / recordedDurations.length
+      : 400;
+
+    const translateLatency = fallbackTranslateStats.value.lastLatencyMs;
+    const translateStatus = fallbackTranslateStats.value.status;
+
+    // 3. Compute dynamic score adjustments for each item
+    const newModifiers: Record<string, number> = {};
+
+    for (const item of leaves) {
+      let modifier = 0;
+
+      // Factor A: Item's own latest fetch duration
+      const itemDuration = itemLastFetchDurationMap.value[item.id];
+      if (typeof itemDuration === 'number' && itemDuration > 0) {
+        if (itemDuration < 300 || itemDuration < avgFetchDurationMs * 0.6) {
+          // Fast-responding item: award throughput bonus to keep cheap channels fresh
+          modifier += 250;
+        } else if (itemDuration > 3000 || itemDuration > avgFetchDurationMs * 2.5) {
+          // Heavy or slow endpoint: dampen slightly so it doesn't starve fast items
+          modifier -= 350;
+        }
+      }
+
+      // Factor B: Fallback Google Translate API latency & health
+      const isChannel = item.type !== 'keyword';
+      const hasForeignIndicator = isChannel || (item.argument && /[\u0400-\u04FF\u0600-\u06FF\u0590-\u05FF]/.test(item.argument));
+
+      if (translateStatus === 'optimal' || (translateLatency != null && translateLatency < 500)) {
+        // Fallback translation endpoint is fast and healthy: boost active channels
+        if (hasForeignIndicator) {
+          modifier += 400;
+        } else {
+          modifier += 150;
+        }
+      } else if (translateStatus === 'moderate') {
+        // Translation latency is acceptable: mild neutral modifier
+        if (hasForeignIndicator) modifier += 100;
+      } else if (translateStatus === 'degraded' || translateStatus === 'offline') {
+        // Fallback translation is experiencing high latency or rate-limiting:
+        // Prioritize lightweight local/cached items, while cooling down heavy foreign channels
+        if (hasForeignIndicator) {
+          modifier -= 450;
+        }
+      }
+
+      newModifiers[item.id] = modifier;
+    }
+
+    itemDynamicPriorityModifiersMap.value = newModifiers;
+
+    // 4. Record top-ranked items post-reevaluation
+    const now = Date.now();
+    const evaluatedItems = leaves.map(item => ({
+      id: item.id,
+      name: item.name,
+      score: computeListenItemQueueScore(item, now),
+      modifier: newModifiers[item.id] || 0
+    })).sort((a, b) => b.score - a.score);
+
+    lastPriorityReevaluatorResult.value = {
+      lastReevaluatedAt: Date.now(),
+      itemsEvaluatedCount: leaves.length,
+      avgFetchDurationMs: Math.round(avgFetchDurationMs),
+      fallbackTranslateLatencyMs: translateLatency,
+      translateStatus,
+      topBoostedItems: evaluatedItems.slice(0, 5)
+    };
+
+    backgroundSyncProgress.value.lastReevaluatedAt = new Date().toLocaleTimeString();
+    backgroundSyncProgress.value.translateFallbackLatencyMs = translateLatency;
+    backgroundSyncProgress.value.translateFallbackStatus = translateStatus;
+    backgroundSyncProgress.value.avgFetchDurationMs = Math.round(avgFetchDurationMs);
+
+    console.log(
+      `[Priority Re-evaluator] Completed hook: ${leaves.length} items re-evaluated. ` +
+      `Avg fetch: ${Math.round(avgFetchDurationMs)}ms | ` +
+      `Translate fallback (${fallbackTranslateStats.value.endpoint}): ${translateLatency ?? 'N/A'}ms [${translateStatus}]`
+    );
+  } catch (hookErr) {
+    console.warn("[Priority Re-evaluator] Hook execution error:", hookErr);
+  }
+};
+
+/**
+ * Intelligent Queue Scoring for Listen Background Sync Tasks
+ * Higher score = Higher priority to fetch next.
+ * Factors evaluated:
+ * 1. Listen item without any cached posts -> Score boosted significantly (+15,000 pts)
+ * 2. Listen item with cached posts and (currentTime - latestPostTime) > (avgGap + stdev)
+ *    -> Score boosted proportionally higher the more it lags (+2,500 base + up to +7,500 lag bonus)
+ * 3. Listen item not fetched for a long time -> Starvation bonus (+4,000 if never synced, +25 pts/min idle)
+ * 4. Other situations:
+ *    - Currently inspected / selected node in UI (+25,000 pts)
+ *    - Belonging to the currently viewed folder (+600 pts)
+ *    - Consecutive error penalty backoff (-600 pts/err, max -3000 pts)
+ *    - Search keywords specific weighting (+300 pts)
+ * 5. Dynamic modifier computed by the Priority Re-evaluator hook
+ *    - Adjusts dynamically based on item's latest fetch duration and fallback Google Translate API endpoint latency
+ */
+const computeListenItemQueueScore = (
+  item: ListenItem,
+  now: number = Date.now(),
+  options?: { selectedId?: string; parentFolderId?: string }
+): number => {
+  let score = 0;
   const freshness = getItemOrFolderFreshness(item);
-  // Priority 0: Never fetched or 0 cached posts -> highest urgency to discover channel content
-  if (!freshness || freshness.postCount === 0) {
-    return 0;
+  const postCount = freshness?.postCount || 0;
+  const latestPostTs = freshness?.timestamp || 0;
+
+  // 1. Listen item without any cached posts -> score up with top urgency to populate initial content
+  if (!freshness || postCount === 0 || latestPostTs === 0) {
+    score += 15000;
+  } else {
+    // 2. Listen item with cached posts where elapsed time since latest post exceeds (avgGap + stdev)
+    const elapsedMs = Math.max(0, now - latestPostTs);
+    const gapStats = itemGapStatsMap.value[item.id];
+    let avgGap = gapStats?.avgGap;
+    let stdev = gapStats?.stdev;
+
+    if (!avgGap) {
+      // Sensible defaults based on freshness tier
+      switch (freshness.level) {
+        case 'today':
+          avgGap = 3 * 3600 * 1000;
+          stdev = 1.5 * 3600 * 1000;
+          break;
+        case 'recent':
+          avgGap = 18 * 3600 * 1000;
+          stdev = 8 * 3600 * 1000;
+          break;
+        case 'week':
+          avgGap = 60 * 3600 * 1000;
+          stdev = 24 * 3600 * 1000;
+          break;
+        case 'stale':
+        default:
+          avgGap = 7 * 24 * 3600 * 1000;
+          stdev = 3 * 24 * 3600 * 1000;
+          break;
+      }
+    }
+    if (stdev == null) stdev = avgGap * 0.5;
+
+    const threshold = avgGap + stdev;
+    if (elapsedMs > threshold) {
+      const lagMs = elapsedMs - threshold;
+      const lagRatio = lagMs / Math.max(1, avgGap);
+      // Base boost for overdue items
+      score += 2500;
+      // Proportional boost: larger if it lags more (up to +7,500 additional pts)
+      score += Math.min(7500, Math.round(lagRatio * 1500));
+    } else {
+      if (freshness.level === 'today') score += 800;
+      else if (freshness.level === 'recent') score += 400;
+      else if (freshness.level === 'week') score += 150;
+    }
   }
-  // Prioritize active channels: active today means frequent updates
-  switch (freshness.level) {
-    case 'today':
-      return 1;
-    case 'recent':
-      return 2;
-    case 'week':
-      return 3;
-    case 'month':
-      return 4;
-    case 'stale':
-    default:
-      return 5;
+
+  // 3. Listen item not fetched for a long time -> Starvation prevention
+  const lastSync = lastItemSyncTimeMap.value[item.id] || 0;
+  if (lastSync === 0) {
+    score += 4000;
+  } else {
+    const timeSinceLastSyncMs = Math.max(0, now - lastSync);
+    score += Math.min(5000, Math.floor(timeSinceLastSyncMs / (60 * 1000)) * 25);
   }
+
+  // 4. Other situations:
+  // a) User is currently viewing/selecting this item in the UI -> immediate priority
+  if (selectedListenNode.value && selectedListenNode.value.id === item.id) {
+    score += 25000;
+  }
+
+  // b) In the same folder as the currently selected node
+  if (options?.parentFolderId && (item as any).parentId === options.parentFolderId) {
+    score += 600;
+  }
+
+  // c) Consecutive error penalty backoff (avoids hammering failing endpoints)
+  const errorCount = itemSyncErrorCountMap.value[item.id] || 0;
+  if (errorCount > 0) {
+    score -= Math.min(3000, errorCount * 600);
+  }
+
+  // d) Keyword stream priority
+  if (item.type === 'keyword') {
+    score += 300;
+  }
+
+  // 5. Dynamic modifier computed by the Priority Re-evaluator hook
+  // (adjusts based on item's latest fetch duration and fallback Google Translate API endpoint latency)
+  const dynamicModifier = itemDynamicPriorityModifiersMap.value[item.id] || 0;
+  score += dynamicModifier;
+
+  return score;
+};
+
+// Backward-compatible alias for any external or template callers
+const getItemSyncPriorityScore = (item: ListenItem): number => {
+  return -computeListenItemQueueScore(item);
 };
 
 const toggleListenBackgroundSync = () => {
@@ -6235,6 +6617,7 @@ const cancelBackgroundSync = () => {
   }
   isBackgroundSyncRunning.value = false;
   activeBackgroundSyncItemId.value = null;
+  activeBackgroundSyncItemIds.value = {};
 };
 
 const scheduleScrapeForListen = async (channelName: string, showToast: boolean = false) => {
@@ -6441,6 +6824,16 @@ const checkAndScheduleScrapeForListenItem = async (item: ListenItem): Promise<bo
   const variance = gaps.reduce((sum, g) => sum + Math.pow(g - avgGap, 2), 0) / gaps.length;
   const stdev = Math.sqrt(variance);
 
+  // Cache calculated stats for priority queue scoring
+  itemGapStatsMap.value = {
+    ...itemGapStatsMap.value,
+    [item.id]: {
+      avgGap,
+      stdev,
+      calculatedAt: Date.now()
+    }
+  };
+
   // Threshold: When current timestamp - latest post timestamp (considering timezone offset)
   // is larger than the average time gap (or at least M stdev)
   const M = 1.0; // Standard deviation multiplier
@@ -6461,6 +6854,8 @@ const syncSingleListenItem = async (
 ): Promise<{ newPosts: number; success: boolean }> => {
   if (!node || node.isFolder) return { newPosts: 0, success: true };
   if (signal?.aborted) return { newPosts: 0, success: false };
+
+  const syncStartTime = performance.now();
 
   const getPostId = (post: any): string => {
     return post.key || post.id || (post.data && post.data.id) || '';
@@ -6680,9 +7075,13 @@ const syncSingleListenItem = async (
       }
     }
 
+    const fetchDurationMs = Math.round(performance.now() - syncStartTime);
+    itemLastFetchDurationMap.value[node.id] = fetchDurationMs;
     lastItemSyncTimeMap.value[node.id] = Date.now();
     return { newPosts: newlyAddedCount, success: true };
   } catch (err) {
+    const fetchDurationMs = Math.round(performance.now() - syncStartTime);
+    itemLastFetchDurationMap.value[node.id] = fetchDurationMs;
     if (signal?.aborted) return { newPosts: 0, success: false };
     console.error(`Error syncing listen item ${node.name}:`, err);
     return { newPosts: 0, success: false };
@@ -6709,34 +7108,60 @@ const startManualBackgroundSync = async (forceAll = false) => {
     return;
   }
 
-  // Smart prioritization algorithm utilizing computed freshness:
-  // 0 = Never fetched or 0 cached posts (High urgency to populate initial state)
-  // 1 = Active Today (< 24h) - Rapid changes, highest value to refetch
-  // 2 = Active Recent (1-3d)
-  // 3 = Active Week (3-7d)
-  // 4 = Active Month (7-30d)
-  // 5 = Inactive / Stale (> 30d) - Low frequency
-  // Tiebreaker: Longest time since last sync
   const now = Date.now();
-  const queue = [...leaves].sort((a, b) => {
-    const scoreA = getItemSyncPriorityScore(a);
-    const scoreB = getItemSyncPriorityScore(b);
-    if (scoreA !== scoreB) return scoreA - scoreB;
+  const selectedNodeId = selectedListenNode.value?.id;
+  const parentFolderId = (selectedListenNode.value as any)?.parentId;
+  const scoreContext = { selectedId: selectedNodeId, parentFolderId };
 
+  // 1. Split listen items by stream type into 2 separate task queues:
+  // Telegram Channel stream vs Search Keywords stream
+  const channelLeaves: ListenItem[] = [];
+  const keywordLeaves: ListenItem[] = [];
+
+  for (const item of leaves) {
+    if (item.type === "keyword") {
+      keywordLeaves.push(item);
+    } else {
+      channelLeaves.push(item);
+    }
+  }
+
+  // Filter candidates unless forceAll is true (items with 0 posts or never synced are always synced)
+  const filterCandidates = (items: ListenItem[]) => {
+    if (forceAll) return [...items];
+    return items.filter(item => {
+      const lastSync = lastItemSyncTimeMap.value[item.id] || 0;
+      const freshness = getItemOrFolderFreshness(item);
+      if (!freshness || freshness.postCount === 0 || lastSync === 0) return true;
+      return (now - lastSync) > 90 * 1000;
+    });
+  };
+
+  // 2. Score and sort each queue independently based on:
+  // - Criteria 1: No cached posts -> High score (+15,000 pts)
+  // - Criteria 2: (currentTime - latestPostTime) > (avgGap + stdev) -> Scored up proportionally to lag (+2,500..+10,000 pts)
+  // - Criteria 3: Long time since last fetch -> Starvation bonus (+4,000 pts or +25 pts/min)
+  // - Criteria 4: User currently viewing item (+25,000 pts), same folder (+600 pts), error backoff (-600 pts/err)
+  const channelQueue = filterCandidates(channelLeaves).sort((a, b) => {
+    const scoreA = computeListenItemQueueScore(a, now, scoreContext);
+    const scoreB = computeListenItemQueueScore(b, now, scoreContext);
+    if (scoreA !== scoreB) return scoreB - scoreA;
     const lastSyncA = lastItemSyncTimeMap.value[a.id] || 0;
     const lastSyncB = lastItemSyncTimeMap.value[b.id] || 0;
     return lastSyncA - lastSyncB;
   });
 
-  // Filter out items synced less than 90 seconds ago unless forceAll is true
-  const itemsToSync = forceAll 
-    ? queue 
-    : queue.filter(item => {
-        const lastSync = lastItemSyncTimeMap.value[item.id] || 0;
-        return (now - lastSync) > 90 * 1000;
-      });
+  const keywordQueue = filterCandidates(keywordLeaves).sort((a, b) => {
+    const scoreA = computeListenItemQueueScore(a, now, scoreContext);
+    const scoreB = computeListenItemQueueScore(b, now, scoreContext);
+    if (scoreA !== scoreB) return scoreB - scoreA;
+    const lastSyncA = lastItemSyncTimeMap.value[a.id] || 0;
+    const lastSyncB = lastItemSyncTimeMap.value[b.id] || 0;
+    return lastSyncA - lastSyncB;
+  });
 
-  if (itemsToSync.length === 0) {
+  const totalItemsToSync = channelQueue.length + keywordQueue.length;
+  if (totalItemsToSync === 0) {
     toastMessage.value = t("listen.allChannelsUpToDate");
     toastType.value = "info";
     setTimeout(() => { toastMessage.value = ""; }, 3000);
@@ -6747,57 +7172,246 @@ const startManualBackgroundSync = async (forceAll = false) => {
   backgroundSyncAbortController = new AbortController();
   const signal = backgroundSyncAbortController.signal;
 
+  let isChannelActive = channelQueue.length > 0;
+  let isKeywordActive = keywordQueue.length > 0;
+
   backgroundSyncProgress.value = {
-    total: itemsToSync.length,
+    total: totalItemsToSync,
     current: 0,
     currentItemName: "",
     updatedChannelsCount: 0,
     newPostsCount: 0,
-    errorCount: 0
+    errorCount: 0,
+    channelTotal: channelQueue.length,
+    channelCurrent: 0,
+    keywordTotal: keywordQueue.length,
+    keywordCurrent: 0,
+    keywordRound: 1,
+    isChannelActive,
+    isKeywordActive
   };
 
-  const cpuCores = typeof navigator !== 'undefined' && navigator.hardwareConcurrency ? navigator.hardwareConcurrency : 4;
-  const maxConcurrency = Math.min(6, Math.max(2, Math.floor(cpuCores / 2) || 3));
+  let activeChannelName = "";
+  let activeKeywordName = "";
+  const updateCurrentItemNameDisplay = () => {
+    const names = [activeChannelName, activeKeywordName].filter(Boolean);
+    backgroundSyncProgress.value.currentItemName = names.join(" · ");
+  };
 
-  let currentIndex = 0;
-  let completedCount = 0;
+  let completedChannels = 0;
+  let completedKeywords = 0;
 
-  const runWorker = async () => {
-    while (currentIndex < itemsToSync.length && !signal.aborted && isListenBackgroundSyncEnabled.value) {
-      if (signal.aborted || !isListenBackgroundSyncEnabled.value) break;
+  // Process Telegram Channel Queue with dedicated concurrency pool
+  const processChannelQueue = async () => {
+    if (channelQueue.length === 0) {
+      isChannelActive = false;
+      backgroundSyncProgress.value.isChannelActive = false;
+      return;
+    }
+    isChannelActive = true;
+    backgroundSyncProgress.value.isChannelActive = true;
 
-      const idx = currentIndex++;
-      const item = itemsToSync[idx];
-      if (!item) continue;
+    try {
+      let channelIndex = 0;
+      const cpuCores = typeof navigator !== 'undefined' && navigator.hardwareConcurrency ? navigator.hardwareConcurrency : 4;
+      const channelWorkersCount = Math.min(cpuCores >= 6 ? 3 : 2, channelQueue.length);
 
-      activeBackgroundSyncItemId.value = item.id;
-      backgroundSyncProgress.value.currentItemName = item.name;
+      const runChannelWorker = async () => {
+        while (channelIndex < channelQueue.length && !signal.aborted && isListenBackgroundSyncEnabled.value) {
+          if (signal.aborted || !isListenBackgroundSyncEnabled.value) break;
+          const idx = channelIndex++;
+          const item = channelQueue[idx];
+          if (!item) continue;
 
-      // Smart background fetch check
-      try {
-        await checkAndScheduleScrapeForListenItem(item);
-        const res = await syncSingleListenItem(item, signal);
-        if (res.newPosts > 0) {
-          backgroundSyncProgress.value.updatedChannelsCount++;
-          backgroundSyncProgress.value.newPostsCount += res.newPosts;
+          activeBackgroundSyncItemId.value = item.id;
+          activeBackgroundSyncItemIds.value = {
+            ...activeBackgroundSyncItemIds.value,
+            [item.id]: true
+          };
+          activeChannelName = item.name;
+          updateCurrentItemNameDisplay();
+
+          try {
+            // Check and schedule scrape if lagging past avg gap + stdev
+            await checkAndScheduleScrapeForListenItem(item);
+            const res = await syncSingleListenItem(item, signal);
+            if (res.newPosts > 0) {
+              backgroundSyncProgress.value.updatedChannelsCount++;
+              backgroundSyncProgress.value.newPostsCount += res.newPosts;
+            }
+            itemSyncErrorCountMap.value[item.id] = 0;
+          } catch (err) {
+            console.error(`Background channel sync failed for ${item.name}:`, err);
+            backgroundSyncProgress.value.errorCount++;
+            itemSyncErrorCountMap.value[item.id] = (itemSyncErrorCountMap.value[item.id] || 0) + 1;
+          } finally {
+            completedChannels++;
+            backgroundSyncProgress.value.channelCurrent = completedChannels;
+            backgroundSyncProgress.value.current = completedChannels + completedKeywords;
+            const updatedActive = { ...activeBackgroundSyncItemIds.value };
+            delete updatedActive[item.id];
+            activeBackgroundSyncItemIds.value = updatedActive;
+            if (activeChannelName === item.name) {
+              activeChannelName = "";
+              updateCurrentItemNameDisplay();
+            }
+          }
+
+          // Brief delay between channel scrapes to respect rate limits
+          await new Promise((resolve) => setTimeout(resolve, 200));
         }
-      } catch (err) {
-        console.error(`Background sync failed for ${item.name}:`, err);
-        backgroundSyncProgress.value.errorCount++;
-      } finally {
-        completedCount++;
-        backgroundSyncProgress.value.current = completedCount;
-      }
+      };
 
-      // Brief pacing delay to balance performance and network rate limits
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      const workers = Array.from({ length: channelWorkersCount }, () => runChannelWorker());
+      await Promise.all(workers);
+    } finally {
+      isChannelActive = false;
+      backgroundSyncProgress.value.isChannelActive = false;
+    }
+  };
+
+  // Process Search Keyword Queue as an independent task that repeats while Channel queue is active
+  const processKeywordQueue = async () => {
+    if (keywordLeaves.length === 0) {
+      isKeywordActive = false;
+      backgroundSyncProgress.value.isKeywordActive = false;
+      return;
+    }
+    isKeywordActive = true;
+    backgroundSyncProgress.value.isKeywordActive = true;
+
+    try {
+      let keywordRound = 1;
+      backgroundSyncProgress.value.keywordRound = 1;
+
+      while (!signal.aborted && isListenBackgroundSyncEnabled.value) {
+        // Round 1 uses the pre-filtered/prioritized keywordQueue
+        // Repeat rounds re-score all keywordLeaves using updated gap/starvation scores
+        const roundCandidates = (keywordRound === 1)
+          ? keywordQueue
+          : [...keywordLeaves].sort((a, b) => {
+              const scoreA = computeListenItemQueueScore(a, Date.now(), scoreContext);
+              const scoreB = computeListenItemQueueScore(b, Date.now(), scoreContext);
+              if (scoreA !== scoreB) return scoreB - scoreA;
+              const lastSyncA = lastItemSyncTimeMap.value[a.id] || 0;
+              const lastSyncB = lastItemSyncTimeMap.value[b.id] || 0;
+              return lastSyncA - lastSyncB;
+            });
+
+        if (roundCandidates.length === 0) break;
+
+        // If repeating, expand total so overall progress remains proportional
+        if (keywordRound > 1) {
+          backgroundSyncProgress.value.keywordTotal = (backgroundSyncProgress.value.keywordTotal || 0) + roundCandidates.length;
+          backgroundSyncProgress.value.total += roundCandidates.length;
+        }
+
+        let keywordIndex = 0;
+        const keywordWorkersCount = Math.min(roundCandidates.length >= 4 ? 2 : 1, roundCandidates.length);
+
+        const runKeywordWorker = async () => {
+          while (keywordIndex < roundCandidates.length && !signal.aborted && isListenBackgroundSyncEnabled.value) {
+            if (signal.aborted || !isListenBackgroundSyncEnabled.value) break;
+
+            // In repeat rounds, if channels have finished in the background, exit immediately
+            if (keywordRound > 1 && !isChannelActive) break;
+
+            const idx = keywordIndex++;
+            const item = roundCandidates[idx];
+            if (!item) continue;
+
+            activeBackgroundSyncItemId.value = item.id;
+            activeBackgroundSyncItemIds.value = {
+              ...activeBackgroundSyncItemIds.value,
+              [item.id]: true
+            };
+            activeKeywordName = keywordRound > 1 ? `${item.name} [R${keywordRound}]` : item.name;
+            updateCurrentItemNameDisplay();
+
+            try {
+              const res = await syncSingleListenItem(item, signal);
+              if (res.newPosts > 0) {
+                backgroundSyncProgress.value.updatedChannelsCount++;
+                backgroundSyncProgress.value.newPostsCount += res.newPosts;
+              }
+              itemSyncErrorCountMap.value[item.id] = 0;
+            } catch (err) {
+              console.error(`Background keyword sync failed for ${item.name}:`, err);
+              backgroundSyncProgress.value.errorCount++;
+              itemSyncErrorCountMap.value[item.id] = (itemSyncErrorCountMap.value[item.id] || 0) + 1;
+            } finally {
+              completedKeywords++;
+              backgroundSyncProgress.value.keywordCurrent = completedKeywords;
+              backgroundSyncProgress.value.current = completedChannels + completedKeywords;
+              const updatedActive = { ...activeBackgroundSyncItemIds.value };
+              delete updatedActive[item.id];
+              activeBackgroundSyncItemIds.value = updatedActive;
+              if (activeKeywordName.startsWith(item.name)) {
+                activeKeywordName = "";
+                updateCurrentItemNameDisplay();
+              }
+            }
+
+            // Delay between full-text keyword searches (gentler pacing on repeat rounds)
+            const itemDelayMs = keywordRound > 1 ? 800 : 400;
+            await new Promise((resolve) => setTimeout(resolve, itemDelayMs));
+          }
+        };
+
+        const workers = Array.from({ length: keywordWorkersCount }, () => runKeywordWorker());
+        await Promise.all(workers);
+
+        // Independence rule: If channel queue is not ending, repeat keyword queue to do more fetches!
+        if (isChannelActive && !signal.aborted && isListenBackgroundSyncEnabled.value) {
+          const nextRound = keywordRound + 1;
+          const REPEAT_COOLDOWN_SECONDS = 10;
+          let remainingSeconds = REPEAT_COOLDOWN_SECONDS;
+
+          // Graceful ticking cool-down delay between repeat passes before starting next round
+          while (remainingSeconds > 0 && isChannelActive && !signal.aborted && isListenBackgroundSyncEnabled.value) {
+            backgroundSyncProgress.value.kwCountdownSeconds = remainingSeconds;
+            activeKeywordName = `KW R${nextRound} in ${remainingSeconds}s`;
+            updateCurrentItemNameDisplay();
+
+            await new Promise((resolve) => {
+              const timer = setTimeout(resolve, 1000);
+              signal.addEventListener("abort", () => {
+                clearTimeout(timer);
+                resolve(null);
+              }, { once: true });
+            });
+
+            remainingSeconds--;
+          }
+
+          backgroundSyncProgress.value.kwCountdownSeconds = null;
+          if (activeKeywordName.startsWith("KW R")) {
+            activeKeywordName = "";
+            updateCurrentItemNameDisplay();
+          }
+
+          // If channels completed or user cancelled during cooldown, exit repetition loop
+          if (!isChannelActive || signal.aborted || !isListenBackgroundSyncEnabled.value) {
+            break;
+          }
+
+          keywordRound = nextRound;
+          backgroundSyncProgress.value.keywordRound = keywordRound;
+        } else {
+          // Channel queue is completed or process was cancelled, conclude keyword queue
+          break;
+        }
+      }
+    } finally {
+      isKeywordActive = false;
+      backgroundSyncProgress.value.isKeywordActive = false;
+      backgroundSyncProgress.value.kwCountdownSeconds = null;
     }
   };
 
   try {
-    const workerCount = Math.min(maxConcurrency, itemsToSync.length);
-    const workers = Array.from({ length: workerCount }, () => runWorker());
-    await Promise.all(workers);
+    // Execute both independent task queues concurrently
+    await Promise.all([processChannelQueue(), processKeywordQueue()]);
   } finally {
     const finalUpdated = backgroundSyncProgress.value.updatedChannelsCount;
     const finalPosts = backgroundSyncProgress.value.newPostsCount;
@@ -6805,10 +7419,15 @@ const startManualBackgroundSync = async (forceAll = false) => {
 
     isBackgroundSyncRunning.value = false;
     activeBackgroundSyncItemId.value = null;
+    activeBackgroundSyncItemIds.value = {};
     backgroundSyncAbortController = null;
     backgroundSyncProgress.value.lastCompletedAt = new Date().toLocaleTimeString();
 
-    if (!isAborted && itemsToSync.length > 0) {
+    // Trigger Priority Re-evaluator hook to dynamically adjust queue scores
+    // based on latest fetch durations and fallback Google Translate API endpoint latency
+    runPriorityReevaluatorHook();
+
+    if (!isAborted && totalItemsToSync > 0) {
       toastMessage.value = t("listen.syncCompleted", {
         updated: finalUpdated,
         posts: finalPosts
@@ -9123,15 +9742,42 @@ const translatePost = async (post: any) => {
   
   isTranslating.value[post.key] = true;
   try {
-     const textToTranslate = post.data?.content || post.data?.rawcontent || "";
-     const res = await fetch(`https://i.gogingko.net/api/v1/gtr?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(textToTranslate)}`, {
+    const textToTranslate = post.data?.content || post.data?.rawcontent || "";
+    const queryParams = `client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(textToTranslate)}`;
+    let data: any = null;
+
+    // 1. Primary endpoint: i.gogingko.net
+    try {
+      const res = await fetch(`https://i.gogingko.net/api/v1/gtr?${queryParams}`, {
         method: 'GET'
-    });
-    if (!res.ok) throw new Error("Translation failed");
-    const data = await res.json();
+      });
+      if (!res.ok) throw new Error(`Primary translation status: ${res.status}`);
+      data = await res.json();
+    } catch (primaryErr) {
+      console.warn("Translation with i.gogingko.net failed, falling back to backup endpoint translate.googleapis.com:", primaryErr);
+      // 2. Backup endpoint fallback: translate.googleapis.com
+      const fallbackStart = performance.now();
+      try {
+        const backupRes = await fetch(`https://translate.googleapis.com/translate_a/single?${queryParams}`, {
+          method: 'GET'
+        });
+        const fallbackLatency = Math.round(performance.now() - fallbackStart);
+        if (!backupRes.ok) {
+          recordFallbackTranslateLatency(fallbackLatency, false);
+          throw new Error(`Backup translation status: ${backupRes.status}`);
+        }
+        data = await backupRes.json();
+        recordFallbackTranslateLatency(fallbackLatency, true);
+      } catch (backupErr) {
+        const fallbackLatency = Math.round(performance.now() - fallbackStart);
+        recordFallbackTranslateLatency(fallbackLatency, false);
+        throw backupErr;
+      }
+    }
+
     // Assuming the API returns a structure where [0][0][0] is the translated text as per common google translate API behavior
-    if (data[0]) {
-      const translatedTextArray = data[0].map(item => item[0])
+    if (data && data[0]) {
+      const translatedTextArray = data[0].map((item: any) => (Array.isArray(item) ? item[0] : (item || '')));
       translatedPosts.value[post.key] = translatedTextArray.join(''); 
     } else {
       translatedPosts.value[post.key] = "Please retry later.";
@@ -24146,6 +24792,9 @@ onUnmounted(() => {
               <RefreshCw class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 animate-spin shrink-0" />
               <span class="text-xs font-bold text-teal-950 dark:text-teal-200 tabular-nums">
                 {{ t('listen.syncingProgress', { current: backgroundSyncProgress.current, total: backgroundSyncProgress.total }) }}
+                <span v-if="(backgroundSyncProgress.channelTotal || 0) > 0 || (backgroundSyncProgress.keywordTotal || 0) > 0" class="text-[10px] font-normal text-teal-700/80 dark:text-teal-300/80 ml-1">
+                  (CH: {{ backgroundSyncProgress.channelCurrent || 0 }}/{{ backgroundSyncProgress.channelTotal || 0 }} · KW: {{ backgroundSyncProgress.keywordCurrent || 0 }}/{{ backgroundSyncProgress.keywordTotal || 0 }}<template v-if="(backgroundSyncProgress.keywordRound || 1) > 1"> R{{ backgroundSyncProgress.keywordRound }}</template><template v-if="backgroundSyncProgress.kwCountdownSeconds != null"> · {{ backgroundSyncProgress.kwCountdownSeconds }}s</template>)
+                </span>
               </span>
               <button
                 @click="cancelBackgroundSync"
@@ -25174,6 +25823,9 @@ onUnmounted(() => {
                 <div class="flex items-center gap-2 shrink-0">
                   <span class="text-[11px] font-mono font-bold text-teal-700 dark:text-teal-300 tabular-nums">
                     {{ backgroundSyncProgress.current }} / {{ backgroundSyncProgress.total }}
+                    <span v-if="(backgroundSyncProgress.channelTotal || 0) > 0 || (backgroundSyncProgress.keywordTotal || 0) > 0" class="text-[10px] font-normal text-teal-600/80 dark:text-teal-400/80 ml-1">
+                      (CH: {{ backgroundSyncProgress.channelCurrent || 0 }}/{{ backgroundSyncProgress.channelTotal || 0 }} · KW: {{ backgroundSyncProgress.keywordCurrent || 0 }}/{{ backgroundSyncProgress.keywordTotal || 0 }}<template v-if="(backgroundSyncProgress.keywordRound || 1) > 1"> R{{ backgroundSyncProgress.keywordRound }}</template><template v-if="backgroundSyncProgress.kwCountdownSeconds != null"> · {{ backgroundSyncProgress.kwCountdownSeconds }}s</template>)
+                    </span>
                   </span>
                   <button
                     @click="cancelBackgroundSync"
@@ -25196,6 +25848,17 @@ onUnmounted(() => {
                 <span v-if="backgroundSyncProgress.newPostsCount > 0" class="text-emerald-700 dark:text-emerald-300 font-bold flex items-center gap-1">
                   <CheckCircle2 class="h-3 w-3" />
                   <span>+{{ backgroundSyncProgress.newPostsCount }} {{ t('listen.newBadge') }}</span>
+                  <span v-if="(backgroundSyncProgress.keywordRound || 1) > 1" class="text-teal-600 dark:text-teal-400 font-semibold ml-1">
+                    · KW Round {{ backgroundSyncProgress.keywordRound }}<template v-if="backgroundSyncProgress.kwCountdownSeconds != null"> (in {{ backgroundSyncProgress.kwCountdownSeconds }}s)</template>
+                  </span>
+                </span>
+                <span v-else-if="backgroundSyncProgress.kwCountdownSeconds != null" class="text-teal-600 dark:text-teal-400 font-medium truncate flex items-center gap-1">
+                  <RefreshCw class="h-2.5 w-2.5 animate-spin shrink-0 text-teal-500" />
+                  <span>Keywords next pass starting in {{ backgroundSyncProgress.kwCountdownSeconds }}s while channels sync...</span>
+                </span>
+                <span v-else-if="(backgroundSyncProgress.keywordRound || 1) > 1" class="text-teal-600 dark:text-teal-400 font-medium truncate flex items-center gap-1">
+                  <RefreshCw class="h-2.5 w-2.5 animate-spin shrink-0" />
+                  <span>Repeating Keywords queue (Round {{ backgroundSyncProgress.keywordRound }})</span>
                 </span>
                 <span v-else class="italic text-gray-500 dark:text-gray-400 truncate">
                   {{ t('listen.syncPriorityTooltip') }}
@@ -25203,6 +25866,34 @@ onUnmounted(() => {
                 <span class="font-mono text-[9px] text-gray-400 dark:text-gray-500 shrink-0">
                   {{ Math.round((backgroundSyncProgress.current / (backgroundSyncProgress.total || 1)) * 100) }}%
                 </span>
+              </div>
+
+              <!-- Re-evaluator & Fallback Translate Latency Indicator -->
+              <div 
+                v-if="lastPriorityReevaluatorResult" 
+                class="pt-1.5 mt-1 border-t border-teal-500/20 flex items-center justify-between text-[9.5px] text-teal-800/90 dark:text-teal-300/90 font-mono"
+                :title="`Priority Re-evaluator active. Avg fetch: ${lastPriorityReevaluatorResult.avgFetchDurationMs}ms. Translate fallback (${fallbackTranslateStats.endpoint}): ${lastPriorityReevaluatorResult.fallbackTranslateLatencyMs ?? 'N/A'}ms.`"
+              >
+                <div class="flex items-center gap-1.5 truncate">
+                  <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-teal-500/15 dark:bg-teal-400/15 font-semibold text-teal-700 dark:text-teal-300">
+                    <Activity class="h-2.5 w-2.5 text-teal-600 dark:text-teal-400" />
+                    <span>Re-evaluator</span>
+                  </span>
+                  <span class="opacity-75">fetch: {{ lastPriorityReevaluatorResult.avgFetchDurationMs }}ms</span>
+                </div>
+                <div class="flex items-center gap-1 shrink-0">
+                  <span class="opacity-75">G-Translate:</span>
+                  <span 
+                    class="px-1 py-0.2 rounded font-bold"
+                    :class="{
+                      'text-emerald-700 dark:text-emerald-300 bg-emerald-100/60 dark:bg-emerald-950/60': lastPriorityReevaluatorResult.translateStatus === 'optimal',
+                      'text-amber-700 dark:text-amber-300 bg-amber-100/60 dark:bg-amber-950/60': lastPriorityReevaluatorResult.translateStatus === 'normal',
+                      'text-rose-700 dark:text-rose-300 bg-rose-100/60 dark:bg-rose-950/60': lastPriorityReevaluatorResult.translateStatus === 'degraded' || lastPriorityReevaluatorResult.translateStatus === 'offline'
+                    }"
+                  >
+                    {{ lastPriorityReevaluatorResult.fallbackTranslateLatencyMs != null ? `${lastPriorityReevaluatorResult.fallbackTranslateLatencyMs}ms` : lastPriorityReevaluatorResult.translateStatus }}
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -25566,7 +26257,7 @@ onUnmounted(() => {
 
                 <!-- Active Background Syncing Indicator -->
                 <span
-                  v-if="activeBackgroundSyncItemId === node.item.id"
+                  v-if="activeBackgroundSyncItemId === node.item.id || activeBackgroundSyncItemIds[node.item.id]"
                   class="mr-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-teal-50 dark:bg-teal-950/80 text-teal-700 dark:text-teal-300 border border-teal-300/90 dark:border-teal-700/80 flex items-center gap-1 shrink-0 select-none animate-pulse shadow-2xs"
                   :class="{ 'ml-auto': node.newPostsCount === 0 }"
                 >

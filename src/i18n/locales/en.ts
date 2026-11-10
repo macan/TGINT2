@@ -801,7 +801,7 @@ export default {
     bgSyncDisabledTip: "Background fetch is disabled. Click to enable.",
     bgSyncDisabledNotice: "Background fetch is currently disabled. Enable the switch first.",
     syncAll: "Sync All",
-    syncPriorityTooltip: "Smart sync prioritized by activity freshness: Uncached & active channels (< 24h) first, throttled for performance.",
+    syncPriorityTooltip: "Dual task queues (Channels & Keywords) prioritized by cache status, post gap lag, starvation time, and active node.",
     syncingProgress: "Syncing {current}/{total}",
     syncingItem: "Syncing \"{name}\"...",
     stopSync: "Stop Sync",

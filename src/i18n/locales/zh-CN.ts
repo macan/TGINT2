@@ -800,7 +800,7 @@ export default {
     bgSyncDisabledTip: "后台同步已停用。点击以启用。",
     bgSyncDisabledNotice: "后台同步当前已停用，请先打开全局开关。",
     syncAll: "一键同步",
-    syncPriorityTooltip: "按活跃度智能调度：未缓存与活跃频道（<24h）优先，平滑限流保障页面流畅。",
+    syncPriorityTooltip: "双队列并行调度（频道与关键词独立队列）：结合无缓存、发帖间隔方差滞后度、饥饿度与当前视图智能评分优先抓取。",
     syncingProgress: "正在同步 {current}/{total}",
     syncingItem: "正在同步 \"{name}\"...",
     stopSync: "停止同步",
