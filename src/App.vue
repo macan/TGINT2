@@ -160,6 +160,7 @@ const TypesTab = defineAsyncComponent(() => import("./components/TypesTab.vue"))
 const ArticleReaderView = defineAsyncComponent(() => import("./components/ArticleReaderView.vue"));
 const ChannelAnalyticsWrapper = defineAsyncComponent(() => import("./components/ChannelAnalyticsWrapper.vue"));
 const HotsDashboard = defineAsyncComponent(() => import("./components/listen/HotsDashboard.vue"));
+const TileTreemapView = defineAsyncComponent(() => import("./components/listen/TileTreemapView.vue"));
 const StorageMonitorWidget = defineAsyncComponent(() => import("./components/listen/StorageMonitorWidget.vue"));
 
 const preloadSecondaryViews = () => {
@@ -2770,9 +2771,9 @@ const listenFetchTimeMs = ref<number | null>(null);
 const listenAutoRefreshActive = ref(false);
 let listenRefreshInterval: any = null;
 
-// Listen Layout Modes: 'view' (Reading focus) vs 'rearrange' (Reorganization focus) vs 'flexible' (Multi-stream workdesk) vs 'hots' (Hot trends & intelligence)
-const listenLayoutMode = ref<'view' | 'rearrange' | 'flexible' | 'hots'>(
-  (localStorage.getItem("listen_layout_mode") as 'view' | 'rearrange' | 'flexible' | 'hots') || 'view'
+// Listen Layout Modes: 'view' (Reading focus) vs 'tile' (Proportional treemap) vs 'rearrange' (Reorganization focus) vs 'flexible' (Multi-stream workdesk) vs 'hots' (Hot trends & intelligence)
+const listenLayoutMode = ref<'view' | 'tile' | 'rearrange' | 'flexible' | 'hots'>(
+  (localStorage.getItem("listen_layout_mode") as 'view' | 'tile' | 'rearrange' | 'flexible' | 'hots') || 'view'
 );
 
 // Reactive tracker for IndexedDB posts updates for progressive Hots calculation
@@ -2827,15 +2828,15 @@ const handleDocumentClickForSortMenu = () => {
   }
 };
 
-const setListenLayoutMode = (mode: 'view' | 'rearrange' | 'flexible' | 'hots') => {
+const setListenLayoutMode = (mode: 'view' | 'tile' | 'rearrange' | 'flexible' | 'hots') => {
   listenLayoutMode.value = mode;
   localStorage.setItem("listen_layout_mode", mode);
   if (mode === 'flexible') {
     nextTick(() => {
       initFlexibleWorkdesk();
     });
-  } else if (mode === 'hots') {
-    // Hots mode initialized
+  } else if (mode === 'hots' || mode === 'tile') {
+    // Specialized full-width interactive dashboards
   } else {
     nextTick(() => {
       initRelationsGraph();
@@ -24751,7 +24752,7 @@ onUnmounted(() => {
         <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/70 dark:border-gray-700/70 shadow-sm p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div class="flex items-center gap-3.5 min-w-0">
             <div class="h-10 w-10 sm:h-11 sm:w-11 rounded-2xl bg-teal-50 dark:bg-teal-950/50 border border-teal-200/60 dark:border-teal-800/60 flex items-center justify-center text-teal-600 dark:text-teal-400 shrink-0 shadow-xs">
-              <component :is="listenLayoutMode === 'view' ? Eye : (listenLayoutMode === 'rearrange' ? FolderTree : (listenLayoutMode === 'hots' ? Flame : LayoutGrid))" class="h-5 w-5" />
+              <component :is="listenLayoutMode === 'view' ? Eye : (listenLayoutMode === 'tile' ? Layers : (listenLayoutMode === 'rearrange' ? FolderTree : (listenLayoutMode === 'hots' ? Flame : LayoutGrid)))" class="h-5 w-5" />
             </div>
             <div class="min-w-0">
               <div class="flex items-center gap-2 flex-wrap">
@@ -24766,7 +24767,7 @@ onUnmounted(() => {
                 </span>
               </div>
               <p class="text-xs text-gray-400 dark:text-gray-500 mt-0.5 truncate max-w-2xl">
-                {{ listenLayoutMode === 'view' ? t('listen.modeViewHint') : (listenLayoutMode === 'rearrange' ? t('listen.modeRearrangeHint') : (listenLayoutMode === 'hots' ? t('listen.modeHotsHint') : t('listen.modeFlexibleHint'))) }}
+                {{ listenLayoutMode === 'view' ? t('listen.modeViewHint') : (listenLayoutMode === 'tile' ? t('listen.modeTileHint') : (listenLayoutMode === 'rearrange' ? t('listen.modeRearrangeHint') : (listenLayoutMode === 'hots' ? t('listen.modeHotsHint') : t('listen.modeFlexibleHint')))) }}
               </p>
             </div>
           </div>
@@ -24893,6 +24894,19 @@ onUnmounted(() => {
               >
                 <Eye class="h-3.5 w-3.5" />
                 <span>{{ t('listen.modeView') }}</span>
+              </button>
+              <button
+                @click="setListenLayoutMode('tile')"
+                class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer select-none"
+                :class="[
+                  listenLayoutMode === 'tile'
+                    ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
+                    : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+                ]"
+                :title="t('listen.modeTileHint')"
+              >
+                <Layers class="h-3.5 w-3.5" />
+                <span>{{ t('listen.modeTile') || 'Tile Mode' }}</span>
               </button>
               <button
                 @click="setListenLayoutMode('rearrange')"
@@ -25586,6 +25600,569 @@ onUnmounted(() => {
                   <Radio class="h-4 w-4 text-teal-500" />
                   <span>{{ t('listen.allChannels') }}</span>
                 </button>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- Tile Mode (Hierarchical Proportional Treemap with Posts Feed below) -->
+        <template v-else-if="listenLayoutMode === 'tile'">
+          <div class="space-y-6 w-full">
+            <!-- Proportional Treemap Canvas Rectangle -->
+            <TileTreemapView
+              :directory="listenDirectory"
+              :selected-item="selectedListenNode"
+              :freshness-map="listenItemsFreshnessMap"
+              :channel-metadata-cache="listenChannelMetadataCache"
+              :is-dark="isDark"
+              @select-item="selectListenItem"
+            />
+
+            <!-- Posts Feed Area Below Treemap Rectangle -->
+            <div class="w-full">
+              <!-- Empty state when no listen item is selected yet -->
+              <div
+                v-if="!selectedListenNode"
+                class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700/80 shadow-sm flex flex-col items-center justify-center p-8 py-16 text-center w-full min-h-[300px]"
+              >
+                <div class="max-w-md mx-auto flex flex-col items-center">
+                  <div class="h-14 w-14 bg-teal-50 dark:bg-teal-950/20 rounded-2xl flex items-center justify-center text-teal-500 mb-4 border border-teal-100/50 dark:border-teal-900/20 shadow-xs">
+                    <Radio class="h-7 w-7 text-teal-600 dark:text-teal-400 animate-pulse" />
+                  </div>
+                  <h3 class="text-base sm:text-lg font-black text-gray-900 dark:text-white uppercase tracking-wider">
+                    {{ t('listen.liveRealtimeFeed') }}
+                  </h3>
+                  <p class="text-xs text-gray-400 mt-1.5 leading-relaxed max-w-sm">
+                    Click on any channel or keyword tile in the treemap above to inspect its real-time cached post stream.
+                  </p>
+                  <div class="mt-4 flex flex-wrap gap-2 justify-center">
+                    <span class="text-[11px] px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-full font-mono font-medium">
+                      {{ t('listen.channelListening') }}
+                    </span>
+                    <span class="text-[11px] px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded-full font-mono font-medium">
+                      {{ t('listen.keywordFiltering') }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Active Listen Node Post Feed Pane -->
+              <div v-else class="space-y-6 select-text">
+                <!-- Active Info Header -->
+                <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm p-5 sm:p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div class="space-y-2 min-w-0 flex-1">
+                    <!-- Folder Breadcrumbs Path -->
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <div class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-gray-50 dark:bg-gray-900/60 border border-gray-200/70 dark:border-gray-700/60 text-xs font-medium text-gray-600 dark:text-gray-300">
+                        <FolderTree class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 shrink-0" />
+                        <span class="text-[11px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">{{ t('listen.folderPath') }}:</span>
+                        <nav class="inline-flex items-center gap-1 flex-wrap" aria-label="Breadcrumb">
+                          <template v-for="(crumb, idx) in selectedItemFolderBreadcrumbs" :key="crumb.id ?? 'root'">
+                            <ChevronRight v-if="idx > 0" class="h-3 w-3 text-gray-300 dark:text-gray-600 shrink-0" />
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-semibold text-teal-700 dark:text-teal-300">
+                              <component
+                                :is="crumb.id === null ? Database : (idx === selectedItemFolderBreadcrumbs.length - 1 ? FolderOpen : Folder)"
+                                class="h-3 w-3 shrink-0"
+                                :class="crumb.id === null ? 'text-teal-500' : 'text-amber-500'"
+                              />
+                              <span>{{ crumb.name }}</span>
+                            </span>
+                          </template>
+                        </nav>
+                      </div>
+
+                      <button
+                        type="button"
+                        @click="openMoveModal(selectedListenNode)"
+                        class="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold text-gray-500 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 hover:bg-teal-50/70 dark:hover:bg-teal-950/40 border border-transparent hover:border-teal-200/60 dark:border-teal-800/60 transition-all cursor-pointer"
+                        :title="t('listen.moveTo')"
+                      >
+                        <ArrowRightLeft class="h-3 w-3 text-teal-500" />
+                        <span>{{ t('listen.moveTo') }}</span>
+                      </button>
+                    </div>
+
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span 
+                        class="text-[10px] font-black uppercase tracking-widest px-2.5 py-0.5 rounded-full"
+                        :class="[
+                          selectedListenNode.type === 'channel'
+                            ? 'bg-orange-50 dark:bg-orange-950/30 text-orange-600 dark:text-orange-400 border border-orange-100 dark:border-orange-900/30'
+                            : 'bg-cyan-50 dark:bg-cyan-950/30 text-cyan-600 dark:text-cyan-400 border border-cyan-100 dark:border-cyan-900/30'
+                        ]"
+                      >
+                        {{ t('listen.telegramType', { type: selectedListenNode.type }) }}
+                      </span>
+                      <h2 class="text-base sm:text-lg font-black tracking-tight text-gray-900 dark:text-white truncate">
+                        {{ selectedListenNode.name }}
+                      </h2>
+                      <span 
+                        v-if="getItemOrFolderFreshness(selectedListenNode)"
+                        class="px-2 py-0.5 rounded-md text-[10px] font-bold border inline-flex items-center gap-1 transition-colors select-none font-mono"
+                        :class="getFreshnessBadgeClasses(getItemOrFolderFreshness(selectedListenNode)!.level)"
+                        :title="`${t('listen.newestPost')}: ${getItemOrFolderFreshness(selectedListenNode)!.formattedDate}`"
+                      >
+                        <span class="h-1.5 w-1.5 rounded-full" :class="getFreshnessDotColor(getItemOrFolderFreshness(selectedListenNode)!.level)"></span>
+                        <span>{{ t('listen.freshness') }}: {{ getItemOrFolderFreshness(selectedListenNode)!.relativeTime }}</span>
+                      </span>
+                    </div>
+                    <p v-if="selectedListenNode.description" class="text-xs text-gray-550 dark:text-gray-400 italic max-w-xl">
+                      {{ selectedListenNode.description }}
+                    </p>
+                  </div>
+
+                  <!-- Listen Control Bar -->
+                  <div class="flex items-center gap-2 self-start md:self-center shrink-0">
+                    <div class="flex items-center bg-gray-100 dark:bg-gray-800/80 px-3 py-1.5 rounded-xl border border-gray-200/50 dark:border-gray-700/50 text-xs font-semibold text-gray-600 dark:text-gray-300 gap-1.5">
+                      <Database class="h-3.5 w-3.5 text-teal-500" />
+                      <span>{{ t('listen.cachedPosts', { count: listenPosts.length }) }}</span>
+                      <button
+                        v-if="listenPosts.length > 0"
+                        @click="clearCachedListenPosts"
+                        class="ml-1 p-0.5 text-gray-400 hover:text-red-500 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors cursor-pointer"
+                        :title="t('listen.clearCachedPosts')"
+                      >
+                        <X class="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                    <button
+                      @click="toggleListenAutoRefresh"
+                      class="px-4 py-2 text-xs font-bold rounded-xl flex items-center gap-2 transition-all duration-300 cursor-pointer"
+                      :class="[
+                        listenAutoRefreshActive
+                          ? 'bg-green-600 hover:bg-green-700 text-white shadow-md shadow-green-600/10'
+                          : 'bg-gray-150 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600'
+                      ]"
+                    >
+                      <span 
+                        class="h-2 w-2 rounded-full bg-white block" 
+                        :class="[listenAutoRefreshActive ? 'animate-ping' : '']"
+                      ></span>
+                      <span>{{ t('listen.livePolling', { interval: selectedListenNode?.type === 'keyword' ? '60s' : '30s', status: listenAutoRefreshActive ? t('common.on') : t('common.off') }) }}</span>
+                    </button>
+                    <button
+                      @click="fetchListenPosts(selectedListenNode)"
+                      class="p-2 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-xl text-gray-500 dark:text-gray-300 transition-colors cursor-pointer"
+                      :title="t('listen.manualSync')"
+                      :disabled="isFetchingListenPosts"
+                    >
+                      <RefreshCw class="h-4 w-4" :class="[isFetchingListenPosts ? 'animate-spin' : '']" />
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Channel Metadata Widget in Tile Mode -->
+                <div v-if="selectedListenNode.type === 'channel' && selectedChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col md:flex-row items-stretch relative">
+                  <div class="bg-gradient-to-br from-teal-500/20 to-teal-600/5 dark:from-teal-950/40 dark:to-teal-900/10 p-5 sm:p-6 flex flex-row md:flex-col items-center justify-center gap-4 border-b md:border-b-0 md:border-r border-gray-150 dark:border-gray-700 md:w-48 shrink-0 select-none">
+                    <div class="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-white dark:bg-gray-800 border-2 shadow-md shrink-0 flex items-center justify-center relative overflow-hidden">
+                      <img
+                        :src="selectedChannelMetadata.photo && (selectedChannelMetadata.photo.startsWith('data:'))
+                          ? selectedChannelMetadata.photo
+                          : `https://i.gogingko.net/api/v1/v/telegram-profile/${selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument}`"
+                        @error="handleImageError"
+                        alt="Channel Avatar"
+                        class="w-full h-full object-cover rounded-2xl"
+                      />
+                    </div>
+                    <div class="text-center flex-1">
+                      <h4 class="text-xs font-bold text-gray-400 uppercase tracking-widest leading-none mb-1 truncate max-w-[150px]">
+                        @{{ selectedChannelMetadata.username || selectedChannelMetadata.name || selectedListenNode.argument }}
+                      </h4>
+                      <span v-if="selectedChannelMetadata.subscribers || selectedChannelMetadata.members || selectedChannelMetadata.participants_count" class="inline-flex items-center gap-1 text-[10px] bg-teal-50 dark:bg-teal-950/50 text-teal-600 dark:text-teal-400 font-black px-2 py-0.5 rounded-full uppercase tracking-wider">
+                        <Users class="h-3 w-3" />
+                        {{ (selectedChannelMetadata.subscribers || selectedChannelMetadata.members || selectedChannelMetadata.participants_count).toLocaleString() }}
+                      </span>
+                    </div>
+                  </div>
+                  <div class="p-5 sm:p-6 flex-1 flex flex-col justify-between gap-3">
+                    <div class="space-y-1.5">
+                      <div class="flex items-center justify-between gap-2 flex-wrap">
+                        <h3 class="text-base font-black text-gray-900 dark:text-white leading-tight">
+                          {{ selectedChannelMetadata.title || selectedChannelMetadata.name }}
+                        </h3>
+                        <a
+                          :href="`https://t.me/${selectedChannelMetadata.username || selectedListenNode.argument}`"
+                          target="_blank"
+                          class="inline-flex items-center gap-1.5 px-3 py-1 bg-teal-500 hover:bg-teal-600 text-white dark:bg-teal-600 dark:hover:bg-teal-700 text-[11px] font-bold rounded-xl shadow-sm transition-all"
+                        >
+                          <ExternalLink class="h-3 w-3" />
+                          <span>{{ t('listen.joinChannel') }}</span>
+                        </a>
+                      </div>
+                      <p v-if="selectedChannelMetadata.description || selectedChannelMetadata.about" class="text-xs text-gray-650 dark:text-gray-300 leading-relaxed whitespace-pre-wrap break-words bg-gray-50/50 dark:bg-gray-800/50 p-3 rounded-2xl border border-gray-100/50 dark:border-gray-700/50">
+                        {{ selectedChannelMetadata.description || selectedChannelMetadata.about }}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Stream Messages Feed Area -->
+                <div class="space-y-6">
+                  <!-- Loading State -->
+                  <div v-if="isFetchingListenPosts && listenPosts.length === 0" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center py-20 text-gray-400">
+                    <LoaderCircle class="h-10 w-10 animate-spin text-teal-500 mb-4" />
+                    <p class="text-sm font-semibold text-gray-500">{{ t('listen.connectingPipeline') }}</p>
+                  </div>
+                  <!-- Empty Feed alert -->
+                  <div v-else-if="listenPosts.length === 0" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center py-24 text-center max-w-sm mx-auto text-gray-400">
+                    <Inbox class="h-12 w-12 mb-4 opacity-40 text-teal-400" />
+                    <p class="text-sm font-bold text-gray-700 dark:text-gray-300">{{ t('listen.noLogsFound') }}</p>
+                    <p class="text-xs mt-1">{{ t('listen.noLogsDesc') }}</p>
+                  </div>
+                  <!-- Active post list feeds cascade -->
+                  <div v-else class="space-y-6">
+                    <div
+                      v-for="(post, index) in visibleListenPosts"
+                      :key="post.key || index"
+                      :id="'tile-post-' + (post.key || index)"
+                      :data-post-key="post.key"
+                      class="rounded-3xl shadow-sm border p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden bg-white dark:bg-gray-800"
+                      :class="[
+                        newlyFetchedListenKeys.has(post.key) || (post.id && newlyFetchedListenKeys.has(post.id))
+                          ? 'border-amber-400 dark:border-amber-500 ring-2 ring-amber-500/20'
+                          : 'border-gray-150 dark:border-gray-700'
+                      ]"
+                    >
+                      <div class="absolute -top-10 -right-10 w-24 h-24 bg-teal-50/50 dark:bg-teal-900/10 rounded-full blur-2xl pointer-events-none"></div>
+
+                      <!-- Quoted / Hover actions -->
+                      <div class="absolute top-4 right-4 flex space-x-1.5 z-20">
+                        <button
+                          @click.stop="addToWorkspaceFromPost(post)"
+                          class="text-[10px] font-bold text-gray-500 hover:text-blue-600 dark:text-gray-400 dark:hover:text-blue-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-700 px-2.5 py-1 rounded-full cursor-pointer"
+                          :title="t('listen.addToWorkspaceAnalysis')"
+                        >
+                          <Plus class="h-3 w-3 mr-1" />
+                          <span>{{ t('workspace.title') }}</span>
+                        </button>
+                        <button
+                          @click.stop="sharePost(post)"
+                          class="text-[10px] font-bold text-gray-500 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 transition-colors flex items-center bg-gray-100 dark:bg-gray-700 px-2.5 py-1 rounded-full cursor-pointer"
+                          :title="t('listen.shareLinks')"
+                        >
+                          <Share2 class="h-3 w-3 mr-1" />
+                          <span>{{ t('listen.share') }}</span>
+                        </button>
+                      </div>
+
+                      <!-- Post top profile header card -->
+                      <div class="flex justify-between items-start mb-4 relative z-10">
+                        <div class="flex items-center space-x-3">
+                          <div class="w-10 h-10 rounded-full bg-teal-50 dark:bg-teal-900/30 flex items-center justify-center text-teal-600 dark:text-teal-400 font-bold text-sm overflow-hidden ring-1 ring-white dark:ring-gray-800 shadow-sm shrink-0">
+                            <img
+                              :src="getPostAvatarUrl(post)"
+                              @error="handleImageError"
+                              alt="TelegAvatar"
+                              class="w-full h-full object-cover"
+                            />
+                          </div>
+                          <div>
+                            <div class="flex items-center flex-wrap gap-1.5">
+                              <h4 class="text-xs sm:text-sm font-extrabold text-gray-900 dark:text-white hover:text-teal-500 transition-colors">
+                                {{ post.data?.author || post.data?.user || selectedListenNode.name }}
+                              </h4>
+                              <span
+                                v-if="getToolName && getToolName(post)"
+                                class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full shrink-0"
+                                :class="
+                                  getToolName(post) === 'TGB'
+                                    ? 'bg-purple-50 dark:bg-purple-950/40 text-purple-600 dark:text-purple-400 border border-purple-100/50 dark:border-purple-900/10'
+                                    : 'bg-gray-50 dark:bg-gray-900 text-gray-450 border border-gray-150/40 dark:border-gray-800'
+                                "
+                              >
+                                {{ getToolName(post) }}
+                              </span>
+                              <span v-if="getUsername && getUsername(post)" class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-full bg-teal-50 dark:bg-teal-950/30 text-teal-650 dark:text-teal-400 border border-teal-100/40 dark:border-teal-900/20 shrink-0">
+                                {{ getUsername(post) }}
+                              </span>
+                            </div>
+                            <div class="flex items-center gap-x-2 text-[10px] font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mt-0.5">
+                              <span>{{ formatDate(post.data?.date) }}</span>
+                              <span v-if="post.mtime" class="text-[9px] text-teal-500 lowercase normal-case tracking-normal">
+                                ({{ t('listen.scrapedAt', { time: formatScrapedDate(post.mtime) }) }})
+                              </span>
+                              <span 
+                                v-if="newlyFetchedListenKeys.has(post.key) || (post.id && newlyFetchedListenKeys.has(post.id))"
+                                class="text-[9px] bg-amber-550 dark:bg-amber-500 text-white dark:text-white font-extrabold px-1.5 py-0.5 rounded-md tracking-wider animate-pulse inline-flex items-center"
+                              >
+                                {{ t('listen.newBadge') }}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <a
+                          v-if="post.url || post.link"
+                          :href="post.url || post.link"
+                          target="_blank"
+                          class="text-[10px] font-bold text-teal-600 dark:text-teal-400 hover:text-teal-700 dark:hover:text-teal-350 transition-colors flex items-center bg-teal-50 dark:bg-teal-900/30 px-2 py-0.5 rounded-full shrink-0"
+                        >
+                          {{ t('listen.viewTg') }} <ExternalLink class="h-2.5 w-2.5 ml-0.5" />
+                        </a>
+                      </div>
+
+                      <!-- Reply Segment Quoted -->
+                      <div
+                        v-if="post.data?.reply && post.data.reply.length >= 2"
+                        class="mb-4 border-l-4 border-teal-400 dark:border-teal-500 bg-teal-50/30 dark:bg-teal-900/10 p-3.5 rounded-r-2xl relative z-10"
+                      >
+                        <div class="flex items-center justify-between text-[9px] font-black uppercase tracking-widest text-teal-600 dark:text-teal-400 mb-1">
+                          <div class="flex items-center gap-1">
+                            <Reply class="h-3 w-3" />
+                            <span>{{ t('listen.replyToMessage') }}</span>
+                          </div>
+                        </div>
+                        <div class="text-gray-600 dark:text-gray-350 text-xs sm:text-sm whitespace-pre-wrap break-words italic line-clamp-2">
+                          {{ post.data.reply[1] }}
+                        </div>
+                      </div>
+
+                      <!-- Forward Subcard Segment -->
+                      <div
+                        v-if="post.data?.forward_url"
+                        class="mb-4 border-l-4 border-purple-400 dark:border-purple-500 bg-purple-50/50 dark:bg-purple-900/10 p-3.5 rounded-r-2xl relative z-10"
+                      >
+                        <div class="flex items-center justify-between text-[9px] font-black uppercase tracking-widest text-purple-600 dark:text-purple-400 mb-1">
+                          <div class="flex items-center gap-1">
+                            <Forward class="h-3 w-3" />
+                            <span>{{ t('listen.forward') }}</span>
+                          </div>
+                        </div>
+                        <div class="flex items-start justify-between gap-4">
+                          <div class="text-gray-700 dark:text-gray-300 text-xs sm:text-sm whitespace-pre-wrap break-words italic flex-1">
+                            {{ getForwardInfo(post)?.text || post.data.forward_url }}
+                          </div>
+                          <button
+                            v-if="getForwardInfo(post)?.target"
+                            @click="jumpToExplorerFromListen(getForwardInfo(post).target, post.key)"
+                            class="inline-flex items-center gap-1 px-2.5 py-1.5 bg-purple-50 hover:bg-purple-100 dark:bg-purple-900/40 dark:hover:bg-purple-900/70 text-purple-600 dark:text-purple-400 rounded-xl border border-purple-200/50 dark:border-purple-850 text-[10px] font-bold transition-all shrink-0 cursor-pointer self-start"
+                            :title="t('listen.viewChannel')"
+                          >
+                            <span>@{{ getForwardInfo(post).target }}</span>
+                            <ChevronRight class="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
+                      <!-- Post content string messages -->
+                      <div v-if="post.data?.content || post.data?.rawcontent" class="flex items-start gap-2 mb-4 relative z-10">
+                        <div 
+                          v-html="highlightTextByKeywords(getSafePostContent(post))"
+                          class="text-gray-800 dark:text-gray-100 text-[14px] leading-relaxed whitespace-pre-wrap break-words flex-1"
+                        ></div>
+                        <button
+                          @click="translatePost(post)"
+                          class="p-1 -mt-1 text-gray-400 hover:text-green-500 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-md transition-colors flex-shrink-0 cursor-pointer"
+                          :title="t('listen.translateContents')"
+                        >
+                          <Languages v-if="!isTranslating[post.key]" class="h-4 w-4" />
+                          <Loader2 v-else class="h-4 w-4 animate-spin" />
+                        </button>
+                      </div>
+
+                      <!-- Translated Posts Container -->
+                      <div
+                        v-if="translatedPosts[post.key]"
+                        class="mb-4 rounded-xl border border-teal-200 dark:border-teal-900/50 bg-teal-50/40 dark:bg-teal-950/20 p-4 relative z-10"
+                      >
+                        <div class="flex items-center text-[10px] font-black tracking-widest text-teal-600 uppercase mb-2">
+                          <Languages class="h-3.5 w-3.5 mr-1" /> {{ t('listen.translatedVersion') }}
+                        </div>
+                        <div class="text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap break-words">
+                          {{ translatedPosts[post.key] }}
+                        </div>
+                      </div>
+
+                      <!-- Contact details -->
+                      <div
+                        v-if="post.data?.contact && Object.keys(post.data.contact).length > 0"
+                        class="mb-4 rounded-xl border border-blue-250 dark:border-blue-900/50 bg-blue-50/30 dark:bg-blue-950/20 p-4 relative z-10"
+                      >
+                        <div class="flex items-center text-[10px] font-black tracking-widest text-blue-500 uppercase mb-2">
+                          <User class="h-3.5 w-3.5 mr-1" /> {{ t('listen.contactShared') }}
+                        </div>
+                        <div class="text-xs text-gray-800 dark:text-gray-300 font-mono">
+                          {{ post.data.contact.first_name }} {{ post.data.contact.last_name }} 
+                          <span v-if="post.data.contact.phone_number" class="block text-blue-500 mt-1 font-bold">{{ post.data.contact.phone_number }}</span>
+                        </div>
+                      </div>
+
+                      <!-- Multimedia Embeddings photos -->
+                      <div
+                        v-if="post.data?.photos && post.data.photos.length > 0"
+                        class="mb-4 rounded-2xl overflow-hidden shadow-sm border border-gray-150 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/30 group-cursor cursor-zoom-in max-w-sm"
+                        @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`)"
+                      >
+                        <img
+                          :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_0`"
+                          class="w-full h-auto max-h-[300px] object-cover transition-transform duration-700 hover:scale-105"
+                          alt="TelegPhoto"
+                          referrerpolicy="no-referrer"
+                        />
+                      </div>
+                      <div
+                        v-if="post.data?.documents && post.data.documents.length > 0 && post.data.documents[0].mime_type && post.data.documents[0].mime_type.startsWith('image/')"
+                        class="mb-4 rounded-2xl overflow-hidden shadow-sm border border-gray-150 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/30 group-cursor cursor-zoom-in max-w-sm"
+                        @click="
+                          openLightbox(
+                            `https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`
+                          )
+                        "
+                      >
+                        <img
+                          :src="`https://i.gogingko.net/api/v1/v/telegram-doc/${post.key}`"
+                          class="w-full h-auto max-h-[500px] object-contain mx-auto transition-transform duration-700 group-hover/media:scale-105"
+                          alt="Post photo by document"
+                          referrerpolicy="no-referrer"
+                        />
+                      </div>
+
+                      <!-- Videos playables -->
+                      <div
+                        v-if="post.data?.videos && post.data.videos.length > 0"
+                        class="mb-4 rounded-2xl overflow-hidden border border-gray-200 dark:border-gray-700 bg-black max-w-sm shadow-sm"
+                      >
+                        <video controls preload="metadata" playsinline class="w-full h-auto max-h-[300px]">
+                          <source :src="getVideoUrl(post)" type="video/mp4" />
+                        </video>
+                      </div>
+
+                      <!-- Link Metadata Embeds -->
+                      <div
+                        v-if="post.data?.linkPreview"
+                        class="mb-3 rounded-2xl overflow-hidden border border-gray-150 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/10 flex flex-col sm:flex-row shadow-sm hover:shadow-md transition-shadow shrink-0"
+                      >
+                        <div
+                          v-if="post.data.linkPreview.image"
+                          class="sm:w-24 sm:h-24 shrink-0 bg-gray-200 dark:bg-gray-800 overflow-hidden cursor-zoom-in"
+                          @click="openLightbox(`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`)"
+                        >
+                          <img
+                            :src="`https://i.gogingko.net/api/v1/v/telegram-photo/${post.key}_l_0`"
+                            class="w-full h-full object-cover transition-transform duration-500 hover:scale-105"
+                            alt="PreTelegPhoto"
+                          />
+                        </div>
+                        <div class="p-4 flex-1 min-w-0">
+                          <div class="text-[10px] font-black uppercase tracking-widest text-teal-500 truncate mb-1">
+                            {{ post.data.linkPreview.siteName || t('listen.embedWebpage') }}
+                          </div>
+                          <a
+                            v-if="post.data.linkPreview.href"
+                            :href="post.data.linkPreview.href"
+                            target="_blank"
+                            class="text-xs sm:text-sm font-bold text-gray-950 dark:text-gray-100 hover:text-blue-500 hover:underline transition-colors block line-clamp-1 mb-1"
+                          >
+                            {{ post.data.linkPreview.title || t('listen.embedLinkUrl') }}
+                          </a>
+                          <p v-if="post.data.linkPreview.description" class="text-xs text-gray-400 dark:text-gray-500 line-clamp-2">
+                            {{ post.data.linkPreview.description }}
+                          </p>
+                        </div>
+                      </div>
+
+                      <!-- PDF or Other Document Preview -->
+                      <div
+                        v-for="(doc, dIdx) in getPostDocuments(post)"
+                        :key="dIdx"
+                        class="mb-3 last:mb-4 rounded-2xl overflow-hidden border border-gray-100 dark:border-gray-700 bg-gray-50/80 dark:bg-gray-800/50 flex items-center p-4 shadow-sm hover:shadow-md transition-shadow relative z-10"
+                      >
+                        <div class="mr-4">
+                          <FileText class="h-10 w-10 text-red-500" />
+                        </div>
+                        <div class="flex-1 min-w-0">
+                          <h4 class="text-sm font-bold text-gray-900 dark:text-white mb-1 text-wrap break-all">
+                            {{ doc.title }}
+                          </h4>
+                          <a
+                            v-if="doc.url"
+                            :href="doc.url"
+                            target="_blank"
+                            class="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-semibold"
+                          >
+                            {{ t('listen.viewDocument') }}
+                          </a>
+                        </div>
+                      </div>
+
+                      <!-- Bottom Metadata Bar -->
+                      <div
+                        class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-xs text-gray-500 dark:text-gray-400"
+                      >
+                        <div class="flex items-center space-x-4 flex-wrap gap-y-1">
+                          <span v-if="post.data?.views != null"
+                            >{{ t('listen.viewsCount', { views: formatViews(post.data.views) }) }}</span
+                          >
+                          <!-- Post Reactions (Listen stream) -->
+                          <div
+                            v-if="post.data?.reactions && getParsedReactions(post.data.reactions).length > 0"
+                            class="flex flex-wrap items-center gap-1"
+                          >
+                            <span
+                              v-for="(react, rIdx) in getParsedReactions(post.data.reactions)"
+                              :key="rIdx"
+                              class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-750 border border-gray-200 dark:border-gray-700 transition-colors cursor-default select-none shadow-3xs"
+                            >
+                              <span v-html="react.emoji"></span>
+                              <span class="text-[9px] font-bold font-mono text-gray-400 dark:text-gray-500">{{ react.count.toLocaleString() }}</span>
+                            </span>
+                          </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <button
+                            class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-teal-600 dark:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-900/20 transition-colors cursor-pointer"
+                            @click="jumpToExplorerFromListen(post.key.split('.')[0], post.key)"
+                          >
+                            {{ post.key.split('.')[0] }}
+                          </button>
+                          <button
+                            v-if="hasOldVersions(post)"
+                            @click="openOldVersionsModal(post)"
+                            class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/80 dark:border-amber-800/60 hover:bg-amber-100 dark:hover:bg-amber-900/60 transition-all cursor-pointer mr-1.5"
+                            :title="t('listen.viewVersionHistory')"
+                          >
+                            <History class="w-3 h-3 text-amber-500" />
+                            <span>{{ t('listen.oldVersions') }}</span>
+                          </button>
+                          <span
+                            v-if="post.key"
+                            class="font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded text-[10px] text-gray-400 dark:text-gray-500"
+                            >ID: {{ post.key }}</span
+                          >
+                        </div>
+                      </div>
+
+                      <!-- Raw Post Debug details -->
+                      <details class="mt-3 text-xs">
+                        <summary
+                          class="text-gray-400 dark:text-gray-500 cursor-pointer hover:text-gray-600 dark:hover:text-gray-300"
+                        >
+                          {{ t('listen.rawData') }}
+                        </summary>
+                        <pre
+                          class="mt-2 p-2 bg-gray-50 dark:bg-gray-900 rounded overflow-x-auto text-gray-500 dark:text-gray-400"
+                          >{{ JSON.stringify(post, null, 2) }}</pre
+                        >
+                      </details>
+                    </div>
+
+                    <!-- Progressive Rendering / Infinite Scroll Trigger for Tile Feed -->
+                    <div class="py-4 flex flex-col items-center justify-center gap-2">
+                      <div v-if="hasMoreListenPosts" class="flex items-center gap-2">
+                        <button
+                          @click="loadMoreListenPosts"
+                          class="px-4 py-2 rounded-xl text-xs font-semibold bg-gray-100 dark:bg-gray-700 hover:bg-teal-50 hover:text-teal-600 dark:hover:bg-gray-600 dark:hover:text-teal-300 text-gray-600 dark:text-gray-300 transition-colors flex items-center gap-2 shadow-2xs border border-gray-200 dark:border-gray-600 cursor-pointer"
+                        >
+                          <ChevronDown class="h-4 w-4" />
+                          <span>{{ t('listen.loadMore') || 'Load more posts' }} ({{ visibleListenPosts.length }} / {{ listenPosts.length }})</span>
+                        </button>
+                      </div>
+                      <div v-else-if="listenPosts.length > 0" class="text-[11px] text-gray-400 dark:text-gray-500 font-medium py-2">
+                        {{ t('listen.allCaughtUp') || 'All posts loaded' }} ({{ listenPosts.length }})
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

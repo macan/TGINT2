@@ -1386,8 +1386,12 @@ export async function clusterWithGeminiAI(
     const toTranslate = topics.filter(t => isNonEnglishNonChinese(t.title) && (!t.titleZh || t.titleZh === t.title));
     if (toTranslate.length === 0) return;
 
+    const titles = Array.from(new Set(toTranslate.map(t => t.title.trim())));
+    const translations: Record<string, string> = {};
+
+    // Tier 1: Try server endpoint via POST
+    let success = false;
     try {
-      const titles = Array.from(new Set(toTranslate.map(t => t.title.trim())));
       const res = await fetch('/api/translate-titles', {
         method: 'POST',
         headers: {
@@ -1398,16 +1402,78 @@ export async function clusterWithGeminiAI(
 
       if (res.ok) {
         const data = await res.json();
-        const translations: Record<string, string> = data.translations || {};
-        for (const topic of toTranslate) {
-          const trans = translations[topic.title.trim()] || translations[topic.title];
-          if (trans && typeof trans === 'string' && trans.trim() && trans.trim() !== topic.title.trim()) {
-            topic.titleZh = trans.trim();
+        Object.assign(translations, data.translations || {});
+        success = true;
+      } else if (res.status === 405) {
+        // Cloudflare Workers or static asset handler rejected POST -> Tier 2: Try GET
+        try {
+          const getRes = await fetch(`/api/translate-titles?titles=${encodeURIComponent(JSON.stringify(titles))}`, {
+            method: 'GET'
+          });
+          if (getRes.ok) {
+            const data = await getRes.json();
+            Object.assign(translations, data.translations || {});
+            success = true;
           }
-        }
+        } catch {}
       }
-    } catch (err) {
-      console.warn("Failed to fetch Chinese translations for foreign titles:", err);
+    } catch {
+      // Network/abort failure on POST -> Tier 2: Try GET fallback
+      try {
+        const getRes = await fetch(`/api/translate-titles?titles=${encodeURIComponent(JSON.stringify(titles))}`, {
+          method: 'GET'
+        });
+        if (getRes.ok) {
+          const data = await getRes.json();
+          Object.assign(translations, data.translations || {});
+          success = true;
+        }
+      } catch {}
+    }
+
+    // Tier 3: Client-side direct fallback if server endpoint is blocked by Cloudflare (405) or not hosted
+    const unhandled = titles.filter(t => !translations[t]);
+    if (unhandled.length > 0) {
+      await Promise.all(
+        unhandled.map(async (title) => {
+          try {
+            // Google Translate client endpoint
+            const gUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(title)}`;
+            const gRes = await fetch(gUrl);
+            if (gRes.ok) {
+              const data = await gRes.json();
+              if (Array.isArray(data) && Array.isArray(data[0])) {
+                const translated = data[0].map((item: any) => item?.[0] || '').join('').trim();
+                if (translated && translated !== title) {
+                  translations[title] = translated;
+                  return;
+                }
+              }
+            }
+          } catch {}
+
+          // Secondary client fallback: MyMemory Neural MT
+          try {
+            const mUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(title)}&langpair=autodetect|zh-CN`;
+            const mRes = await fetch(mUrl);
+            if (mRes.ok) {
+              const data = await mRes.json();
+              const tr = data?.responseData?.translatedText;
+              if (tr && typeof tr === 'string' && tr.trim() && !tr.includes('MYMEMORY WARNING')) {
+                translations[title] = tr.trim();
+              }
+            }
+          } catch {}
+        })
+      );
+    }
+
+    // Apply translations to topics
+    for (const topic of toTranslate) {
+      const trans = translations[topic.title.trim()] || translations[topic.title];
+      if (trans && typeof trans === 'string' && trans.trim() && trans.trim() !== topic.title.trim()) {
+        topic.titleZh = trans.trim();
+      }
     }
   }
 

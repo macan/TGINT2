@@ -14,6 +14,17 @@ const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '10mb' }));
 
+// Cross-Origin Resource Sharing (CORS) & Preflight handling for Cloudflare / edge deployments
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-gos-token');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 // Shared server-side Gemini client helper
 function getGeminiClient(customApiKey?: string): GoogleGenAI | null {
   const key = customApiKey || process.env.GEMINI_API_KEY;
@@ -192,6 +203,14 @@ app.post('/api/gemini/generate-stream', async (req, res) => {
 // ---------------------------------------------------------------------------
 
 app.all('/api/lq/:channel', async (req, res) => {
+  res.header('Allow', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  if (req.method !== 'POST' && req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
   try {
     const channel = req.params.channel;
     const url = `https://i.gogingko.net/api/v1/lq/${encodeURIComponent(channel)}`;
@@ -213,10 +232,36 @@ app.all('/api/lq/:channel', async (req, res) => {
 
 
 // Endpoint to translate non-English, non-Chinese topic titles into Chinese
-app.post('/api/translate-titles', async (req, res) => {
+// Supports both POST and GET to prevent 405 Method Not Allowed behind Cloudflare Workers / reverse proxies
+app.all('/api/translate-titles', async (req, res) => {
+  res.header('Allow', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  if (req.method !== 'POST' && req.method !== 'GET') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
   try {
-    const { titles, apiKey: customKey } = req.body;
-    if (!Array.isArray(titles) || titles.length === 0) {
+    let rawTitles: any = req.body?.titles;
+    let customKey: string | undefined = req.body?.apiKey;
+
+    // Support GET query parameters fallback (e.g. ?titles=["..."])
+    if (!rawTitles && req.query.titles) {
+      try {
+        rawTitles = typeof req.query.titles === 'string' && req.query.titles.startsWith('[')
+          ? JSON.parse(req.query.titles)
+          : String(req.query.titles).split(',');
+      } catch {
+        rawTitles = [String(req.query.titles)];
+      }
+    }
+    if (!customKey && typeof req.query.apiKey === 'string') {
+      customKey = req.query.apiKey;
+    }
+
+    const titles: string[] = Array.isArray(rawTitles) ? rawTitles : [];
+    if (titles.length === 0) {
       return res.json({ translations: {} });
     }
 
