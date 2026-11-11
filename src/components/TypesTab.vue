@@ -36,7 +36,8 @@ import {
   Loader2,
   Image as ImageIcon,
   Info,
-  Languages
+  Languages,
+  Database
 } from "lucide-vue-next";
 import { useI18n } from "../i18n";
 import {
@@ -52,6 +53,28 @@ import {
   calculateDistributionAwareScore,
   type ParsedFilterCriteria
 } from "../utils/systemoneFilter";
+import {
+  initTypesDB,
+  getTypesCacheMeta,
+  saveTypesCacheMeta,
+  batchSaveClassifiedChannels,
+  saveLz4Blob,
+  getLz4Blob,
+  loadAllCompactRecords,
+  getChannelsByHandles,
+  getChannelByHandle,
+  clearTypesCache,
+  getTypesDbStats,
+  getCachedChannelsCount,
+  type TypesCacheMeta,
+  type CompactChannelRecord,
+  type ClassifiedChannel
+} from "../utils/indexedDbTypes";
+import {
+  toCompactRecord,
+  matchesCompactFilter,
+  compareCompactRecords
+} from "../utils/typesCompactIndex";
 
 const { t } = useI18n();
 
@@ -59,30 +82,30 @@ const emit = defineEmits<{
   (e: "explore-channel", channel: string): void;
 }>();
 
-// Compact data structure supporting both legacy and new format
-export interface ClassifiedChannel {
-  channel: string;
-  topic: string;
-  topicConf: number;
-  topicProbs: Record<string, number>;
-  country: string;
-  countryConf: number;
-  countryProbs: Record<string, number>;
-  domestic: number;
-  // Read Value scoring (new format)
-  hasReadValue: boolean;
-  readValueScore: number | null;
-  readValueProbs: Record<string, number>;
-  readValueLegend?: Record<string, string> | null;
-  tokensIn: number;
-  tokensOut: number;
-  latencyMs: number;
-  model: string;
-}
-
 // Ingestion and Streaming State
-const items = ref<ClassifiedChannel[]>([]);
+const compactItems = ref<CompactChannelRecord[]>([]);
+const items = compactItems; // Backwards-compatible alias for reactive length and filtering bindings
 const channelIndexMap = new Map<string, number>();
+
+// IndexedDB Cache and Background Sync State
+const cachedChannelsCount = ref<number>(0);
+const isCacheLoaded = ref<boolean>(false);
+const isCheckingCache = ref<boolean>(false);
+const isClearingCache = ref<boolean>(false);
+const cacheLoadingProgress = ref<string>("");
+
+// Active Page Lazy Hydration Map
+const hydratedPageMap = reactive(new Map<string, ClassifiedChannel>());
+const isHydratingPage = ref<boolean>(false);
+
+// Background Sync & Revalidation State
+const isBackgroundSyncing = ref(false);
+const isBackgroundSyncPaused = ref(false);
+const backgroundSyncStatus = ref<"fresh" | "checking" | "syncing" | "paused" | "uncertain" | "remote_updated" | "error" | "">("");
+const backgroundSyncMessage = ref<string>("");
+let backgroundSyncTimer: any = null;
+let backgroundSyncAbortController: AbortController | null = null;
+
 const isStreaming = ref(false);
 const isPaused = ref(false);
 const isCompleted = ref(false);
@@ -99,7 +122,7 @@ const MAX_LIMIT_OPTIONS = [
   { label: "250,000", value: 250000 },
   { label: "Unlimited", value: Infinity }
 ];
-const memoryLimit = ref<number>(100000);
+const memoryLimit = ref<number>(Infinity);
 
 // Resumable Range Streaming & Auto-Recovery State
 const isAutoRetrying = ref(false);
@@ -152,14 +175,14 @@ const hasActiveNlRules = computed(() => {
   );
 });
 
-const NL_SUGGESTIONS = [
-  { label: "🇨🇳 🇯🇵 Political China with Japan", query: "political China with Japan" },
-  { label: "🪖 🇺🇦 Critical military updates in Ukraine", query: "critical military updates in Ukraine" },
-  { label: "✊ 🏳️‍🌈 Social justice & civil rights", query: "social movements and civil rights" },
-  { label: "💡 🤖 Tech and AI overseas developments", query: "external technology and AI" },
-  { label: "📈 🇪🇺 Substantive EU financial markets", query: "substantive financial European Union" },
-  { label: "🏛️ 🇺🇸 US domestic affairs", query: "domestic United States politics" }
-];
+const NL_SUGGESTIONS = computed(() => [
+  { label: `🇨🇳 🇯🇵 ${t('types.sugChinaTech')}`, query: "High Technology in China" },
+  { label: `🪖 🇺🇦 ${t('types.sugUkraineMilitary')}`, query: "critical military updates in Ukraine" },
+  { label: `🇷🇺 📰 ${t('types.sugRussiaDomestic')}`, query: "domestic Russia news" },
+  { label: `🌏 🤖 ${t('types.sugUsAllies')}`, query: "strategic US allies asia" },
+  { label: `📈 🇪🇺 ${t('types.sugEuHighQuality')}`, query: "substantive financial European Union" },
+  { label: `🏛️ 🇺🇸 ${t('types.sugFinanceCritical')}`, query: "critical finance and markets" }
+]);
 
 const handleNlSearch = async (queryText?: string) => {
   const target = (queryText !== undefined ? queryText : nlQuery.value).trim();
@@ -275,8 +298,16 @@ const PAGE_SIZE_OPTIONS = [24, 48, 96];
 const selectedInspectionItem = ref<ClassifiedChannel | null>(null);
 const isDrawerOpen = ref(false);
 
-const openDrawer = (item: ClassifiedChannel) => {
-  selectedInspectionItem.value = item;
+const openDrawer = async (item: ClassifiedChannel) => {
+  let fullItem = hydratedPageMap.get(item.channel) || item;
+  if (!fullItem.readValueLegend || Object.keys(fullItem.topicProbs || {}).length <= 1) {
+    const fromDb = await getChannelByHandle(item.channel);
+    if (fromDb) {
+      fullItem = fromDb;
+      hydratedPageMap.set(item.channel, fromDb);
+    }
+  }
+  selectedInspectionItem.value = fullItem;
   isDrawerOpen.value = true;
   fetchChannelJobMeta(item.channel);
 };
@@ -321,20 +352,20 @@ const COUNTRY_CONFIG: Record<string, CountryMeta> = {
   other: { label: "Other", flag: "🗺️" }
 };
 
-// Standard Read Value Legend
-const DEFAULT_READ_LEGEND: Record<string, string> = {
-  "0": "0: Fluff, greetings, boilerplate, rhetorical banter, or low-information chatter.",
-  "1": "1: Background context, emotional sentiment, subjective opinion, or common knowledge.",
-  "2": "2: Relevant circumstantial context, unverified claims, or secondary commentary.",
-  "3": "3: Critical facts, quantitative metrics, verified actions, breaking events, entity disclosures, or decisive operational changes."
+// Standard Read Value Legend (localized fallback)
+const getReadValueLegend = (item: ClassifiedChannel | null, level: string) => {
+  if (item?.readValueLegend?.[level]) {
+    return item.readValueLegend[level];
+  }
+  return t(`types.readValue.legend${level}` as any);
 };
 
 // Read Value Level Definition Helper
 const getReadValueTier = (score: number | null) => {
   if (score === null || score === undefined) {
     return {
-      label: "Legacy (No Score)",
-      shortLabel: "Legacy",
+      label: t("types.readValue.legacyLabel"),
+      shortLabel: t("types.readValue.legacyShort"),
       color: "text-gray-500 dark:text-gray-400",
       bg: "bg-gray-100 dark:bg-gray-800",
       border: "border-gray-200 dark:border-gray-700",
@@ -343,8 +374,8 @@ const getReadValueTier = (score: number | null) => {
   }
   if (score >= 2.2) {
     return {
-      label: "Critical Facts",
-      shortLabel: "L3 Critical",
+      label: t("types.readValue.criticalLabel"),
+      shortLabel: t("types.readValue.criticalShort"),
       color: "text-emerald-700 dark:text-emerald-300",
       bg: "bg-emerald-50 dark:bg-emerald-950/60",
       border: "border-emerald-200 dark:border-emerald-800",
@@ -353,8 +384,8 @@ const getReadValueTier = (score: number | null) => {
   }
   if (score >= 1.5) {
     return {
-      label: "Substantive",
-      shortLabel: "L2 Substantive",
+      label: t("types.readValue.substantiveLabel"),
+      shortLabel: t("types.readValue.substantiveShort"),
       color: "text-blue-700 dark:text-blue-300",
       bg: "bg-blue-50 dark:bg-blue-950/60",
       border: "border-blue-200 dark:border-blue-800",
@@ -363,8 +394,8 @@ const getReadValueTier = (score: number | null) => {
   }
   if (score >= 0.8) {
     return {
-      label: "Background",
-      shortLabel: "L1 Background",
+      label: t("types.readValue.backgroundLabel"),
+      shortLabel: t("types.readValue.backgroundShort"),
       color: "text-amber-700 dark:text-amber-300",
       bg: "bg-amber-50 dark:bg-amber-950/60",
       border: "border-amber-200 dark:border-amber-800",
@@ -372,8 +403,8 @@ const getReadValueTier = (score: number | null) => {
     };
   }
   return {
-    label: "Low Info Chatter",
-    shortLabel: "L0 Chatter",
+    label: t("types.readValue.lowLabel"),
+    shortLabel: t("types.readValue.lowShort"),
     color: "text-slate-600 dark:text-slate-400",
     bg: "bg-slate-100 dark:bg-slate-800/80",
     border: "border-slate-200 dark:border-slate-700",
@@ -533,8 +564,18 @@ const startStreaming = async (resume = false) => {
     // Step 1: Probe whether compressed object classify.json.lz4 is available
     isProbingLz4.value = true;
     lz4ProbeStatus.value = "probing";
+    lz4ProbeMessage.value = t("types.probingAttempt", { attempt: 1, max: 2 });
     try {
-      const probe = await probeLz4Endpoint(CLASSIFY_LZ4_URL);
+      const PROBE_TIMEOUT_MS = 25000;
+      let probe = await probeLz4Endpoint(CLASSIFY_LZ4_URL, PROBE_TIMEOUT_MS);
+
+      // If timed out on the first probe, make a second LZ4 probe before falling back to raw NDJSON
+      if (!probe.available && (probe.isTimeout || probe.error?.toLowerCase().includes("time"))) {
+        console.warn(`[LZ4 Probe] First probe timed out (${probe.error}). Retrying second LZ4 probe before falling back to NDJSON...`);
+        lz4ProbeMessage.value = t("types.probingTimeoutRetry");
+        probe = await probeLz4Endpoint(CLASSIFY_LZ4_URL, PROBE_TIMEOUT_MS);
+      }
+
       if (probe.available) {
         isUsingLz4.value = true;
         lz4ProbeStatus.value = "available";
@@ -574,21 +615,33 @@ const startStreaming = async (resume = false) => {
   const FLUSH_INTERVAL = 150; // flush to Vue state every 150ms to keep UI silky smooth
   let lastFlushTime = Date.now();
   let receivedChunks = 0;
+  const lz4Chunks: Uint8Array[] = [];
 
   const flushBatch = () => {
     if (batch.length > 0) {
+      const itemsToSave: ClassifiedChannel[] = [];
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i];
         const channelKey = item.channel.replace(/^@/, "").trim().toLowerCase();
+        itemsToSave.push(item);
+
+        const compactRec = toCompactRecord(item);
         const existingIdx = channelIndexMap.get(channelKey);
         if (existingIdx !== undefined) {
-          // Channel already exists: update existing entry with latest classification data
-          items.value[existingIdx] = item;
+          compactItems.value[existingIdx] = compactRec;
         } else {
-          channelIndexMap.set(channelKey, items.value.length);
-          items.value.push(item);
+          channelIndexMap.set(channelKey, compactItems.value.length);
+          compactItems.value.push(compactRec);
         }
+        hydratedPageMap.set(channelKey, item);
       }
+
+      batchSaveClassifiedChannels(itemsToSave).then(() => {
+        cachedChannelsCount.value = Math.max(cachedChannelsCount.value, compactItems.value.length);
+      }).catch((e) => {
+        console.warn("IndexedDB batch save error:", e);
+      });
+
       batch.length = 0;
       lastFlushTime = Date.now();
     }
@@ -798,6 +851,7 @@ const startStreaming = async (resume = false) => {
         loadedBytes.value += value.byteLength;
 
         if (isUsingLz4.value && lz4Decoder) {
+          lz4Chunks.push(new Uint8Array(value));
           // Decode compressed chunk on the fly
           lz4Decoder.append(value);
         } else {
@@ -844,9 +898,38 @@ const startStreaming = async (resume = false) => {
 
     if (!isPaused.value) {
       isCompleted.value = true;
+      isCacheLoaded.value = true;
       retryAttempt.value = 0;
       isAutoRetrying.value = false;
       streamError.value = null;
+
+      // Save raw LZ4 blob only if LZ4 was used (not raw NDJSON fallback)
+      if (isUsingLz4.value && lz4Chunks.length > 0) {
+        try {
+          const lz4Blob = new Blob(lz4Chunks, { type: "application/octet-stream" });
+          await saveLz4Blob(lz4Blob);
+        } catch (blobErr) {
+          console.warn("Failed to cache LZ4 blob:", blobErr);
+        }
+      }
+
+      try {
+        const etag = res.headers.get("etag") || res.headers.get("x-amz-version-id");
+        const lastModified = res.headers.get("last-modified");
+        await saveTypesCacheMeta({
+          id: "classify_meta",
+          etag,
+          lastModified,
+          contentLength: loadedBytes.value,
+          totalChannels: compactItems.value.length,
+          cachedAt: Date.now(),
+          lastCheckedAt: Date.now(),
+          isUsingLz4: isUsingLz4.value
+        });
+        cachedChannelsCount.value = await getCachedChannelsCount();
+      } catch (metaErr) {
+        console.warn("Failed to save cache metadata:", metaErr);
+      }
     }
   } catch (err: any) {
     stopStallWatchdog();
@@ -927,17 +1010,344 @@ const manualResumeNow = () => {
   startStreaming(true);
 };
 
+// Check remote dataset via HEAD request and handle non-standard GOS responses
+const checkRemoteDatasetChanged = async (cachedEtag: string | null): Promise<'unchanged' | 'changed' | 'uncertain'> => {
+  try {
+    const headRes = await fetch(CLASSIFY_LZ4_URL, {
+      method: "HEAD",
+      cache: "no-cache"
+    });
+
+    if (!headRes.ok) {
+      return 'uncertain';
+    }
+
+    const remoteEtag = headRes.headers.get("etag") || headRes.headers.get("x-amz-version-id");
+    const remoteCl = headRes.headers.get("content-length");
+    const remoteLastMod = headRes.headers.get("last-modified");
+
+    if (remoteEtag && cachedEtag) {
+      const cleanRemote = remoteEtag.replace(/^(W\/)?"|"$/g, "");
+      const cleanCached = cachedEtag.replace(/^(W\/)?"|"$/g, "");
+      return cleanRemote === cleanCached ? 'unchanged' : 'changed';
+    }
+
+    if (!remoteEtag && !remoteLastMod && !remoteCl) {
+      return 'uncertain';
+    }
+
+    const cachedMeta = await getTypesCacheMeta();
+    if (remoteCl && cachedMeta?.contentLength) {
+      const clNum = parseInt(remoteCl, 10);
+      if (clNum > 0 && Math.abs(clNum - cachedMeta.contentLength) > 1024) {
+        return 'changed';
+      }
+    }
+
+    return 'uncertain';
+  } catch {
+    return 'uncertain';
+  }
+};
+
+// Background revalidation scheduler
+const scheduleBackgroundRevalidation = async (cachedEtag: string | null, lastSyncTime: number | null) => {
+  if (isBackgroundSyncing.value || isStreaming.value) return;
+
+  backgroundSyncStatus.value = "checking";
+  backgroundSyncMessage.value = t("types.checkingRemote");
+
+  try {
+    const changeStatus = await checkRemoteDatasetChanged(cachedEtag);
+
+    if (changeStatus === "unchanged") {
+      backgroundSyncStatus.value = "fresh";
+      backgroundSyncMessage.value = t("types.cacheUpToDate");
+      return;
+    }
+
+    if (changeStatus === "uncertain") {
+      // Per user comment:
+      // "Note that the GOS object maybe return non-standard HTTP response, so when you can't determine whether the object changed, just wait a few minutes to start the background update stream."
+      backgroundSyncStatus.value = "uncertain";
+      backgroundSyncMessage.value = t("types.gosNonStandard");
+      console.log("[Types Cache] GOS object returned non-standard response. Scheduling background update check in 5 minutes...");
+      clearTimeout(backgroundSyncTimer);
+      backgroundSyncTimer = setTimeout(() => {
+        if (!isBackgroundSyncPaused.value && !isStreaming.value) {
+          startBackgroundSync(false);
+        }
+      }, 5 * 60 * 1000);
+      return;
+    }
+
+    if (changeStatus === "changed") {
+      backgroundSyncStatus.value = "remote_updated";
+      backgroundSyncMessage.value = t("types.remoteUpdated");
+      if (!isBackgroundSyncPaused.value) {
+        startBackgroundSync(false);
+      }
+    }
+  } catch (err) {
+    console.warn("Background revalidation error:", err);
+    backgroundSyncStatus.value = "uncertain";
+    backgroundSyncMessage.value = t("types.gosNonStandard");
+    clearTimeout(backgroundSyncTimer);
+    backgroundSyncTimer = setTimeout(() => {
+      if (!isBackgroundSyncPaused.value && !isStreaming.value) {
+        startBackgroundSync(false);
+      }
+    }, 5 * 60 * 1000);
+  }
+};
+
+// Background stream sync for non-blocking database updates
+const startBackgroundSync = async (isResume = false) => {
+  if (isBackgroundSyncing.value || isStreaming.value || isBackgroundSyncPaused.value) {
+    return;
+  }
+
+  isBackgroundSyncing.value = true;
+  backgroundSyncStatus.value = "syncing";
+  backgroundSyncMessage.value = t("types.backgroundSyncActive");
+  backgroundSyncAbortController = new AbortController();
+
+  try {
+    let isLz4 = false;
+    try {
+      const probe = await probeLz4Endpoint(CLASSIFY_LZ4_URL, 25000);
+      isLz4 = probe.available;
+    } catch {
+      isLz4 = false;
+    }
+
+    const targetUrl = isLz4 ? CLASSIFY_LZ4_URL : CLASSIFY_RAW_URL;
+    const res = await fetch(targetUrl, {
+      signal: backgroundSyncAbortController.signal
+    });
+
+    if (!res.ok || !res.body) {
+      throw new Error(`Sync fetch failed with status ${res.status}`);
+    }
+
+    const etag = res.headers.get("etag") || res.headers.get("x-amz-version-id");
+    const lastModified = res.headers.get("last-modified");
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+
+    const syncBatch: ClassifiedChannel[] = [];
+    const lz4Chunks: Uint8Array[] = [];
+    let syncLoadedBytes = 0;
+    let syncRemainder = "";
+
+    const flushSyncBatch = async () => {
+      if (syncBatch.length > 0) {
+        const toSave = [...syncBatch];
+        syncBatch.length = 0;
+        await batchSaveClassifiedChannels(toSave);
+        for (const item of toSave) {
+          const compact = toCompactRecord(item);
+          const idx = channelIndexMap.get(compact.channel);
+          if (idx !== undefined) {
+            compactItems.value[idx] = compact;
+          } else {
+            channelIndexMap.set(compact.channel, compactItems.value.length);
+            compactItems.value.push(compact);
+          }
+          hydratedPageMap.set(compact.channel, item);
+        }
+        cachedChannelsCount.value = compactItems.value.length;
+      }
+    };
+
+    let lz4Decoder: StreamingLz4FrameDecoder | null = null;
+    if (isLz4) {
+      lz4Decoder = new StreamingLz4FrameDecoder((decompBlock) => {
+        const chunkText = decoder.decode(decompBlock, { stream: true });
+        const lines = (syncRemainder + chunkText).split("\n");
+        syncRemainder = lines.pop() || "";
+        for (const l of lines) {
+          const item = parseLineToItem(l.trim());
+          if (item) syncBatch.push(item);
+        }
+      });
+    }
+
+    while (true) {
+      if (isBackgroundSyncPaused.value) {
+        break;
+      }
+      const { done, value } = await reader.read();
+      if (done) {
+        if (isLz4 && lz4Decoder) lz4Decoder.finish();
+        break;
+      }
+      if (value) {
+        syncLoadedBytes += value.byteLength;
+        if (isLz4 && lz4Decoder) {
+          lz4Chunks.push(new Uint8Array(value));
+          lz4Decoder.append(value);
+        } else {
+          const chunkText = decoder.decode(value, { stream: true });
+          const lines = (syncRemainder + chunkText).split("\n");
+          syncRemainder = lines.pop() || "";
+          for (const l of lines) {
+            const item = parseLineToItem(l.trim());
+            if (item) syncBatch.push(item);
+          }
+        }
+        if (syncBatch.length >= 2500) {
+          await flushSyncBatch();
+        }
+      }
+    }
+
+    if (syncRemainder.trim()) {
+      const item = parseLineToItem(syncRemainder.trim());
+      if (item) syncBatch.push(item);
+    }
+    await flushSyncBatch();
+
+    // Cache LZ4 blob if LZ4 was used
+    if (isLz4 && lz4Chunks.length > 0) {
+      const blob = new Blob(lz4Chunks, { type: "application/octet-stream" });
+      await saveLz4Blob(blob);
+    }
+
+    // Save meta
+    await saveTypesCacheMeta({
+      id: "classify_meta",
+      etag,
+      lastModified,
+      contentLength: syncLoadedBytes,
+      totalChannels: compactItems.value.length,
+      cachedAt: Date.now(),
+      lastCheckedAt: Date.now(),
+      isUsingLz4: isLz4
+    });
+
+    cachedChannelsCount.value = compactItems.value.length;
+    backgroundSyncStatus.value = "fresh";
+    backgroundSyncMessage.value = t("types.syncComplete");
+  } catch (syncErr: any) {
+    if (isBackgroundSyncPaused.value) {
+      backgroundSyncStatus.value = "paused";
+      backgroundSyncMessage.value = t("types.syncPaused");
+    } else {
+      console.warn("Background sync error:", syncErr);
+      backgroundSyncStatus.value = "error";
+      backgroundSyncMessage.value = t("types.syncInterrupted");
+    }
+  } finally {
+    isBackgroundSyncing.value = false;
+    backgroundSyncAbortController = null;
+  }
+};
+
+// Pause / Resume background sync trigger
+const toggleBackgroundSync = () => {
+  isBackgroundSyncPaused.value = !isBackgroundSyncPaused.value;
+  if (isBackgroundSyncPaused.value) {
+    if (backgroundSyncAbortController) {
+      backgroundSyncAbortController.abort();
+      backgroundSyncAbortController = null;
+    }
+    isBackgroundSyncing.value = false;
+    backgroundSyncStatus.value = "paused";
+    backgroundSyncMessage.value = t("types.syncPaused");
+  } else {
+    backgroundSyncStatus.value = "syncing";
+    backgroundSyncMessage.value = t("types.backgroundSyncActive");
+    startBackgroundSync(true);
+  }
+};
+
+// Clear cache action
+const handleClearCache = async () => {
+  if (!confirm(t("types.clearCacheConfirm"))) {
+    return;
+  }
+  isClearingCache.value = true;
+  try {
+    pauseStream();
+    if (backgroundSyncAbortController) {
+      backgroundSyncAbortController.abort();
+      backgroundSyncAbortController = null;
+    }
+    clearTimeout(backgroundSyncTimer);
+    await clearTypesCache();
+    compactItems.value = [];
+    channelIndexMap.clear();
+    hydratedPageMap.clear();
+    cachedChannelsCount.value = 0;
+    isCacheLoaded.value = false;
+    backgroundSyncStatus.value = "";
+    backgroundSyncMessage.value = "";
+    memoryLimit.value = Infinity;
+    startStreaming(false);
+  } catch (err) {
+    console.warn("Failed to clear cache:", err);
+  } finally {
+    isClearingCache.value = false;
+  }
+};
+
+// Startup initialization: load from IndexedDB cache or start fresh stream
+const checkAndInitializeFromCache = async () => {
+  try {
+    isCheckingCache.value = true;
+    cacheLoadingProgress.value = "Inspecting local database...";
+    const stats = await getTypesDbStats();
+    cachedChannelsCount.value = stats.channelCount;
+
+    if (stats.channelCount > 0) {
+      cacheLoadingProgress.value = `Loading ${stats.channelCount.toLocaleString()} channels from IndexedDB...`;
+      const { records } = await loadAllCompactRecords();
+      compactItems.value = records;
+      for (let i = 0; i < records.length; i++) {
+        channelIndexMap.set(records[i].channel, i);
+      }
+      totalParsedLines.value = records.length;
+      isCompleted.value = true;
+      isCacheLoaded.value = true;
+      console.log(`[Types Cache] Instantly restored ${records.length} channels from IndexedDB (<50ms).`);
+
+      // Asynchronously revalidate remote dataset in background
+      scheduleBackgroundRevalidation(stats.etag, stats.lastSyncTime);
+    } else {
+      // First time without local cache:
+      // Set memoryLimit to Unlimited per user comment:
+      // "For the first time without local cache, you should load the lz4 stream without item limits (e.g. change from 100,000 to unlimited)."
+      memoryLimit.value = Infinity;
+      startStreaming(false);
+    }
+  } catch (err) {
+    console.warn("Failed to initialize from cache, starting stream:", err);
+    memoryLimit.value = Infinity;
+    startStreaming(false);
+  } finally {
+    isCheckingCache.value = false;
+    cacheLoadingProgress.value = "";
+  }
+};
+
 // Start streaming automatically on mount
-onMounted(() => {
-  startStreaming(false);
+onMounted(async () => {
   window.addEventListener("mouseup", handleWindowMouseUp);
   window.addEventListener("mousedown", handleGlobalMouseDown);
   window.addEventListener("keydown", handleGlobalKeyDown);
+
+  // Initialize from cache or stream
+  await checkAndInitializeFromCache();
 });
 
 onUnmounted(() => {
   stopStallWatchdog();
   clearRetryTimers();
+  clearTimeout(backgroundSyncTimer);
+  if (backgroundSyncAbortController) {
+    backgroundSyncAbortController.abort();
+  }
   closeProfileTooltip();
   window.removeEventListener("mouseup", handleWindowMouseUp);
   window.removeEventListener("mousedown", handleGlobalMouseDown);
@@ -1004,8 +1414,8 @@ const applyReadValuePreset = (preset: "all" | "critical" | "substantive" | "back
   else if (preset === "legacyOnly") readValueMinScore.value = 0;
 };
 
-// Filtered and Sorted Channel List (Gracefully handles mixed formats)
-const filteredItems = computed(() => {
+// Filtered and Sorted Channel List (Evaluated over compact in-memory index in <2ms)
+const filteredItems = computed<CompactChannelRecord[]>(() => {
   const query = searchQuery.value.trim().toLowerCase();
   const topicFilter = selectedTopic.value;
   const countryFilter = selectedCountry.value;
@@ -1015,97 +1425,31 @@ const filteredItems = computed(() => {
 
   const rvPreset = readValuePreset.value;
   const minRv = readValueMinScore.value;
+  const sort = sortBy.value;
+  const nlFilter = activeNlFilter.value;
 
   const seenChannels = new Set<string>();
 
-  return items.value
+  return compactItems.value
     .filter((item) => {
-      // Defensive uniqueness check: ensure no duplicate channels ever reach VNode rendering
-      const chKey = item.channel.replace(/^@/, "").trim().toLowerCase();
+      const chKey = item.channel;
       if (!chKey || seenChannels.has(chKey)) {
         return false;
       }
       seenChannels.add(chKey);
 
-      // 0. Natural Language Distribution-Aware Filter (Kev SystemOne)
-      if (activeNlFilter.value && !matchesDistributionAwareFilter(item, activeNlFilter.value)) {
-        return false;
-      }
-
-      // 1. Channel Search
-      if (query && !item.channel.toLowerCase().includes(query)) {
-        return false;
-      }
-      // 2. Topic
-      if (topicFilter !== "all" && item.topic !== topicFilter) {
-        return false;
-      }
-      // 3. Country (handles both traditional and expanded countries)
-      if (countryFilter !== "all" && item.country !== countryFilter) {
-        return false;
-      }
-      // 4. Domestic Affairs
-      if (domPreset === "high" && item.domestic < 0.6) {
-        return false;
-      } else if (domPreset === "mid" && (item.domestic < 0.3 || item.domestic >= 0.6)) {
-        return false;
-      } else if (domPreset === "low" && item.domestic >= 0.3) {
-        return false;
-      } else if (domPreset === "all" && minDom > 0 && item.domestic < minDom) {
-        return false;
-      }
-
-      // 5. Read Value Filter (mixed format aware)
-      if (rvPreset === "critical") {
-        if (!item.hasReadValue || (item.readValueScore ?? 0) < 2.2) return false;
-      } else if (rvPreset === "substantive") {
-        if (!item.hasReadValue || (item.readValueScore ?? 0) < 1.5) return false;
-      } else if (rvPreset === "background") {
-        if (!item.hasReadValue || (item.readValueScore ?? 0) < 0.8) return false;
-      } else if (rvPreset === "low") {
-        if (!item.hasReadValue || (item.readValueScore ?? 0) >= 0.8) return false;
-      } else if (rvPreset === "hasReadValue") {
-        if (!item.hasReadValue) return false;
-      } else if (rvPreset === "legacyOnly") {
-        if (item.hasReadValue) return false;
-      } else if (minRv > 0) {
-        if (!item.hasReadValue || (item.readValueScore ?? 0) < minRv) return false;
-      }
-
-      return true;
+      return matchesCompactFilter(item, {
+        searchQuery: query,
+        selectedTopic: topicFilter,
+        selectedCountry: countryFilter,
+        domesticPreset: domPreset,
+        domesticMinScore: minDom,
+        readValuePreset: rvPreset,
+        readValueMinScore: minRv,
+        activeNlFilter: nlFilter
+      });
     })
-    .sort((a, b) => {
-      if (sortBy.value === "aiRelevance" && activeNlFilter.value) {
-        const scoreA = calculateDistributionAwareScore(a, activeNlFilter.value);
-        const scoreB = calculateDistributionAwareScore(b, activeNlFilter.value);
-        if (Math.abs(scoreB - scoreA) > 0.001) {
-          return scoreB - scoreA;
-        }
-        const valA = a.hasReadValue && a.readValueScore !== null ? a.readValueScore : -1;
-        const valB = b.hasReadValue && b.readValueScore !== null ? b.readValueScore : -1;
-        if (valB !== valA) return valB - valA;
-        return b.topicConf - a.topicConf;
-      }
-      if (sortBy.value === "readValDesc") {
-        const valA = a.hasReadValue && a.readValueScore !== null ? a.readValueScore : -1;
-        const valB = b.hasReadValue && b.readValueScore !== null ? b.readValueScore : -1;
-        if (valB !== valA) return valB - valA;
-        return b.topicConf - a.topicConf;
-      }
-      if (sortBy.value === "readValAsc") {
-        const valA = a.hasReadValue && a.readValueScore !== null ? a.readValueScore : 999;
-        const valB = b.hasReadValue && b.readValueScore !== null ? b.readValueScore : 999;
-        if (valA !== valB) return valA - valB;
-        return a.topicConf - b.topicConf;
-      }
-      if (sortBy.value === "topicConf") return b.topicConf - a.topicConf;
-      if (sortBy.value === "countryConf") return b.countryConf - a.countryConf;
-      if (sortBy.value === "domesticDesc") return b.domestic - a.domestic;
-      if (sortBy.value === "domesticAsc") return a.domestic - b.domestic;
-      if (sortBy.value === "channelAsc") return a.channel.localeCompare(b.channel);
-      if (sortBy.value === "latencyAsc") return a.latencyMs - b.latencyMs;
-      return 0;
-    });
+    .sort((a, b) => compareCompactRecords(a, b, sort));
 });
 
 // Reset page on filter changes
@@ -1127,28 +1471,88 @@ watch(
   }
 );
 
-// Paginated View Items
+// Paginated View Items with Lazy Row Hydration
 const totalFilteredPages = computed(() => Math.max(1, Math.ceil(filteredItems.value.length / pageSize.value)));
 
-const paginatedItems = computed(() => {
+const paginatedCompactItems = computed<CompactChannelRecord[]>(() => {
   const start = (currentPage.value - 1) * pageSize.value;
   return filteredItems.value.slice(start, start + pageSize.value);
 });
 
-// Helper for topic configuration
-const getTopicInfo = (topic: string) => {
-  return (
-    TOPIC_CONFIG[topic] || {
-      label: topic,
-      color: "text-gray-700 dark:text-gray-300",
-      bg: "bg-gray-100 dark:bg-gray-800",
-      border: "border-gray-200 dark:border-gray-700"
+const paginatedItems = computed<ClassifiedChannel[]>(() => {
+  return paginatedCompactItems.value.map((compact) => {
+    const full = hydratedPageMap.get(compact.channel);
+    if (full) return full;
+    return {
+      channel: compact.channel,
+      topic: compact.topic,
+      topicConf: compact.topicConf,
+      topicProbs: { [compact.topic]: compact.topicConf },
+      country: compact.country,
+      countryConf: compact.countryConf,
+      countryProbs: { [compact.country]: compact.countryConf },
+      domestic: compact.domestic,
+      hasReadValue: compact.hasReadValue,
+      readValueScore: compact.readValueScore,
+      readValueProbs: compact.hasReadValue && compact.readValueScore !== null ? { [String(Math.round(compact.readValueScore))]: 0.9 } : {},
+      readValueLegend: null,
+      tokensIn: 0,
+      tokensOut: 0,
+      latencyMs: compact.latencyMs,
+      model: "kev-latest"
+    };
+  });
+});
+
+const hydrateCurrentPage = async () => {
+  const channels = paginatedCompactItems.value.map((c) => c.channel);
+  const missing = channels.filter((ch) => !hydratedPageMap.has(ch));
+  if (missing.length === 0) return;
+
+  isHydratingPage.value = true;
+  try {
+    const fullRecords = await getChannelsByHandles(missing);
+    for (const [ch, rec] of Object.entries(fullRecords)) {
+      hydratedPageMap.set(ch, rec);
     }
-  );
+  } catch (err) {
+    console.warn("Failed to hydrate current page:", err);
+  } finally {
+    isHydratingPage.value = false;
+  }
 };
 
+watch(
+  () => paginatedCompactItems.value.map((c) => c.channel).join(","),
+  () => {
+    hydrateCurrentPage();
+  },
+  { immediate: true }
+);
+
+// Helper for topic configuration with i18n
+const getTopicInfo = (topic: string) => {
+  const cfg = TOPIC_CONFIG[topic];
+  const translated = t(`types.topics.${topic}`);
+  const label = (translated && translated !== `types.topics.${topic}`) ? translated : (cfg?.label || topic);
+  return {
+    label,
+    color: cfg?.color || "text-gray-700 dark:text-gray-300",
+    bg: cfg?.bg || "bg-gray-100 dark:bg-gray-800",
+    border: cfg?.border || "border-gray-200 dark:border-gray-700"
+  };
+};
+
+// Helper for country configuration with i18n
 const getCountryInfo = (country: string) => {
-  return COUNTRY_CONFIG[country] || { label: country.replace(/_/g, " "), flag: "🌐" };
+  const cfg = COUNTRY_CONFIG[country];
+  const translated = t(`types.countries.${country}`);
+  const label = (translated && translated !== `types.countries.${country}`) ? translated : (cfg?.label || country.replace(/_/g, " "));
+  return {
+    label,
+    flag: cfg?.flag || "🌐",
+    isNew: cfg?.isNew
+  };
 };
 
 // Sort probabilities for multi-segment bars
@@ -1623,17 +2027,17 @@ const copyProfileChannelName = async (channel: string) => {
             </div>
             <div>
               <h2 class="text-lg font-extrabold text-gray-900 dark:text-white tracking-tight flex items-center gap-2 flex-wrap">
-                Types & Classification Intelligence
+                {{ t('types.headerTitle') }}
                 <span
                   class="text-xs font-mono px-2 py-0.5 rounded-full border inline-flex items-center gap-1"
                   :class="isUsingLz4 ? 'bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-900/40 dark:text-purple-300 dark:border-purple-800' : 'bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-900/40 dark:text-indigo-300 dark:border-indigo-800'"
                 >
                   <Zap v-if="isUsingLz4" class="w-3 h-3 text-purple-600 dark:text-purple-400 fill-purple-500/20" />
-                  {{ isUsingLz4 ? 'classify.json.lz4 (Stream)' : 'classify.json (NDJSON)' }}
+                  {{ isUsingLz4 ? t('types.streamLz4Badge') : t('types.streamNdjsonBadge') }}
                 </span>
               </h2>
               <p class="text-xs text-gray-500 dark:text-gray-400">
-                Live stream analysis of topic taxonomies, 12 regional geopolitical targets, and Level 0–3 Read Value informativeness
+                {{ t('types.headerSubtitle') }}
               </p>
             </div>
           </div>
@@ -1643,7 +2047,7 @@ const copyProfileChannelName = async (channel: string) => {
         <div class="flex flex-wrap items-center gap-3">
           <!-- Memory Cap Selector -->
           <div class="flex items-center gap-1.5 text-xs bg-gray-50 dark:bg-gray-900/60 px-3 py-1.5 rounded-xl border border-gray-200 dark:border-gray-700">
-            <span class="text-gray-500 dark:text-gray-400 font-medium">Memory Cap:</span>
+            <span class="text-gray-500 dark:text-gray-400 font-medium">{{ t('types.memoryCap') }}</span>
             <select
               v-model="memoryLimit"
               @change="reloadStream"
@@ -1666,27 +2070,27 @@ const copyProfileChannelName = async (channel: string) => {
               v-if="isStreaming && !isPaused"
               @click="pauseStream"
               class="flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:hover:bg-amber-900/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800 transition cursor-pointer"
-              title="Pause streaming ingestion"
+              :title="t('types.pause')"
             >
               <Pause class="w-3.5 h-3.5" />
-              <span>Pause</span>
+              <span>{{ t('types.pause') }}</span>
             </button>
             <button
               v-else-if="!isCompleted"
               @click="startStreaming(true)"
               class="flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:hover:bg-emerald-900/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 transition cursor-pointer"
-              title="Resume streaming ingestion"
+              :title="t('types.resume')"
             >
               <Play class="w-3.5 h-3.5" />
-              <span>Resume</span>
+              <span>{{ t('types.resume') }}</span>
             </button>
             <button
               @click="reloadStream"
               class="flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 transition cursor-pointer"
-              title="Reload from beginning"
+              :title="t('types.reload')"
             >
               <RefreshCw :class="['w-3.5 h-3.5', isStreaming ? 'animate-spin text-indigo-500' : '']" />
-              <span>Reload</span>
+              <span>{{ t('types.reload') }}</span>
             </button>
           </div>
         </div>
@@ -1698,27 +2102,27 @@ const copyProfileChannelName = async (channel: string) => {
           <div class="flex items-center gap-2 flex-wrap">
             <span v-if="isProbingLz4" class="flex items-center gap-1.5 text-purple-600 dark:text-purple-400 font-bold">
               <RefreshCw class="w-3 h-3 animate-spin text-purple-500" />
-              Probing classify.json.lz4...
+              {{ lz4ProbeMessage || t('types.probingLz4') }}
             </span>
             <span v-else-if="isAutoRetrying" class="flex items-center gap-1.5 text-amber-600 dark:text-amber-400 font-bold">
               <RefreshCw class="w-3 h-3 animate-spin text-amber-500" />
-              Retrying in {{ retryCountdown }}s (Attempt {{ retryAttempt }}/{{ maxRetries }})...
+              {{ t('types.retrying', { seconds: retryCountdown, attempt: retryAttempt, max: maxRetries }) }}
             </span>
             <span v-else-if="isStreaming" class="flex items-center gap-1.5 font-bold" :class="isUsingLz4 ? 'text-purple-600 dark:text-purple-400' : 'text-indigo-600 dark:text-indigo-400'">
               <Zap v-if="isUsingLz4" class="w-3.5 h-3.5 text-purple-500 fill-purple-500/20 animate-pulse" />
               <span v-else class="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></span>
-              {{ isUsingLz4 ? 'Streaming LZ4 Frame...' : 'Streaming NDJSON...' }}
+              {{ isUsingLz4 ? t('types.streamingLz4') : t('types.streamingNdjson') }}
             </span>
             <span v-else-if="isCompleted" class="text-emerald-600 dark:text-emerald-400 font-bold">
-              ✓ Ingestion Complete
+              {{ t('types.ingestionComplete') }}
             </span>
             <span v-else-if="isPaused" class="text-amber-600 dark:text-amber-400 font-bold">
-              ⏸ Paused
+              {{ t('types.paused') }}
             </span>
             <span class="tabular-nums">
-              {{ items.length.toLocaleString() }} channels active
+              {{ t('types.channelsActive', { count: items.length.toLocaleString() }) }}
               <span v-if="readValueStats.hasCount > 0" class="text-emerald-600 dark:text-emerald-400">
-                ({{ readValueStats.hasCount.toLocaleString() }} with Read Value)
+                {{ t('types.withReadValue', { count: readValueStats.hasCount.toLocaleString() }) }}
               </span>
             </span>
 
@@ -1728,20 +2132,20 @@ const copyProfileChannelName = async (channel: string) => {
               :class="isUsingLz4
                 ? 'bg-purple-50 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800'
                 : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700'"
-              :title="isUsingLz4 ? 'Live stream LZ4 chunk decompressor' : 'Uncompressed fallback stream. Click to re-probe .lz4'"
+              :title="isUsingLz4 ? t('types.lz4Stream') : t('types.rawNdjson')"
             >
               <Zap v-if="isUsingLz4" class="w-2.5 h-2.5 text-purple-600 dark:text-purple-400" />
-              <span>{{ isUsingLz4 ? '⚡ LZ4 Stream' : 'Raw NDJSON' }}</span>
+              <span>{{ isUsingLz4 ? t('types.lz4Stream') : t('types.rawNdjson') }}</span>
               <span v-if="isUsingLz4 && decompressedBytesCount > 0" class="text-purple-600 dark:text-purple-400 opacity-90">
-                ({{ (decompressedBytesCount / (1024 * 1024)).toFixed(1) }} MB decomp)
+                {{ t('types.decompressed', { size: (decompressedBytesCount / (1024 * 1024)).toFixed(1) }) }}
               </span>
               <button
                 v-if="!isUsingLz4 && !isStreaming"
                 @click="reprobeAndReload"
                 class="ml-1 text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer flex items-center gap-0.5 font-bold"
-                title="Probe whether classify.json.lz4 has been uploaded"
+                :title="t('types.probeLz4')"
               >
-                <RefreshCw class="w-2.5 h-2.5" /> Probe .lz4
+                <RefreshCw class="w-2.5 h-2.5" /> {{ t('types.probeLz4') }}
               </button>
             </span>
           </div>
@@ -1749,10 +2153,8 @@ const copyProfileChannelName = async (channel: string) => {
             <span
               v-if="lastResumedByteOffset && lastResumedByteOffset > 0"
               class="hidden sm:inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800/60 font-mono"
-              title="Stream resumed using HTTP Range header from byte offset"
             >
-              <span>Range:</span>
-              <span>{{ (lastResumedByteOffset / (1024 * 1024)).toFixed(1) }}MB+</span>
+              <span>{{ t('types.rangeOffset', { size: (lastResumedByteOffset / (1024 * 1024)).toFixed(1) }) }}</span>
             </span>
             <div>
               {{ (loadedBytes / (1024 * 1024)).toFixed(1) }} MB
@@ -1776,9 +2178,9 @@ const copyProfileChannelName = async (channel: string) => {
           <div class="flex items-start sm:items-center gap-2 text-amber-800 dark:text-amber-200">
             <RefreshCw class="w-4 h-4 text-amber-600 dark:text-amber-400 animate-spin shrink-0 mt-0.5 sm:mt-0" />
             <div>
-              <span class="font-bold">Network throttled or connection dropped:</span>
+              <span class="font-bold">{{ t('types.networkThrottledTitle') }}</span>
               <span class="text-amber-700 dark:text-amber-300 ml-1">
-                Auto-resuming with HTTP Range from {{ (loadedBytes / (1024 * 1024)).toFixed(2) }} MB in {{ retryCountdown }}s (Attempt {{ retryAttempt }}/{{ maxRetries }})...
+                {{ t('types.autoResumingDesc', { size: (loadedBytes / (1024 * 1024)).toFixed(2), seconds: retryCountdown, attempt: retryAttempt, max: maxRetries }) }}
               </span>
             </div>
           </div>
@@ -1787,13 +2189,13 @@ const copyProfileChannelName = async (channel: string) => {
               @click="manualResumeNow"
               class="px-2.5 py-1 text-xs font-bold rounded-lg bg-amber-600 hover:bg-amber-700 text-white cursor-pointer transition shadow-2xs"
             >
-              Resume Now
+              {{ t('types.resumeNow') }}
             </button>
             <button
               @click="pauseStream"
               class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-amber-100 hover:bg-amber-200 dark:bg-amber-900/60 dark:hover:bg-amber-900 text-amber-800 dark:text-amber-200 cursor-pointer transition"
             >
-              Pause
+              {{ t('types.pause') }}
             </button>
           </div>
         </div>
@@ -1806,7 +2208,7 @@ const copyProfileChannelName = async (channel: string) => {
           <div class="flex items-start sm:items-center gap-2 text-rose-800 dark:text-rose-200">
             <AlertTriangle class="w-4 h-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5 sm:mt-0" />
             <div>
-              <span class="font-bold">Stream Stopped:</span>
+              <span class="font-bold">{{ t('types.streamStoppedTitle') }}</span>
               <span class="text-rose-700 dark:text-rose-300 ml-1">{{ streamError }}</span>
             </div>
           </div>
@@ -1816,13 +2218,90 @@ const copyProfileChannelName = async (channel: string) => {
               @click="manualResumeNow"
               class="px-2.5 py-1 text-xs font-bold rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer transition shadow-2xs"
             >
-              Resume from {{ (loadedBytes / (1024 * 1024)).toFixed(1) }} MB
+              {{ t('types.resumeFrom', { size: (loadedBytes / (1024 * 1024)).toFixed(1) }) }}
             </button>
             <button
               @click="reloadStream"
               class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-rose-100 hover:bg-rose-200 dark:bg-rose-900/60 dark:hover:bg-rose-900 text-rose-800 dark:text-rose-200 cursor-pointer transition"
             >
-              Reload from 0
+              {{ t('types.reloadFromZero') }}
+            </button>
+          </div>
+        </div>
+
+        <!-- IndexedDB Cache Intelligence & Background Revalidation Banner -->
+        <div
+          v-if="cachedChannelsCount > 0 || isCheckingCache || isBackgroundSyncing || backgroundSyncStatus"
+          class="mt-2.5 p-3 rounded-xl bg-slate-50/90 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs"
+        >
+          <!-- Left: Database Stats & Sync Status -->
+          <div class="flex items-center gap-2.5 flex-wrap">
+            <div class="flex items-center gap-1.5 font-bold text-slate-800 dark:text-slate-200">
+              <Database class="w-3.5 h-3.5 text-indigo-500" />
+              <span>{{ t('types.indexedDbCache') }}</span>
+              <span class="tabular-nums font-mono text-indigo-600 dark:text-indigo-400">
+                {{ cachedChannelsCount.toLocaleString() }}
+              </span>
+              <span class="text-slate-500 dark:text-slate-400 font-normal">{{ t('types.channelsCached') }}</span>
+            </div>
+
+            <!-- Sync State Pill/Text -->
+            <div class="flex items-center gap-1.5 pl-2 border-l border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300">
+              <!-- Status Dot -->
+              <span
+                class="w-2 h-2 rounded-full shrink-0"
+                :class="{
+                  'bg-emerald-500': backgroundSyncStatus === 'fresh',
+                  'bg-blue-500 animate-pulse': backgroundSyncStatus === 'syncing' || backgroundSyncStatus === 'checking',
+                  'bg-amber-500': backgroundSyncStatus === 'paused',
+                  'bg-purple-500': backgroundSyncStatus === 'uncertain' || backgroundSyncStatus === 'remote_updated',
+                  'bg-rose-500': backgroundSyncStatus === 'error',
+                  'bg-slate-400': !backgroundSyncStatus
+                }"
+              ></span>
+              <span class="text-[11px] font-mono">
+                {{ backgroundSyncMessage || (isCacheLoaded ? t('types.loadedInstantly') : t('types.ready')) }}
+              </span>
+            </div>
+          </div>
+
+          <!-- Right: Sync Controls & Cache Actions -->
+          <div class="flex items-center gap-1.5 flex-wrap shrink-0">
+            <!-- Pause / Resume Background Sync -->
+            <button
+              v-if="isBackgroundSyncing || backgroundSyncStatus === 'paused'"
+              @click="toggleBackgroundSync"
+              class="px-2.5 py-1 text-xs font-semibold rounded-lg border transition cursor-pointer flex items-center gap-1"
+              :class="isBackgroundSyncPaused
+                ? 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                : 'bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800'"
+              :title="isBackgroundSyncPaused ? t('types.resumeSync') : t('types.pauseSync')"
+            >
+              <Play v-if="isBackgroundSyncPaused" class="w-3 h-3" />
+              <Pause v-else class="w-3 h-3" />
+              <span>{{ isBackgroundSyncPaused ? t('types.resumeSync') : t('types.pauseSync') }}</span>
+            </button>
+
+            <!-- Recheck Remote ETag -->
+            <button
+              v-if="!isBackgroundSyncing"
+              @click="scheduleBackgroundRevalidation(null, null)"
+              class="px-2.5 py-1 text-xs font-medium rounded-lg bg-white hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 transition cursor-pointer flex items-center gap-1"
+              :title="t('types.checkRemote')"
+            >
+              <RefreshCw class="w-3 h-3 text-slate-500" :class="{ 'animate-spin': backgroundSyncStatus === 'checking' }" />
+              <span>{{ t('types.checkRemote') }}</span>
+            </button>
+
+            <!-- Clear Cache -->
+            <button
+              @click="handleClearCache"
+              :disabled="isClearingCache"
+              class="px-2.5 py-1 text-xs font-medium rounded-lg bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/40 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900 transition cursor-pointer flex items-center gap-1"
+              :title="t('types.clearCache')"
+            >
+              <RotateCcw class="w-3 h-3 text-rose-500" :class="{ 'animate-spin': isClearingCache }" />
+              <span>{{ t('types.clearCache') }}</span>
             </button>
           </div>
         </div>
@@ -1843,14 +2322,14 @@ const copyProfileChannelName = async (channel: string) => {
               v-model="nlQuery"
               @keydown.enter.prevent="handleNlSearch()"
               type="text"
-              placeholder="Ask in natural language: e.g. 'political China with Japan', 'critical military in Ukraine'..."
+              :placeholder="t('types.nlPlaceholder')"
               class="w-full pl-9 pr-8 py-2 text-xs sm:text-sm bg-white dark:bg-gray-900 border border-indigo-200 dark:border-indigo-800/80 rounded-xl focus:ring-2 focus:ring-indigo-500/50 outline-none text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 shadow-xs"
             />
             <button
               v-if="nlQuery"
               @click="clearNlFilter"
               class="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-0.5 cursor-pointer"
-              title="Clear natural language query"
+              :title="t('types.clearNlQuery')"
             >
               <X class="w-3.5 h-3.5" />
             </button>
@@ -1864,16 +2343,16 @@ const copyProfileChannelName = async (channel: string) => {
             >
               <RefreshCw v-if="isNlParsing" class="w-3.5 h-3.5 animate-spin" />
               <Sparkles v-else class="w-3.5 h-3.5" />
-              <span>{{ isNlParsing ? "Kev AI Parsing..." : "Filter with Kev AI" }}</span>
+              <span>{{ isNlParsing ? t('types.kevAiParsing') : t('types.filterWithKevAi') }}</span>
             </button>
 
             <button
               v-if="activeNlFilter"
               @click="clearNlFilter"
               class="px-2.5 py-2 text-xs font-semibold rounded-xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 transition cursor-pointer"
-              title="Reset all natural language filters"
+              :title="t('types.reset')"
             >
-              Reset
+              {{ t('types.reset') }}
             </button>
           </div>
         </div>
@@ -1881,7 +2360,7 @@ const copyProfileChannelName = async (channel: string) => {
         <!-- 1-Click Suggestion Presets -->
         <div class="flex items-center gap-1.5 flex-wrap text-[11px]">
           <span class="text-gray-500 dark:text-gray-400 font-semibold flex items-center gap-1 shrink-0">
-            <span>Suggestions:</span>
+            <span>{{ t('types.suggestions') }}</span>
           </span>
           <button
             v-for="sug in NL_SUGGESTIONS"
@@ -1904,7 +2383,7 @@ const copyProfileChannelName = async (channel: string) => {
           class="pt-2 border-t border-indigo-100 dark:border-indigo-900/50 flex flex-wrap items-center gap-2 text-xs"
         >
           <span class="text-[10px] font-black uppercase tracking-wider text-indigo-700 dark:text-indigo-300 flex items-center gap-1">
-            <span>Parsed Rules:</span>
+            <span>{{ t('types.parsedRules') }}</span>
           </span>
 
           <!-- Topic Chips (Supports multi-aspect distribution-aware topics) -->
@@ -1914,8 +2393,8 @@ const copyProfileChannelName = async (channel: string) => {
               :key="top"
               class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-100 dark:bg-indigo-900/70 border border-indigo-300 dark:border-indigo-700 text-indigo-900 dark:text-indigo-100 text-xs font-semibold shadow-2xs"
             >
-              <span class="text-[10px] font-bold uppercase text-indigo-600 dark:text-indigo-400">Topic:</span>
-              <span>{{ TOPIC_CONFIG[top]?.label || top }}</span>
+              <span class="text-[10px] font-bold uppercase text-indigo-600 dark:text-indigo-400">{{ t('types.ruleTopic') }}</span>
+              <span>{{ getTopicInfo(top).label }}</span>
               <span
                 v-if="activeNlFilter.topicConfidences?.[top] || (top === activeNlFilter.topic && activeNlFilter.topicConfidence)"
                 class="text-[10px] font-mono px-1 rounded bg-indigo-200/80 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-200"
@@ -1925,7 +2404,7 @@ const copyProfileChannelName = async (channel: string) => {
               <button
                 @click="removeTopicCriteria(top)"
                 class="text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-200 ml-0.5 cursor-pointer"
-                title="Remove Topic Rule"
+                :title="t('types.removeTopicRule')"
               >
                 <X class="w-3 h-3" />
               </button>
@@ -1935,8 +2414,8 @@ const copyProfileChannelName = async (channel: string) => {
             v-else-if="activeNlFilter.topic"
             class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-100 dark:bg-indigo-900/70 border border-indigo-300 dark:border-indigo-700 text-indigo-900 dark:text-indigo-100 text-xs font-semibold shadow-2xs"
           >
-            <span class="text-[10px] font-bold uppercase text-indigo-600 dark:text-indigo-400">Topic:</span>
-            <span>{{ TOPIC_CONFIG[activeNlFilter.topic]?.label || activeNlFilter.topic }}</span>
+            <span class="text-[10px] font-bold uppercase text-indigo-600 dark:text-indigo-400">{{ t('types.ruleTopic') }}</span>
+            <span>{{ getTopicInfo(activeNlFilter.topic).label }}</span>
             <span
               v-if="activeNlFilter.topicConfidence"
               class="text-[10px] font-mono px-1 rounded bg-indigo-200/80 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-200"
@@ -1946,7 +2425,7 @@ const copyProfileChannelName = async (channel: string) => {
             <button
               @click="removeTopicCriteria()"
               class="text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-200 ml-0.5 cursor-pointer"
-              title="Remove Topic Rule"
+              :title="t('types.removeTopicRule')"
             >
               <X class="w-3 h-3" />
             </button>
@@ -1959,8 +2438,8 @@ const copyProfileChannelName = async (channel: string) => {
               :key="region"
               class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-100 dark:bg-sky-900/70 border border-sky-300 dark:border-sky-700 text-sky-900 dark:text-sky-100 text-xs font-semibold shadow-2xs"
             >
-              <span class="text-[10px] font-bold uppercase text-sky-600 dark:text-sky-400">Region:</span>
-              <span>{{ COUNTRY_CONFIG[region]?.flag }} {{ COUNTRY_CONFIG[region]?.label || region }}</span>
+              <span class="text-[10px] font-bold uppercase text-sky-600 dark:text-sky-400">{{ t('types.ruleRegion') }}</span>
+              <span>{{ getCountryInfo(region).flag }} {{ getCountryInfo(region).label }}</span>
               <span
                 v-if="activeNlFilter.regionConfidences?.[region]"
                 class="text-[10px] font-mono px-1 rounded bg-sky-200/80 dark:bg-sky-950 text-sky-800 dark:text-sky-200"
@@ -1970,7 +2449,7 @@ const copyProfileChannelName = async (channel: string) => {
               <button
                 @click="removeRegionCriteria(region)"
                 class="text-sky-400 hover:text-sky-700 dark:hover:text-sky-200 ml-0.5 cursor-pointer"
-                title="Remove Region Rule"
+                :title="t('types.removeRegionRule')"
               >
                 <X class="w-3 h-3" />
               </button>
@@ -1982,20 +2461,20 @@ const copyProfileChannelName = async (channel: string) => {
             v-if="activeNlFilter.domesticOrientation"
             class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-purple-100 dark:bg-purple-900/70 border border-purple-300 dark:border-purple-700 text-purple-900 dark:text-purple-100 text-xs font-semibold shadow-2xs"
           >
-            <span class="text-[10px] font-bold uppercase text-purple-600 dark:text-purple-400">Orientation:</span>
+            <span class="text-[10px] font-bold uppercase text-purple-600 dark:text-purple-400">{{ t('types.ruleOrientation') }}</span>
             <span>
               {{
                 activeNlFilter.domesticOrientation === "domestic"
-                  ? "Domestic Focus (≥55%)"
+                  ? t('types.domesticFocusRule')
                   : activeNlFilter.domesticOrientation === "external"
-                  ? "Foreign Focus (≤35%)"
-                  : "Balanced Focus"
+                  ? t('types.foreignFocusRule')
+                  : t('types.balancedFocusRule')
               }}
             </span>
             <button
               @click="removeDomesticCriteria"
               class="text-purple-400 hover:text-purple-700 dark:hover:text-purple-200 ml-0.5 cursor-pointer"
-              title="Remove Orientation Rule"
+              :title="t('types.removeOrientationRule')"
             >
               <X class="w-3 h-3" />
             </button>
@@ -2006,12 +2485,12 @@ const copyProfileChannelName = async (channel: string) => {
             v-if="activeNlFilter.minReadValue !== null && activeNlFilter.minReadValue !== undefined"
             class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-900/70 border border-emerald-300 dark:border-emerald-700 text-emerald-900 dark:text-emerald-100 text-xs font-semibold shadow-2xs"
           >
-            <span class="text-[10px] font-bold uppercase text-emerald-600 dark:text-emerald-400">Quality:</span>
+            <span class="text-[10px] font-bold uppercase text-emerald-600 dark:text-emerald-400">{{ t('types.ruleQuality') }}</span>
             <span>{{ activeNlFilter.readValueTier || `≥ ${activeNlFilter.minReadValue}` }}</span>
             <button
               @click="removeReadValueCriteria"
               class="text-emerald-400 hover:text-emerald-700 dark:hover:text-emerald-200 ml-0.5 cursor-pointer"
-              title="Remove Quality Rule"
+              :title="t('types.removeQualityRule')"
             >
               <X class="w-3 h-3" />
             </button>
@@ -2020,20 +2499,20 @@ const copyProfileChannelName = async (channel: string) => {
           <!-- Matching Count & AI Status Tag -->
           <div class="ml-auto flex items-center gap-2">
             <span class="text-[11px] font-mono text-gray-500 dark:text-gray-400">
-              <strong class="text-indigo-600 dark:text-indigo-400">{{ filteredItems.length.toLocaleString() }}</strong> matches
+              {{ t('types.matchesCount', { count: filteredItems.length.toLocaleString() }) }}
             </span>
             <span
               v-if="activeNlFilter.isAiParsed"
               class="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800"
             >
               <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-              Kev SystemOne Verified
+              {{ t('types.kevSystemOneVerified') }}
             </span>
             <span
               v-else
               class="inline-flex items-center gap-1 text-[10px] font-medium text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 px-2 py-0.5 rounded-full border border-indigo-200 dark:border-indigo-800"
             >
-              ⚡ Fast-Rule Pre-Filtered
+              {{ t('types.fastRulePreFiltered') }}
             </span>
           </div>
         </div>
@@ -2047,7 +2526,7 @@ const copyProfileChannelName = async (channel: string) => {
           <input
             v-model="searchQuery"
             type="text"
-            placeholder="Search channel username (e.g. info65mchs, husainov_photo)..."
+            :placeholder="t('types.searchPlaceholder')"
             class="w-full pl-10 pr-9 py-2 text-xs sm:text-sm bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-indigo-500/40 outline-none text-gray-900 dark:text-white transition"
           />
           <button
@@ -2066,15 +2545,15 @@ const copyProfileChannelName = async (channel: string) => {
             v-model="sortBy"
             class="bg-transparent font-bold text-gray-800 dark:text-gray-200 outline-none cursor-pointer"
           >
-            <option v-if="activeNlFilter" value="aiRelevance" class="dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 font-bold">✨ AI Relevance (Best Match)</option>
-            <option value="readValDesc" class="dark:bg-gray-800">Read Value (High → Low)</option>
-            <option value="readValAsc" class="dark:bg-gray-800">Read Value (Low → High)</option>
-            <option value="topicConf" class="dark:bg-gray-800">Topic Confidence (High → Low)</option>
-            <option value="countryConf" class="dark:bg-gray-800">Country Confidence (High → Low)</option>
-            <option value="domesticDesc" class="dark:bg-gray-800">Domestic Score (High → Low)</option>
-            <option value="domesticAsc" class="dark:bg-gray-800">Domestic Score (Low → High)</option>
-            <option value="channelAsc" class="dark:bg-gray-800">Channel Name (A → Z)</option>
-            <option value="latencyAsc" class="dark:bg-gray-800">Latency (Fastest)</option>
+            <option v-if="activeNlFilter" value="aiRelevance" class="dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 font-bold">{{ t('types.sortAiRelevance') }}</option>
+            <option value="readValDesc" class="dark:bg-gray-800">{{ t('types.sortReadValDesc') }}</option>
+            <option value="readValAsc" class="dark:bg-gray-800">{{ t('types.sortReadValAsc') }}</option>
+            <option value="topicConf" class="dark:bg-gray-800">{{ t('types.sortTopicConf') }}</option>
+            <option value="countryConf" class="dark:bg-gray-800">{{ t('types.sortCountryConf') }}</option>
+            <option value="domesticDesc" class="dark:bg-gray-800">{{ t('types.sortDomesticDesc') }}</option>
+            <option value="domesticAsc" class="dark:bg-gray-800">{{ t('types.sortDomesticAsc') }}</option>
+            <option value="channelAsc" class="dark:bg-gray-800">{{ t('types.sortChannelAsc') }}</option>
+            <option value="latencyAsc" class="dark:bg-gray-800">{{ t('types.sortLatencyAsc') }}</option>
           </select>
         </div>
       </div>
@@ -2086,11 +2565,11 @@ const copyProfileChannelName = async (channel: string) => {
           <div class="flex items-center justify-between">
             <label class="block text-[10px] font-black uppercase tracking-wider text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
               <Award class="w-3.5 h-3.5" />
-              <span>Read Value Scoring</span>
+              <span>{{ t('types.readValueScoring') }}</span>
             </label>
             <div class="flex items-center gap-2">
               <span class="text-[10px] font-mono text-gray-400">
-                Min: {{ readValueMinScore.toFixed(1) }} / 3.0
+                {{ t('types.minScore', { score: readValueMinScore.toFixed(1) }) }}
               </span>
               <button
                 @click="sortBy = 'readValDesc'"
@@ -2100,9 +2579,9 @@ const copyProfileChannelName = async (channel: string) => {
                     ? 'bg-emerald-600 text-white shadow-xs'
                     : 'bg-gray-100 dark:bg-gray-900/60 text-gray-600 dark:text-gray-300 hover:text-emerald-600'
                 ]"
-                title="Sort channels by Read Value High to Low"
+                :title="t('types.sortReadValDesc')"
               >
-                <span>⚡ High → Low</span>
+                <span>{{ t('types.highToLow') }}</span>
               </button>
             </div>
           </div>
@@ -2118,16 +2597,16 @@ const copyProfileChannelName = async (channel: string) => {
               v-model.number="readValueMinScore"
               @input="readValuePreset = 'custom'"
               class="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-emerald-600 dark:accent-emerald-500"
-              title="Slide to filter channels by minimum Read Value score"
+              :title="t('types.slideTooltip')"
             />
             <span class="text-[10px] font-mono text-gray-400 shrink-0">3.0</span>
             <button
               v-if="readValueMinScore > 0"
               @click="readValueMinScore = 0; readValuePreset = 'all'"
               class="text-[10px] font-bold text-gray-400 hover:text-rose-500 dark:hover:text-rose-400 px-1 py-0.5 transition cursor-pointer shrink-0"
-              title="Reset score slider"
+              :title="t('types.resetSlider')"
             >
-              Reset
+              {{ t('types.resetSlider') }}
             </button>
           </div>
 
@@ -2142,7 +2621,7 @@ const copyProfileChannelName = async (channel: string) => {
                   : 'bg-gray-100 dark:bg-gray-900/60 text-gray-600 dark:text-gray-300 hover:bg-gray-200'
               ]"
             >
-              All
+              {{ t('types.all') }}
             </button>
             <button
               @click="applyReadValuePreset('critical')"
@@ -2153,7 +2632,7 @@ const copyProfileChannelName = async (channel: string) => {
                   : 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100'
               ]"
             >
-              <span>L3 Critical (≥2.2)</span>
+              <span>{{ t('types.l3Critical') }}</span>
               <span class="text-[10px] px-1 rounded-full font-mono bg-black/10 dark:bg-white/10">
                 {{ readValueStats.criticalCount.toLocaleString() }}
               </span>
@@ -2167,7 +2646,7 @@ const copyProfileChannelName = async (channel: string) => {
                   : 'bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 hover:bg-blue-100'
               ]"
             >
-              <span>L2 Substantive (≥1.5)</span>
+              <span>{{ t('types.l2Substantive') }}</span>
               <span class="text-[10px] px-1 rounded-full font-mono bg-black/10 dark:bg-white/10">
                 {{ readValueStats.substantiveCount.toLocaleString() }}
               </span>
@@ -2181,7 +2660,7 @@ const copyProfileChannelName = async (channel: string) => {
                   : 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 hover:bg-amber-100'
               ]"
             >
-              <span>L1 (≥0.8)</span>
+              <span>{{ t('types.l1Background') }}</span>
             </button>
             <button
               @click="applyReadValuePreset('low')"
@@ -2192,7 +2671,7 @@ const copyProfileChannelName = async (channel: string) => {
                   : 'bg-slate-100 dark:bg-slate-900/60 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-200'
               ]"
             >
-              <span>L0 (&lt;0.8)</span>
+              <span>{{ t('types.l0Low') }}</span>
             </button>
             <button
               @click="applyReadValuePreset('hasReadValue')"
@@ -2203,7 +2682,7 @@ const copyProfileChannelName = async (channel: string) => {
                   : 'bg-gray-100 dark:bg-gray-900/60 text-gray-700 dark:text-gray-300 hover:bg-gray-200'
               ]"
             >
-              <span>Scored</span>
+              <span>{{ t('types.scored') }}</span>
               <span class="text-[10px] px-1 rounded-full font-mono bg-black/10 dark:bg-white/10">
                 {{ readValueStats.hasCount.toLocaleString() }}
               </span>
@@ -2216,9 +2695,9 @@ const copyProfileChannelName = async (channel: string) => {
                   ? 'bg-gray-700 text-white shadow-sm'
                   : 'bg-gray-100 dark:bg-gray-900/60 text-gray-500 dark:text-gray-400 hover:bg-gray-200'
               ]"
-              title="Filter channels from legacy batch without Read Value scoring"
+              :title="t('types.legacyTooltip')"
             >
-              <span>Legacy</span>
+              <span>{{ t('types.legacy') }}</span>
               <span class="text-[10px] px-1 rounded-full font-mono bg-black/10 dark:bg-white/10">
                 {{ readValueStats.legacyCount.toLocaleString() }}
               </span>
@@ -2230,10 +2709,10 @@ const copyProfileChannelName = async (channel: string) => {
         <div class="lg:col-span-5 space-y-1.5">
           <div class="flex items-center justify-between">
             <label class="block text-[10px] font-black uppercase tracking-wider text-purple-600 dark:text-purple-400">
-              Domestic Affairs Orientation
+              {{ t('types.domesticOrientation') }}
             </label>
             <span class="text-[10px] font-mono text-gray-400">
-              Ratio: 0.0–1.0
+              {{ t('types.ratio') }}
             </span>
           </div>
 
@@ -2247,7 +2726,7 @@ const copyProfileChannelName = async (channel: string) => {
                   : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'
               ]"
             >
-              All
+              {{ t('types.all') }}
             </button>
             <button
               @click="applyDomesticPreset('high')"
@@ -2258,7 +2737,7 @@ const copyProfileChannelName = async (channel: string) => {
                   : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'
               ]"
             >
-              Domestic (≥0.6)
+              {{ t('types.domesticHigh') }}
             </button>
             <button
               @click="applyDomesticPreset('mid')"
@@ -2269,7 +2748,7 @@ const copyProfileChannelName = async (channel: string) => {
                   : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'
               ]"
             >
-              Mid
+              {{ t('types.domesticMid') }}
             </button>
             <button
               @click="applyDomesticPreset('low')"
@@ -2280,7 +2759,7 @@ const copyProfileChannelName = async (channel: string) => {
                   : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'
               ]"
             >
-              External (&lt;0.3)
+              {{ t('types.domesticLow') }}
             </button>
           </div>
         </div>
@@ -2289,7 +2768,7 @@ const copyProfileChannelName = async (channel: string) => {
       <!-- Row 3: Topic Chips -->
       <div class="space-y-1.5 pt-2 border-t border-gray-100 dark:border-gray-700/60">
         <label class="block text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500">
-          Filter By Topic
+          {{ t('types.filterByTopic') }}
         </label>
         <div class="flex flex-wrap items-center gap-1.5">
           <button
@@ -2301,7 +2780,7 @@ const copyProfileChannelName = async (channel: string) => {
                 : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-700/60 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300'
             ]"
           >
-            All Topics
+            {{ t('types.allTopics') }}
             <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono" :class="selectedTopic === 'all' ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-600'">
               {{ items.length.toLocaleString() }}
             </span>
@@ -2317,7 +2796,7 @@ const copyProfileChannelName = async (channel: string) => {
                 : `${cfg.bg} ${cfg.color} border ${cfg.border} hover:opacity-80`
             ]"
           >
-            <span>{{ cfg.label }}</span>
+            <span>{{ getTopicInfo(key).label }}</span>
             <span
               class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
               :class="selectedTopic === key ? 'bg-white/20' : 'bg-black/5 dark:bg-white/10'"
@@ -2331,8 +2810,8 @@ const copyProfileChannelName = async (channel: string) => {
       <!-- Row 4: Target Country Chips (Expanded to 12 regions) -->
       <div class="space-y-1.5">
         <label class="block text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500 flex items-center justify-between">
-          <span>Filter By Target Country / Region</span>
-          <span class="text-indigo-600 dark:text-indigo-400 lowercase font-normal">Includes European Union, US Allies Asia, Africa</span>
+          <span>{{ t('types.filterByCountry') }}</span>
+          <span class="text-indigo-600 dark:text-indigo-400 lowercase font-normal">{{ t('types.includesRegionsHint') }}</span>
         </label>
         <div class="flex flex-wrap items-center gap-1.5">
           <button
@@ -2344,7 +2823,7 @@ const copyProfileChannelName = async (channel: string) => {
                 : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-700/60 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300'
             ]"
           >
-            All Countries
+            {{ t('types.allCountries') }}
             <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono" :class="selectedCountry === 'all' ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-600'">
               {{ items.length.toLocaleString() }}
             </span>
@@ -2362,12 +2841,12 @@ const copyProfileChannelName = async (channel: string) => {
                   : 'bg-gray-50 dark:bg-gray-900/60 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800'
             ]"
           >
-            <span>{{ cfg.flag }} {{ cfg.label }}</span>
+            <span>{{ cfg.flag }} {{ getCountryInfo(key).label }}</span>
             <span
               v-if="cfg.isNew"
               class="text-[9px] uppercase px-1 py-0.2 rounded font-extrabold bg-amber-400/20 text-amber-700 dark:text-amber-300 border border-amber-300/40"
             >
-              New
+              {{ t('types.newBadge') }}
             </span>
             <span
               class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
@@ -2384,19 +2863,11 @@ const copyProfileChannelName = async (channel: string) => {
     <div class="flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-gray-500 dark:text-gray-400 px-1">
       <div class="flex items-center gap-2">
         <span>
-          Showing
-          <strong class="text-gray-900 dark:text-white font-mono tabular-nums">
-            {{ filteredItems.length === 0 ? 0 : (currentPage - 1) * pageSize + 1 }}
-          </strong>
-          –
-          <strong class="text-gray-900 dark:text-white font-mono tabular-nums">
-            {{ Math.min(currentPage * pageSize, filteredItems.length) }}
-          </strong>
-          of
-          <strong class="text-gray-900 dark:text-white font-mono tabular-nums">
-            {{ filteredItems.length.toLocaleString() }}
-          </strong>
-          matching channels
+          {{ t('types.showingChannels', {
+            start: filteredItems.length === 0 ? 0 : (currentPage - 1) * pageSize + 1,
+            end: Math.min(currentPage * pageSize, filteredItems.length),
+            total: filteredItems.length.toLocaleString()
+          }) }}
         </span>
       </div>
 
@@ -2404,7 +2875,7 @@ const copyProfileChannelName = async (channel: string) => {
       <div class="flex items-center gap-2">
         <!-- Page size selector -->
         <div class="flex items-center gap-1">
-          <span class="text-[11px]">Per page:</span>
+          <span class="text-[11px]">{{ t('types.perPage') }}</span>
           <select
             v-model="pageSize"
             class="bg-gray-100 dark:bg-gray-800 font-bold px-2 py-1 rounded-lg border border-gray-200 dark:border-gray-700 outline-none cursor-pointer"
@@ -2443,15 +2914,15 @@ const copyProfileChannelName = async (channel: string) => {
       <div class="w-12 h-12 rounded-2xl bg-gray-100 dark:bg-gray-700 text-gray-400 mx-auto flex items-center justify-center">
         <Search class="w-6 h-6" />
       </div>
-      <h3 class="text-sm font-bold text-gray-900 dark:text-white">No classified channels match current filters</h3>
+      <h3 class="text-sm font-bold text-gray-900 dark:text-white">{{ t('types.emptyTitle') }}</h3>
       <p class="text-xs text-gray-500 dark:text-gray-400 max-w-md mx-auto">
-        Try resetting the search query or expanding topic, country, or Read Value thresholds.
+        {{ t('types.emptyDesc') }}
       </p>
       <button
         @click="searchQuery = ''; selectedTopic = 'all'; selectedCountry = 'all'; applyDomesticPreset('all'); applyReadValuePreset('all')"
         class="px-4 py-2 text-xs font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 transition cursor-pointer"
       >
-        Reset Filters
+        {{ t('types.resetFilters') }}
       </button>
     </div>
 
@@ -2473,7 +2944,7 @@ const copyProfileChannelName = async (channel: string) => {
               @mouseenter="handleChannelMouseEnter($event, item.channel)"
               @mouseleave="handleChannelMouseLeave"
               @click.stop="handleExplore(item.channel)"
-              :title="`View profile hint card for @${item.channel}`"
+              :title="t('types.channelCard.viewProfileHint', { channel: item.channel })"
             >
               <img
                 :src="getChannelAvatarSrc(item.channel)"
@@ -2490,7 +2961,7 @@ const copyProfileChannelName = async (channel: string) => {
                 <h4
                   class="text-xs font-extrabold text-gray-900 dark:text-white truncate hover:text-indigo-600 dark:hover:text-indigo-400 hover:underline cursor-pointer transition select-text"
                   data-profile-trigger="true"
-                  :title="`View profile hint card for @${item.channel}`"
+                  :title="t('types.channelCard.viewProfileHint', { channel: item.channel })"
                   @mouseenter="handleChannelMouseEnter($event, item.channel)"
                   @mouseleave="handleChannelMouseLeave"
                   @click.stop="handleExplore(item.channel)"
@@ -2511,7 +2982,7 @@ const copyProfileChannelName = async (channel: string) => {
                 <div
                   v-else-if="getChannelJobMeta(item.channel)?.loading"
                   class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[8.5px] font-bold tracking-wider border shrink-0 bg-gray-50 text-gray-400 dark:bg-gray-800 dark:text-gray-500 border-gray-200 dark:border-gray-700 animate-pulse"
-                  title="Detecting channel language..."
+                  :title="t('types.channelCard.detectingLang')"
                 >
                   <Languages class="w-2.5 h-2.5 shrink-0 opacity-60 animate-spin" />
                   <span>LANG...</span>
@@ -2539,17 +3010,17 @@ const copyProfileChannelName = async (channel: string) => {
                 <div
                   v-if="activeNlFilter"
                   class="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9px] font-black tracking-wide border shrink-0 bg-indigo-50 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300 border-indigo-300 dark:border-indigo-700"
-                  :title="`AI Match Affinity: ${Math.round(calculateDistributionAwareScore(item, activeNlFilter) * 100)}%`"
+                  :title="t('types.channelCard.matchAffinity', { percent: Math.round(calculateDistributionAwareScore(item, activeNlFilter) * 100) })"
                 >
                   <Sparkles class="w-2.5 h-2.5 shrink-0 text-indigo-500" />
-                  <span>{{ Math.round(calculateDistributionAwareScore(item, activeNlFilter) * 100) }}% Match</span>
+                  <span>{{ t('types.channelCard.matchAffinity', { percent: Math.round(calculateDistributionAwareScore(item, activeNlFilter) * 100) }) }}</span>
                 </div>
                 <div
                   v-else-if="!item.hasReadValue"
                   class="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9px] font-medium text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 border border-dashed border-gray-300 dark:border-gray-700 shrink-0"
-                  title="Legacy batch without Read Value scoring"
+                  :title="t('types.legacyTooltip')"
                 >
-                  <span>Legacy</span>
+                  <span>{{ t('types.legacy') }}</span>
                 </div>
               </div>
               <div class="flex items-center gap-1.5 text-[10px] text-gray-400 font-mono mt-0.5 flex-wrap">
@@ -2578,14 +3049,14 @@ const copyProfileChannelName = async (channel: string) => {
             <button
               @click="openDrawer(item)"
               class="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition cursor-pointer"
-              title="Inspect full distributions and legend"
+              :title="t('types.channelCard.inspectTooltip')"
             >
               <Eye class="w-4 h-4" />
             </button>
             <button
               @click="handleExplore(item.channel)"
               class="p-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900 text-indigo-600 dark:text-indigo-300 transition cursor-pointer"
-              title="Jump to Explorer to view posts"
+              :title="t('types.channelCard.jumpToExplorer')"
             >
               <ArrowUpRight class="w-4 h-4" />
             </button>
@@ -2596,7 +3067,7 @@ const copyProfileChannelName = async (channel: string) => {
         <div class="space-y-1.5 bg-gray-50/70 dark:bg-gray-900/40 p-2.5 rounded-xl border border-gray-100 dark:border-gray-800/60">
           <div class="flex items-center justify-between text-xs">
             <span class="text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500">
-              Topic
+              {{ t('types.channelCard.topic') }}
             </span>
             <span class="font-extrabold text-gray-800 dark:text-gray-200 capitalize">
               {{ getTopicInfo(item.topic).label }}
@@ -2628,7 +3099,7 @@ const copyProfileChannelName = async (channel: string) => {
         <div class="space-y-1.5 bg-gray-50/70 dark:bg-gray-900/40 p-2.5 rounded-xl border border-gray-100 dark:border-gray-800/60">
           <div class="flex items-center justify-between text-xs">
             <span class="text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500">
-              Target Region
+              {{ t('types.channelCard.targetRegion') }}
             </span>
             <span class="font-extrabold text-gray-800 dark:text-gray-200 capitalize flex items-center gap-1 truncate max-w-[170px]" :title="getCountryInfo(item.country).label">
               <span>{{ getCountryInfo(item.country).flag }}</span>
@@ -2663,7 +3134,7 @@ const copyProfileChannelName = async (channel: string) => {
           <div class="space-y-1 bg-gray-50/70 dark:bg-gray-900/40 p-2.5 rounded-xl border border-gray-100 dark:border-gray-800/60">
             <div class="flex items-center justify-between text-xs">
               <span class="text-[9px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500">
-                Domestic
+                {{ t('types.channelCard.domestic') }}
               </span>
               <span class="font-mono font-extrabold text-[11px] tabular-nums" :class="item.domestic >= 0.6 ? 'text-purple-600 dark:text-purple-400' : 'text-gray-700 dark:text-gray-300'">
                 {{ item.domestic.toFixed(2) }}
@@ -2676,7 +3147,7 @@ const copyProfileChannelName = async (channel: string) => {
               ></div>
             </div>
             <div class="text-[9px] text-gray-400 truncate">
-              {{ item.domestic >= 0.6 ? 'Domestic Focus' : item.domestic >= 0.3 ? 'Balanced' : 'External Focus' }}
+              {{ item.domestic >= 0.6 ? t('types.channelCard.domesticFocus') : item.domestic >= 0.3 ? t('types.channelCard.balanced') : t('types.channelCard.externalFocus') }}
             </div>
           </div>
 
@@ -2685,7 +3156,7 @@ const copyProfileChannelName = async (channel: string) => {
             <div class="flex items-center justify-between text-xs">
               <span class="text-[9px] font-black uppercase tracking-wider text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
                 <Award class="w-3 h-3" />
-                <span>Read Value</span>
+                <span>{{ t('types.channelCard.readValue') }}</span>
               </span>
               <span
                 v-if="item.hasReadValue && item.readValueScore !== null"
@@ -2694,7 +3165,7 @@ const copyProfileChannelName = async (channel: string) => {
                 {{ item.readValueScore.toFixed(2) }}
               </span>
               <span v-else class="text-[10px] text-gray-400 font-mono">
-                Legacy
+                {{ t('types.legacy') }}
               </span>
             </div>
 
@@ -2708,7 +3179,7 @@ const copyProfileChannelName = async (channel: string) => {
                       ? 'bg-slate-400 text-white'
                       : 'bg-gray-200 dark:bg-gray-700 text-gray-400 opacity-40'
                   ]"
-                  title="Level 0: Fluff/Chatter (Score ≥ 0.0)"
+                  :title="t('types.readValue.meterL0')"
                 >
                   0
                 </div>
@@ -2719,7 +3190,7 @@ const copyProfileChannelName = async (channel: string) => {
                       ? 'bg-amber-500 text-white shadow-xs'
                       : 'bg-gray-200 dark:bg-gray-700 text-gray-400 opacity-40'
                   ]"
-                  title="Level 1: Background/Sentiment (Score ≥ 0.8)"
+                  :title="t('types.readValue.meterL1')"
                 >
                   1
                 </div>
@@ -2730,7 +3201,7 @@ const copyProfileChannelName = async (channel: string) => {
                       ? 'bg-blue-500 text-white shadow-xs'
                       : 'bg-gray-200 dark:bg-gray-700 text-gray-400 opacity-40'
                   ]"
-                  title="Level 2: Circumstantial/Claims (Score ≥ 1.5)"
+                  :title="t('types.readValue.meterL2')"
                 >
                   2
                 </div>
@@ -2741,7 +3212,7 @@ const copyProfileChannelName = async (channel: string) => {
                       ? 'bg-emerald-500 text-white shadow-xs ring-1 ring-emerald-300'
                       : 'bg-gray-200 dark:bg-gray-700 text-gray-400 opacity-40'
                   ]"
-                  title="Level 3: Critical Facts (Score ≥ 2.2)"
+                  :title="t('types.readValue.meterL3')"
                 >
                   3
                 </div>
@@ -2757,22 +3228,22 @@ const copyProfileChannelName = async (channel: string) => {
               <div
                 class="bg-slate-400"
                 :style="{ width: `${Math.round((item.readValueProbs['0'] || 0) * 100)}%` }"
-                title="Level 0: Fluff/Banter"
+                :title="t('types.readValue.meterL0')"
               ></div>
               <div
                 class="bg-amber-400"
                 :style="{ width: `${Math.round((item.readValueProbs['1'] || 0) * 100)}%` }"
-                title="Level 1: Background/Sentiment"
+                :title="t('types.readValue.meterL1')"
               ></div>
               <div
                 class="bg-sky-500"
                 :style="{ width: `${Math.round((item.readValueProbs['2'] || 0) * 100)}%` }"
-                title="Level 2: Circumstantial/Unverified"
+                :title="t('types.readValue.meterL2')"
               ></div>
               <div
                 class="bg-emerald-500"
                 :style="{ width: `${Math.round((item.readValueProbs['3'] || 0) * 100)}%` }"
-                title="Level 3: Critical Facts"
+                :title="t('types.readValue.meterL3')"
               ></div>
             </div>
             <div v-else class="w-full h-1.5 bg-gray-200/60 dark:bg-gray-800 rounded-full border border-dashed border-gray-300 dark:border-gray-700" title="Legacy format without score breakdown"></div>
@@ -2791,13 +3262,13 @@ const copyProfileChannelName = async (channel: string) => {
         <!-- Card Footer Action Bar -->
         <div class="pt-2 border-t border-gray-100 dark:border-gray-700/60 flex items-center justify-between">
           <div class="text-[10px] font-mono text-gray-400">
-            Tokens: {{ (item.tokensIn / 1000).toFixed(1) }}k in
+            {{ t('types.channelCard.tokensIn', { tokens: (item.tokensIn / 1000).toFixed(1) }) }}
           </div>
           <button
             @click="handleExplore(item.channel)"
             class="text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 flex items-center gap-1 cursor-pointer"
           >
-            <span>Explore Channel</span>
+            <span>{{ t('types.channelCard.exploreChannel') }}</span>
             <ArrowUpRight class="w-3.5 h-3.5" />
           </button>
         </div>
@@ -2807,7 +3278,7 @@ const copyProfileChannelName = async (channel: string) => {
     <!-- Bottom Pagination Footer -->
     <div v-if="filteredItems.length > 0" class="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-gray-200/80 dark:border-gray-700/80 text-xs">
       <div class="text-gray-500 dark:text-gray-400 font-mono">
-        Page {{ currentPage }} of {{ totalFilteredPages }} ({{ filteredItems.length.toLocaleString() }} total channels)
+        {{ t('types.pageSummary', { current: currentPage, total: totalFilteredPages, count: filteredItems.length.toLocaleString() }) }}
       </div>
 
       <div class="flex items-center gap-1.5">
@@ -2816,7 +3287,7 @@ const copyProfileChannelName = async (channel: string) => {
           :disabled="currentPage <= 1"
           class="px-2.5 py-1.5 rounded-xl border border-gray-200 dark:border-gray-700 font-bold hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition"
         >
-          First
+          {{ t('types.first') }}
         </button>
         <button
           @click="currentPage = Math.max(1, currentPage - 1)"
@@ -2824,14 +3295,14 @@ const copyProfileChannelName = async (channel: string) => {
           class="px-3 py-1.5 rounded-xl border border-gray-200 dark:border-gray-700 font-bold hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition flex items-center gap-1"
         >
           <ChevronLeft class="w-3.5 h-3.5" />
-          <span>Prev</span>
+          <span>{{ t('types.prev') }}</span>
         </button>
         <button
           @click="currentPage = Math.min(totalFilteredPages, currentPage + 1)"
           :disabled="currentPage >= totalFilteredPages"
           class="px-3 py-1.5 rounded-xl border border-gray-200 dark:border-gray-700 font-bold hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition flex items-center gap-1"
         >
-          <span>Next</span>
+          <span>{{ t('types.next') }}</span>
           <ChevronRight class="w-3.5 h-3.5" />
         </button>
         <button
@@ -2839,7 +3310,7 @@ const copyProfileChannelName = async (channel: string) => {
           :disabled="currentPage >= totalFilteredPages"
           class="px-2.5 py-1.5 rounded-xl border border-gray-200 dark:border-gray-700 font-bold hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition"
         >
-          Last
+          {{ t('types.last') }}
         </button>
       </div>
     </div>
@@ -2889,7 +3360,7 @@ const copyProfileChannelName = async (channel: string) => {
                       </div>
                     </div>
                     <p class="text-xs text-gray-500 dark:text-gray-400">
-                      Channel Taxonomy, Read Value & Geopolitical Distribution
+                      {{ t('types.drawer.subtitle') }}
                     </p>
                   </div>
                 </div>
@@ -2905,9 +3376,9 @@ const copyProfileChannelName = async (channel: string) => {
               <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-center">
                 <!-- Topic -->
                 <div class="p-2.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200/60 dark:border-indigo-800/60">
-                  <div class="text-[9px] font-black uppercase text-indigo-700 dark:text-indigo-300">Topic</div>
+                  <div class="text-[9px] font-black uppercase text-indigo-700 dark:text-indigo-300">{{ t('types.drawer.topic') }}</div>
                   <div class="text-xs font-bold text-gray-900 dark:text-white capitalize truncate mt-0.5">
-                    {{ selectedInspectionItem.topic }}
+                    {{ getTopicInfo(selectedInspectionItem.topic).label }}
                   </div>
                   <div class="text-[11px] font-mono font-bold text-indigo-600 dark:text-indigo-400">
                     {{ Math.round(selectedInspectionItem.topicConf * 100) }}%
@@ -2916,7 +3387,7 @@ const copyProfileChannelName = async (channel: string) => {
 
                 <!-- Country -->
                 <div class="p-2.5 rounded-xl bg-cyan-50 dark:bg-cyan-950/40 border border-cyan-200/60 dark:border-cyan-800/60">
-                  <div class="text-[9px] font-black uppercase text-cyan-700 dark:text-cyan-300">Region</div>
+                  <div class="text-[9px] font-black uppercase text-cyan-700 dark:text-cyan-300">{{ t('types.drawer.region') }}</div>
                   <div class="text-xs font-bold text-gray-900 dark:text-white capitalize truncate mt-0.5" :title="getCountryInfo(selectedInspectionItem.country).label">
                     {{ getCountryInfo(selectedInspectionItem.country).label }}
                   </div>
@@ -2927,9 +3398,9 @@ const copyProfileChannelName = async (channel: string) => {
 
                 <!-- Domestic -->
                 <div class="p-2.5 rounded-xl bg-purple-50 dark:bg-purple-950/40 border border-purple-200/60 dark:border-purple-800/60">
-                  <div class="text-[9px] font-black uppercase text-purple-700 dark:text-purple-300">Domestic</div>
+                  <div class="text-[9px] font-black uppercase text-purple-700 dark:text-purple-300">{{ t('types.drawer.domestic') }}</div>
                   <div class="text-xs font-bold text-gray-900 dark:text-white truncate mt-0.5">
-                    {{ selectedInspectionItem.domestic >= 0.6 ? 'Domestic' : 'External' }}
+                    {{ selectedInspectionItem.domestic >= 0.6 ? t('types.drawer.domesticValue') : t('types.drawer.externalValue') }}
                   </div>
                   <div class="text-[11px] font-mono font-bold text-purple-600 dark:text-purple-400">
                     {{ selectedInspectionItem.domestic.toFixed(2) }}
@@ -2938,9 +3409,9 @@ const copyProfileChannelName = async (channel: string) => {
 
                 <!-- Read Value -->
                 <div class="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200/60 dark:border-emerald-800/60">
-                  <div class="text-[9px] font-black uppercase text-emerald-700 dark:text-emerald-300">Read Value</div>
+                  <div class="text-[9px] font-black uppercase text-emerald-700 dark:text-emerald-300">{{ t('types.drawer.readValue') }}</div>
                   <div class="text-xs font-bold text-gray-900 dark:text-white truncate mt-0.5">
-                    {{ selectedInspectionItem.hasReadValue ? getReadValueTier(selectedInspectionItem.readValueScore).shortLabel : 'Legacy' }}
+                    {{ selectedInspectionItem.hasReadValue ? getReadValueTier(selectedInspectionItem.readValueScore).shortLabel : t('types.legacy') }}
                   </div>
                   <div class="text-[11px] font-mono font-bold text-emerald-600 dark:text-emerald-400">
                     {{ selectedInspectionItem.hasReadValue && selectedInspectionItem.readValueScore !== null ? selectedInspectionItem.readValueScore.toFixed(2) : 'N/A' }}
@@ -2953,16 +3424,16 @@ const copyProfileChannelName = async (channel: string) => {
                 <div class="flex items-center justify-between">
                   <h4 class="text-xs font-black uppercase tracking-wider text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
                     <Award class="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                    <span>Read Value Quality Breakdown</span>
+                    <span>{{ t('types.drawer.qualityBreakdown') }}</span>
                   </h4>
                   <span
                     v-if="selectedInspectionItem.hasReadValue && selectedInspectionItem.readValueScore !== null"
                     class="font-mono text-xs font-extrabold px-2 py-0.5 rounded-lg bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700"
                   >
-                    Score: {{ selectedInspectionItem.readValueScore.toFixed(3) }} / 3.000
+                    {{ t('types.drawer.score', { score: selectedInspectionItem.readValueScore.toFixed(3) }) }}
                   </span>
                   <span v-else class="text-[10px] text-gray-400 font-mono">
-                    Legacy Format (Score Not Included)
+                    {{ t('types.drawer.legacyNotice') }}
                   </span>
                 </div>
 
@@ -2974,7 +3445,7 @@ const copyProfileChannelName = async (channel: string) => {
                       <div class="flex items-center justify-between text-xs">
                         <span class="font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
                           <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
-                          Level 3: Critical Facts & Disclosures
+                          {{ t('types.readValue.level3Title') }}
                         </span>
                         <span class="font-mono text-[11px] font-bold tabular-nums text-emerald-800 dark:text-emerald-200">
                           {{ (((selectedInspectionItem.readValueProbs['3'] || 0)) * 100).toFixed(2) }}%
@@ -2984,7 +3455,7 @@ const copyProfileChannelName = async (channel: string) => {
                         <div class="h-full bg-emerald-500 rounded-full" :style="{ width: `${Math.round((selectedInspectionItem.readValueProbs['3'] || 0) * 100)}%` }"></div>
                       </div>
                       <p class="text-[10px] text-gray-500 dark:text-gray-400 italic leading-snug">
-                        {{ selectedInspectionItem.readValueLegend?.['3'] || DEFAULT_READ_LEGEND['3'] }}
+                        {{ getReadValueLegend(selectedInspectionItem, '3') }}
                       </p>
                     </div>
 
@@ -2993,7 +3464,7 @@ const copyProfileChannelName = async (channel: string) => {
                       <div class="flex items-center justify-between text-xs">
                         <span class="font-bold text-blue-700 dark:text-blue-300 flex items-center gap-1.5">
                           <span class="w-2 h-2 rounded-full bg-blue-500"></span>
-                          Level 2: Circumstantial Context & Claims
+                          {{ t('types.readValue.level2Title') }}
                         </span>
                         <span class="font-mono text-[11px] font-bold tabular-nums text-blue-800 dark:text-blue-200">
                           {{ (((selectedInspectionItem.readValueProbs['2'] || 0)) * 100).toFixed(2) }}%
@@ -3003,7 +3474,7 @@ const copyProfileChannelName = async (channel: string) => {
                         <div class="h-full bg-blue-500 rounded-full" :style="{ width: `${Math.round((selectedInspectionItem.readValueProbs['2'] || 0) * 100)}%` }"></div>
                       </div>
                       <p class="text-[10px] text-gray-500 dark:text-gray-400 italic leading-snug">
-                        {{ selectedInspectionItem.readValueLegend?.['2'] || DEFAULT_READ_LEGEND['2'] }}
+                        {{ getReadValueLegend(selectedInspectionItem, '2') }}
                       </p>
                     </div>
 
@@ -3012,7 +3483,7 @@ const copyProfileChannelName = async (channel: string) => {
                       <div class="flex items-center justify-between text-xs">
                         <span class="font-bold text-amber-700 dark:text-amber-300 flex items-center gap-1.5">
                           <span class="w-2 h-2 rounded-full bg-amber-500"></span>
-                          Level 1: Background & Opinion
+                          {{ t('types.readValue.level1Title') }}
                         </span>
                         <span class="font-mono text-[11px] font-bold tabular-nums text-amber-800 dark:text-amber-200">
                           {{ (((selectedInspectionItem.readValueProbs['1'] || 0)) * 100).toFixed(2) }}%
@@ -3022,7 +3493,7 @@ const copyProfileChannelName = async (channel: string) => {
                         <div class="h-full bg-amber-500 rounded-full" :style="{ width: `${Math.round((selectedInspectionItem.readValueProbs['1'] || 0) * 100)}%` }"></div>
                       </div>
                       <p class="text-[10px] text-gray-500 dark:text-gray-400 italic leading-snug">
-                        {{ selectedInspectionItem.readValueLegend?.['1'] || DEFAULT_READ_LEGEND['1'] }}
+                        {{ getReadValueLegend(selectedInspectionItem, '1') }}
                       </p>
                     </div>
 
@@ -3031,7 +3502,7 @@ const copyProfileChannelName = async (channel: string) => {
                       <div class="flex items-center justify-between text-xs">
                         <span class="font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                           <span class="w-2 h-2 rounded-full bg-slate-400"></span>
-                          Level 0: Fluff & Chatter
+                          {{ t('types.readValue.level0Title') }}
                         </span>
                         <span class="font-mono text-[11px] font-bold tabular-nums text-slate-800 dark:text-slate-200">
                           {{ (((selectedInspectionItem.readValueProbs['0'] || 0)) * 100).toFixed(2) }}%
@@ -3041,22 +3512,22 @@ const copyProfileChannelName = async (channel: string) => {
                         <div class="h-full bg-slate-400 rounded-full" :style="{ width: `${Math.round((selectedInspectionItem.readValueProbs['0'] || 0) * 100)}%` }"></div>
                       </div>
                       <p class="text-[10px] text-gray-500 dark:text-gray-400 italic leading-snug">
-                        {{ selectedInspectionItem.readValueLegend?.['0'] || DEFAULT_READ_LEGEND['0'] }}
+                        {{ getReadValueLegend(selectedInspectionItem, '0') }}
                       </p>
                     </div>
                   </div>
                 </div>
 
                 <div v-else class="text-xs text-gray-500 dark:text-gray-400 italic bg-white dark:bg-gray-900/50 p-3 rounded-xl border border-gray-200/60 dark:border-gray-800">
-                  This record belongs to the legacy classification model run before Read Value scoring was implemented. Re-running the classifier on this channel will populate 0–3 level informativeness.
+                  {{ t('types.drawer.legacyNotice') }}
                 </div>
               </div>
 
               <!-- Topic Probabilities Table -->
               <div class="space-y-2">
                 <h4 class="text-xs font-black uppercase tracking-wider text-gray-600 dark:text-gray-300 flex items-center justify-between">
-                  <span>Topic Distribution (All 9 Categories)</span>
-                  <span class="text-[10px] font-mono font-normal text-gray-400">Probabilities</span>
+                  <span>{{ t('types.drawer.allTopicsTitle') }}</span>
+                  <span class="text-[10px] font-mono font-normal text-gray-400">{{ t('types.drawer.probabilities') }}</span>
                 </h4>
                 <div class="space-y-1.5 bg-gray-50 dark:bg-gray-900/60 p-3 rounded-xl border border-gray-200/60 dark:border-gray-700/60">
                   <div
@@ -3085,8 +3556,8 @@ const copyProfileChannelName = async (channel: string) => {
               <!-- Target Country Probabilities Table (Supports 12 regions) -->
               <div class="space-y-2">
                 <h4 class="text-xs font-black uppercase tracking-wider text-gray-600 dark:text-gray-300 flex items-center justify-between">
-                  <span>Geopolitical Target Region Distribution</span>
-                  <span class="text-[10px] font-mono font-normal text-gray-400">Probabilities</span>
+                  <span>{{ t('types.drawer.allRegionsTitle') }}</span>
+                  <span class="text-[10px] font-mono font-normal text-gray-400">{{ t('types.drawer.probabilities') }}</span>
                 </h4>
                 <div class="space-y-1.5 bg-gray-50 dark:bg-gray-900/60 p-3 rounded-xl border border-gray-200/60 dark:border-gray-700/60">
                   <div
@@ -3116,23 +3587,23 @@ const copyProfileChannelName = async (channel: string) => {
               <!-- Inference Telemetry -->
               <div class="space-y-2">
                 <h4 class="text-xs font-black uppercase tracking-wider text-gray-600 dark:text-gray-300">
-                  Model Inference Telemetry
+                  {{ t('types.drawer.telemetry') }}
                 </h4>
                 <div class="grid grid-cols-2 gap-2 text-xs bg-gray-50 dark:bg-gray-900/60 p-3 rounded-xl border border-gray-200/60 dark:border-gray-700/60 font-mono">
                   <div>
-                    <span class="text-gray-400">Model:</span>
+                    <span class="text-gray-400">{{ t('types.drawer.model') }}</span>
                     <span class="ml-1 text-gray-800 dark:text-gray-200 font-bold">{{ selectedInspectionItem.model }}</span>
                   </div>
                   <div>
-                    <span class="text-gray-400">Latency:</span>
+                    <span class="text-gray-400">{{ t('types.drawer.latency') }}</span>
                     <span class="ml-1 text-gray-800 dark:text-gray-200 font-bold">{{ selectedInspectionItem.latencyMs.toFixed(1) }}ms</span>
                   </div>
                   <div>
-                    <span class="text-gray-400">Input Tokens:</span>
+                    <span class="text-gray-400">{{ t('types.drawer.inputTokens') }}</span>
                     <span class="ml-1 text-gray-800 dark:text-gray-200 font-bold">{{ selectedInspectionItem.tokensIn.toLocaleString() }}</span>
                   </div>
                   <div>
-                    <span class="text-gray-400">Output Tokens:</span>
+                    <span class="text-gray-400">{{ t('types.drawer.outputTokens') }}</span>
                     <span class="ml-1 text-gray-800 dark:text-gray-200 font-bold">{{ selectedInspectionItem.tokensOut.toLocaleString() }}</span>
                   </div>
                 </div>
@@ -3145,7 +3616,7 @@ const copyProfileChannelName = async (channel: string) => {
                 @click="handleExplore(selectedInspectionItem.channel); closeDrawer()"
                 class="w-full py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md shadow-indigo-600/20 transition flex items-center justify-center gap-2 cursor-pointer"
               >
-                <span>Jump to Explorer & Fetch Channel Posts</span>
+                <span>{{ t('types.drawer.jumpToExplorer') }}</span>
                 <ArrowUpRight class="w-4 h-4" />
               </button>
               <a
@@ -3154,7 +3625,7 @@ const copyProfileChannelName = async (channel: string) => {
                 rel="noopener noreferrer"
                 class="w-full py-2 px-4 rounded-xl border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 text-xs font-bold transition flex items-center justify-center gap-1.5"
               >
-                <span>Open in Telegram Web</span>
+                <span>{{ t('types.drawer.openTelegram') }}</span>
                 <ExternalLink class="w-3.5 h-3.5" />
               </a>
             </div>
@@ -3216,7 +3687,7 @@ const copyProfileChannelName = async (channel: string) => {
                   </h4>
                   <!-- Channel Badge -->
                   <span class="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30 rounded-md shrink-0 select-text cursor-text">
-                    CHANNEL
+                    {{ t('types.profile.channelBadge') }}
                   </span>
                   <!-- Language Easy View Badge -->
                   <div
@@ -3232,7 +3703,7 @@ const copyProfileChannelName = async (channel: string) => {
                   <span
                     v-if="hoveredProfileMetadata?.verified"
                     class="text-[9px] font-bold text-teal-600 dark:text-teal-400 shrink-0 select-none"
-                    title="Verified"
+                    :title="t('types.profile.verified')"
                   >
                     <CheckCircle2 class="w-3.5 h-3.5" />
                   </span>
@@ -3249,7 +3720,7 @@ const copyProfileChannelName = async (channel: string) => {
             <button
               @click="closeProfileTooltip"
               class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors shrink-0 cursor-pointer select-none"
-              title="Close"
+              :title="t('types.profile.close')"
             >
               <X class="w-3.5 h-3.5" />
             </button>
@@ -3259,7 +3730,7 @@ const copyProfileChannelName = async (channel: string) => {
           <div v-if="isProfileLoading" class="py-3 px-1 flex flex-col items-center justify-center gap-2 text-center select-none">
             <div class="flex items-center gap-2 text-xs font-bold text-indigo-600 dark:text-indigo-400">
               <Loader2 class="w-3.5 h-3.5 animate-spin" />
-              <span>Fetching channel profile...</span>
+              <span>{{ t('types.profile.fetchingProfile') }}</span>
             </div>
             <div class="w-full space-y-1.5 mt-1">
               <div class="h-2 bg-gray-100 dark:bg-gray-800 rounded-full animate-pulse w-4/5 mx-auto"></div>
@@ -3282,7 +3753,7 @@ const copyProfileChannelName = async (channel: string) => {
               <div class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 select-text">
                 <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 flex items-center gap-1 select-text cursor-text">
                   <Users class="w-2.5 h-2.5 select-none" />
-                  Subscribers
+                  {{ t('types.profile.subscribers') }}
                 </span>
                 <span class="font-bold font-mono text-indigo-600 dark:text-indigo-400 text-xs block mt-0.5 select-text cursor-text">
                   {{ formatMemberCount(hoveredProfileMetadata.members || hoveredProfileMetadata.participants_count) }}
@@ -3293,7 +3764,7 @@ const copyProfileChannelName = async (channel: string) => {
               <div class="p-2 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 select-text">
                 <span class="text-[9px] uppercase font-black tracking-wider text-gray-400 flex items-center gap-1 select-text cursor-text">
                   <ImageIcon class="w-2.5 h-2.5 select-none" />
-                  Media Items
+                  {{ t('types.profile.mediaItems') }}
                 </span>
                 <span class="font-bold font-mono text-gray-800 dark:text-gray-200 text-xs block mt-0.5 select-text cursor-text">
                   {{ ((hoveredProfileMetadata.photos || 0) + (hoveredProfileMetadata.files || 0) + (hoveredProfileMetadata.videos || 0)).toLocaleString() }}
@@ -3306,13 +3777,13 @@ const copyProfileChannelName = async (channel: string) => {
                 class="col-span-2 px-2.5 py-1.5 rounded-xl bg-gray-50/70 dark:bg-gray-800/60 border border-gray-150/40 dark:border-gray-700/50 flex items-center justify-between text-[10px] select-text"
               >
                 <span class="font-mono text-gray-500 dark:text-gray-400 select-text cursor-text">
-                  <span class="font-bold text-gray-700 dark:text-gray-200 select-text cursor-text">{{ hoveredProfileMetadata.photos ?? 0 }}</span> photos
+                  <span class="font-bold text-gray-700 dark:text-gray-200 select-text cursor-text">{{ hoveredProfileMetadata.photos ?? 0 }}</span> {{ t('types.profile.photos') }}
                 </span>
                 <span class="font-mono text-gray-500 dark:text-gray-400 select-text cursor-text">
-                  <span class="font-bold text-gray-700 dark:text-gray-200 select-text cursor-text">{{ hoveredProfileMetadata.files ?? 0 }}</span> files
+                  <span class="font-bold text-gray-700 dark:text-gray-200 select-text cursor-text">{{ hoveredProfileMetadata.files ?? 0 }}</span> {{ t('types.profile.files') }}
                 </span>
                 <span class="font-mono text-gray-500 dark:text-gray-400 select-text cursor-text">
-                  <span class="font-bold text-gray-700 dark:text-gray-200 select-text cursor-text">{{ hoveredProfileMetadata.links ?? 0 }}</span> links
+                  <span class="font-bold text-gray-700 dark:text-gray-200 select-text cursor-text">{{ hoveredProfileMetadata.links ?? 0 }}</span> {{ t('types.profile.links') }}
                 </span>
               </div>
             </div>
@@ -3322,10 +3793,10 @@ const copyProfileChannelName = async (channel: string) => {
           <div v-else class="space-y-1.5 py-1.5 text-center select-text">
             <div class="flex items-center justify-center gap-1.5 text-amber-600 dark:text-amber-400 text-xs font-bold select-text cursor-text">
               <Info class="w-3.5 h-3.5 shrink-0 select-none" />
-              <span>Public Profile Bio Not Cached</span>
+              <span>{{ t('types.profile.bioNotCached') }}</span>
             </div>
             <p class="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed select-text cursor-text">
-              Channel is actively indexed in the live stream. Click Explore to inspect recent posts.
+              {{ t('types.profile.bioNotCachedDesc') }}
             </p>
           </div>
 
@@ -3337,7 +3808,7 @@ const copyProfileChannelName = async (channel: string) => {
               class="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-colors cursor-pointer select-none"
             >
               <ArrowUpRight class="w-3.5 h-3.5" />
-              <span>Explore Channel</span>
+              <span>{{ t('types.profile.exploreChannel') }}</span>
             </button>
 
             <!-- Open in Telegram Web -->
@@ -3346,17 +3817,17 @@ const copyProfileChannelName = async (channel: string) => {
               target="_blank"
               rel="noopener noreferrer"
               class="flex items-center justify-center gap-1 py-1.5 px-2.5 rounded-xl text-xs font-bold bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-700 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60 transition-colors select-none"
-              title="Open in Telegram Web"
+              :title="t('types.drawer.openTelegram')"
             >
               <ExternalLink class="w-3.5 h-3.5" />
-              <span class="hidden sm:inline">Telegram</span>
+              <span class="hidden sm:inline">{{ t('types.profile.telegramWeb') }}</span>
             </a>
 
             <!-- Copy Handle -->
             <button
               @click="copyProfileChannelName(hoveredProfileChannel)"
               class="p-1.5 rounded-xl bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-750 text-gray-600 dark:text-gray-300 border border-gray-200/60 dark:border-gray-700/60 transition-colors cursor-pointer shrink-0 select-none"
-              :title="isProfileCopied ? 'Copied!' : 'Copy @handle'"
+              :title="isProfileCopied ? t('types.profile.copied') : t('types.profile.copyHandle')"
             >
               <CheckCircle2 v-if="isProfileCopied" class="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
               <Copy v-else class="w-3.5 h-3.5" />

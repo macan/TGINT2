@@ -12,6 +12,7 @@ export interface Lz4ProbeResult {
   endpointUrl: string;
   totalBytes?: number | null;
   error?: string;
+  isTimeout?: boolean;
 }
 
 export const CLASSIFY_LZ4_URL = "https://i.gogingko.net/api/v1/v/exchange/classify.json.lz4";
@@ -25,15 +26,17 @@ export const RAW_DEFAULT_ENDPOINT = CLASSIFY_RAW_URL;
 
 /**
  * Probes whether the compressed LZ4 endpoint is available and valid on i.gogingko.net.
- * Uses a CORS-friendly HEAD pre-check first, with a generous 12s timeout and
+ * Uses a CORS-friendly HEAD pre-check first, with an enlarged 25s timeout and
  * first-chunk stream inspection fallback. Never downloads the entire compressed archive.
  */
 export async function probeLz4Endpoint(
   endpointUrl: string = CLASSIFY_LZ4_URL,
-  timeoutMs = 12000
+  timeoutMs = 25000
 ): Promise<Lz4ProbeResult> {
   const controller = new AbortController();
+  let didTimeout = false;
   const timer = setTimeout(() => {
+    didTimeout = true;
     try {
       controller.abort(
         new DOMException(`LZ4 probe timed out after ${timeoutMs}ms`, "TimeoutError")
@@ -158,12 +161,14 @@ export async function probeLz4Endpoint(
     };
   } catch (err: any) {
     clearTimeout(timer);
-    const isAborted = controller.signal.aborted || err?.name === "AbortError";
+    const isAborted = didTimeout || controller.signal.aborted || err?.name === "AbortError" || err?.name === "TimeoutError";
+    const isTimeout = didTimeout || (isAborted && (err?.message?.includes("timed out") || err?.name === "TimeoutError" || controller.signal.reason?.message?.includes("timed out")));
     const reasonMsg = controller.signal.reason?.message || err?.message || "Probe request failed";
     return {
       available: false,
       endpointUrl,
-      error: isAborted ? (reasonMsg.includes("timed out") ? reasonMsg : `Probe timed out after ${timeoutMs}ms`) : reasonMsg
+      isTimeout,
+      error: isTimeout ? (reasonMsg.includes("timed out") ? reasonMsg : `Probe timed out after ${timeoutMs}ms`) : reasonMsg
     };
   }
 }
