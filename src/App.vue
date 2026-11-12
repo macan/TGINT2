@@ -25618,7 +25618,13 @@ onUnmounted(() => {
               :freshness-map="listenItemsFreshnessMap"
               :channel-metadata-cache="listenChannelMetadataCache"
               :is-dark="isDark"
+              :new-posts-count-map="newlyFetchedPostsCountMap"
+              :folder-new-posts-map="folderStatsMap?.newPostsMap"
+              :active-sync-item-ids="activeBackgroundSyncItemIds"
+              :active-sync-item-id="activeBackgroundSyncItemId"
+              :total-newly-fetched-count="totalNewlyFetchedPostsCount"
               @select-item="selectListenItem"
+              @clear-all-new-badges="clearAllNewlyFetchedBadges"
             />
 
             <!-- Posts Feed Area Below Treemap Rectangle -->
@@ -25699,6 +25705,10 @@ onUnmounted(() => {
                       <h2 class="text-base sm:text-lg font-black tracking-tight text-gray-900 dark:text-white truncate">
                         {{ selectedListenNode.name }}
                       </h2>
+                      <span v-if="listenAutoRefreshActive" class="text-[10px] bg-green-500/10 text-green-500 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider animate-pulse flex items-center gap-1">
+                        <span class="h-1.5 w-1.5 bg-green-500 rounded-full"></span>
+                        {{ t('listen.listeningLive') }}
+                      </span>
                       <span 
                         v-if="getItemOrFolderFreshness(selectedListenNode)"
                         class="px-2 py-0.5 rounded-md text-[10px] font-bold border inline-flex items-center gap-1 transition-colors select-none font-mono"
@@ -25709,6 +25719,25 @@ onUnmounted(() => {
                         <span>{{ t('listen.freshness') }}: {{ getItemOrFolderFreshness(selectedListenNode)!.relativeTime }}</span>
                       </span>
                     </div>
+
+                    <!-- Post Feed Panel Metadata Row: Target, Created, Newest, Cache Lookup (Indexed load time), and Fetch Time (Latest post fetch time) -->
+                    <div class="text-xs font-mono text-gray-400 flex flex-wrap gap-x-4 gap-y-1">
+                      <span>{{ t('listen.target') }}: <strong class="text-gray-700 dark:text-gray-200">{{ selectedListenNode.argument }}</strong></span>
+                      <span>{{ t('listen.created') }}: <strong>{{ new Date(selectedListenNode.create_time).toLocaleDateString() }}</strong></span>
+                      <span v-if="listenPosts && listenPosts.length > 0">
+                        {{ t('listen.newest') }}: <strong class="text-teal-600 dark:text-teal-400">{{ formatDate(listenPosts[0]?.data?.date) }}</strong>
+                      </span>
+                      <span v-if="listenCacheLookupTimeMs != null">
+                        {{ t('listen.cacheLookup') }}: <strong class="text-indigo-600 dark:text-indigo-400">{{ listenCacheLookupTimeMs }}ms</strong>
+                      </span>
+                      <span v-if="isFetchingListenPosts">
+                        {{ t('listen.fetchTime') }}: <strong class="text-amber-500 animate-pulse">{{ t('listen.fetching') || 'fetching...' }}</strong>
+                      </span>
+                      <span v-else-if="listenFetchTimeMs != null">
+                        {{ t('listen.fetchTime') }}: <strong class="text-emerald-600 dark:text-emerald-400">{{ listenFetchTimeMs }}ms</strong>
+                      </span>
+                    </div>
+
                     <p v-if="selectedListenNode.description" class="text-xs text-gray-550 dark:text-gray-400 italic max-w-xl">
                       {{ selectedListenNode.description }}
                     </p>

@@ -59,17 +59,45 @@ export interface TreemapNode {
 const props = defineProps<{
   directory: ListenItem[];
   selectedItem: ListenItem | null;
-  freshnessMap?: Record<string, { label: string; tier: string; relativeTime: string; timestamp: number }>;
+  freshnessMap?: Record<string, { label?: string; tier?: string; level?: string; relativeTime: string; timestamp: number; formattedDate?: string }>;
   channelMetadataCache?: Record<string, any>;
   isDark?: boolean;
+  newPostsCountMap?: Record<string, number>;
+  folderNewPostsMap?: Record<string, number>;
+  activeSyncItemIds?: Record<string, boolean>;
+  activeSyncItemId?: string | null;
+  totalNewlyFetchedCount?: number;
 }>();
 
 const emit = defineEmits<{
   (e: "select-item", item: ListenItem): void;
   (e: "drill-down", folder: ListenItem): void;
+  (e: "clear-all-new-badges"): void;
 }>();
 
 const { t } = useI18n();
+
+const getNodeNewPostsCount = (node: TreemapNode): number => {
+  if (node.isFolder) {
+    return props.folderNewPostsMap?.[node.id] ?? props.newPostsCountMap?.[node.id] ?? 0;
+  }
+  return props.newPostsCountMap?.[node.id] ?? 0;
+};
+
+const isNodeSyncing = (node: TreemapNode): boolean => {
+  return (
+    props.activeSyncItemId === node.id ||
+    !!props.activeSyncItemIds?.[node.id]
+  );
+};
+
+const getTileTitle = (node: TreemapNode): string => {
+  const newCount = getNodeNewPostsCount(node);
+  const newCountNotice = newCount > 0 ? `\n🔥 ${t('listen.hasNewPostsTip', { count: newCount })}` : '';
+  const typeLabel = node.isFolder ? `${node.leafCount} items` : (node.type === 'channel' ? 'Telegram Channel' : 'Keyword Stream');
+  const actionLabel = node.isFolder ? 'Click to drill down' : 'Click to inspect posts';
+  return `${node.name} (${typeLabel})${newCountNotice}\n${actionLabel}`;
+};
 
 // Navigation drilldown stack: array of folder nodes from root to current parent
 // root level = empty stack []
@@ -414,6 +442,20 @@ const getItemFreshness = (node: TreemapNode) => {
 
       <!-- Quick Filter in Current Level & Legend -->
       <div class="flex items-center gap-2.5 shrink-0">
+        <!-- Clear unread new badges button if any new posts are highlighted (matches View Mode) -->
+        <button
+          v-if="(props.totalNewlyFetchedCount || 0) > 0"
+          type="button"
+          @click="emit('clear-all-new-badges')"
+          class="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/40 border border-emerald-300/80 dark:border-emerald-700/60 rounded-xl text-xs font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5 transition-all shadow-2xs cursor-pointer select-none shrink-0"
+          :title="t('listen.clearNewBadges')"
+        >
+          <Sparkles class="h-3 w-3 text-emerald-500 animate-pulse" />
+          <span class="font-mono tabular-nums">+{{ props.totalNewlyFetchedCount }}</span>
+          <span class="text-[10px] uppercase font-bold hidden sm:inline">{{ t('listen.clearNewBadges') || 'Clear' }}</span>
+          <X class="h-3 w-3 opacity-60 hover:opacity-100" />
+        </button>
+
         <div class="relative w-48 sm:w-56">
           <Search class="h-3.5 w-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
           <input
@@ -482,19 +524,22 @@ const getItemFreshness = (node: TreemapNode) => {
           height: `${node.h}px`,
         }"
         class="absolute p-1 box-border transition-all duration-200 ease-out group/tile cursor-pointer"
-        :title="`${node.name} (${node.isFolder ? node.leafCount + ' items' : (node.type === 'channel' ? 'Telegram Channel' : 'Keyword Stream')}) - Click to ${node.isFolder ? 'drill down' : 'inspect posts'}`"
+        :title="getTileTitle(node)"
       >
         <div
           class="w-full h-full rounded-2xl border transition-all duration-200 p-2.5 sm:p-3 flex flex-col justify-between overflow-hidden relative shadow-2xs group-hover/tile:shadow-md"
           :class="[
-            // Folder styling
-            node.isFolder
-              ? 'bg-gradient-to-br from-amber-500/10 via-amber-400/5 to-amber-500/15 dark:from-amber-950/40 dark:via-amber-900/20 dark:to-gray-900 border-amber-300/60 dark:border-amber-700/50 hover:border-amber-400 dark:hover:border-amber-500'
-              // Channel stream styling
-              : node.type === 'channel'
-                ? 'bg-gradient-to-br from-teal-500/10 via-emerald-500/5 to-teal-500/15 dark:from-teal-950/40 dark:via-teal-900/20 dark:to-gray-900 border-teal-300/60 dark:border-teal-700/50 hover:border-teal-400 dark:hover:border-teal-500'
-                // Keyword stream styling
-                : 'bg-gradient-to-br from-indigo-500/10 via-purple-500/5 to-indigo-500/15 dark:from-indigo-950/40 dark:via-indigo-900/20 dark:to-gray-900 border-indigo-300/60 dark:border-indigo-700/50 hover:border-indigo-400 dark:hover:border-indigo-500',
+            // Has newly fetched posts: prominent emerald glow highlight matching View mode
+            getNodeNewPostsCount(node) > 0
+              ? 'ring-2 ring-emerald-500/80 border-emerald-400 dark:border-emerald-500 bg-gradient-to-br from-emerald-500/20 via-teal-500/10 to-emerald-500/15 dark:from-emerald-950/50 dark:via-emerald-900/30 dark:to-gray-900 text-emerald-950 dark:text-emerald-100 shadow-sm shadow-emerald-500/20'
+              // Folder styling
+              : node.isFolder
+                ? 'bg-gradient-to-br from-amber-500/10 via-amber-400/5 to-amber-500/15 dark:from-amber-950/40 dark:via-amber-900/20 dark:to-gray-900 border-amber-300/60 dark:border-amber-700/50 hover:border-amber-400 dark:hover:border-amber-500'
+                // Channel stream styling
+                : node.type === 'channel'
+                  ? 'bg-gradient-to-br from-teal-500/10 via-emerald-500/5 to-teal-500/15 dark:from-teal-950/40 dark:via-teal-900/20 dark:to-gray-900 border-teal-300/60 dark:border-teal-700/50 hover:border-teal-400 dark:hover:border-teal-500'
+                  // Keyword stream styling
+                  : 'bg-gradient-to-br from-indigo-500/10 via-purple-500/5 to-indigo-500/15 dark:from-indigo-950/40 dark:via-indigo-900/20 dark:to-gray-900 border-indigo-300/60 dark:border-indigo-700/50 hover:border-indigo-400 dark:hover:border-indigo-500',
             // Active selection ring
             props.selectedItem?.id === node.id
               ? 'ring-2 ring-teal-500 dark:ring-teal-400 ring-offset-2 ring-offset-white dark:ring-offset-gray-900 border-teal-500 dark:border-teal-400 z-20'
@@ -503,7 +548,7 @@ const getItemFreshness = (node: TreemapNode) => {
             hoveredTileId === node.id ? 'scale-[1.015] z-30' : ''
           ]"
         >
-          <!-- Top Row: Icon + Type Badge + Percentage -->
+          <!-- Top Row: Icon + Type Badge + Badges & Percentage -->
           <div class="flex items-center justify-between gap-1.5 w-full">
             <div class="flex items-center gap-1.5 min-w-0">
               <!-- Folder Icon -->
@@ -543,13 +588,36 @@ const getItemFreshness = (node: TreemapNode) => {
               </span>
             </div>
 
-            <!-- Share Percentage Badge -->
-            <span
-              v-if="node.w > 65 && node.h > 45"
-              class="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-white/70 dark:bg-gray-800/70 border border-gray-200/60 dark:border-gray-700/60 text-gray-600 dark:text-gray-300 tabular-nums shrink-0"
-            >
-              {{ node.sharePercent }}%
-            </span>
+            <!-- Top Right Badges: Active Syncing Indicator & Newly Fetched Posts Badge & Share Percent -->
+            <div class="flex items-center gap-1 shrink-0">
+              <!-- Active Background Syncing Indicator on Tile -->
+              <span
+                v-if="isNodeSyncing(node)"
+                class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-teal-50 dark:bg-teal-950/80 text-teal-700 dark:text-teal-300 border border-teal-300/90 dark:border-teal-700/80 shrink-0 select-none animate-pulse shadow-2xs"
+                title="Syncing latest posts in background..."
+              >
+                <RefreshCw class="h-2.5 w-2.5 animate-spin text-teal-600 dark:text-teal-400" />
+                <span v-if="node.w > 130" class="font-mono uppercase text-[8px] tracking-wider">Sync</span>
+              </span>
+
+              <!-- Newly Fetched Posts Visual Indicator Badge (Identical to View Mode Sparkles Badge) -->
+              <span
+                v-if="getNodeNewPostsCount(node) > 0"
+                class="px-1.5 py-0.5 rounded-full text-[9px] sm:text-[10px] font-black tracking-tight bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow-xs shadow-emerald-500/50 flex items-center gap-1 shrink-0 select-none animate-bounce border border-emerald-300/40 z-20"
+                :title="t('listen.hasNewPostsTip', { count: getNodeNewPostsCount(node) })"
+              >
+                <Sparkles class="h-2.5 w-2.5 sm:h-3 sm:w-3 text-emerald-100 shrink-0" />
+                <span class="whitespace-nowrap font-mono tabular-nums">+{{ getNodeNewPostsCount(node) }}</span>
+              </span>
+
+              <!-- Share Percentage Badge -->
+              <span
+                v-if="node.w > 65 && node.h > 45"
+                class="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-white/70 dark:bg-gray-800/70 border border-gray-200/60 dark:border-gray-700/60 text-gray-600 dark:text-gray-300 tabular-nums shrink-0"
+              >
+                {{ node.sharePercent }}%
+              </span>
+            </div>
           </div>
 
           <!-- Middle: Name & Argument/Preview -->
@@ -586,8 +654,16 @@ const getItemFreshness = (node: TreemapNode) => {
             v-if="node.h > 60"
             class="flex items-center justify-between text-[10px] font-medium pt-1 border-t border-black/5 dark:border-white/5 w-full"
           >
-            <!-- Left: Interaction hint -->
+            <!-- Left: Interaction hint or New posts notification -->
             <span
+              v-if="getNodeNewPostsCount(node) > 0"
+              class="flex items-center gap-1 truncate font-bold text-emerald-700 dark:text-emerald-300"
+            >
+              <Sparkles class="h-3 w-3 shrink-0 text-emerald-500 animate-pulse" />
+              <span class="truncate">{{ t('listen.hasNewPostsTip', { count: getNodeNewPostsCount(node) }) }}</span>
+            </span>
+            <span
+              v-else
               class="flex items-center gap-1 truncate font-semibold"
               :class="[
                 node.isFolder
@@ -612,13 +688,13 @@ const getItemFreshness = (node: TreemapNode) => {
                 v-else-if="getItemFreshness(node)"
                 class="px-1.5 py-0.5 rounded font-bold"
                 :class="[
-                  getItemFreshness(node)?.tier === '<24h' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300' :
-                  getItemFreshness(node)?.tier === '1-3d' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300' :
-                  getItemFreshness(node)?.tier === '3-7d' ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300' :
+                  (getItemFreshness(node) as any)?.level === 'today' || getItemFreshness(node)?.tier === '<24h' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300' :
+                  (getItemFreshness(node) as any)?.level === 'recent' || getItemFreshness(node)?.tier === '1-3d' ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300' :
+                  (getItemFreshness(node) as any)?.level === 'week' || getItemFreshness(node)?.tier === '3-7d' ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300' :
                   'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
                 ]"
               >
-                {{ getItemFreshness(node)?.relativeTime || getItemFreshness(node)?.label }}
+                {{ getItemFreshness(node)?.relativeTime || (getItemFreshness(node) as any)?.label }}
               </span>
             </div>
           </div>
