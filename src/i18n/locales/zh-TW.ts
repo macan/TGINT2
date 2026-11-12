@@ -1314,6 +1314,16 @@ export default {
     domesticMid: "均衡",
     domesticLow: "偏涉外 (<0.3)",
 
+    // 篩選佈局與磁貼分佈圖模式
+    filterViewMode: "篩選檢視",
+    classicMode: "傳統標籤",
+    tileMode: "磁貼分佈圖",
+    topicDistribution: "主題分類分佈",
+    regionDistribution: "地緣政治目標區域分佈",
+    categories: "個分類",
+    spheres: "個區域",
+    channels: "個頻道",
+
     // Topic Filters
     filterByTopic: "按主題分類篩選",
     allTopics: "所有主題",

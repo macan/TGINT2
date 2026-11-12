@@ -1382,6 +1382,16 @@ export default {
     domesticMid: "Баланс",
     domesticLow: "Внешняя (<0.3)",
 
+    // Режим фильтрации и плиточная карта
+    filterViewMode: "Режим фильтров",
+    classicMode: "Классические метки",
+    tileMode: "Плиточная карта",
+    topicDistribution: "Распределение по тематикам",
+    regionDistribution: "Геополитические сферы влияния",
+    categories: "категорий",
+    spheres: "регионов",
+    channels: "каналов",
+
     // Topic Filters
     filterByTopic: "Фильтр по темам",
     allTopics: "Все темы",

@@ -1315,6 +1315,16 @@ export default {
     domesticMid: "バランス",
     domesticLow: "対外重視 (<0.3)",
 
+    // フィルター表示とタイルツリーマップ
+    filterViewMode: "フィルター表示",
+    classicMode: "クラシックタグ",
+    tileMode: "タイルツリーマップ",
+    topicDistribution: "トピック分布",
+    regionDistribution: "地政学的対象地域分布",
+    categories: "カテゴリ",
+    spheres: "地域",
+    channels: "チャンネル",
+
     // Topic Filters
     filterByTopic: "トピック別フィルター",
     allTopics: "全トピック",

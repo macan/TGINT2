@@ -1315,6 +1315,16 @@ export default {
     domesticMid: "Equilibrado",
     domesticLow: "Internacional (<0.3)",
 
+    // Vista de filtros y modo mosaico
+    filterViewMode: "Vista de filtros",
+    classicMode: "Etiquetas clásicas",
+    tileMode: "Mosaico proporcional",
+    topicDistribution: "Distribución temática",
+    regionDistribution: "Esferas geopolíticas de influencia",
+    categories: "categorías",
+    spheres: "regiones",
+    channels: "canales",
+
     // Topic Filters
     filterByTopic: "Filtrar por tema",
     allTopics: "Todos los temas",

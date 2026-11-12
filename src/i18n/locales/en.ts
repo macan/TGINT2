@@ -1406,6 +1406,16 @@ export default {
     domesticMid: "Mid",
     domesticLow: "External (<0.3)",
 
+    // Filter Layout & Tile Treemap Mode
+    filterViewMode: "Filter View",
+    classicMode: "Classic Chips",
+    tileMode: "Tile Treemap",
+    topicDistribution: "Topic Distribution",
+    regionDistribution: "Geopolitical Sphere Distribution",
+    categories: "categories",
+    spheres: "spheres",
+    channels: "channels",
+
     // Topic Filters
     filterByTopic: "Filter By Topic",
     allTopics: "All Topics",

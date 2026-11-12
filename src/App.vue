@@ -4838,7 +4838,8 @@ const initWidgetForNode = async (node: ListenItem) => {
   if (state.posts.length > 0) return;
   state.isLoading = true;
   try {
-    const cached = await getCachedPostsIndexedDB(node.id);
+    const channelHint = node.type === 'channel' ? (node.argument?.trim() || node.name?.trim()) : undefined;
+    const cached = await getCachedPostsIndexedDB(node.id, { channelId: channelHint });
     if (cached && cached.length > 0) {
       state.posts = cached;
       state.lastSync = Date.now();
@@ -4872,7 +4873,8 @@ const syncWidgetNode = async (node: ListenItem) => {
   state.isSyncing = true;
   try {
     await syncNodePosts(node);
-    const updated = await getCachedPostsIndexedDB(node.id);
+    const channelHint = node.type === 'channel' ? (node.argument?.trim() || node.name?.trim()) : undefined;
+    const updated = await getCachedPostsIndexedDB(node.id, { channelId: channelHint });
     if (updated) {
       state.posts = updated;
       state.lastSync = Date.now();
@@ -6766,7 +6768,7 @@ const checkAndScheduleScrapeForListenItem = async (item: ListenItem): Promise<bo
   // Lookup cached posts for this listen item
   let cached: any[] = [];
   try {
-    cached = (await getCachedPostsIndexedDB(item.id)) || [];
+    cached = (await getCachedPostsIndexedDB(item.id, { channelId: channelTarget })) || [];
   } catch {
     cached = [];
   }
@@ -6893,7 +6895,8 @@ const syncSingleListenItem = async (
 
   let cached: any[] = [];
   try {
-    cached = (await getCachedPostsIndexedDB(node.id)) || [];
+    const channelHint = node.type === 'channel' ? (node.argument?.trim() || node.name?.trim()) : undefined;
+    cached = (await getCachedPostsIndexedDB(node.id, { channelId: channelHint })) || [];
   } catch {
     cached = [];
   }

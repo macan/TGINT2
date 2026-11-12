@@ -37,7 +37,8 @@ import {
   Image as ImageIcon,
   Info,
   Languages,
-  Database
+  Database,
+  LayoutGrid
 } from "lucide-vue-next";
 import { useI18n } from "../i18n";
 import {
@@ -75,6 +76,7 @@ import {
   matchesCompactFilter,
   compareCompactRecords
 } from "../utils/typesCompactIndex";
+import TypesTileTreemapFilter from "./types/TypesTileTreemapFilter.vue";
 
 const { t } = useI18n();
 
@@ -158,6 +160,21 @@ let profileLeaveTimer: any = null;
 const searchQuery = ref("");
 const selectedTopic = ref<string>("all");
 const selectedCountry = ref<string>("all");
+
+// View mode for category filters (classic chip buttons vs tile treemap matrix)
+const filterViewMode = ref<"classic" | "tile">(
+  typeof window !== "undefined" && localStorage.getItem("types_filter_view_mode") === "classic"
+    ? "classic"
+    : "tile"
+);
+
+watch(filterViewMode, (newVal) => {
+  if (typeof window !== "undefined") {
+    try {
+      localStorage.setItem("types_filter_view_mode", newVal);
+    } catch {}
+  }
+});
 
 // Natural Language SystemOne Filter State
 const nlQuery = ref("");
@@ -2538,23 +2555,58 @@ const copyProfileChannelName = async (channel: string) => {
           </button>
         </div>
 
-        <!-- Sort Select -->
-        <div class="flex items-center gap-1.5 text-xs bg-gray-50 dark:bg-gray-900 px-3 py-2 rounded-xl border border-gray-200 dark:border-gray-700">
-          <SlidersHorizontal class="w-3.5 h-3.5 text-gray-400" />
-          <select
-            v-model="sortBy"
-            class="bg-transparent font-bold text-gray-800 dark:text-gray-200 outline-none cursor-pointer"
-          >
-            <option v-if="activeNlFilter" value="aiRelevance" class="dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 font-bold">{{ t('types.sortAiRelevance') }}</option>
-            <option value="readValDesc" class="dark:bg-gray-800">{{ t('types.sortReadValDesc') }}</option>
-            <option value="readValAsc" class="dark:bg-gray-800">{{ t('types.sortReadValAsc') }}</option>
-            <option value="topicConf" class="dark:bg-gray-800">{{ t('types.sortTopicConf') }}</option>
-            <option value="countryConf" class="dark:bg-gray-800">{{ t('types.sortCountryConf') }}</option>
-            <option value="domesticDesc" class="dark:bg-gray-800">{{ t('types.sortDomesticDesc') }}</option>
-            <option value="domesticAsc" class="dark:bg-gray-800">{{ t('types.sortDomesticAsc') }}</option>
-            <option value="channelAsc" class="dark:bg-gray-800">{{ t('types.sortChannelAsc') }}</option>
-            <option value="latencyAsc" class="dark:bg-gray-800">{{ t('types.sortLatencyAsc') }}</option>
-          </select>
+        <!-- Controls Cluster: Sort Select + View Mode Segmented Switcher -->
+        <div class="flex items-center gap-2 flex-wrap justify-between md:justify-end">
+          <!-- Sort Select -->
+          <div class="flex items-center gap-1.5 text-xs bg-gray-50 dark:bg-gray-900 px-3 py-1.5 rounded-xl border border-gray-200 dark:border-gray-700">
+            <SlidersHorizontal class="w-3.5 h-3.5 text-gray-400" />
+            <select
+              v-model="sortBy"
+              class="bg-transparent font-bold text-gray-800 dark:text-gray-200 outline-none cursor-pointer py-0.5"
+            >
+              <option v-if="activeNlFilter" value="aiRelevance" class="dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 font-bold">{{ t('types.sortAiRelevance') }}</option>
+              <option value="readValDesc" class="dark:bg-gray-800">{{ t('types.sortReadValDesc') }}</option>
+              <option value="readValAsc" class="dark:bg-gray-800">{{ t('types.sortReadValAsc') }}</option>
+              <option value="topicConf" class="dark:bg-gray-800">{{ t('types.sortTopicConf') }}</option>
+              <option value="countryConf" class="dark:bg-gray-800">{{ t('types.sortCountryConf') }}</option>
+              <option value="domesticDesc" class="dark:bg-gray-800">{{ t('types.sortDomesticDesc') }}</option>
+              <option value="domesticAsc" class="dark:bg-gray-800">{{ t('types.sortDomesticAsc') }}</option>
+              <option value="channelAsc" class="dark:bg-gray-800">{{ t('types.sortChannelAsc') }}</option>
+              <option value="latencyAsc" class="dark:bg-gray-800">{{ t('types.sortLatencyAsc') }}</option>
+            </select>
+          </div>
+
+          <!-- View Mode Segmented Control (Classic vs Tile Treemap) -->
+          <div class="flex items-center p-0.5 bg-gray-100 dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 text-xs shadow-2xs">
+            <button
+              @click="filterViewMode = 'classic'"
+              :class="[
+                'flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold transition cursor-pointer',
+                filterViewMode === 'classic'
+                  ? 'bg-white dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 shadow-xs'
+                  : 'text-gray-500 hover:text-gray-900 dark:hover:text-white font-medium'
+              ]"
+              :title="t('types.classicMode')"
+            >
+              <Tag class="w-3.5 h-3.5" />
+              <span class="hidden sm:inline">{{ t('types.classicMode') }}</span>
+              <span class="sm:hidden">Classic</span>
+            </button>
+            <button
+              @click="filterViewMode = 'tile'"
+              :class="[
+                'flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold transition cursor-pointer',
+                filterViewMode === 'tile'
+                  ? 'bg-white dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 shadow-xs'
+                  : 'text-gray-500 hover:text-gray-900 dark:hover:text-white font-medium'
+              ]"
+              :title="t('types.tileMode')"
+            >
+              <LayoutGrid class="w-3.5 h-3.5" />
+              <span class="hidden sm:inline">{{ t('types.tileMode') }}</span>
+              <span class="sm:hidden">Tile</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -2765,98 +2817,115 @@ const copyProfileChannelName = async (channel: string) => {
         </div>
       </div>
 
-      <!-- Row 3: Topic Chips -->
-      <div class="space-y-1.5 pt-2 border-t border-gray-100 dark:border-gray-700/60">
-        <label class="block text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500">
-          {{ t('types.filterByTopic') }}
-        </label>
-        <div class="flex flex-wrap items-center gap-1.5">
-          <button
-            @click="selectedTopic = 'all'"
-            :class="[
-              'px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer',
-              selectedTopic === 'all'
-                ? 'bg-indigo-600 text-white shadow-sm'
-                : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-700/60 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300'
-            ]"
-          >
-            {{ t('types.allTopics') }}
-            <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono" :class="selectedTopic === 'all' ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-600'">
-              {{ items.length.toLocaleString() }}
-            </span>
-          </button>
-          <button
-            v-for="(cfg, key) in TOPIC_CONFIG"
-            :key="key"
-            @click="selectedTopic = key"
-            :class="[
-              'px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer',
-              selectedTopic === key
-                ? 'bg-indigo-600 text-white shadow-sm ring-2 ring-indigo-500/40'
-                : `${cfg.bg} ${cfg.color} border ${cfg.border} hover:opacity-80`
-            ]"
-          >
-            <span>{{ getTopicInfo(key).label }}</span>
-            <span
-              class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
-              :class="selectedTopic === key ? 'bg-white/20' : 'bg-black/5 dark:bg-white/10'"
+      <!-- CATEGORY FILTERS: Classic Mode Chips vs Tile Treemap Matrix -->
+      <template v-if="filterViewMode === 'classic'">
+        <!-- Row 3: Topic Chips -->
+        <div class="space-y-1.5 pt-2 border-t border-gray-100 dark:border-gray-700/60">
+          <label class="block text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500">
+            {{ t('types.filterByTopic') }}
+          </label>
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button
+              @click="selectedTopic = 'all'"
+              :class="[
+                'px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer',
+                selectedTopic === 'all'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-700/60 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300'
+              ]"
             >
-              {{ (topicCounts[key] || 0).toLocaleString() }}
-            </span>
-          </button>
+              {{ t('types.allTopics') }}
+              <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono" :class="selectedTopic === 'all' ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-600'">
+                {{ items.length.toLocaleString() }}
+              </span>
+            </button>
+            <button
+              v-for="(cfg, key) in TOPIC_CONFIG"
+              :key="key"
+              @click="selectedTopic = key"
+              :class="[
+                'px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer',
+                selectedTopic === key
+                  ? 'bg-indigo-600 text-white shadow-sm ring-2 ring-indigo-500/40'
+                  : `${cfg.bg} ${cfg.color} border ${cfg.border} hover:opacity-80`
+              ]"
+            >
+              <span>{{ getTopicInfo(key).label }}</span>
+              <span
+                class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
+                :class="selectedTopic === key ? 'bg-white/20' : 'bg-black/5 dark:bg-white/10'"
+              >
+                {{ (topicCounts[key] || 0).toLocaleString() }}
+              </span>
+            </button>
+          </div>
         </div>
-      </div>
 
-      <!-- Row 4: Target Country Chips (Expanded to 12 regions) -->
-      <div class="space-y-1.5">
-        <label class="block text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500 flex items-center justify-between">
-          <span>{{ t('types.filterByCountry') }}</span>
-          <span class="text-indigo-600 dark:text-indigo-400 lowercase font-normal">{{ t('types.includesRegionsHint') }}</span>
-        </label>
-        <div class="flex flex-wrap items-center gap-1.5">
-          <button
-            @click="selectedCountry = 'all'"
-            :class="[
-              'px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer',
-              selectedCountry === 'all'
-                ? 'bg-cyan-600 text-white shadow-sm'
-                : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-700/60 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300'
-            ]"
-          >
-            {{ t('types.allCountries') }}
-            <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono" :class="selectedCountry === 'all' ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-600'">
-              {{ items.length.toLocaleString() }}
-            </span>
-          </button>
-          <button
-            v-for="(cfg, key) in COUNTRY_CONFIG"
-            :key="key"
-            @click="selectedCountry = key"
-            :class="[
-              'px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer relative',
-              selectedCountry === key
-                ? 'bg-cyan-600 text-white shadow-sm ring-2 ring-cyan-500/40'
-                : cfg.isNew
-                  ? 'bg-cyan-50/80 dark:bg-cyan-950/30 text-cyan-800 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800/60 hover:bg-cyan-100 dark:hover:bg-cyan-900/50'
-                  : 'bg-gray-50 dark:bg-gray-900/60 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800'
-            ]"
-          >
-            <span>{{ cfg.flag }} {{ getCountryInfo(key).label }}</span>
-            <span
-              v-if="cfg.isNew"
-              class="text-[9px] uppercase px-1 py-0.2 rounded font-extrabold bg-amber-400/20 text-amber-700 dark:text-amber-300 border border-amber-300/40"
+        <!-- Row 4: Target Country Chips (Expanded to 12 regions) -->
+        <div class="space-y-1.5">
+          <label class="block text-[10px] font-black uppercase tracking-wider text-gray-400 dark:text-gray-500 flex items-center justify-between">
+            <span>{{ t('types.filterByCountry') }}</span>
+            <span class="text-indigo-600 dark:text-indigo-400 lowercase font-normal">{{ t('types.includesRegionsHint') }}</span>
+          </label>
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button
+              @click="selectedCountry = 'all'"
+              :class="[
+                'px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer',
+                selectedCountry === 'all'
+                  ? 'bg-cyan-600 text-white shadow-sm'
+                  : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-700/60 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300'
+              ]"
             >
-              {{ t('types.newBadge') }}
-            </span>
-            <span
-              class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
-              :class="selectedCountry === key ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400'"
+              {{ t('types.allCountries') }}
+              <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono" :class="selectedCountry === 'all' ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-600'">
+                {{ items.length.toLocaleString() }}
+              </span>
+            </button>
+            <button
+              v-for="(cfg, key) in COUNTRY_CONFIG"
+              :key="key"
+              @click="selectedCountry = key"
+              :class="[
+                'px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer relative',
+                selectedCountry === key
+                  ? 'bg-cyan-600 text-white shadow-sm ring-2 ring-cyan-500/40'
+                  : cfg.isNew
+                    ? 'bg-cyan-50/80 dark:bg-cyan-950/30 text-cyan-800 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800/60 hover:bg-cyan-100 dark:hover:bg-cyan-900/50'
+                    : 'bg-gray-50 dark:bg-gray-900/60 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800'
+              ]"
             >
-              {{ (countryCounts[key] || 0).toLocaleString() }}
-            </span>
-          </button>
+              <span>{{ cfg.flag }} {{ getCountryInfo(key).label }}</span>
+              <span
+                v-if="cfg.isNew"
+                class="text-[9px] uppercase px-1 py-0.2 rounded font-extrabold bg-amber-400/20 text-amber-700 dark:text-amber-300 border border-amber-300/40"
+              >
+                {{ t('types.newBadge') }}
+              </span>
+              <span
+                class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
+                :class="selectedCountry === key ? 'bg-white/20' : 'bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400'"
+              >
+                {{ (countryCounts[key] || 0).toLocaleString() }}
+              </span>
+            </button>
+          </div>
         </div>
-      </div>
+      </template>
+
+      <!-- TILE MODE: Squarified Treemap Filter Matrix for Topics and Regions -->
+      <TypesTileTreemapFilter
+        v-else
+        :topic-counts="topicCounts"
+        :country-counts="countryCounts"
+        :selected-topic="selectedTopic"
+        :selected-country="selectedCountry"
+        :total-channels="items.length"
+        :topic-config="TOPIC_CONFIG"
+        :country-config="COUNTRY_CONFIG"
+        @update:selected-topic="selectedTopic = $event"
+        @update:selected-country="selectedCountry = $event"
+      />
     </div>
 
     <!-- Active Filter Summary & Pagination Bar -->

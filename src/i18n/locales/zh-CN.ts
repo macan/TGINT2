@@ -1403,7 +1403,15 @@ export default {
     ratio: "比率：0.0–1.0",
     domesticHigh: "偏内政 (≥0.6)",
     domesticMid: "均衡",
-    domesticLow: "偏涉外 (<0.3)",
+    // 筛选布局与瓷砖分布图模式
+    filterViewMode: "筛选视图",
+    classicMode: "经典标签",
+    tileMode: "瓷砖分布图",
+    topicDistribution: "主题分类分布",
+    regionDistribution: "地缘政治目标区域分布",
+    categories: "个分类",
+    spheres: "个区域",
+    channels: "个频道",
 
     // Topic Filters
     filterByTopic: "按主题分类筛选",
