@@ -21,8 +21,21 @@ import {
   CheckCircle2,
   SlidersHorizontal,
   ChevronDown,
+  AlertCircle,
+  ArrowUpDown,
+  ArrowDownWideNarrow,
+  ArrowUpNarrowWide,
 } from "lucide-vue-next";
 import { useI18n } from "../../i18n";
+import DateRangePicker from "./DateRangePicker.vue";
+import {
+  type ListenDateRangeValue,
+  DEFAULT_LISTEN_DATE_RANGE,
+  loadSavedListenDateRange,
+  isListenDateRangeActive,
+  getListenDateRangeBounds,
+  isTimestampInListenDateRange,
+} from "../../utils/listenDateRange";
 
 export interface ListenItem {
   id: string;
@@ -50,16 +63,27 @@ export interface TreemapNode {
   type?: "channel" | "keyword";
   leafCount: number;
   sharePercent: number;
+  orderIndex?: number;
   x: number;
   y: number;
   w: number;
   h: number;
 }
 
+export interface TileFreshnessEntry {
+  label?: string;
+  tier?: string;
+  level?: string;
+  relativeTime: string;
+  timestamp: number;
+  formattedDate?: string;
+}
+
 const props = defineProps<{
   directory: ListenItem[];
   selectedItem: ListenItem | null;
-  freshnessMap?: Record<string, { label?: string; tier?: string; level?: string; relativeTime: string; timestamp: number; formattedDate?: string }>;
+  freshnessMap?: Record<string, TileFreshnessEntry>;
+  folderFreshnessMap?: Record<string, TileFreshnessEntry>;
   channelMetadataCache?: Record<string, any>;
   isDark?: boolean;
   newPostsCountMap?: Record<string, number>;
@@ -67,12 +91,16 @@ const props = defineProps<{
   activeSyncItemIds?: Record<string, boolean>;
   activeSyncItemId?: string | null;
   totalNewlyFetchedCount?: number;
+  itemErrorsMap?: Record<string, { title: string; message: string; category: string; httpStatus?: number }>;
+  folderErrorsMap?: Record<string, number>;
+  dateRange?: ListenDateRangeValue;
 }>();
 
 const emit = defineEmits<{
   (e: "select-item", item: ListenItem): void;
   (e: "drill-down", folder: ListenItem): void;
   (e: "clear-all-new-badges"): void;
+  (e: "update:date-range", value: ListenDateRangeValue): void;
 }>();
 
 const { t } = useI18n();
@@ -84,6 +112,16 @@ const getNodeNewPostsCount = (node: TreemapNode): number => {
   return props.newPostsCountMap?.[node.id] ?? 0;
 };
 
+const getNodeFetchError = (node: TreemapNode) => {
+  if (node.isFolder) return null;
+  return props.itemErrorsMap?.[node.id] || null;
+};
+
+const getFolderErrorCount = (node: TreemapNode): number => {
+  if (!node.isFolder) return 0;
+  return props.folderErrorsMap?.[node.id] ?? 0;
+};
+
 const isNodeSyncing = (node: TreemapNode): boolean => {
   return (
     props.activeSyncItemId === node.id ||
@@ -91,12 +129,48 @@ const isNodeSyncing = (node: TreemapNode): boolean => {
   );
 };
 
+const getRecursiveFolderFreshness = (item: ListenItem): TileFreshnessEntry | null => {
+  if (!item.isFolder) {
+    return props.freshnessMap?.[item.id] || null;
+  }
+  if (props.folderFreshnessMap?.[item.id]) {
+    return props.folderFreshnessMap[item.id];
+  }
+  if (!item.children || item.children.length === 0) return null;
+  let newest: TileFreshnessEntry | null = null;
+  for (const child of item.children) {
+    const childFreshness = getRecursiveFolderFreshness(child);
+    if (childFreshness && childFreshness.timestamp > 0) {
+      if (!newest || childFreshness.timestamp > newest.timestamp) {
+        newest = childFreshness;
+      }
+    }
+  }
+  return newest;
+};
+
+const getEffectiveFreshnessForItem = (item: ListenItem): TileFreshnessEntry | null => {
+  if (item.isFolder) {
+    return getRecursiveFolderFreshness(item);
+  }
+  return props.freshnessMap?.[item.id] || null;
+};
+
 const getTileTitle = (node: TreemapNode): string => {
   const newCount = getNodeNewPostsCount(node);
   const newCountNotice = newCount > 0 ? `\n🔥 ${t('listen.hasNewPostsTip', { count: newCount })}` : '';
+  const itemErr = getNodeFetchError(node);
+  const folderErrCount = getFolderErrorCount(node);
+  const errorNotice = itemErr
+    ? `\n⚠ ${itemErr.title}: ${itemErr.message}`
+    : (folderErrCount > 0 ? `\n⚠ ${t('listen.fetchErrors.folderErrorsTip', { count: folderErrCount })}` : '');
+  const freshness = getEffectiveFreshnessForItem(node.item);
+  const freshnessNotice = freshness
+    ? `\n🕒 ${t('listen.newestPost') || 'Latest post'}: ${freshness.formattedDate || freshness.relativeTime}`
+    : '';
   const typeLabel = node.isFolder ? `${node.leafCount} items` : (node.type === 'channel' ? 'Telegram Channel' : 'Keyword Stream');
   const actionLabel = node.isFolder ? 'Click to drill down' : 'Click to inspect posts';
-  return `${node.name} (${typeLabel})${newCountNotice}\n${actionLabel}`;
+  return `${node.name} (${typeLabel})${freshnessNotice}${newCountNotice}${errorNotice}\n${actionLabel}`;
 };
 
 // Navigation drilldown stack: array of folder nodes from root to current parent
@@ -108,6 +182,89 @@ const containerHeight = ref<number>(640);
 const searchQuery = ref<string>("");
 const hoveredTileId = ref<string | null>(null);
 
+// Sort state for Tile mode: default (size-packed treemap) | date-desc (newest first) | date-asc (oldest first)
+type TileSortOrder = "default" | "date-desc" | "date-asc";
+const TILE_SORT_STORAGE_KEY = "listen_tile_sort_order";
+const getInitialTileSortOrder = (): TileSortOrder => {
+  try {
+    const saved = localStorage.getItem(TILE_SORT_STORAGE_KEY);
+    if (saved === "date-desc" || saved === "date-asc" || saved === "default") {
+      return saved;
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  return "default";
+};
+const tileSortOrder = ref<TileSortOrder>(getInitialTileSortOrder());
+watch(tileSortOrder, (val) => {
+  try {
+    localStorage.setItem(TILE_SORT_STORAGE_KEY, val);
+  } catch {
+    // Ignore storage write errors
+  }
+});
+
+const toggleTileDateSort = () => {
+  if (tileSortOrder.value === "default") {
+    tileSortOrder.value = "date-desc";
+  } else if (tileSortOrder.value === "date-desc") {
+    tileSortOrder.value = "date-asc";
+  } else {
+    tileSortOrder.value = "date-desc";
+  }
+};
+
+const resetTileSortOrder = () => {
+  tileSortOrder.value = "default";
+};
+
+// Item type priority for tie-breaking when timestamps are equal or absent: Directory -> Channel -> Keyword
+const getItemTypeRank = (item: ListenItem): number => {
+  if (item.isFolder) return 0;
+  if (item.type === "channel") return 1;
+  return 2;
+};
+
+const getEffectivePostTimestamp = (item: ListenItem): number => {
+  const f = getEffectiveFreshnessForItem(item);
+  return f && typeof f.timestamp === "number" && f.timestamp > 0 ? f.timestamp : 0;
+};
+
+const internalDateRange = ref<ListenDateRangeValue>(loadSavedListenDateRange());
+const activeDateRange = computed<ListenDateRangeValue>(() => props.dateRange ?? internalDateRange.value);
+const isDateRangeActive = computed<boolean>(() => isListenDateRangeActive(activeDateRange.value));
+
+const onUpdateDateRange = (nextVal: ListenDateRangeValue) => {
+  internalDateRange.value = nextVal;
+  try {
+    localStorage.setItem("listen_date_range_filter", JSON.stringify(nextVal));
+  } catch {
+    // Ignore storage write errors
+  }
+  emit("update:date-range", nextVal);
+};
+
+const clearAllTileFilters = () => {
+  searchQuery.value = "";
+  onUpdateDateRange({ ...DEFAULT_LISTEN_DATE_RANGE });
+};
+
+const activeDateBounds = computed(() => {
+  if (!isDateRangeActive.value) return { startMs: null, endMs: null };
+  return getListenDateRangeBounds(activeDateRange.value);
+});
+
+const itemMatchesDateRange = (item: ListenItem): boolean => {
+  if (!isDateRangeActive.value) return true;
+  if (!item.isFolder) {
+    const ts = props.freshnessMap?.[item.id]?.timestamp || 0;
+    return isTimestampInListenDateRange(ts, activeDateBounds.value);
+  }
+  if (!item.children || item.children.length === 0) return false;
+  return item.children.some((child) => itemMatchesDateRange(child));
+};
+
 // Get items at current level
 const currentLevelItems = computed<ListenItem[]>(() => {
   if (folderPathStack.value.length === 0) {
@@ -117,30 +274,71 @@ const currentLevelItems = computed<ListenItem[]>(() => {
   return currentFolder.children || [];
 });
 
-// Recursive leaf item count calculation
+// Recursive leaf item count calculation (respects active date range filter when enabled)
 const countLeafItems = (node: ListenItem): number => {
-  if (!node.isFolder) return 1;
+  if (!node.isFolder) {
+    return itemMatchesDateRange(node) ? 1 : 0;
+  }
   if (!node.children || node.children.length === 0) return 0;
   return node.children.reduce((acc, child) => acc + countLeafItems(child), 0);
 };
 
 // Total items count at current level (using countLeafItems for folders)
 const currentLevelTotalLeaves = computed<number>(() => {
-  return currentLevelItems.value.reduce((acc, item) => {
+  return displayItems.value.reduce((acc, item) => {
     const count = countLeafItems(item);
     return acc + (count > 0 ? count : 1);
   }, 0);
 });
 
-// Filtered items if user uses the quick search input in Tile mode
+// Filtered (by search query + date range) & optionally date-sorted items for Tile mode
 const displayItems = computed<ListenItem[]>(() => {
   const query = searchQuery.value.trim().toLowerCase();
-  if (!query) return currentLevelItems.value;
-  return currentLevelItems.value.filter((item) => {
+  const filtered = currentLevelItems.value.filter((item) => {
+    if (isDateRangeActive.value && !itemMatchesDateRange(item)) {
+      return false;
+    }
+    if (!query) return true;
     const matchName = item.name.toLowerCase().includes(query);
     const matchArg = (item.argument || "").toLowerCase().includes(query);
     const matchTag = item.tags?.some((tag) => tag.toLowerCase().includes(query));
     return matchName || matchArg || matchTag;
+  });
+
+  if (tileSortOrder.value === "default" || filtered.length <= 1) {
+    return filtered;
+  }
+
+  const order = tileSortOrder.value;
+  return filtered.sort((a, b) => {
+    const tsA = getEffectivePostTimestamp(a);
+    const tsB = getEffectivePostTimestamp(b);
+    const hasA = tsA > 0;
+    const hasB = tsB > 0;
+
+    // Items with known post timestamps always appear ahead of uncached/empty items
+    if (hasA !== hasB) {
+      return hasA ? -1 : 1;
+    }
+
+    if (hasA && hasB && tsA !== tsB) {
+      return order === "date-desc" ? tsB - tsA : tsA - tsB;
+    }
+
+    // Tie-break across item types: Directory -> Channel -> Keyword
+    const rankDiff = getItemTypeRank(a) - getItemTypeRank(b);
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
+
+    // Secondary tie-break by item create_time in the requested direction
+    const createdA = a.create_time ? new Date(a.create_time).getTime() || 0 : 0;
+    const createdB = b.create_time ? new Date(b.create_time).getTime() || 0 : 0;
+    if (createdA !== createdB) {
+      return order === "date-desc" ? createdB - createdA : createdA - createdB;
+    }
+
+    return (a.name || "").localeCompare(b.name || "");
   });
 });
 
@@ -306,7 +504,154 @@ const computeSquarifiedTreemap = (
   return result;
 };
 
+/**
+ * Ordered Proportional Treemap Algorithm
+ * Preserves exact chronological item ordering (left-to-right, top-to-bottom)
+ * while maintaining proportional tile area via weight-balanced binary space partitioning.
+ */
+const computeOrderedTreemap = (
+  items: ListenItem[],
+  width: number,
+  height: number
+): TreemapNode[] => {
+  if (!items || items.length === 0 || width <= 0 || height <= 0) return [];
+
+  const rawNodes = items.map((item, idx) => {
+    const leaves = countLeafItems(item);
+    const weight = leaves > 0 ? leaves : 1;
+    return {
+      item,
+      id: item.id,
+      name: item.name || "Untitled",
+      isFolder: !!item.isFolder,
+      type: item.type,
+      leafCount: leaves,
+      weight,
+      sharePercent: 0,
+      orderIndex: idx + 1,
+    };
+  });
+
+  const totalWeight = rawNodes.reduce((sum, n) => sum + n.weight, 0);
+  if (totalWeight <= 0) return [];
+
+  rawNodes.forEach((n) => {
+    n.sharePercent = Math.round((n.weight / totalWeight) * 1000) / 10;
+  });
+
+  const result: TreemapNode[] = [];
+
+  const partition = (slice: typeof rawNodes, rect: Rect, sliceWeight: number) => {
+    if (slice.length === 0 || rect.w <= 0 || rect.h <= 0 || sliceWeight <= 0) return;
+
+    if (slice.length === 1) {
+      const n = slice[0];
+      result.push({
+        item: n.item,
+        id: n.id,
+        name: n.name,
+        isFolder: n.isFolder,
+        type: n.type,
+        leafCount: n.leafCount,
+        sharePercent: n.sharePercent,
+        orderIndex: n.orderIndex,
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+      });
+      return;
+    }
+
+    if (slice.length <= 3) {
+      const horizontal = rect.w >= rect.h;
+      let offset = 0;
+      for (const n of slice) {
+        const frac = n.weight / sliceWeight;
+        if (horizontal) {
+          const nw = rect.w * frac;
+          result.push({
+            item: n.item,
+            id: n.id,
+            name: n.name,
+            isFolder: n.isFolder,
+            type: n.type,
+            leafCount: n.leafCount,
+            sharePercent: n.sharePercent,
+            orderIndex: n.orderIndex,
+            x: rect.x + offset,
+            y: rect.y,
+            w: nw,
+            h: rect.h,
+          });
+          offset += nw;
+        } else {
+          const nh = rect.h * frac;
+          result.push({
+            item: n.item,
+            id: n.id,
+            name: n.name,
+            isFolder: n.isFolder,
+            type: n.type,
+            leafCount: n.leafCount,
+            sharePercent: n.sharePercent,
+            orderIndex: n.orderIndex,
+            x: rect.x,
+            y: rect.y + offset,
+            w: rect.w,
+            h: nh,
+          });
+          offset += nh;
+        }
+      }
+      return;
+    }
+
+    // Choose split index k (1..n-1) that best balances weight between first & second halves
+    const halfWeight = sliceWeight / 2;
+    let bestSplit = 1;
+    let bestDiff = Infinity;
+    let runningWeight = 0;
+    let bestLeftWeight = slice[0].weight;
+
+    for (let i = 0; i < slice.length - 1; i++) {
+      runningWeight += slice[i].weight;
+      const diff = Math.abs(runningWeight - halfWeight);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestSplit = i + 1;
+        bestLeftWeight = runningWeight;
+      }
+    }
+
+    const leftSlice = slice.slice(0, bestSplit);
+    const rightSlice = slice.slice(bestSplit);
+    const rightWeight = sliceWeight - bestLeftWeight;
+    const leftRatio = bestLeftWeight / sliceWeight;
+
+    if (rect.w >= rect.h) {
+      const leftW = rect.w * leftRatio;
+      partition(leftSlice, { x: rect.x, y: rect.y, w: leftW, h: rect.h }, bestLeftWeight);
+      partition(rightSlice, { x: rect.x + leftW, y: rect.y, w: Math.max(0, rect.w - leftW), h: rect.h }, rightWeight);
+    } else {
+      const topH = rect.h * leftRatio;
+      partition(leftSlice, { x: rect.x, y: rect.y, w: rect.w, h: topH }, bestLeftWeight);
+      partition(rightSlice, { x: rect.x, y: rect.y + topH, w: rect.w, h: Math.max(0, rect.h - topH) }, rightWeight);
+    }
+  };
+
+  partition(rawNodes, { x: 0, y: 0, w: width, h: height }, totalWeight);
+  return result;
+};
+
 const treemapNodes = computed<TreemapNode[]>(() => {
+  if (tileSortOrder.value !== "default") {
+    return computeOrderedTreemap(
+      displayItems.value,
+      containerWidth.value,
+      containerHeight.value
+    );
+  }
   return computeSquarifiedTreemap(
     displayItems.value,
     containerWidth.value,
@@ -375,10 +720,7 @@ const handleTileClick = (node: TreemapNode) => {
 };
 
 const getItemFreshness = (node: TreemapNode) => {
-  if (props.freshnessMap && props.freshnessMap[node.id]) {
-    return props.freshnessMap[node.id];
-  }
-  return null;
+  return getEffectiveFreshnessForItem(node.item);
 };
 </script>
 
@@ -432,16 +774,16 @@ const getItemFreshness = (node: TreemapNode) => {
 
         <!-- Level Stats Badge -->
         <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold bg-teal-50 dark:bg-teal-950/40 text-teal-700 dark:text-teal-300 border border-teal-200/60 dark:border-teal-800/60 tabular-nums">
-          <span>{{ currentLevelItems.length }}</span>
-          <span class="font-normal opacity-80">{{ currentLevelItems.length === 1 ? 'tile' : 'tiles' }}</span>
+          <span>{{ displayItems.length }}</span>
+          <span class="font-normal opacity-80">{{ displayItems.length === 1 ? 'tile' : 'tiles' }}</span>
           <span class="text-gray-300 dark:text-gray-600 mx-0.5">·</span>
           <span>{{ currentLevelTotalLeaves }}</span>
           <span class="font-normal opacity-80">items</span>
         </span>
       </div>
 
-      <!-- Quick Filter in Current Level & Legend -->
-      <div class="flex items-center gap-2.5 shrink-0">
+      <!-- Quick Sort, Filter in Current Level & Legend -->
+      <div class="flex items-center gap-2.5 shrink-0 flex-wrap">
         <!-- Clear unread new badges button if any new posts are highlighted (matches View Mode) -->
         <button
           v-if="(props.totalNewlyFetchedCount || 0) > 0"
@@ -455,6 +797,60 @@ const getItemFreshness = (node: TreemapNode) => {
           <span class="text-[10px] uppercase font-bold hidden sm:inline">{{ t('listen.clearNewBadges') || 'Clear' }}</span>
           <X class="h-3 w-3 opacity-60 hover:opacity-100" />
         </button>
+
+        <!-- Date ASC / DESC Sort Button (directly before Search input) -->
+        <div
+          class="inline-flex items-center rounded-xl border transition-all shadow-2xs shrink-0 overflow-hidden"
+          :class="[
+            tileSortOrder === 'date-desc'
+              ? 'bg-teal-50 dark:bg-teal-950/60 border-teal-300 dark:border-teal-700 text-teal-700 dark:text-teal-300'
+              : tileSortOrder === 'date-asc'
+                ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-300'
+                : 'bg-gray-50 dark:bg-gray-900 border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300'
+          ]"
+        >
+          <button
+            type="button"
+            @click="toggleTileDateSort"
+            class="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-bold transition-colors cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
+            :title="
+              tileSortOrder === 'date-desc'
+                ? (t('listen.tileSortTooltipDesc') || 'Sorted by latest post date (newest first). Click for oldest first.')
+                : tileSortOrder === 'date-asc'
+                  ? (t('listen.tileSortTooltipAsc') || 'Sorted by latest post date (oldest first). Click for newest first.')
+                  : (t('listen.tileSortTooltipDefault') || 'Sort tiles by latest post date (click for newest first)')
+            "
+          >
+            <ArrowDownWideNarrow v-if="tileSortOrder === 'date-desc'" class="h-3.5 w-3.5 shrink-0" />
+            <ArrowUpNarrowWide v-else-if="tileSortOrder === 'date-asc'" class="h-3.5 w-3.5 shrink-0" />
+            <ArrowUpDown v-else class="h-3.5 w-3.5 shrink-0 text-gray-400" />
+            <span class="whitespace-nowrap">
+              {{
+                tileSortOrder === 'date-desc'
+                  ? (t('listen.tileSortDateDesc') || 'Date DSC')
+                  : tileSortOrder === 'date-asc'
+                    ? (t('listen.tileSortDateAsc') || 'Date ASC')
+                    : (t('listen.tileSortDefault') || 'Date Sort')
+              }}
+            </span>
+          </button>
+          <button
+            v-if="tileSortOrder !== 'default'"
+            type="button"
+            @click.stop="resetTileSortOrder"
+            class="px-1.5 py-1.5 border-l border-current/15 hover:bg-black/10 dark:hover:bg-white/10 transition-colors cursor-pointer flex items-center justify-center"
+            :title="t('listen.tileSortReset') || 'Reset to default size layout'"
+          >
+            <X class="h-3 w-3 opacity-75" />
+          </button>
+        </div>
+
+        <!-- Date Range Picker Component (directly next to Sort button) -->
+        <DateRangePicker
+          :model-value="activeDateRange"
+          @update:model-value="onUpdateDateRange"
+          align="right"
+        />
 
         <div class="relative w-48 sm:w-56">
           <Search class="h-3.5 w-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
@@ -503,11 +899,19 @@ const getItemFreshness = (node: TreemapNode) => {
       >
         <LayoutGrid class="h-10 w-10 text-gray-400 dark:text-gray-600 mb-2 stroke-[1.5]" />
         <h4 class="text-sm font-bold text-gray-700 dark:text-gray-300">
-          {{ searchQuery ? 'No matching tiles found' : 'Directory is empty' }}
+          {{ (searchQuery || isDateRangeActive) ? 'No matching tiles found' : 'Directory is empty' }}
         </h4>
         <p class="text-xs text-gray-400 mt-1 max-w-xs">
-          {{ searchQuery ? 'Try adjusting your search filter term.' : 'This directory level contains no sub-folders or listen stream items.' }}
+          {{ (searchQuery || isDateRangeActive) ? 'Try adjusting your search filter or selected time range.' : 'This directory level contains no sub-folders or listen stream items.' }}
         </p>
+        <button
+          v-if="searchQuery || isDateRangeActive"
+          type="button"
+          @click="clearAllTileFilters"
+          class="mt-3 px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60 transition-colors cursor-pointer"
+        >
+          {{ t('listen.dateRange.reset') || 'Reset' }}
+        </button>
       </div>
 
       <!-- Treemap Tiles -->
@@ -586,6 +990,14 @@ const getItemFreshness = (node: TreemapNode) => {
               >
                 {{ node.isFolder ? 'Folder' : (node.type === 'channel' ? 'Channel' : 'Keyword') }}
               </span>
+
+              <!-- Chronological sequence rank badge when Date Sort is active -->
+              <span
+                v-if="tileSortOrder !== 'default' && node.orderIndex && node.w > 70 && node.h > 42"
+                class="font-mono text-[9px] font-black px-1 py-0.2 rounded bg-black/5 dark:bg-white/10 text-gray-600 dark:text-gray-300 tabular-nums shrink-0"
+              >
+                #{{ node.orderIndex }}
+              </span>
             </div>
 
             <!-- Top Right Badges: Active Syncing Indicator & Newly Fetched Posts Badge & Share Percent -->
@@ -598,6 +1010,17 @@ const getItemFreshness = (node: TreemapNode) => {
               >
                 <RefreshCw class="h-2.5 w-2.5 animate-spin text-teal-600 dark:text-teal-400" />
                 <span v-if="node.w > 130" class="font-mono uppercase text-[8px] tracking-wider">Sync</span>
+              </span>
+
+              <!-- Granular Fetch Error Indicator on Tile -->
+              <span
+                v-if="!isNodeSyncing(node) && (getNodeFetchError(node) || getFolderErrorCount(node) > 0)"
+                class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-rose-500/15 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 border border-rose-400/70 dark:border-rose-700/80 shrink-0 select-none shadow-2xs"
+                :title="getNodeFetchError(node) ? `${getNodeFetchError(node)!.title}: ${getNodeFetchError(node)!.message}` : t('listen.fetchErrors.folderErrorsTip', { count: getFolderErrorCount(node) })"
+              >
+                <AlertCircle class="h-2.5 w-2.5 text-rose-600 dark:text-rose-400 shrink-0" />
+                <span v-if="node.isFolder" class="font-mono tabular-nums">{{ getFolderErrorCount(node) }}</span>
+                <span v-else-if="node.w > 130 && getNodeFetchError(node)?.httpStatus" class="font-mono text-[8px]">{{ getNodeFetchError(node)!.httpStatus }}</span>
               </span>
 
               <!-- Newly Fetched Posts Visual Indicator Badge (Identical to View Mode Sparkles Badge) -->
@@ -654,13 +1077,21 @@ const getItemFreshness = (node: TreemapNode) => {
             v-if="node.h > 60"
             class="flex items-center justify-between text-[10px] font-medium pt-1 border-t border-black/5 dark:border-white/5 w-full"
           >
-            <!-- Left: Interaction hint or New posts notification -->
+            <!-- Left: Interaction hint, New posts notification, or Fetch Error -->
             <span
               v-if="getNodeNewPostsCount(node) > 0"
               class="flex items-center gap-1 truncate font-bold text-emerald-700 dark:text-emerald-300"
             >
               <Sparkles class="h-3 w-3 shrink-0 text-emerald-500 animate-pulse" />
               <span class="truncate">{{ t('listen.hasNewPostsTip', { count: getNodeNewPostsCount(node) }) }}</span>
+            </span>
+            <span
+              v-else-if="getNodeFetchError(node)"
+              class="flex items-center gap-1 truncate font-bold text-rose-700 dark:text-rose-300"
+              :title="getNodeFetchError(node)!.message"
+            >
+              <AlertCircle class="h-3 w-3 shrink-0 text-rose-500" />
+              <span class="truncate">{{ getNodeFetchError(node)!.title }}</span>
             </span>
             <span
               v-else
@@ -676,7 +1107,7 @@ const getItemFreshness = (node: TreemapNode) => {
               <span class="truncate">{{ node.isFolder ? 'Click to open' : 'View posts feed' }}</span>
             </span>
 
-            <!-- Right: Item count or Freshness -->
+            <!-- Right: Item count & Folder/Item Freshness -->
             <div class="flex items-center gap-1 shrink-0 font-mono">
               <span
                 v-if="node.isFolder"
@@ -685,7 +1116,7 @@ const getItemFreshness = (node: TreemapNode) => {
                 {{ node.leafCount }} items
               </span>
               <span
-                v-else-if="getItemFreshness(node)"
+                v-if="getItemFreshness(node) && (!node.isFolder || node.w > 110)"
                 class="px-1.5 py-0.5 rounded font-bold"
                 :class="[
                   (getItemFreshness(node) as any)?.level === 'today' || getItemFreshness(node)?.tier === '<24h' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300' :
@@ -693,6 +1124,7 @@ const getItemFreshness = (node: TreemapNode) => {
                   (getItemFreshness(node) as any)?.level === 'week' || getItemFreshness(node)?.tier === '3-7d' ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300' :
                   'bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300'
                 ]"
+                :title="getItemFreshness(node)?.formattedDate || getItemFreshness(node)?.relativeTime"
               >
                 {{ getItemFreshness(node)?.relativeTime || (getItemFreshness(node) as any)?.label }}
               </span>

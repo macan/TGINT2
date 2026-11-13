@@ -162,6 +162,15 @@ const ChannelAnalyticsWrapper = defineAsyncComponent(() => import("./components/
 const HotsDashboard = defineAsyncComponent(() => import("./components/listen/HotsDashboard.vue"));
 const TileTreemapView = defineAsyncComponent(() => import("./components/listen/TileTreemapView.vue"));
 const StorageMonitorWidget = defineAsyncComponent(() => import("./components/listen/StorageMonitorWidget.vue"));
+import DateRangePicker from "./components/listen/DateRangePicker.vue";
+import {
+  type ListenDateRangeValue,
+  DEFAULT_LISTEN_DATE_RANGE,
+  loadSavedListenDateRange,
+  isListenDateRangeActive,
+  getListenDateRangeBounds,
+  isTimestampInListenDateRange,
+} from "./utils/listenDateRange";
 
 const preloadSecondaryViews = () => {
   if (typeof window === "undefined") return;
@@ -4035,55 +4044,88 @@ const triggerListenItemSystemOneClassification = async (
 };
 
 const listenSearchQuery = ref("");
+const listenDateRange = ref<ListenDateRangeValue>(loadSavedListenDateRange());
+
+watch(
+  listenDateRange,
+  (val) => {
+    try {
+      localStorage.setItem("listen_date_range_filter", JSON.stringify(val));
+    } catch {
+      // Ignore storage write errors
+    }
+  },
+  { deep: true }
+);
+
+const isDateFilterActive = computed(() => isListenDateRangeActive(listenDateRange.value));
+
+const resetListenDateRange = () => {
+  listenDateRange.value = { ...DEFAULT_LISTEN_DATE_RANGE };
+};
 
 const getMatchingNodeIds = (
   nodes: ListenItem[],
   term: string,
-  tagFilter: string | null
+  tagFilter: string | null,
+  dateRange: ListenDateRangeValue | null = null,
+  freshnessMap: Record<string, ListenItemFreshness> | null = null
 ): Set<string> => {
   const matched = new Set<string>();
-  if (!term && !tagFilter) return matched;
+  const dateActive = isListenDateRangeActive(dateRange);
+  if (!term && !tagFilter && !dateActive) return matched;
 
   const lowerTerm = term ? term.toLowerCase() : "";
   const cleanTerm = lowerTerm.replace(/^[#@]/, "").trim();
   const classPrefixTerm = lowerTerm.replace(/^(class|category|type|auto_class|auto):/, "").trim();
+  const dateBounds = dateActive ? getListenDateRangeBounds(dateRange) : null;
 
   const check = (node: ListenItem): boolean => {
     let selfMatch = false;
 
-    if (tagFilter) {
-      if (!node.isFolder && Array.isArray(node.tags) && node.tags.includes(tagFilter)) {
-        selfMatch = true;
-      }
-    }
-
-    if (term) {
-      const autoClassClass = !node.isFolder && node.auto_class?.class ? node.auto_class.class.toLowerCase() : "";
-      const autoClassLabel = autoClassClass ? getChannelCategoryMeta(autoClassClass).label.toLowerCase() : "";
-
-      const textMatch =
-        (node.name && node.name.toLowerCase().includes(lowerTerm)) ||
-        (node.argument && node.argument.toLowerCase().includes(lowerTerm)) ||
-        (!node.isFolder && Array.isArray(node.tags) && node.tags.some(t => {
-          const lt = t.toLowerCase();
-          return lt.includes(lowerTerm) || lt.includes(cleanTerm);
-        })) ||
-        (autoClassClass && (
-          autoClassClass.includes(lowerTerm) ||
-          autoClassClass.includes(cleanTerm) ||
-          (classPrefixTerm && autoClassClass.includes(classPrefixTerm))
-        )) ||
-        (autoClassLabel && (
-          autoClassLabel.includes(lowerTerm) ||
-          autoClassLabel.includes(cleanTerm) ||
-          (classPrefixTerm && autoClassLabel.includes(classPrefixTerm))
-        ));
-
+    if (!node.isFolder) {
+      let passesTag = true;
       if (tagFilter) {
-        selfMatch = selfMatch && !!textMatch;
-      } else {
-        selfMatch = !!textMatch;
+        passesTag = Array.isArray(node.tags) && node.tags.includes(tagFilter);
       }
+
+      let passesTerm = true;
+      if (term) {
+        const autoClassClass = node.auto_class?.class ? node.auto_class.class.toLowerCase() : "";
+        const autoClassLabel = autoClassClass ? getChannelCategoryMeta(autoClassClass).label.toLowerCase() : "";
+
+        passesTerm = !!(
+          (node.name && node.name.toLowerCase().includes(lowerTerm)) ||
+          (node.argument && node.argument.toLowerCase().includes(lowerTerm)) ||
+          (Array.isArray(node.tags) && node.tags.some(t => {
+            const lt = t.toLowerCase();
+            return lt.includes(lowerTerm) || lt.includes(cleanTerm);
+          })) ||
+          (autoClassClass && (
+            autoClassClass.includes(lowerTerm) ||
+            autoClassClass.includes(cleanTerm) ||
+            (classPrefixTerm && autoClassClass.includes(classPrefixTerm))
+          )) ||
+          (autoClassLabel && (
+            autoClassLabel.includes(lowerTerm) ||
+            autoClassLabel.includes(cleanTerm) ||
+            (classPrefixTerm && autoClassLabel.includes(classPrefixTerm))
+          ))
+        );
+      }
+
+      let passesDate = true;
+      if (dateActive && dateBounds) {
+        const ts = freshnessMap?.[node.id]?.timestamp || 0;
+        passesDate = isTimestampInListenDateRange(ts, dateBounds);
+      }
+
+      selfMatch = passesTag && passesTerm && passesDate;
+    } else if (term && !tagFilter && !dateActive) {
+      selfMatch = !!(
+        (node.name && node.name.toLowerCase().includes(lowerTerm)) ||
+        (node.argument && node.argument.toLowerCase().includes(lowerTerm))
+      );
     }
 
     let anyChildMatched = false;
@@ -4187,10 +4229,11 @@ const getFilteredVisibleNodes = (
   matchingIds: Set<string> | null = null,
   folderStats: any = null,
   freshnessMap: any = null,
-  newPostsMap: any = null
+  newPostsMap: any = null,
+  dateFilterActive = false
 ): any[] => {
   const list: any[] = [];
-  const isFiltering = !!(term || selectedListenTagFilter.value);
+  const isFiltering = !!(term || selectedListenTagFilter.value || dateFilterActive);
   if (!nodes || !Array.isArray(nodes)) return list;
 
   // Use sorted copy for display without altering the original low-level JSON data order
@@ -4246,7 +4289,8 @@ const getFilteredVisibleNodes = (
         matchingIds,
         folderStats,
         freshnessMap,
-        newPostsMap
+        newPostsMap,
+        dateFilterActive
       ));
     }
   }
@@ -4279,10 +4323,13 @@ const getFolderItemsCount = (item: ListenItem): number => {
 const visibleDirectoryNodes = computed(() => {
   const term = listenSearchQuery.value.trim();
   const tagFilter = selectedListenTagFilter.value;
-  const isFiltering = !!(term || tagFilter);
-  const matchingIds = isFiltering ? getMatchingNodeIds(listenDirectory.value, term, tagFilter) : null;
-  const folderStats = folderStatsMap.value;
+  const dateFilterActive = isDateFilterActive.value;
+  const isFiltering = !!(term || tagFilter || dateFilterActive);
   const freshnessMap = listenItemsFreshnessMap.value;
+  const matchingIds = isFiltering
+    ? getMatchingNodeIds(listenDirectory.value, term, tagFilter, listenDateRange.value, freshnessMap)
+    : null;
+  const folderStats = folderStatsMap.value;
   const newPostsMap = newlyFetchedPostsCountMap.value;
   // Ensure reactive dependency tracking on sort order
   const _currentSort = listenSortOrder.value;
@@ -4294,7 +4341,8 @@ const visibleDirectoryNodes = computed(() => {
     matchingIds,
     folderStats,
     freshnessMap,
-    newPostsMap
+    newPostsMap,
+    dateFilterActive
   );
 });
 
@@ -5746,22 +5794,48 @@ const listenItemsFreshnessMap = ref<Record<string, ListenItemFreshness>>({});
 // Tracks newly fetched posts count per listen item ID to visually badge updated channels & folders
 const newlyFetchedPostsCountMap = ref<Record<string, number>>({});
 
-// Memoized O(N) aggregate folder stats computed once per directory / freshness / badge mutation
+export interface ListenItemFetchError {
+  nodeId: string;
+  itemName: string;
+  category: 'offline' | 'timeout' | 'cors_or_network' | 'http' | 'parse' | 'validation' | 'unknown';
+  title: string;
+  message: string;
+  detail: string;
+  endpoint?: string;
+  phase?: string;
+  httpStatus?: number;
+  httpStatusText?: string;
+  timestamp: number;
+  source: 'foreground' | 'background';
+}
+
+// Tracks granular fetch/sync errors per listen item ID for UI diagnostics & inline banners
+const listenItemErrorMap = ref<Record<string, ListenItemFetchError>>({});
+const isFetchErrorsPanelOpen = ref<boolean>(false);
+
+const listenFetchErrorsList = computed<ListenItemFetchError[]>(() => {
+  return Object.values(listenItemErrorMap.value).sort((a, b) => b.timestamp - a.timestamp);
+});
+
+// Memoized O(N) aggregate folder stats computed once per directory / freshness / badge / error mutation
 const folderStatsMap = computed(() => {
   const freshnessMap: Record<string, ListenItemFreshness> = {};
   const newPostsMap: Record<string, number> = {};
   const itemsCountMap: Record<string, number> = {};
+  const errorCountMap: Record<string, number> = {};
 
-  const compute = (node: ListenItem): { freshness: ListenItemFreshness | null; newCount: number; itemCount: number } => {
+  const compute = (node: ListenItem): { freshness: ListenItemFreshness | null; newCount: number; itemCount: number; errorCount: number } => {
     if (!node.isFolder) {
       const f = listenItemsFreshnessMap.value[node.id] || null;
       const nc = newlyFetchedPostsCountMap.value[node.id] || 0;
-      return { freshness: f, newCount: nc, itemCount: 1 };
+      const ec = listenItemErrorMap.value[node.id] ? 1 : 0;
+      return { freshness: f, newCount: nc, itemCount: 1, errorCount: ec };
     }
 
     let newestF: ListenItemFreshness | null = null;
     let totalNc = 0;
     let totalItems = 0;
+    let totalErrors = 0;
 
     if (node.children && Array.isArray(node.children)) {
       for (const child of node.children) {
@@ -5771,14 +5845,16 @@ const folderStatsMap = computed(() => {
         }
         totalNc += childStats.newCount;
         totalItems += childStats.itemCount;
+        totalErrors += childStats.errorCount;
       }
     }
 
     if (newestF) freshnessMap[node.id] = newestF;
     newPostsMap[node.id] = totalNc;
     itemsCountMap[node.id] = totalItems;
+    errorCountMap[node.id] = totalErrors;
 
-    return { freshness: newestF, newCount: totalNc, itemCount: totalItems };
+    return { freshness: newestF, newCount: totalNc, itemCount: totalItems, errorCount: totalErrors };
   };
 
   if (Array.isArray(listenDirectory.value)) {
@@ -5787,7 +5863,7 @@ const folderStatsMap = computed(() => {
     }
   }
 
-  return { freshnessMap, newPostsMap, itemsCountMap };
+  return { freshnessMap, newPostsMap, itemsCountMap, errorCountMap };
 });
 
 const updateItemFreshness = (nodeId: string, posts: any[]) => {
@@ -6186,6 +6262,273 @@ const activeBackgroundSyncItemIds = ref<Record<string, boolean>>({});
 let backgroundSyncAbortController: AbortController | null = null;
 const lastItemSyncTimeMap = ref<Record<string, number>>({});
 const itemSyncErrorCountMap = ref<Record<string, number>>({});
+
+const setListenItemError = (errObj: ListenItemFetchError) => {
+  listenItemErrorMap.value = {
+    ...listenItemErrorMap.value,
+    [errObj.nodeId]: errObj
+  };
+};
+
+const clearListenItemError = (nodeId: string) => {
+  if (!nodeId || !listenItemErrorMap.value[nodeId]) return;
+  const next = { ...listenItemErrorMap.value };
+  delete next[nodeId];
+  listenItemErrorMap.value = next;
+  if (Object.keys(next).length === 0) {
+    isFetchErrorsPanelOpen.value = false;
+  }
+};
+
+const clearAllListenItemErrors = () => {
+  listenItemErrorMap.value = {};
+  isFetchErrorsPanelOpen.value = false;
+};
+
+const getListenErrorBadgeClass = (category: string): string => {
+  switch (category) {
+    case 'timeout':
+      return 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950/70 dark:text-amber-300 dark:border-amber-800/70';
+    case 'offline':
+      return 'bg-slate-200 text-slate-800 border-slate-300 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700';
+    case 'http':
+      return 'bg-orange-100 text-orange-800 border-orange-300 dark:bg-orange-950/70 dark:text-orange-300 dark:border-orange-800/70';
+    case 'cors_or_network':
+    case 'parse':
+    case 'validation':
+    default:
+      return 'bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-950/70 dark:text-rose-300 dark:border-rose-800/70';
+  }
+};
+
+const sanitizeListenChannelHandle = (rawArg?: string): string => {
+  let clean = (rawArg || '').trim();
+  if (!clean) return '';
+  if (clean.includes('t.me/')) {
+    const parts = clean.split('t.me/');
+    clean = parts[parts.length - 1];
+  } else if (clean.includes('telegram.me/')) {
+    const parts = clean.split('telegram.me/');
+    clean = parts[parts.length - 1];
+  }
+  clean = clean.split('?')[0].split('#')[0].replace(/^@+/, '').replace(/\/+$/, '').trim();
+  return clean;
+};
+
+class ListenFetchTimeoutError extends Error {
+  timeoutMs: number;
+  constructor(timeoutMs: number) {
+    super(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    this.name = 'ListenFetchTimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+class ListenHttpError extends Error {
+  status: number;
+  statusText: string;
+  endpoint: string;
+  phase: string;
+  snippet: string;
+  constructor(status: number, statusText: string, endpoint: string, phase: string, snippet = '') {
+    super(`HTTP ${status} ${statusText || ''}`.trim());
+    this.name = 'ListenHttpError';
+    this.status = status;
+    this.statusText = statusText;
+    this.endpoint = endpoint;
+    this.phase = phase;
+    this.snippet = snippet;
+  }
+}
+
+class ListenParseError extends Error {
+  endpoint: string;
+  phase: string;
+  constructor(message: string, endpoint: string, phase: string) {
+    super(message);
+    this.name = 'ListenParseError';
+    this.endpoint = endpoint;
+    this.phase = phase;
+  }
+}
+
+const LISTEN_DEFAULT_TIMEOUT_MS = 60000;
+const LISTEN_KEYWORD_SEARCH_TIMEOUT_MS = 90000;
+const LISTEN_RESOLVE_TIMEOUT_MS = 20000;
+
+const fetchWithTimeout = async (
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = LISTEN_DEFAULT_TIMEOUT_MS
+): Promise<Response> => {
+  const controller = new AbortController();
+  const callerSignal = init.signal;
+  let timedOut = false;
+
+  const onCallerAbort = () => {
+    controller.abort();
+  };
+
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      controller.abort();
+      throw new DOMException('Aborted', 'AbortError');
+    }
+    callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+  }
+
+  const timerId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal
+    });
+  } catch (err: any) {
+    if (timedOut && !(callerSignal?.aborted)) {
+      throw new ListenFetchTimeoutError(timeoutMs);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timerId);
+    if (callerSignal) {
+      callerSignal.removeEventListener('abort', onCallerAbort);
+    }
+  }
+};
+
+const classifyListenFetchError = (
+  err: any,
+  ctx: {
+    nodeId: string;
+    itemName: string;
+    endpoint?: string;
+    phase?: string;
+    source: 'foreground' | 'background';
+  }
+): ListenItemFetchError => {
+  const now = Date.now();
+  const baseEndpoint = ctx.endpoint || '';
+  const phase = ctx.phase || 'fetch';
+
+  if (err instanceof ListenHttpError) {
+    const status = err.status;
+    const statusText = err.statusText || '';
+    let message = t('listen.fetchErrors.httpOtherMsg', { status, statusText });
+    if (status === 404) {
+      message = t('listen.fetchErrors.http404Msg');
+    } else if (status === 429) {
+      message = t('listen.fetchErrors.http429Msg');
+    } else if (status >= 500) {
+      message = t('listen.fetchErrors.http5xxMsg', { status, statusText });
+    }
+    return {
+      nodeId: ctx.nodeId,
+      itemName: ctx.itemName,
+      category: 'http',
+      title: t('listen.fetchErrors.httpTitle', { status }),
+      message,
+      detail: err.snippet
+        ? `HTTP ${status} ${statusText} · ${err.snippet}`
+        : `HTTP ${status} ${statusText}`.trim(),
+      endpoint: err.endpoint || baseEndpoint,
+      phase: err.phase || phase,
+      httpStatus: status,
+      httpStatusText: statusText,
+      timestamp: now,
+      source: ctx.source
+    };
+  }
+
+  if (err instanceof ListenFetchTimeoutError || err?.name === 'TimeoutError') {
+    const seconds = Math.round((err?.timeoutMs || LISTEN_DEFAULT_TIMEOUT_MS) / 1000);
+    return {
+      nodeId: ctx.nodeId,
+      itemName: ctx.itemName,
+      category: 'timeout',
+      title: t('listen.fetchErrors.timeoutTitle', { seconds }),
+      message: t('listen.fetchErrors.timeoutMsg', { seconds }),
+      detail: err?.message || `Timed out after ${seconds}s`,
+      endpoint: baseEndpoint,
+      phase,
+      timestamp: now,
+      source: ctx.source
+    };
+  }
+
+  if (err instanceof ListenParseError || err?.name === 'SyntaxError') {
+    return {
+      nodeId: ctx.nodeId,
+      itemName: ctx.itemName,
+      category: 'parse',
+      title: t('listen.fetchErrors.parseTitle'),
+      message: t('listen.fetchErrors.parseMsg'),
+      detail: err?.message || 'JSON syntax error',
+      endpoint: (err as any)?.endpoint || baseEndpoint,
+      phase: (err as any)?.phase || phase,
+      timestamp: now,
+      source: ctx.source
+    };
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return {
+      nodeId: ctx.nodeId,
+      itemName: ctx.itemName,
+      category: 'offline',
+      title: t('listen.fetchErrors.offlineTitle'),
+      message: t('listen.fetchErrors.offlineMsg'),
+      detail: err?.message || 'navigator.onLine === false',
+      endpoint: baseEndpoint,
+      phase,
+      timestamp: now,
+      source: ctx.source
+    };
+  }
+
+  const rawMsg = String(err?.message || err || '');
+  const isNetworkOrCors =
+    err?.name === 'TypeError' &&
+    /failed to fetch|load failed|networkerror|fetch/i.test(rawMsg);
+
+  if (isNetworkOrCors) {
+    return {
+      nodeId: ctx.nodeId,
+      itemName: ctx.itemName,
+      category: 'cors_or_network',
+      title: t('listen.fetchErrors.corsOrNetworkTitle'),
+      message: t('listen.fetchErrors.corsOrNetworkMsg'),
+      detail: `${err?.name || 'TypeError'}: ${rawMsg}`,
+      endpoint: baseEndpoint,
+      phase,
+      timestamp: now,
+      source: ctx.source
+    };
+  }
+
+  return {
+    nodeId: ctx.nodeId,
+    itemName: ctx.itemName,
+    category: 'unknown',
+    title: t('listen.fetchErrors.unknownTitle'),
+    message: t('listen.fetchErrors.unknownMsg', { error: rawMsg || 'Unknown error' }),
+    detail: rawMsg,
+    endpoint: baseEndpoint,
+    phase,
+    timestamp: now,
+    source: ctx.source
+  };
+};
+
+const jumpToAndRetryListenError = (errObj: ListenItemFetchError) => {
+  const leaf = allListenLeafItems.value.find(i => i.id === errObj.nodeId);
+  if (leaf) {
+    selectListenItem(leaf);
+  }
+};
 
 // Tracks latest fetch duration in ms for each individual listen item
 const itemLastFetchDurationMap = ref<Record<string, number>>({});
@@ -6875,7 +7218,7 @@ const checkAndScheduleScrapeForListenItem = async (item: ListenItem): Promise<bo
 const syncSingleListenItem = async (
   node: ListenItem,
   signal?: AbortSignal
-): Promise<{ newPosts: number; success: boolean }> => {
+): Promise<{ newPosts: number; success: boolean; error?: ListenItemFetchError }> => {
   if (!node || node.isFolder) return { newPosts: 0, success: true };
   if (signal?.aborted) return { newPosts: 0, success: false };
 
@@ -6895,7 +7238,7 @@ const syncSingleListenItem = async (
 
   let cached: any[] = [];
   try {
-    const channelHint = node.type === 'channel' ? (node.argument?.trim() || node.name?.trim()) : undefined;
+    const channelHint = node.type === 'channel' ? sanitizeListenChannelHandle(node.argument || node.name) : undefined;
     cached = (await getCachedPostsIndexedDB(node.id, { channelId: channelHint })) || [];
   } catch {
     cached = [];
@@ -6916,20 +7259,36 @@ const syncSingleListenItem = async (
   }
 
   let fetchedPosts: any[] = [];
+  let activeEndpoint = '';
+  let activePhase = 'init';
 
   try {
     if (node.type === "channel") {
-      let username = node.argument?.trim();
-      if (!username) return { newPosts: 0, success: false };
-      if (username.startsWith('@')) username = username.slice(1);
+      let username = sanitizeListenChannelHandle(node.argument);
+      if (!username) {
+        const valErr: ListenItemFetchError = {
+          nodeId: node.id,
+          itemName: node.name,
+          category: 'validation',
+          title: t('listen.fetchErrors.validationTitle'),
+          message: t('listen.fetchErrors.validationMsg'),
+          detail: 'Empty channel username',
+          phase: 'validation',
+          timestamp: Date.now(),
+          source: 'background'
+        };
+        setListenItemError(valErr);
+        return { newPosts: 0, success: false, error: valErr };
+      }
 
-      // Fast cache resolve check
+      // Fast cache resolve check (best effort)
       try {
-        const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${username}`, { signal });
+        const resolveUrl = `https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${encodeURIComponent(username)}`;
+        const resolveRes = await fetchWithTimeout(resolveUrl, { signal }, LISTEN_RESOLVE_TIMEOUT_MS);
         if (resolveRes.ok) {
           const data = await resolveRes.json();
           if (data.state === 0 && data.gso?.result) {
-            username = data.gso.result;
+            username = sanitizeListenChannelHandle(String(data.gso.result)) || username;
           }
         }
       } catch {
@@ -6943,18 +7302,35 @@ const syncSingleListenItem = async (
       let iterationCount = 0;
       let allFetched: any[] = [];
       let batchMinPostNumber = Infinity;
-      let url = `https://i.gogingko.net/api/v1/last/${username}?n=50`;
+      let url = `https://i.gogingko.net/api/v1/last/${encodeURIComponent(username)}?n=50`;
 
       while (iterationCount < MAX_BG_ITERATIONS) {
         if (signal?.aborted) return { newPosts: 0, success: false };
 
-        const response = await fetch(url, {
+        activeEndpoint = url;
+        activePhase = `channel-last (batch ${iterationCount + 1})`;
+        const response = await fetchWithTimeout(url, {
           headers: { "x-gos-rawcontent": "1" },
           signal
-        });
-        if (!response.ok) break;
+        }, LISTEN_DEFAULT_TIMEOUT_MS);
 
-        const data = await response.json();
+        if (!response.ok) {
+          const snippet = (await response.text().catch(() => '')).slice(0, 160).trim();
+          if (iterationCount === 0) {
+            throw new ListenHttpError(response.status, response.statusText, url, activePhase, snippet);
+          }
+          break;
+        }
+
+        let data: any;
+        try {
+          data = await response.json();
+        } catch (parseErr: any) {
+          if (iterationCount === 0) {
+            throw new ListenParseError(parseErr?.message || 'Invalid JSON', url, activePhase);
+          }
+          break;
+        }
         if (signal?.aborted) return { newPosts: 0, success: false };
 
         const batchPosts = Array.isArray(data) ? data : (data.data || data.posts || data.items || []);
@@ -6986,53 +7362,90 @@ const syncSingleListenItem = async (
           break;
         }
 
-        url = `https://i.gogingko.net/api/v1/last/${username}?n=50&b=${batchMinPostNumber}`;
+        url = `https://i.gogingko.net/api/v1/last/${encodeURIComponent(username)}?n=50&b=${batchMinPostNumber}`;
         iterationCount++;
       }
 
       fetchedPosts = allFetched;
     } else if (node.type === "keyword") {
-      const keywords = node.argument?.trim().split(',');
-      if (keywords && keywords.length > 0) {
-        const start = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const end = new Date();
-        const fieldQueries = keywords.map(keyword => {
-          if (keyword.startsWith('+')) return `+content:"${keyword}"`;
-          if (keyword.startsWith('-')) return `-content:"${keyword}"`;
-          return `content:"${keyword}"`;
-        }).join(' ');
-        const dateRange = `date:[to_date("${formatDateForSearch(start)}", "%Y-%m-%dT%H:%M:%S%z") TO to_date("${formatDateForSearch(end)}", "%Y-%m-%dT%H:%M:%S%z")]`;
-        const finalQuery = `(${fieldQueries}) AND ${dateRange}`;
+      const keywords = node.argument?.trim().split(',').map(k => k.trim()).filter(Boolean);
+      if (!keywords || keywords.length === 0) {
+        const valErr: ListenItemFetchError = {
+          nodeId: node.id,
+          itemName: node.name,
+          category: 'validation',
+          title: t('listen.fetchErrors.validationTitle'),
+          message: t('listen.fetchErrors.validationMsg'),
+          detail: 'Empty keyword query',
+          phase: 'validation',
+          timestamp: Date.now(),
+          source: 'background'
+        };
+        setListenItemError(valErr);
+        return { newPosts: 0, success: false, error: valErr };
+      }
 
-        const response = await fetch("https://i.gogingko.net/api/v1/ft/telegram", {
-          method: "GET",
-          headers: {
-            "x-gos-ft-query": encodeURIComponent(finalQuery),
-            "x-gos-ft-sort": "date-",
-            "x-gos-ft-topk": "30",
-          },
-          signal
+      const start = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const end = new Date();
+      const fieldQueries = keywords.map(keyword => {
+        if (keyword.startsWith('+')) return `+content:"${keyword}"`;
+        if (keyword.startsWith('-')) return `-content:"${keyword}"`;
+        return `content:"${keyword}"`;
+      }).join(' ');
+      const dateRange = `date:[to_date("${formatDateForSearch(start)}", "%Y-%m-%dT%H:%M:%S%z") TO to_date("${formatDateForSearch(end)}", "%Y-%m-%dT%H:%M:%S%z")]`;
+      const finalQuery = `(${fieldQueries}) AND ${dateRange}`;
+
+      activeEndpoint = "https://i.gogingko.net/api/v1/ft/telegram";
+      activePhase = "keyword-search";
+      const response = await fetchWithTimeout(activeEndpoint, {
+        method: "GET",
+        headers: {
+          "x-gos-ft-query": encodeURIComponent(finalQuery),
+          "x-gos-ft-sort": "date-",
+          "x-gos-ft-topk": "30",
+        },
+        signal
+      }, LISTEN_KEYWORD_SEARCH_TIMEOUT_MS);
+
+      if (!response.ok) {
+        const snippet = (await response.text().catch(() => '')).slice(0, 160).trim();
+        throw new ListenHttpError(response.status, response.statusText, activeEndpoint, activePhase, snippet);
+      }
+
+      let data: any;
+      try {
+        data = await response.json();
+      } catch (parseErr: any) {
+        throw new ListenParseError(parseErr?.message || 'Invalid JSON', activeEndpoint, activePhase);
+      }
+
+      const keys = data.keys || [];
+      if (keys.length > 0 && Array.isArray(keys[0]) && keys[0].length > 0) {
+        const mgetPayload = keys[0].map((fullKey: string) => {
+          const idx = fullKey.indexOf(".");
+          return { ns: fullKey.slice(0, idx), key: fullKey.slice(idx + 1) };
         });
-        if (response.ok) {
-          const data = await response.json();
-          const keys = data.keys || [];
-          if (keys.length > 0) {
-            const mgetPayload = keys[0].map((fullKey: string) => {
-              const idx = fullKey.indexOf(".");
-              return { ns: fullKey.slice(0, idx), key: fullKey.slice(idx + 1) };
-            });
-            const mgetResponse = await fetch("https://i.gogingko.net/api/v1/mget/_", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(mgetPayload),
-              signal
-            });
-            if (mgetResponse.ok) {
-              const postsData = await mgetResponse.json();
-              fetchedPosts = Array.isArray(postsData) ? postsData : (postsData.data || []);
-            }
-          }
+        activeEndpoint = "https://i.gogingko.net/api/v1/mget/_";
+        activePhase = "keyword-mget";
+        const mgetResponse = await fetchWithTimeout(activeEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(mgetPayload),
+          signal
+        }, LISTEN_DEFAULT_TIMEOUT_MS);
+
+        if (!mgetResponse.ok) {
+          const snippet = (await mgetResponse.text().catch(() => '')).slice(0, 160).trim();
+          throw new ListenHttpError(mgetResponse.status, mgetResponse.statusText, activeEndpoint, activePhase, snippet);
         }
+
+        let postsData: any;
+        try {
+          postsData = await mgetResponse.json();
+        } catch (parseErr: any) {
+          throw new ListenParseError(parseErr?.message || 'Invalid JSON', activeEndpoint, activePhase);
+        }
+        fetchedPosts = Array.isArray(postsData) ? postsData : (postsData.data || []);
       }
     }
 
@@ -7087,6 +7500,9 @@ const syncSingleListenItem = async (
       }
     }
 
+    // Clear previous error once sync completes successfully
+    clearListenItemError(node.id);
+
     // Trigger SystemOne auto topic classification when:
     // 1) New posts were fetched (newlyAddedCount > 0), OR
     // 2) The listen item has NOT been auto_class yet (!hasAutoClass)
@@ -7108,8 +7524,17 @@ const syncSingleListenItem = async (
     const fetchDurationMs = Math.round(performance.now() - syncStartTime);
     itemLastFetchDurationMap.value[node.id] = fetchDurationMs;
     if (signal?.aborted) return { newPosts: 0, success: false };
-    console.error(`Error syncing listen item ${node.name}:`, err);
-    return { newPosts: 0, success: false };
+
+    const errObj = classifyListenFetchError(err, {
+      nodeId: node.id,
+      itemName: node.name,
+      endpoint: activeEndpoint,
+      phase: activePhase,
+      source: 'background'
+    });
+    setListenItemError(errObj);
+    console.warn(`Error syncing listen item ${node.name} [${errObj.title}]:`, err);
+    return { newPosts: 0, success: false, error: errObj };
   }
 };
 
@@ -7260,15 +7685,28 @@ const startManualBackgroundSync = async (forceAll = false) => {
             // Check and schedule scrape if lagging past avg gap + stdev
             await checkAndScheduleScrapeForListenItem(item);
             const res = await syncSingleListenItem(item, signal);
-            if (res.newPosts > 0) {
-              backgroundSyncProgress.value.updatedChannelsCount++;
-              backgroundSyncProgress.value.newPostsCount += res.newPosts;
+            if (res.success) {
+              if (res.newPosts > 0) {
+                backgroundSyncProgress.value.updatedChannelsCount++;
+                backgroundSyncProgress.value.newPostsCount += res.newPosts;
+              }
+              itemSyncErrorCountMap.value[item.id] = 0;
+            } else if (!signal.aborted) {
+              backgroundSyncProgress.value.errorCount++;
+              itemSyncErrorCountMap.value[item.id] = (itemSyncErrorCountMap.value[item.id] || 0) + 1;
             }
-            itemSyncErrorCountMap.value[item.id] = 0;
           } catch (err) {
-            console.error(`Background channel sync failed for ${item.name}:`, err);
-            backgroundSyncProgress.value.errorCount++;
-            itemSyncErrorCountMap.value[item.id] = (itemSyncErrorCountMap.value[item.id] || 0) + 1;
+            if (!signal.aborted) {
+              const errObj = classifyListenFetchError(err, {
+                nodeId: item.id,
+                itemName: item.name,
+                phase: 'channel-worker',
+                source: 'background'
+              });
+              setListenItemError(errObj);
+              backgroundSyncProgress.value.errorCount++;
+              itemSyncErrorCountMap.value[item.id] = (itemSyncErrorCountMap.value[item.id] || 0) + 1;
+            }
           } finally {
             completedChannels++;
             backgroundSyncProgress.value.channelCurrent = completedChannels;
@@ -7355,15 +7793,28 @@ const startManualBackgroundSync = async (forceAll = false) => {
 
             try {
               const res = await syncSingleListenItem(item, signal);
-              if (res.newPosts > 0) {
-                backgroundSyncProgress.value.updatedChannelsCount++;
-                backgroundSyncProgress.value.newPostsCount += res.newPosts;
+              if (res.success) {
+                if (res.newPosts > 0) {
+                  backgroundSyncProgress.value.updatedChannelsCount++;
+                  backgroundSyncProgress.value.newPostsCount += res.newPosts;
+                }
+                itemSyncErrorCountMap.value[item.id] = 0;
+              } else if (!signal.aborted) {
+                backgroundSyncProgress.value.errorCount++;
+                itemSyncErrorCountMap.value[item.id] = (itemSyncErrorCountMap.value[item.id] || 0) + 1;
               }
-              itemSyncErrorCountMap.value[item.id] = 0;
             } catch (err) {
-              console.error(`Background keyword sync failed for ${item.name}:`, err);
-              backgroundSyncProgress.value.errorCount++;
-              itemSyncErrorCountMap.value[item.id] = (itemSyncErrorCountMap.value[item.id] || 0) + 1;
+              if (!signal.aborted) {
+                const errObj = classifyListenFetchError(err, {
+                  nodeId: item.id,
+                  itemName: item.name,
+                  phase: 'keyword-worker',
+                  source: 'background'
+                });
+                setListenItemError(errObj);
+                backgroundSyncProgress.value.errorCount++;
+                itemSyncErrorCountMap.value[item.id] = (itemSyncErrorCountMap.value[item.id] || 0) + 1;
+              }
             } finally {
               completedKeywords++;
               backgroundSyncProgress.value.keywordCurrent = completedKeywords;
@@ -7558,29 +8009,50 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
   }
   
   const fetchStart = performance.now();
+  let activeEndpoint = '';
+  let activePhase = 'init';
   try {
     let fetchedPosts: any[] = [];
 
     if (node.type === "channel") {
-      let username = node.argument?.trim();
+      let username = sanitizeListenChannelHandle(node.argument);
       if (!username) {
+        setListenItemError({
+          nodeId: node.id,
+          itemName: node.name,
+          category: 'validation',
+          title: t('listen.fetchErrors.validationTitle'),
+          message: t('listen.fetchErrors.validationMsg'),
+          detail: 'Empty channel username',
+          phase: 'validation',
+          timestamp: Date.now(),
+          source: 'foreground'
+        });
         if (selectedListenNode.value?.id === node.id) {
           isFetchingListenPosts.value = false;
         }
         return;
       }
 
-      // try to lookup the resolve cache with fast in-memory memoization
+      // try to lookup the resolve cache with fast in-memory memoization (best effort)
       if (listenResolveCache.has(username)) {
-        username = listenResolveCache.get(username)!;
+        username = sanitizeListenChannelHandle(listenResolveCache.get(username)!) || username;
       } else {
-        const resolveRes = await fetch(`https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${username}`);
-        if (resolveRes.ok) {
-          const data = await resolveRes.json();
-          if (data.state == 0 && data.gso?.result) {
-            username = data.gso.result;
-            listenResolveCache.set(node.argument?.trim() || username, username);
+        try {
+          const resolveUrl = `https://i.gogingko.net/api/v1/z/test2/dict_tg_resolve/${encodeURIComponent(username)}`;
+          const resolveRes = await fetchWithTimeout(resolveUrl, {}, LISTEN_RESOLVE_TIMEOUT_MS);
+          if (resolveRes.ok) {
+            const data = await resolveRes.json();
+            if (data.state == 0 && data.gso?.result) {
+              const resolved = sanitizeListenChannelHandle(String(data.gso.result));
+              if (resolved) {
+                username = resolved;
+                listenResolveCache.set(sanitizeListenChannelHandle(node.argument) || username, username);
+              }
+            }
           }
+        } catch {
+          // Fallback cleanly to original username
         }
       }
 
@@ -7590,7 +8062,7 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
         ftoChannelsListen.value = profileData.fto || [];
       } else {
         try {
-          const profileRes = await fetch(`https://i.gogingko.net/api/v1/v/profiles/CG-${username}`);
+          const profileRes = await fetchWithTimeout(`https://i.gogingko.net/api/v1/v/profiles/CG-${encodeURIComponent(username)}`, {}, LISTEN_RESOLVE_TIMEOUT_MS);
           if (profileRes.ok) {
             const profileData = await profileRes.json();
             listenProfileCache.set(username, profileData);
@@ -7598,26 +8070,42 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
             ftoChannelsListen.value = profileData.fto || [];
           }
         } catch (e) {
-          console.error("Failed to fetch forwards and fto", e);
+          console.warn("Failed to fetch forwards and fto:", e);
         }
       }
 
       let allFetched: any[] = [];
       let batchMinPostNumber = Infinity;
-      let url = `https://i.gogingko.net/api/v1/last/${username}?n=50`;
+      let url = `https://i.gogingko.net/api/v1/last/${encodeURIComponent(username)}?n=50`;
       let iterationCount = 0;
       const MAX_ITERATIONS = 20;
 
       while (iterationCount < MAX_ITERATIONS) {
-        const response = await fetch(url, {
+        activeEndpoint = url;
+        activePhase = `channel-last (batch ${iterationCount + 1})`;
+        const response = await fetchWithTimeout(url, {
           headers: {
             "x-gos-rawcontent": "1",
           }
-        });
+        }, LISTEN_DEFAULT_TIMEOUT_MS);
         if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
-        if (!response.ok) break;
+        if (!response.ok) {
+          const snippet = (await response.text().catch(() => '')).slice(0, 160).trim();
+          if (iterationCount === 0) {
+            throw new ListenHttpError(response.status, response.statusText, url, activePhase, snippet);
+          }
+          break;
+        }
 
-        const data = await response.json();
+        let data: any;
+        try {
+          data = await response.json();
+        } catch (parseErr: any) {
+          if (iterationCount === 0) {
+            throw new ListenParseError(parseErr?.message || 'Invalid JSON', url, activePhase);
+          }
+          break;
+        }
         if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
 
         const batchPosts = Array.isArray(data) ? data : (data.data || data.posts || data.items || []);
@@ -7652,14 +8140,25 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
           break;
         }
 
-        url = `https://i.gogingko.net/api/v1/last/${username}?n=50&b=${batchMinPostNumber}`;
+        url = `https://i.gogingko.net/api/v1/last/${encodeURIComponent(username)}?n=50&b=${batchMinPostNumber}`;
         iterationCount++;
       }
 
       fetchedPosts = allFetched;
     } else if (node.type === "keyword") {
-      const keywords = node.argument?.trim().split(',');
-      if (!keywords) {
+      const keywords = node.argument?.trim().split(',').map(k => k.trim()).filter(Boolean);
+      if (!keywords || keywords.length === 0) {
+        setListenItemError({
+          nodeId: node.id,
+          itemName: node.name,
+          category: 'validation',
+          title: t('listen.fetchErrors.validationTitle'),
+          message: t('listen.fetchErrors.validationMsg'),
+          detail: 'Empty keyword query',
+          phase: 'validation',
+          timestamp: Date.now(),
+          source: 'foreground'
+        });
         if (selectedListenNode.value?.id === node.id) {
           isFetchingListenPosts.value = false;
         }
@@ -7681,48 +8180,71 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
       const dateRange = `date:[to_date("${formatDateForSearch(start)}", "%Y-%m-%dT%H:%M:%S%z") TO to_date("${formatDateForSearch(end)}", "%Y-%m-%dT%H:%M:%S%z")]`;
       const finalQuery = `(${fieldQueries}) AND ${dateRange}`;
 
-      const response = await fetch("https://i.gogingko.net/api/v1/ft/telegram", {
+      activeEndpoint = "https://i.gogingko.net/api/v1/ft/telegram";
+      activePhase = "keyword-search";
+      const response = await fetchWithTimeout(activeEndpoint, {
         method: "GET",
         headers: {
           "x-gos-ft-query": encodeURIComponent(finalQuery),
           "x-gos-ft-sort": "date-",
           "x-gos-ft-topk": "50",
         }
-      });
+      }, LISTEN_KEYWORD_SEARCH_TIMEOUT_MS);
       if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
-      if (response.ok) {
-        const data = await response.json();
+      if (!response.ok) {
+        const snippet = (await response.text().catch(() => '')).slice(0, 160).trim();
+        throw new ListenHttpError(response.status, response.statusText, activeEndpoint, activePhase, snippet);
+      }
+
+      let data: any;
+      try {
+        data = await response.json();
+      } catch (parseErr: any) {
+        throw new ListenParseError(parseErr?.message || 'Invalid JSON', activeEndpoint, activePhase);
+      }
+      if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
+      const keys = data.keys || [];
+
+      if (keys.length > 0 && Array.isArray(keys[0]) && keys[0].length > 0) {
+        // Transform keys into { ns, key } objects by splitting at the first dot
+        const mgetPayload = keys[0].map((fullKey: string) => {
+          const idx = fullKey.indexOf(".");
+          return {
+            ns: fullKey.slice(0, idx),
+            key: fullKey.slice(idx + 1),
+          };
+        });
+
+        // Fetch full post data
+        activeEndpoint = "https://i.gogingko.net/api/v1/mget/_";
+        activePhase = "keyword-mget";
+        const mgetResponse = await fetchWithTimeout(activeEndpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(mgetPayload),
+        }, LISTEN_DEFAULT_TIMEOUT_MS);
         if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
-        const keys = data.keys || [];
 
-        if (keys.length > 0) {
-          // Transform keys into { ns, key } objects by splitting at the first dot
-          const mgetPayload = keys[0].map((fullKey: string) => {
-            const idx = fullKey.indexOf(".");
-            return {
-              ns: fullKey.slice(0, idx),
-              key: fullKey.slice(idx + 1),
-            };
-          });
-
-          // Fetch full post data
-          const mgetResponse = await fetch("https://i.gogingko.net/api/v1/mget/_", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify(mgetPayload),
-          });
-          if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
-
-          if (mgetResponse.ok) {
-            const postsData = await mgetResponse.json();
-            if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
-            fetchedPosts = Array.isArray(postsData) ? postsData : postsData.data || [];
-          }
+        if (!mgetResponse.ok) {
+          const snippet = (await mgetResponse.text().catch(() => '')).slice(0, 160).trim();
+          throw new ListenHttpError(mgetResponse.status, mgetResponse.statusText, activeEndpoint, activePhase, snippet);
         }
+
+        let postsData: any;
+        try {
+          postsData = await mgetResponse.json();
+        } catch (parseErr: any) {
+          throw new ListenParseError(parseErr?.message || 'Invalid JSON', activeEndpoint, activePhase);
+        }
+        if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
+        fetchedPosts = Array.isArray(postsData) ? postsData : postsData.data || [];
       }
     }
+
+    // Fetch succeeded cleanly; clear any stale error badge for this listen item
+    clearListenItemError(node.id);
 
     if (!selectedListenNode.value || selectedListenNode.value.id !== node.id) return;
 
@@ -7801,7 +8323,15 @@ const fetchListenPosts = async (node: ListenItem, isNewSelection = false) => {
       }
     }
   } catch (e) {
-    console.error("Error in fetchListenPosts:", e);
+    const errObj = classifyListenFetchError(e, {
+      nodeId: node.id,
+      itemName: node.name,
+      endpoint: activeEndpoint,
+      phase: activePhase,
+      source: 'foreground'
+    });
+    setListenItemError(errObj);
+    console.warn(`Error in fetchListenPosts for ${node.name} [${errObj.title}]:`, e);
   } finally {
     if (selectedListenNode.value?.id === node.id) {
       isFetchingListenPosts.value = false;
@@ -24846,6 +25376,25 @@ onUnmounted(() => {
               <span>{{ t('listen.syncAll') }}</span>
             </button>
 
+            <!-- Fetch & Sync Errors Diagnostics Toggle Pill -->
+            <button
+              v-if="listenFetchErrorsList.length > 0"
+              type="button"
+              @click="isFetchErrorsPanelOpen = !isFetchErrorsPanelOpen"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-bold transition-all cursor-pointer select-none shadow-2xs border"
+              :class="[
+                isFetchErrorsPanelOpen
+                  ? 'bg-rose-600 hover:bg-rose-700 text-white border-rose-700'
+                  : 'bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/60 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 border-rose-300/80 dark:border-rose-800/70'
+              ]"
+              :title="t('listen.fetchErrors.panelTitle', { count: listenFetchErrorsList.length })"
+            >
+              <AlertCircle class="h-3.5 w-3.5 shrink-0" />
+              <span class="tabular-nums">{{ t('listen.fetchErrors.failedCountBadge', { count: listenFetchErrorsList.length }) }}</span>
+              <ChevronUp v-if="isFetchErrorsPanelOpen" class="h-3.5 w-3.5 shrink-0 opacity-80" />
+              <ChevronDown v-else class="h-3.5 w-3.5 shrink-0 opacity-80" />
+            </button>
+
             <!-- Topic Distribution Toggle Button -->
             <button
               type="button"
@@ -24947,6 +25496,107 @@ onUnmounted(() => {
                 <Flame class="h-3.5 w-3.5" :class="listenLayoutMode === 'hots' ? 'text-amber-500' : ''" />
                 <span>{{ t('listen.modeHots') || 'Hots' }}</span>
               </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Expandable Fetch & Sync Diagnostics Panel -->
+        <div
+          v-if="isFetchErrorsPanelOpen && listenFetchErrorsList.length > 0"
+          class="bg-white dark:bg-gray-800 rounded-3xl border border-rose-200 dark:border-rose-800/70 shadow-sm overflow-hidden animate-fadeIn"
+        >
+          <div class="px-4 sm:px-5 py-3 bg-rose-50/80 dark:bg-rose-950/40 border-b border-rose-200/70 dark:border-rose-800/50 flex items-center justify-between gap-3 flex-wrap">
+            <div class="flex items-center gap-2 min-w-0">
+              <div class="p-1.5 rounded-xl bg-rose-100 dark:bg-rose-900/60 text-rose-600 dark:text-rose-300 shrink-0">
+                <AlertCircle class="h-4 w-4" />
+              </div>
+              <h3 class="text-xs sm:text-sm font-black text-rose-900 dark:text-rose-200 tracking-tight truncate">
+                {{ t('listen.fetchErrors.panelTitle', { count: listenFetchErrorsList.length }) }}
+              </h3>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                @click="clearAllListenItemErrors"
+                class="px-2.5 py-1 rounded-xl text-[11px] font-bold bg-white dark:bg-gray-800 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800/60 transition-colors cursor-pointer"
+              >
+                {{ t('listen.fetchErrors.clearAll') }}
+              </button>
+              <button
+                type="button"
+                @click="isFetchErrorsPanelOpen = false"
+                class="p-1 rounded-xl text-rose-500 hover:text-rose-700 dark:hover:text-rose-200 hover:bg-rose-100 dark:hover:bg-rose-900/50 transition-colors cursor-pointer"
+                :title="t('listen.fetchErrors.dismiss')"
+              >
+                <X class="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          <div class="max-h-72 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-700/60 scrollbar-thin">
+            <div
+              v-for="err in listenFetchErrorsList"
+              :key="err.nodeId"
+              class="px-4 sm:px-5 py-3 flex flex-col sm:flex-row sm:items-start justify-between gap-3 hover:bg-rose-50/30 dark:hover:bg-rose-950/20 transition-colors"
+            >
+              <div class="min-w-0 flex-1 space-y-1">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    @click="jumpToAndRetryListenError(err)"
+                    class="text-xs sm:text-sm font-bold text-gray-900 dark:text-white hover:text-teal-600 dark:hover:text-teal-400 hover:underline text-left truncate max-w-[260px] cursor-pointer"
+                  >
+                    {{ err.itemName }}
+                  </button>
+                  <span
+                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border"
+                    :class="getListenErrorBadgeClass(err.category)"
+                  >
+                    {{ err.title }}
+                  </span>
+                  <span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold bg-gray-100 dark:bg-gray-700/70 text-gray-600 dark:text-gray-300 uppercase">
+                    {{ err.source === 'background' ? t('listen.bgSync') : t('listen.manualSync') }}
+                  </span>
+                  <span class="text-[10px] font-mono text-gray-400 dark:text-gray-500 tabular-nums">
+                    {{ new Date(err.timestamp).toLocaleTimeString() }}
+                  </span>
+                </div>
+                <p class="text-xs text-gray-700 dark:text-gray-300 leading-relaxed">
+                  {{ err.message }}
+                </p>
+                <div
+                  v-if="err.endpoint || err.phase || err.detail"
+                  class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] font-mono text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 px-2.5 py-1.5 rounded-xl border border-gray-200/60 dark:border-gray-700/60 select-all break-all"
+                >
+                  <span v-if="err.phase">
+                    <strong class="text-gray-600 dark:text-gray-300">{{ t('listen.fetchErrors.phaseLabel') }}:</strong> {{ err.phase }}
+                  </span>
+                  <span v-if="err.endpoint">
+                    <strong class="text-gray-600 dark:text-gray-300">{{ t('listen.fetchErrors.endpointLabel') }}:</strong> {{ err.endpoint }}
+                  </span>
+                  <span v-if="err.detail" class="text-rose-600 dark:text-rose-400">
+                    {{ err.detail }}
+                  </span>
+                </div>
+              </div>
+              <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                <button
+                  type="button"
+                  @click="jumpToAndRetryListenError(err)"
+                  class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-bold bg-teal-50 dark:bg-teal-950/50 hover:bg-teal-100 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 transition-colors cursor-pointer"
+                >
+                  <RefreshCw class="h-3 w-3" />
+                  <span>{{ t('listen.fetchErrors.retry') }}</span>
+                </button>
+                <button
+                  type="button"
+                  @click="clearListenItemError(err.nodeId)"
+                  class="p-1.5 rounded-xl text-gray-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 border border-transparent hover:border-rose-200 dark:hover:border-rose-800/50 transition-colors cursor-pointer"
+                  :title="t('listen.fetchErrors.dismiss')"
+                >
+                  <X class="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -25405,6 +26055,53 @@ onUnmounted(() => {
                   @scroll="handleDeskWidgetScroll(node.id, $event)"
                   class="flex-1 min-h-0 overflow-y-auto p-3 space-y-3 scrollbar-thin bg-gray-50/40 dark:bg-gray-900/40"
                 >
+                  <!-- Inline Fetch Error Banner inside Workdesk Card -->
+                  <div
+                    v-if="listenItemErrorMap[node.id]"
+                    class="p-2.5 rounded-xl border border-rose-200 dark:border-rose-800/70 bg-rose-50/90 dark:bg-rose-950/40 text-xs space-y-1.5"
+                  >
+                    <div class="flex items-start justify-between gap-2">
+                      <div class="flex items-center gap-1.5 min-w-0">
+                        <AlertCircle class="h-3.5 w-3.5 text-rose-600 dark:text-rose-400 shrink-0" />
+                        <span
+                          class="px-1.5 py-0.5 rounded text-[9.5px] font-bold border truncate"
+                          :class="getListenErrorBadgeClass(listenItemErrorMap[node.id].category)"
+                        >
+                          {{ listenItemErrorMap[node.id].title }}
+                        </span>
+                      </div>
+                      <div class="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          @click="syncWidgetNode(node)"
+                          :disabled="getWidgetState(node.id).isSyncing"
+                          class="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 transition-colors cursor-pointer inline-flex items-center gap-1 disabled:opacity-50"
+                        >
+                          <RefreshCw class="h-2.5 w-2.5" :class="{ 'animate-spin': getWidgetState(node.id).isSyncing }" />
+                          <span>{{ t('listen.fetchErrors.retry') }}</span>
+                        </button>
+                        <button
+                          type="button"
+                          @click="clearListenItemError(node.id)"
+                          class="p-0.5 rounded text-rose-400 hover:text-rose-700 dark:hover:text-rose-200 cursor-pointer"
+                          :title="t('listen.fetchErrors.dismiss')"
+                        >
+                          <X class="h-3 w-3" />
+                        </button>
+                      </div>
+                    </div>
+                    <p class="text-[11px] text-rose-900 dark:text-rose-200 leading-snug">
+                      {{ listenItemErrorMap[node.id].message }}
+                    </p>
+                    <p
+                      v-if="listenItemErrorMap[node.id].detail || listenItemErrorMap[node.id].endpoint"
+                      class="text-[9.5px] font-mono text-rose-700/80 dark:text-rose-300/80 truncate"
+                      :title="`${listenItemErrorMap[node.id].endpoint || ''} — ${listenItemErrorMap[node.id].detail || ''}`"
+                    >
+                      {{ listenItemErrorMap[node.id].detail || listenItemErrorMap[node.id].endpoint }}
+                    </p>
+                  </div>
+
                   <!-- Loading Skeleton State -->
                   <div v-if="getWidgetState(node.id).isLoading" class="space-y-3 py-4">
                     <div v-for="i in 3" :key="i" class="p-3.5 rounded-xl border border-gray-200/60 dark:border-gray-700/60 bg-white/80 dark:bg-gray-800/80 animate-pulse space-y-2">
@@ -25616,10 +26313,15 @@ onUnmounted(() => {
               :directory="listenDirectory"
               :selected-item="selectedListenNode"
               :freshness-map="listenItemsFreshnessMap"
+              :folder-freshness-map="folderStatsMap?.freshnessMap"
               :channel-metadata-cache="listenChannelMetadataCache"
               :is-dark="isDark"
               :new-posts-count-map="newlyFetchedPostsCountMap"
               :folder-new-posts-map="folderStatsMap?.newPostsMap"
+              :item-errors-map="listenItemErrorMap"
+              :folder-errors-map="folderStatsMap?.errorCountMap"
+              :date-range="listenDateRange"
+              @update:date-range="val => (listenDateRange = val)"
               :active-sync-item-ids="activeBackgroundSyncItemIds"
               :active-sync-item-id="activeBackgroundSyncItemId"
               :total-newly-fetched-count="totalNewlyFetchedPostsCount"
@@ -25718,6 +26420,15 @@ onUnmounted(() => {
                         <span class="h-1.5 w-1.5 rounded-full" :class="getFreshnessDotColor(getItemOrFolderFreshness(selectedListenNode)!.level)"></span>
                         <span>{{ t('listen.freshness') }}: {{ getItemOrFolderFreshness(selectedListenNode)!.relativeTime }}</span>
                       </span>
+                      <span
+                        v-if="listenItemErrorMap[selectedListenNode.id]"
+                        class="px-2 py-0.5 rounded-md text-[10px] font-bold border inline-flex items-center gap-1 select-none"
+                        :class="getListenErrorBadgeClass(listenItemErrorMap[selectedListenNode.id].category)"
+                        :title="listenItemErrorMap[selectedListenNode.id].message"
+                      >
+                        <AlertCircle class="h-3 w-3 shrink-0" />
+                        <span>{{ listenItemErrorMap[selectedListenNode.id].title }}</span>
+                      </span>
                     </div>
 
                     <!-- Post Feed Panel Metadata Row: Target, Created, Newest, Cache Lookup (Indexed load time), and Fetch Time (Latest post fetch time) -->
@@ -25783,6 +26494,69 @@ onUnmounted(() => {
                   </div>
                 </div>
 
+                <!-- Granular Fetch Error Alert Banner in Tile Mode -->
+                <div
+                  v-if="listenItemErrorMap[selectedListenNode.id]"
+                  class="bg-rose-50/90 dark:bg-rose-950/35 rounded-3xl border border-rose-200 dark:border-rose-800/70 shadow-sm p-4 sm:p-5 flex flex-col sm:flex-row sm:items-start justify-between gap-4 animate-fadeIn"
+                >
+                  <div class="flex items-start gap-3 min-w-0 flex-1">
+                    <div class="p-2 rounded-2xl bg-rose-100 dark:bg-rose-900/60 text-rose-600 dark:text-rose-300 shrink-0 mt-0.5">
+                      <AlertCircle class="h-4 w-4" />
+                    </div>
+                    <div class="min-w-0 flex-1 space-y-1.5">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <span
+                          class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border"
+                          :class="getListenErrorBadgeClass(listenItemErrorMap[selectedListenNode.id].category)"
+                        >
+                          {{ listenItemErrorMap[selectedListenNode.id].title }}
+                        </span>
+                        <span class="text-[11px] font-bold text-rose-900 dark:text-rose-200">
+                          {{ t('listen.fetchErrors.syncErrorNotice') }}
+                        </span>
+                        <span class="text-[10px] font-mono text-rose-600/80 dark:text-rose-400/80 tabular-nums">
+                          {{ new Date(listenItemErrorMap[selectedListenNode.id].timestamp).toLocaleTimeString() }}
+                        </span>
+                      </div>
+                      <p class="text-xs text-rose-900 dark:text-rose-100 leading-relaxed">
+                        {{ listenItemErrorMap[selectedListenNode.id].message }}
+                      </p>
+                      <div
+                        v-if="listenItemErrorMap[selectedListenNode.id].endpoint || listenItemErrorMap[selectedListenNode.id].phase || listenItemErrorMap[selectedListenNode.id].detail"
+                        class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] font-mono text-rose-800/80 dark:text-rose-300/80 bg-white/70 dark:bg-gray-900/50 px-2.5 py-1.5 rounded-xl border border-rose-200/70 dark:border-rose-800/50 select-all break-all"
+                      >
+                        <span v-if="listenItemErrorMap[selectedListenNode.id].phase">
+                          <strong>{{ t('listen.fetchErrors.phaseLabel') }}:</strong> {{ listenItemErrorMap[selectedListenNode.id].phase }}
+                        </span>
+                        <span v-if="listenItemErrorMap[selectedListenNode.id].endpoint">
+                          <strong>{{ t('listen.fetchErrors.endpointLabel') }}:</strong> {{ listenItemErrorMap[selectedListenNode.id].endpoint }}
+                        </span>
+                        <span v-if="listenItemErrorMap[selectedListenNode.id].detail">
+                          {{ listenItemErrorMap[selectedListenNode.id].detail }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                    <button
+                      type="button"
+                      @click="fetchListenPosts(selectedListenNode, false)"
+                      :disabled="isFetchingListenPosts"
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts }" />
+                      <span>{{ t('listen.fetchErrors.retry') }}</span>
+                    </button>
+                    <button
+                      type="button"
+                      @click="clearListenItemError(selectedListenNode.id)"
+                      class="px-2.5 py-1.5 rounded-xl text-xs font-semibold text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/50 transition-colors cursor-pointer"
+                    >
+                      {{ t('listen.fetchErrors.dismiss') }}
+                    </button>
+                  </div>
+                </div>
+
                 <!-- Channel Metadata Widget in Tile Mode -->
                 <div v-if="selectedListenNode.type === 'channel' && selectedChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col md:flex-row items-stretch relative">
                   <div class="bg-gradient-to-br from-teal-500/20 to-teal-600/5 dark:from-teal-950/40 dark:to-teal-900/10 p-5 sm:p-6 flex flex-row md:flex-col items-center justify-center gap-4 border-b md:border-b-0 md:border-r border-gray-150 dark:border-gray-700 md:w-48 shrink-0 select-none">
@@ -25836,10 +26610,26 @@ onUnmounted(() => {
                     <p class="text-sm font-semibold text-gray-500">{{ t('listen.connectingPipeline') }}</p>
                   </div>
                   <!-- Empty Feed alert -->
-                  <div v-else-if="listenPosts.length === 0" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center py-24 text-center max-w-sm mx-auto text-gray-400">
-                    <Inbox class="h-12 w-12 mb-4 opacity-40 text-teal-400" />
-                    <p class="text-sm font-bold text-gray-700 dark:text-gray-300">{{ t('listen.noLogsFound') }}</p>
-                    <p class="text-xs mt-1">{{ t('listen.noLogsDesc') }}</p>
+                  <div v-else-if="listenPosts.length === 0" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center py-24 px-6 text-center max-w-md mx-auto text-gray-400">
+                    <template v-if="listenItemErrorMap[selectedListenNode.id]">
+                      <AlertCircle class="h-12 w-12 mb-4 text-rose-500" />
+                      <p class="text-sm font-bold text-rose-700 dark:text-rose-300">{{ listenItemErrorMap[selectedListenNode.id].title }}</p>
+                      <p class="text-xs text-gray-600 dark:text-gray-300 mt-1">{{ listenItemErrorMap[selectedListenNode.id].message }}</p>
+                      <button
+                        type="button"
+                        @click="fetchListenPosts(selectedListenNode, false)"
+                        :disabled="isFetchingListenPosts"
+                        class="mt-4 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts }" />
+                        <span>{{ t('listen.fetchErrors.retry') }}</span>
+                      </button>
+                    </template>
+                    <template v-else>
+                      <Inbox class="h-12 w-12 mb-4 opacity-40 text-teal-400" />
+                      <p class="text-sm font-bold text-gray-700 dark:text-gray-300">{{ t('listen.noLogsFound') }}</p>
+                      <p class="text-xs mt-1">{{ t('listen.noLogsDesc') }}</p>
+                    </template>
                   </div>
                   <!-- Active post list feeds cascade -->
                   <div v-else class="space-y-6">
@@ -26406,6 +27196,13 @@ onUnmounted(() => {
                       </div>
                     </div>
                   </div>
+
+                  <!-- Date Range Filter Picker Component (next to Sort button) -->
+                  <DateRangePicker
+                    v-model="listenDateRange"
+                    :compact="true"
+                    align="right"
+                  />
                 </div>
                 <div class="h-4 w-px bg-gray-200 dark:bg-gray-700 mx-0.5 hidden sm:block"></div>
                 <div class="flex items-center gap-1.5 shrink-0">
@@ -26457,6 +27254,16 @@ onUnmounted(() => {
                       (CH: {{ backgroundSyncProgress.channelCurrent || 0 }}/{{ backgroundSyncProgress.channelTotal || 0 }} · KW: {{ backgroundSyncProgress.keywordCurrent || 0 }}/{{ backgroundSyncProgress.keywordTotal || 0 }}<template v-if="(backgroundSyncProgress.keywordRound || 1) > 1"> R{{ backgroundSyncProgress.keywordRound }}</template><template v-if="backgroundSyncProgress.kwCountdownSeconds != null"> · {{ backgroundSyncProgress.kwCountdownSeconds }}s</template>)
                     </span>
                   </span>
+                  <button
+                    v-if="backgroundSyncProgress.errorCount > 0"
+                    type="button"
+                    @click="isFetchErrorsPanelOpen = !isFetchErrorsPanelOpen"
+                    class="px-1.5 py-0.5 rounded-md bg-rose-100 dark:bg-rose-950/70 hover:bg-rose-200 dark:hover:bg-rose-900/70 text-rose-700 dark:text-rose-300 border border-rose-300/80 dark:border-rose-800/70 text-[10px] font-bold inline-flex items-center gap-1 transition-colors cursor-pointer tabular-nums"
+                    :title="t('listen.fetchErrors.panelTitle', { count: backgroundSyncProgress.errorCount })"
+                  >
+                    <AlertCircle class="h-2.5 w-2.5 shrink-0" />
+                    <span>{{ t('listen.fetchErrors.failedCountBadge', { count: backgroundSyncProgress.errorCount }) }}</span>
+                  </button>
                   <button
                     @click="cancelBackgroundSync"
                     class="px-1.5 py-0.5 rounded-md bg-white/90 dark:bg-gray-800/90 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200/80 dark:border-rose-800/60 text-[10px] font-bold flex items-center gap-1 shadow-2xs transition-colors cursor-pointer"
@@ -26595,6 +27402,21 @@ onUnmounted(() => {
                   class="text-teal-600 dark:text-teal-400 hover:text-teal-900 dark:hover:text-teal-100 font-bold cursor-pointer hover:underline shrink-0 ml-2"
                 >
                   {{ t('common.reset') }}
+                </button>
+              </div>
+
+              <!-- Active Date Range Filter Banner -->
+              <div v-if="isDateFilterActive" class="flex items-center justify-between text-[10px] text-indigo-800 dark:text-indigo-200 bg-indigo-50 dark:bg-indigo-950/60 px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-800/80">
+                <span class="font-medium flex items-center gap-1 truncate">
+                  <Calendar class="h-3 w-3 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                  <span>{{ t('listen.dateRange.matchingCount', { count: visibleListenItemsCount }) }}</span>
+                </span>
+                <button
+                  type="button"
+                  @click="resetListenDateRange"
+                  class="text-indigo-600 dark:text-indigo-400 hover:text-indigo-900 dark:hover:text-indigo-100 font-bold cursor-pointer hover:underline shrink-0 ml-2"
+                >
+                  {{ t('listen.dateRange.reset') }}
                 </button>
               </div>
             </div>
@@ -26885,11 +27707,34 @@ onUnmounted(() => {
                   <span class="whitespace-nowrap font-mono tabular-nums">+{{ node.newPostsCount }}</span>
                 </span>
 
+                <!-- Fetch Error Indicator Badge on Directory Item / Folder -->
+                <span
+                  v-if="!node.item.isFolder && listenItemErrorMap[node.item.id]"
+                  class="mr-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold border inline-flex items-center gap-1 shrink-0 select-none"
+                  :class="[
+                    getListenErrorBadgeClass(listenItemErrorMap[node.item.id].category),
+                    { 'ml-auto': node.newPostsCount === 0 }
+                  ]"
+                  :title="`${listenItemErrorMap[node.item.id].title}: ${listenItemErrorMap[node.item.id].message}`"
+                >
+                  <AlertCircle class="h-2.5 w-2.5 shrink-0" />
+                  <span v-if="listenItemErrorMap[node.item.id].httpStatus" class="font-mono">{{ listenItemErrorMap[node.item.id].httpStatus }}</span>
+                </span>
+                <span
+                  v-else-if="node.item.isFolder && (folderStatsMap?.errorCountMap?.[node.item.id] || 0) > 0"
+                  class="mr-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-rose-100 text-rose-800 border border-rose-300 dark:bg-rose-950/70 dark:text-rose-300 dark:border-rose-800/70 inline-flex items-center gap-1 shrink-0 select-none tabular-nums"
+                  :class="{ 'ml-auto': node.newPostsCount === 0 }"
+                  :title="t('listen.fetchErrors.folderErrorsTip', { count: folderStatsMap.errorCountMap[node.item.id] })"
+                >
+                  <AlertCircle class="h-2.5 w-2.5 shrink-0" />
+                  <span class="font-mono">{{ folderStatsMap.errorCountMap[node.item.id] }}</span>
+                </span>
+
                 <!-- Active Background Syncing Indicator -->
                 <span
                   v-if="activeBackgroundSyncItemId === node.item.id || activeBackgroundSyncItemIds[node.item.id]"
                   class="mr-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold bg-teal-50 dark:bg-teal-950/80 text-teal-700 dark:text-teal-300 border border-teal-300/90 dark:border-teal-700/80 flex items-center gap-1 shrink-0 select-none animate-pulse shadow-2xs"
-                  :class="{ 'ml-auto': node.newPostsCount === 0 }"
+                  :class="{ 'ml-auto': node.newPostsCount === 0 && !(!node.item.isFolder && listenItemErrorMap[node.item.id]) && !(node.item.isFolder && (folderStatsMap?.errorCountMap?.[node.item.id] || 0) > 0) }"
                 >
                   <RefreshCw class="h-2.5 w-2.5 animate-spin text-teal-600 dark:text-teal-400" />
                   <span class="font-mono uppercase text-[8px] tracking-wider">Syncing</span>
@@ -26901,7 +27746,7 @@ onUnmounted(() => {
                   class="mr-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-bold tracking-tight border flex items-center gap-1 shrink-0 select-none transition-colors"
                   :class="[
                     getFreshnessBadgeClasses(node.freshness.level),
-                    { 'ml-auto': node.newPostsCount === 0 }
+                    { 'ml-auto': node.newPostsCount === 0 && !(!node.item.isFolder && listenItemErrorMap[node.item.id]) && !(node.item.isFolder && (folderStatsMap?.errorCountMap?.[node.item.id] || 0) > 0) }
                   ]"
                 >
                   <span class="h-1.5 w-1.5 rounded-full" :class="getFreshnessDotColor(node.freshness.level)"></span>
@@ -27242,6 +28087,15 @@ onUnmounted(() => {
                       <span class="h-1.5 w-1.5 rounded-full" :class="getFreshnessDotColor(getItemOrFolderFreshness(selectedListenNode)!.level)"></span>
                       <span>{{ t('listen.freshness') }}: {{ getItemOrFolderFreshness(selectedListenNode)!.relativeTime }}</span>
                     </span>
+                    <span
+                      v-if="listenItemErrorMap[selectedListenNode.id]"
+                      class="text-[10px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1 border"
+                      :class="getListenErrorBadgeClass(listenItemErrorMap[selectedListenNode.id].category)"
+                      :title="listenItemErrorMap[selectedListenNode.id].message"
+                    >
+                      <AlertCircle class="h-3 w-3 shrink-0" />
+                      <span>{{ listenItemErrorMap[selectedListenNode.id].title }}</span>
+                    </span>
                   </div>
                   <h2 class="text-xl font-black text-gray-900 dark:text-white tracking-tight">
                     {{ selectedListenNode.name }}
@@ -27306,6 +28160,69 @@ onUnmounted(() => {
                     :disabled="isFetchingListenPosts"
                   >
                     <RefreshCw class="h-4 w-4" :class="[isFetchingListenPosts ? 'animate-spin' : '']" />
+                  </button>
+                </div>
+              </div>
+
+              <!-- Granular Fetch Error Alert Banner in View Mode -->
+              <div
+                v-if="listenItemErrorMap[selectedListenNode.id]"
+                class="bg-rose-50/90 dark:bg-rose-950/35 rounded-3xl border border-rose-200 dark:border-rose-800/70 shadow-sm p-4 sm:p-5 flex flex-col sm:flex-row sm:items-start justify-between gap-4 animate-fadeIn"
+              >
+                <div class="flex items-start gap-3 min-w-0 flex-1">
+                  <div class="p-2 rounded-2xl bg-rose-100 dark:bg-rose-900/60 text-rose-600 dark:text-rose-300 shrink-0 mt-0.5">
+                    <AlertCircle class="h-4 w-4" />
+                  </div>
+                  <div class="min-w-0 flex-1 space-y-1.5">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span
+                        class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border"
+                        :class="getListenErrorBadgeClass(listenItemErrorMap[selectedListenNode.id].category)"
+                      >
+                        {{ listenItemErrorMap[selectedListenNode.id].title }}
+                      </span>
+                      <span class="text-[11px] font-bold text-rose-900 dark:text-rose-200">
+                        {{ t('listen.fetchErrors.syncErrorNotice') }}
+                      </span>
+                      <span class="text-[10px] font-mono text-rose-600/80 dark:text-rose-400/80 tabular-nums">
+                        {{ new Date(listenItemErrorMap[selectedListenNode.id].timestamp).toLocaleTimeString() }}
+                      </span>
+                    </div>
+                    <p class="text-xs text-rose-900 dark:text-rose-100 leading-relaxed">
+                      {{ listenItemErrorMap[selectedListenNode.id].message }}
+                    </p>
+                    <div
+                      v-if="listenItemErrorMap[selectedListenNode.id].endpoint || listenItemErrorMap[selectedListenNode.id].phase || listenItemErrorMap[selectedListenNode.id].detail"
+                      class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] font-mono text-rose-800/80 dark:text-rose-300/80 bg-white/70 dark:bg-gray-900/50 px-2.5 py-1.5 rounded-xl border border-rose-200/70 dark:border-rose-800/50 select-all break-all"
+                    >
+                      <span v-if="listenItemErrorMap[selectedListenNode.id].phase">
+                        <strong>{{ t('listen.fetchErrors.phaseLabel') }}:</strong> {{ listenItemErrorMap[selectedListenNode.id].phase }}
+                      </span>
+                      <span v-if="listenItemErrorMap[selectedListenNode.id].endpoint">
+                        <strong>{{ t('listen.fetchErrors.endpointLabel') }}:</strong> {{ listenItemErrorMap[selectedListenNode.id].endpoint }}
+                      </span>
+                      <span v-if="listenItemErrorMap[selectedListenNode.id].detail">
+                        {{ listenItemErrorMap[selectedListenNode.id].detail }}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                  <button
+                    type="button"
+                    @click="fetchListenPosts(selectedListenNode, false)"
+                    :disabled="isFetchingListenPosts"
+                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts }" />
+                    <span>{{ t('listen.fetchErrors.retry') }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    @click="clearListenItemError(selectedListenNode.id)"
+                    class="px-2.5 py-1.5 rounded-xl text-xs font-semibold text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/50 transition-colors cursor-pointer"
+                  >
+                    {{ t('listen.fetchErrors.dismiss') }}
                   </button>
                 </div>
               </div>
@@ -27408,10 +28325,26 @@ onUnmounted(() => {
                 </div>
 
                 <!-- Empty Feed alert -->
-                <div v-else-if="listenPosts.length === 0" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center py-24 text-center max-w-sm mx-auto text-gray-400">
-                  <Inbox class="h-12 w-12 mb-4 opacity-40 text-teal-400" />
-                  <p class="text-sm font-bold text-gray-700 dark:text-gray-300">{{ t('listen.noLogsFound') }}</p>
-                  <p class="text-xs mt-1">{{ t('listen.noLogsDesc') }}</p>
+                <div v-else-if="listenPosts.length === 0" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm flex flex-col items-center justify-center py-24 px-6 text-center max-w-md mx-auto text-gray-400">
+                  <template v-if="listenItemErrorMap[selectedListenNode.id]">
+                    <AlertCircle class="h-12 w-12 mb-4 text-rose-500" />
+                    <p class="text-sm font-bold text-rose-700 dark:text-rose-300">{{ listenItemErrorMap[selectedListenNode.id].title }}</p>
+                    <p class="text-xs text-gray-600 dark:text-gray-300 mt-1">{{ listenItemErrorMap[selectedListenNode.id].message }}</p>
+                    <button
+                      type="button"
+                      @click="fetchListenPosts(selectedListenNode, false)"
+                      :disabled="isFetchingListenPosts"
+                      class="mt-4 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts }" />
+                      <span>{{ t('listen.fetchErrors.retry') }}</span>
+                    </button>
+                  </template>
+                  <template v-else>
+                    <Inbox class="h-12 w-12 mb-4 opacity-40 text-teal-400" />
+                    <p class="text-sm font-bold text-gray-700 dark:text-gray-300">{{ t('listen.noLogsFound') }}</p>
+                    <p class="text-xs mt-1">{{ t('listen.noLogsDesc') }}</p>
+                  </template>
                 </div>
 
                 <!-- Active post list feeds cascade -->
@@ -27860,6 +28793,15 @@ onUnmounted(() => {
                               <RefreshCw class="h-2.5 w-2.5 animate-spin" />
                               <span>{{ t('listen.syncing') || 'Refreshing...' }}</span>
                             </span>
+                            <span
+                              v-if="listenItemErrorMap[selectedListenNode.id]"
+                              class="px-2 py-0.5 rounded-md text-[10px] font-bold border inline-flex items-center gap-1 select-none"
+                              :class="getListenErrorBadgeClass(listenItemErrorMap[selectedListenNode.id].category)"
+                              :title="listenItemErrorMap[selectedListenNode.id].message"
+                            >
+                              <AlertCircle class="h-3 w-3 shrink-0" />
+                              <span>{{ listenItemErrorMap[selectedListenNode.id].title }}</span>
+                            </span>
                           </div>
                           <!-- Category / Folder Breadcrumbs Path in Rearrange Mode -->
                           <div class="flex items-center gap-1.5 mt-1.5 flex-wrap text-xs">
@@ -28061,6 +29003,58 @@ onUnmounted(() => {
                         </span>
                       </div>
 
+                      <!-- Granular Fetch Error Banner in Rearrange Posts Flow -->
+                      <div
+                        v-if="selectedListenNode && listenItemErrorMap[selectedListenNode.id]"
+                        class="mb-3 p-3 rounded-2xl border border-rose-200 dark:border-rose-800/70 bg-rose-50/90 dark:bg-rose-950/35 flex flex-col sm:flex-row sm:items-start justify-between gap-2.5 shrink-0"
+                      >
+                        <div class="flex items-start gap-2.5 min-w-0 flex-1">
+                          <AlertCircle class="h-4 w-4 text-rose-600 dark:text-rose-400 shrink-0 mt-0.5" />
+                          <div class="min-w-0 flex-1 space-y-1">
+                            <div class="flex items-center gap-2 flex-wrap">
+                              <span
+                                class="px-1.5 py-0.5 rounded text-[10px] font-bold border"
+                                :class="getListenErrorBadgeClass(listenItemErrorMap[selectedListenNode.id].category)"
+                              >
+                                {{ listenItemErrorMap[selectedListenNode.id].title }}
+                              </span>
+                              <span class="text-[10px] font-mono text-rose-600/80 dark:text-rose-400/80 tabular-nums">
+                                {{ new Date(listenItemErrorMap[selectedListenNode.id].timestamp).toLocaleTimeString() }}
+                              </span>
+                            </div>
+                            <p class="text-xs text-rose-900 dark:text-rose-100 leading-snug">
+                              {{ listenItemErrorMap[selectedListenNode.id].message }}
+                            </p>
+                            <p
+                              v-if="listenItemErrorMap[selectedListenNode.id].endpoint || listenItemErrorMap[selectedListenNode.id].detail"
+                              class="text-[10px] font-mono text-rose-800/80 dark:text-rose-300/80 break-all"
+                            >
+                              <span v-if="listenItemErrorMap[selectedListenNode.id].endpoint">{{ listenItemErrorMap[selectedListenNode.id].endpoint }} · </span>
+                              <span>{{ listenItemErrorMap[selectedListenNode.id].detail }}</span>
+                            </p>
+                          </div>
+                        </div>
+                        <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                          <button
+                            type="button"
+                            @click="fetchListenPosts(selectedListenNode, false)"
+                            :disabled="isFetchingListenPosts"
+                            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 transition-colors cursor-pointer disabled:opacity-50"
+                          >
+                            <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': isFetchingListenPosts }" />
+                            <span>{{ t('listen.fetchErrors.retry') }}</span>
+                          </button>
+                          <button
+                            type="button"
+                            @click="clearListenItemError(selectedListenNode.id)"
+                            class="p-1 rounded-lg text-rose-500 hover:text-rose-700 dark:hover:text-rose-200 cursor-pointer"
+                            :title="t('listen.fetchErrors.dismiss')"
+                          >
+                            <X class="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+
                       <!-- Enhanced larger preview feed list -->
                       <div
                         ref="rearrangePostsContainer"
@@ -28068,7 +29062,13 @@ onUnmounted(() => {
                         class="flex-1 min-h-0 overflow-y-auto space-y-3.5 pr-1.5 scrollbar-thin"
                       >
                       <div v-if="listenPosts.length === 0 && !isFetchingListenPosts" class="py-12 text-center text-xs text-gray-400 dark:text-gray-500">
-                        {{ t('listen.noLogsFound') }}
+                        <template v-if="selectedListenNode && listenItemErrorMap[selectedListenNode.id]">
+                          <p class="font-bold text-rose-600 dark:text-rose-400">{{ listenItemErrorMap[selectedListenNode.id].title }}</p>
+                          <p class="mt-1 text-gray-500 dark:text-gray-400">{{ listenItemErrorMap[selectedListenNode.id].message }}</p>
+                        </template>
+                        <template v-else>
+                          {{ t('listen.noLogsFound') }}
+                        </template>
                       </div>
 
                       <div
