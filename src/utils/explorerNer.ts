@@ -7,6 +7,8 @@
  * canonical entity merging, and safe HTML quote/entity highlighting.
  */
 
+import { probeApiBackend } from "./apiCapabilities";
+
 export type NerClassId =
   | "person"
   | "organization"
@@ -1633,8 +1635,11 @@ Rules:
   const LOCAL_CHUNK_SIZE = 80;
   const storedGeminiKey =
     typeof localStorage !== "undefined" ? localStorage.getItem("gemini_api_key") || "" : "";
-  let geminiUnavailable = false;
-  let serverNerEndpointMissing = false;
+  const backendCap = await probeApiBackend();
+  let serverNerEndpointMissing = !backendCap.hasApiBackend;
+  let geminiUnavailable =
+    (!backendCap.hasApiBackend && !storedGeminiKey) ||
+    (backendCap.hasApiBackend && !backendCap.serverHasGeminiKey && !storedGeminiKey);
   let usedGemini = false;
   let usedLocal = false;
 

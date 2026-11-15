@@ -9,15 +9,15 @@
   >
     <div
       v-if="open"
-      class="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-sm p-3 sm:p-5"
+      class="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 backdrop-blur-sm p-1.5 sm:p-2.5"
       @click="$emit('close')"
     >
       <div
-        class="bg-white dark:bg-gray-800 rounded-3xl shadow-2xl w-full max-w-7xl h-[90vh] flex flex-col overflow-hidden border border-gray-200/70 dark:border-gray-700/70"
+        class="bg-white dark:bg-gray-800 rounded-2xl sm:rounded-3xl shadow-2xl w-full max-w-[98vw] h-[96vh] flex flex-col overflow-hidden border border-gray-200/70 dark:border-gray-700/70"
         @click.stop
       >
         <!-- Modal Top Header -->
-        <div class="px-6 py-4 border-b border-gray-200/70 dark:border-gray-700/70 flex flex-wrap items-center justify-between gap-4 shrink-0">
+        <div class="px-5 py-3 border-b border-gray-200/70 dark:border-gray-700/70 flex flex-wrap items-center justify-between gap-3 shrink-0">
           <div class="min-w-0">
             <div class="flex items-center gap-2.5">
               <h2 class="text-base sm:text-lg font-bold text-gray-900 dark:text-white truncate">
@@ -78,7 +78,7 @@
         </div>
 
         <!-- Shared Mode Switcher + Filter Toolbar -->
-        <div class="px-6 py-3 bg-gray-50/70 dark:bg-gray-900/40 border-b border-gray-200/70 dark:border-gray-700/70 flex flex-wrap items-center justify-between gap-3 shrink-0">
+        <div class="px-5 py-2.5 bg-gray-50/70 dark:bg-gray-900/40 border-b border-gray-200/70 dark:border-gray-700/70 flex flex-wrap items-center justify-between gap-2.5 shrink-0">
           <!-- Mode Tabs -->
           <div class="flex items-center gap-1 p-1 bg-gray-200/70 dark:bg-gray-800 rounded-xl shrink-0">
             <button
@@ -258,24 +258,16 @@
             </div>
           </template>
 
-          <!-- MODE 2: INTERACTIVE ENTITY-RELATION GRAPH -->
+          <!-- MODE 2: INTERACTIVE ENTITY-RELATION GRAPH (Cytoscape + CoSE Worker) -->
           <template v-else-if="modalMode === 'graph'">
             <div ref="graphWrapperRef" class="flex-1 min-w-0 relative bg-gray-50/60 dark:bg-gray-950/60 overflow-hidden">
-              <canvas
-                ref="graphCanvasRef"
-                @mousedown="onGraphMouseDown"
-                @mousemove="onGraphMouseMove"
-                @mouseup="onGraphMouseUp"
-                @mouseleave="onGraphMouseUp"
-                @wheel.prevent="onGraphWheel"
-                class="block w-full h-full cursor-grab active:cursor-grabbing"
-              ></canvas>
+              <div ref="graphContainerRef" class="w-full h-full"></div>
 
               <!-- Graph Zoom Controls -->
-              <div class="absolute top-3 right-3 flex items-center gap-1 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xs border border-gray-200/70 dark:border-gray-700 rounded-xl p-1 shadow-xs">
+              <div class="absolute top-3 right-3 z-10 flex items-center gap-1 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xs border border-gray-200/70 dark:border-gray-700 rounded-xl p-1 shadow-xs">
                 <button
                   type="button"
-                  @click="zoomGraph(1.2)"
+                  @click="zoomGraph(1.25)"
                   class="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 cursor-pointer"
                   :title="t('explorer.zoomIn')"
                 >
@@ -283,7 +275,7 @@
                 </button>
                 <button
                   type="button"
-                  @click="zoomGraph(0.83)"
+                  @click="zoomGraph(0.8)"
                   class="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-600 dark:text-gray-300 cursor-pointer"
                   :title="t('explorer.zoomOut')"
                 >
@@ -300,15 +292,16 @@
               </div>
 
               <!-- Legend Strip -->
-              <div class="absolute bottom-3 left-3 right-3 flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xs border border-gray-200/70 dark:border-gray-700 rounded-xl text-[10px] text-gray-500 dark:text-gray-400 pointer-events-none">
+              <div class="absolute bottom-3 left-3 right-3 z-10 flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xs border border-gray-200/70 dark:border-gray-700 rounded-xl text-[10px] text-gray-500 dark:text-gray-400 pointer-events-none">
                 <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
                   <span v-for="cls in NER_CLASSES" :key="cls.id" class="inline-flex items-center gap-1">
                     <span class="w-2 h-2 rounded-full shrink-0" :style="{ backgroundColor: cls.accentHex }"></span>
                     <span>{{ t(`explorer.ner.classes.${cls.id}`) }}</span>
                   </span>
                 </div>
-                <span class="font-mono tabular-nums">
-                  {{ graphNodesCount }} {{ t('explorer.ner.entitiesShort') }} · {{ graphEdgesCount }} {{ t('explorer.ner.relationsShort') }}
+                <span class="inline-flex items-center gap-1.5 font-mono tabular-nums">
+                  <Loader2 v-if="isGraphLayouting" class="w-3 h-3 animate-spin text-teal-600 dark:text-teal-400" />
+                  <span>{{ graphNodesCount }} {{ t('explorer.ner.entitiesShort') }} · {{ graphEdgesCount }} {{ t('explorer.ner.relationsShort') }}</span>
                 </span>
               </div>
             </div>
@@ -557,6 +550,7 @@ import { ref, computed, watch, nextTick, onBeforeUnmount } from "vue";
 import { useI18n } from "../../i18n";
 import {
   Clock,
+  Loader2,
   Network,
   RotateCcw,
   ScanSearch,
@@ -567,6 +561,13 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-vue-next";
+import type cytoscape from "cytoscape";
+import type {
+  NerGraphLayoutRequest,
+  NerGraphLayoutResponse,
+  WorkerGraphEdgeInput,
+  WorkerGraphNodeInput,
+} from "../../utils/nerGraphLayoutSolver";
 import {
   NER_CLASSES,
   NER_CLASS_MAP,
@@ -838,342 +839,497 @@ const jumpToTimelineClaim = (item: TimelineClaimItem) => {
 };
 
 // ---------------------------------------------------------------------------
-// Interactive Canvas Force Graph (Mode 2)
+// Cytoscape Interactive Force-Directed Graph (Mode 2)
+// Runs Cytoscape's CoSE physics + Spatial-Hash collision detection in Web Worker
+// and tunes Cytoscape viewport culling/haystack batching for 10k+ nodes & edges.
 // ---------------------------------------------------------------------------
 
-interface GraphNode {
-  id: string;
-  label: string;
-  nerClass: NerClassId;
-  mentions: number;
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  radius: number;
-}
-
-interface GraphEdge {
-  relId: string;
-  source: GraphNode;
-  target: GraphNode;
-  relationClass: RelationClassId;
-  weight: number;
-}
-
 const graphWrapperRef = ref<HTMLDivElement | null>(null);
-const graphCanvasRef = ref<HTMLCanvasElement | null>(null);
+const graphContainerRef = ref<HTMLDivElement | null>(null);
 const graphNodesCount = ref(0);
 const graphEdgesCount = ref(0);
+const isGraphLayouting = ref(false);
 
-let nodes: GraphNode[] = [];
-let edges: GraphEdge[] = [];
-let scale = 1;
-let offsetX = 0;
-let offsetY = 0;
-let isDraggingBg = false;
-let draggedNode: GraphNode | null = null;
-let lastPointerX = 0;
-let lastPointerY = 0;
-let dragMoved = false;
-let animFrameId: number | null = null;
+let cyInstance: cytoscape.Core | null = null;
+let layoutWorker: Worker | null = null;
+let resizeObserver: ResizeObserver | null = null;
+let activeLayoutReqId = 0;
+let activeWorkerNodeIds: string[] = [];
+let hoveredNodeId: string | null = null;
+let hoveredEdgeId: string | null = null;
+let totalGraphElementsCount = 0;
+let isUnmounted = false;
+let wheelTargetEl: HTMLElement | null = null;
+let wheelRafId: number | null = null;
+let pendingWheelDelta = 0;
+let pendingWheelX = 0;
+let pendingWheelY = 0;
 
-const buildGraphData = () => {
-  const relList = filteredRelations.value.slice(0, 90);
-  const nodeMap = new Map<string, GraphNode>();
+const truncateGraphLabel = (label: string, maxLen = 22): string => {
+  if (label.length <= maxLen) return label;
+  return `${label.slice(0, maxLen - 1)}…`;
+};
 
-  const addNodeById = (entId: string) => {
-    if (nodeMap.has(entId)) return nodeMap.get(entId)!;
-    const ent = props.index.entityById.get(entId);
-    if (!ent) return null;
-    const idx = nodeMap.size;
-    const angle = (idx * 137.5 * Math.PI) / 180;
-    const dist = 45 + Math.sqrt(idx + 1) * 32;
-    const gn: GraphNode = {
-      id: ent.id,
-      label: ent.canonicalName,
-      nerClass: ent.nerClass,
-      mentions: ent.mentionCount,
-      x: Math.cos(angle) * dist,
-      y: Math.sin(angle) * dist,
-      vx: 0,
-      vy: 0,
-      radius: Math.min(22, Math.max(8, 7 + Math.sqrt(ent.mentionCount) * 2.5)),
-    };
-    nodeMap.set(ent.id, gn);
-    return gn;
-  };
+const estimateLabelHalfWidth = (shortLabel: string): number => {
+  let units = 0;
+  for (let i = 0; i < shortLabel.length; i++) {
+    units += shortLabel.charCodeAt(i) > 255 ? 10 : 5.8;
+  }
+  return Math.max(18, Math.min(82, units * 0.5 + 6));
+};
 
-  const builtEdges: GraphEdge[] = [];
-  for (const rel of relList) {
-    const s = addNodeById(rel.subjectId);
-    const o = addNodeById(rel.objectId);
-    if (s && o) {
-      builtEdges.push({
-        relId: rel.id,
-        source: s,
-        target: o,
-        relationClass: rel.relationClass,
-        weight: rel.occurrences.length,
+const onGraphContainerWheel = (ev: WheelEvent) => {
+  if (!cyInstance || !wheelTargetEl) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+
+  let dy = ev.deltaY;
+  if (ev.deltaMode === 1) dy *= 28;
+  else if (ev.deltaMode === 2) dy *= 120;
+  if (dy === 0) return;
+
+  dy = Math.max(-240, Math.min(240, dy));
+  pendingWheelDelta += dy;
+
+  const rect = wheelTargetEl.getBoundingClientRect();
+  pendingWheelX = ev.clientX - rect.left;
+  pendingWheelY = ev.clientY - rect.top;
+
+  if (wheelRafId === null) {
+    wheelRafId = requestAnimationFrame(() => {
+      wheelRafId = null;
+      if (!cyInstance || pendingWheelDelta === 0) return;
+      const delta = pendingWheelDelta;
+      pendingWheelDelta = 0;
+      const factor = Math.exp(-delta * 0.0022);
+      const nextZoom = Math.min(4, Math.max(0.02, cyInstance.zoom() * factor));
+      cyInstance.zoom({
+        level: nextZoom,
+        renderedPosition: {
+          x: pendingWheelX,
+          y: pendingWheelY,
+        },
       });
-    }
-  }
-
-  // Include top isolated filtered entities if graph has room
-  for (const ent of filteredDirectoryEntities.value.slice(0, 35)) {
-    if (nodeMap.size >= 60) break;
-    addNodeById(ent.id);
-  }
-
-  nodes = Array.from(nodeMap.values());
-  edges = builtEdges;
-  graphNodesCount.value = nodes.length;
-  graphEdgesCount.value = edges.length;
-
-  // Run quick settle ticks
-  for (let iter = 0; iter < 85; iter++) {
-    stepForceSimulation(0.85);
-  }
-  drawGraph();
-};
-
-const stepForceSimulation = (damping: number) => {
-  const n = nodes.length;
-  for (let i = 0; i < n; i++) {
-    const a = nodes[i];
-    // Gentle center pull
-    a.vx += -a.x * 0.004;
-    a.vy += -a.y * 0.004;
-
-    for (let j = i + 1; j < n; j++) {
-      const b = nodes[j];
-      let dx = b.x - a.x;
-      let dy = b.y - a.y;
-      let distSq = dx * dx + dy * dy;
-      if (distSq < 1) distSq = 1;
-      const force = 1100 / distSq;
-      const dist = Math.sqrt(distSq);
-      const fx = (dx / dist) * force;
-      const fy = (dy / dist) * force;
-      a.vx -= fx;
-      a.vy -= fy;
-      b.vx += fx;
-      b.vy += fy;
-    }
-  }
-
-  for (const edge of edges) {
-    const dx = edge.target.x - edge.source.x;
-    const dy = edge.target.y - edge.source.y;
-    const dist = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-    const targetDist = 115;
-    const pull = (dist - targetDist) * 0.035;
-    const fx = (dx / dist) * pull;
-    const fy = (dy / dist) * pull;
-    edge.source.vx += fx;
-    edge.source.vy += fy;
-    edge.target.vx -= fx;
-    edge.target.vy -= fy;
-  }
-
-  for (const node of nodes) {
-    if (node === draggedNode) continue;
-    node.vx *= damping;
-    node.vy *= damping;
-    node.x += node.vx;
-    node.y += node.vy;
+    });
   }
 };
 
-const drawGraph = () => {
-  const canvas = graphCanvasRef.value;
-  const wrapper = graphWrapperRef.value;
-  if (!canvas || !wrapper) return;
-
-  const rect = wrapper.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) return;
-
-  const dpr = window.devicePixelRatio || 1;
-  if (canvas.width !== Math.round(rect.width * dpr) || canvas.height !== Math.round(rect.height * dpr)) {
-    canvas.width = Math.round(rect.width * dpr);
-    canvas.height = Math.round(rect.height * dpr);
+const detachWheelZoom = () => {
+  if (wheelRafId !== null) {
+    cancelAnimationFrame(wheelRafId);
+    wheelRafId = null;
   }
-
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-
-  const isDark = document.documentElement.classList.contains("dark");
-  ctx.save();
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, rect.width, rect.height);
-
-  ctx.translate(rect.width / 2 + offsetX, rect.height / 2 + offsetY);
-  ctx.scale(scale, scale);
-
-  // Draw Edges
-  for (const edge of edges) {
-    const isSelectedEdge = selectedInspectorRelId.value === edge.relId;
-    const meta = RELATION_CLASS_MAP.get(edge.relationClass);
-    ctx.beginPath();
-    ctx.moveTo(edge.source.x, edge.source.y);
-    ctx.lineTo(edge.target.x, edge.target.y);
-    ctx.strokeStyle = isSelectedEdge
-      ? "#0d9488"
-      : meta?.accentHex || (isDark ? "#475569" : "#94a3b8");
-    ctx.globalAlpha = isSelectedEdge ? 0.95 : 0.45;
-    ctx.lineWidth = isSelectedEdge ? 2.6 : Math.min(2.4, 1 + edge.weight * 0.25);
-    ctx.stroke();
-
-    // Relation mid-label when zoomed or selected
-    if (scale >= 1.05 || isSelectedEdge) {
-      const mx = (edge.source.x + edge.target.x) / 2;
-      const my = (edge.source.y + edge.target.y) / 2;
-      ctx.globalAlpha = 0.85;
-      ctx.font = "500 9px sans-serif";
-      ctx.fillStyle = isDark ? "#cbd5e1" : "#334155";
-      ctx.textAlign = "center";
-      ctx.fillText(t(`explorer.ner.relations.${edge.relationClass}`), mx, my - 3);
-    }
-  }
-
-  // Draw Nodes
-  for (const node of nodes) {
-    const isSelected = selectedInspectorEntityId.value === node.id;
-    const meta = NER_CLASS_MAP.get(node.nerClass);
-    const fill = meta?.accentHex || "#0f766e";
-
-    ctx.globalAlpha = 1;
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
-    ctx.fillStyle = fill;
-    ctx.fill();
-
-    ctx.lineWidth = isSelected ? 3 : 1.5;
-    ctx.strokeStyle = isSelected ? (isDark ? "#ffffff" : "#0f172a") : (isDark ? "#1e293b" : "#ffffff");
-    ctx.stroke();
-
-    ctx.font = isSelected ? "700 11px sans-serif" : "600 10px sans-serif";
-    ctx.fillStyle = isDark ? "#f1f5f9" : "#0f172a";
-    ctx.textAlign = "center";
-    ctx.fillText(node.label, node.x, node.y + node.radius + 12);
-  }
-
-  ctx.restore();
-};
-
-const screenToWorld = (clientX: number, clientY: number) => {
-  const canvas = graphCanvasRef.value;
-  if (!canvas) return { x: 0, y: 0 };
-  const rect = canvas.getBoundingClientRect();
-  const sx = clientX - rect.left - rect.width / 2 - offsetX;
-  const sy = clientY - rect.top - rect.height / 2 - offsetY;
-  return { x: sx / scale, y: sy / scale };
-};
-
-const distToSegmentSq = (
-  px: number,
-  py: number,
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number
-) => {
-  const l2 = (x2 - x1) ** 2 + (y2 - y1) ** 2;
-  if (l2 === 0) return (px - x1) ** 2 + (py - y1) ** 2;
-  let tVal = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
-  tVal = Math.max(0, Math.min(1, tVal));
-  const projX = x1 + tVal * (x2 - x1);
-  const projY = y1 + tVal * (y2 - y1);
-  return (px - projX) ** 2 + (py - projY) ** 2;
-};
-
-const onGraphMouseDown = (ev: MouseEvent) => {
-  const world = screenToWorld(ev.clientX, ev.clientY);
-  lastPointerX = ev.clientX;
-  lastPointerY = ev.clientY;
-  dragMoved = false;
-
-  const hitNode = nodes.find((n) => {
-    const dx = world.x - n.x;
-    const dy = world.y - n.y;
-    return dx * dx + dy * dy <= (n.radius + 5) ** 2;
-  });
-
-  if (hitNode) {
-    draggedNode = hitNode;
-    isDraggingBg = false;
-  } else {
-    draggedNode = null;
-    isDraggingBg = true;
+  pendingWheelDelta = 0;
+  if (wheelTargetEl) {
+    wheelTargetEl.removeEventListener("wheel", onGraphContainerWheel, true);
+    wheelTargetEl = null;
   }
 };
 
-const onGraphMouseMove = (ev: MouseEvent) => {
-  if (!draggedNode && !isDraggingBg) return;
-  const dx = ev.clientX - lastPointerX;
-  const dy = ev.clientY - lastPointerY;
-  if (Math.abs(dx) > 2 || Math.abs(dy) > 2) dragMoved = true;
-
-  lastPointerX = ev.clientX;
-  lastPointerY = ev.clientY;
-
-  if (draggedNode) {
-    draggedNode.x += dx / scale;
-    draggedNode.y += dy / scale;
-    drawGraph();
-  } else if (isDraggingBg) {
-    offsetX += dx;
-    offsetY += dy;
-    drawGraph();
+const destroyCytoscape = () => {
+  detachWheelZoom();
+  if (cyInstance) {
+    cyInstance.destroy();
+    cyInstance = null;
   }
+  hoveredNodeId = null;
+  hoveredEdgeId = null;
 };
 
-const onGraphMouseUp = (ev: MouseEvent) => {
-  if (!dragMoved) {
-    const world = screenToWorld(ev.clientX, ev.clientY);
-    if (draggedNode) {
-      selectedInspectorEntityId.value = draggedNode.id;
-      selectedInspectorRelId.value = null;
-      drawGraph();
-    } else {
-      // Check edge hit
-      const hitEdge = edges.find(
-        (e) =>
-          distToSegmentSq(
-            world.x,
-            world.y,
-            e.source.x,
-            e.source.y,
-            e.target.x,
-            e.target.y
-          ) <= (8 / scale) ** 2
-      );
-      if (hitEdge) {
-        selectedInspectorRelId.value = hitEdge.relId;
-        selectedInspectorEntityId.value = null;
-        drawGraph();
+const getCytoscapeStylesheet = (
+  isDark: boolean,
+  isLargeEdgeGraph: boolean
+): cytoscape.StylesheetStyle[] => {
+  const edgeOpacity = isLargeEdgeGraph ? 0.34 : 0.56;
+  const labelBg = isDark ? "#0f172a" : "#ffffff";
+  const labelFg = isDark ? "#f1f5f9" : "#0f172a";
+  const nodeBorder = isDark ? "#1e293b" : "#ffffff";
+  const activeBorder = isDark ? "#ffffff" : "#0f172a";
+
+  return [
+    {
+      selector: "node",
+      style: {
+        width: "data(size)",
+        height: "data(size)",
+        "background-color": "data(color)",
+        "border-width": 1.5,
+        "border-color": nodeBorder,
+        label: "data(shortLabel)",
+        "font-size": 10,
+        "font-weight": 600,
+        color: labelFg,
+        "text-valign": "bottom",
+        "text-halign": "center",
+        "text-margin-y": 4,
+        "text-background-color": labelBg,
+        "text-background-opacity": 0.82,
+        "text-background-padding": "2px",
+        "text-background-shape": "rectangle",
+        "min-zoomed-font-size": 9,
+      },
+    },
+    {
+      selector: "edge",
+      style: isLargeEdgeGraph
+        ? {
+            "curve-style": "haystack",
+            "haystack-radius": 0.25,
+            width: "data(width)",
+            "line-color": "data(color)",
+            opacity: edgeOpacity,
+          }
+        : {
+            "curve-style": "bezier",
+            "control-point-step-size": 26,
+            width: "data(width)",
+            "line-color": "data(color)",
+            "target-arrow-color": "data(color)",
+            "target-arrow-shape": "triangle",
+            "arrow-scale": 0.78,
+            opacity: edgeOpacity,
+          },
+    },
+    {
+      selector: ".ner-dim",
+      style: {
+        opacity: 0.14,
+      },
+    },
+    {
+      selector: "edge.ner-focus",
+      style: {
+        opacity: 0.96,
+        width: 2.5,
+        "line-color": "#0d9488",
+        "target-arrow-color": "#0d9488",
+        label: "data(relationLabel)",
+        "font-size": 9,
+        "font-weight": 600,
+        color: isDark ? "#e2e8f0" : "#334155",
+        "text-background-color": labelBg,
+        "text-background-opacity": 0.88,
+        "text-background-padding": "2px",
+        "text-background-shape": "roundrectangle",
+        "text-rotation": "autorotate",
+        "min-zoomed-font-size": 7,
+        "z-index": 20,
+      },
+    },
+    {
+      selector: "node.ner-focus",
+      style: {
+        opacity: 1,
+        "border-width": 3,
+        "border-color": activeBorder,
+        label: "data(label)",
+        "font-size": 11,
+        "font-weight": 700,
+        "min-zoomed-font-size": 0,
+        "z-index": 30,
+      },
+    },
+  ];
+};
+
+const syncGraphHighlights = (allowDimming = true) => {
+  if (!cyInstance) return;
+  const focusNodeId = hoveredNodeId || selectedInspectorEntityId.value;
+  const focusRelId = hoveredEdgeId || selectedInspectorRelId.value;
+
+  cyInstance.batch(() => {
+    const all = cyInstance!.elements();
+    all.removeClass("ner-dim ner-focus");
+
+    if (!focusNodeId && !focusRelId) return;
+
+    const focusedEles = cyInstance!.collection();
+    if (focusNodeId) {
+      const node = cyInstance!.getElementById(focusNodeId);
+      if (node.nonempty()) {
+        focusedEles.merge(node);
+        focusedEles.merge(node.connectedEdges());
+        if (totalGraphElementsCount <= 3000 || selectedInspectorEntityId.value === focusNodeId) {
+          focusedEles.merge(node.neighborhood("node"));
+        }
+      }
+    } else if (focusRelId) {
+      const edge = cyInstance!.getElementById(`e:${focusRelId}`);
+      if (edge.nonempty()) {
+        focusedEles.merge(edge);
+        focusedEles.merge(edge.connectedNodes());
       }
     }
-  }
-  draggedNode = null;
-  isDraggingBg = false;
+
+    if (focusedEles.nonempty()) {
+      if (allowDimming || totalGraphElementsCount <= 2500) {
+        all.not(focusedEles).addClass("ner-dim");
+      }
+      focusedEles.addClass("ner-focus");
+    }
+  });
 };
 
-const onGraphWheel = (ev: WheelEvent) => {
-  const factor = ev.deltaY < 0 ? 1.12 : 0.89;
-  zoomGraph(factor);
+const applySettledPositions = (
+  reqId: number,
+  positions: Float64Array,
+  nodeIds: string[]
+) => {
+  if (
+    isUnmounted ||
+    reqId !== activeLayoutReqId ||
+    !cyInstance ||
+    !props.open ||
+    modalMode.value !== "graph"
+  ) {
+    return;
+  }
+
+  cyInstance.batch(() => {
+    const count = Math.min(nodeIds.length, Math.floor(positions.length / 2));
+    for (let i = 0; i < count; i++) {
+      const node = cyInstance!.getElementById(nodeIds[i]);
+      if (node.nonempty()) {
+        node.position({
+          x: positions[i * 2],
+          y: positions[i * 2 + 1],
+        });
+      }
+    }
+  });
+
+  cyInstance.fit(undefined, 40);
+  isGraphLayouting.value = false;
+};
+
+const ensureLayoutWorker = (): Worker | null => {
+  if (layoutWorker) return layoutWorker;
+  if (typeof Worker === "undefined") return null;
+  try {
+    layoutWorker = new Worker(
+      new URL("../../workers/nerGraphLayout.worker.ts", import.meta.url),
+      { type: "module" }
+    );
+    layoutWorker.onmessage = (ev: MessageEvent<NerGraphLayoutResponse>) => {
+      const { id, positions } = ev.data;
+      if (id !== activeLayoutReqId) return;
+      applySettledPositions(id, positions, activeWorkerNodeIds);
+    };
+    layoutWorker.onerror = () => {
+      isGraphLayouting.value = false;
+    };
+    return layoutWorker;
+  } catch {
+    return null;
+  }
+};
+
+const buildGraphData = async () => {
+  const container = graphContainerRef.value;
+  if (!container || !props.open || modalMode.value !== "graph") return;
+
+  const reqId = ++activeLayoutReqId;
+  const { default: cytoscapeLib } = await import("cytoscape");
+  if (isUnmounted || reqId !== activeLayoutReqId || !graphContainerRef.value) return;
+
+  const workerNodes: WorkerGraphNodeInput[] = [];
+  const workerEdges: WorkerGraphEdgeInput[] = [];
+  const nodeIds: string[] = [];
+  const cyNodes: cytoscape.ElementDefinition[] = [];
+  const cyEdges: cytoscape.ElementDefinition[] = [];
+  const addedNodeIds = new Set<string>();
+  const addedEdgeIds = new Set<string>();
+
+  const ensureEntityNode = (entId: string): boolean => {
+    if (addedNodeIds.has(entId)) return true;
+    const ent = props.index.entityById.get(entId);
+    if (!ent) return false;
+    addedNodeIds.add(entId);
+
+    const shortLabel = truncateGraphLabel(ent.canonicalName);
+    const radius = Math.min(20, Math.max(8, 7 + Math.sqrt(ent.mentionCount) * 2.2));
+    const labelHalfW = estimateLabelHalfWidth(shortLabel);
+    const color = NER_CLASS_MAP.get(ent.nerClass)?.accentHex || "#0f766e";
+
+    nodeIds.push(ent.id);
+    workerNodes.push({
+      id: ent.id,
+      radius,
+      labelHalfW,
+      mentions: ent.mentionCount,
+    });
+
+    const idx = nodeIds.length - 1;
+    const cols = Math.max(8, Math.ceil(Math.sqrt(Math.max(16, filteredDirectoryEntities.value.length))));
+    const seedX = (idx % cols) * 140;
+    const seedY = Math.floor(idx / cols) * 90;
+
+    cyNodes.push({
+      group: "nodes",
+      data: {
+        id: ent.id,
+        label: ent.canonicalName,
+        shortLabel,
+        color,
+        size: radius * 2,
+      },
+      position: { x: seedX, y: seedY },
+    });
+    return true;
+  };
+
+  for (const rel of filteredRelations.value) {
+    if (!ensureEntityNode(rel.subjectId) || !ensureEntityNode(rel.objectId)) continue;
+    const edgeId = `e:${rel.id}`;
+    if (addedEdgeIds.has(edgeId)) continue;
+    addedEdgeIds.add(edgeId);
+
+    const meta = RELATION_CLASS_MAP.get(rel.relationClass);
+    const relationLabel = t(`explorer.ner.relations.${rel.relationClass}`);
+    workerEdges.push({
+      id: edgeId,
+      source: rel.subjectId,
+      target: rel.objectId,
+    });
+    cyEdges.push({
+      group: "edges",
+      data: {
+        id: edgeId,
+        relId: rel.id,
+        source: rel.subjectId,
+        target: rel.objectId,
+        relationLabel,
+        color: meta?.accentHex || "#64748b",
+        width: Math.min(2.6, 1 + rel.occurrences.length * 0.24),
+      },
+    });
+  }
+
+  for (const ent of filteredDirectoryEntities.value) {
+    ensureEntityNode(ent.id);
+  }
+
+  graphNodesCount.value = cyNodes.length;
+  graphEdgesCount.value = cyEdges.length;
+  totalGraphElementsCount = cyNodes.length + cyEdges.length;
+  activeWorkerNodeIds = nodeIds;
+
+  destroyCytoscape();
+
+  const isDark = document.documentElement.classList.contains("dark");
+  const isLargeGraph = totalGraphElementsCount > 350;
+  const isLargeEdgeGraph = cyEdges.length > 1500;
+
+  cyInstance = cytoscapeLib({
+    container: graphContainerRef.value,
+    elements: [...cyNodes, ...cyEdges],
+    layout: {
+      name: "preset",
+      fit: true,
+      padding: 36,
+    },
+    style: getCytoscapeStylesheet(isDark, isLargeEdgeGraph),
+    pixelRatio: 1,
+    hideEdgesOnViewport: isLargeGraph,
+    textureOnViewport: totalGraphElementsCount > 600,
+    motionBlur: false,
+    boxSelectionEnabled: false,
+    minZoom: 0.02,
+    maxZoom: 4,
+  });
+
+  if (graphContainerRef.value) {
+    wheelTargetEl = graphContainerRef.value;
+    wheelTargetEl.addEventListener("wheel", onGraphContainerWheel, {
+      passive: false,
+      capture: true,
+    });
+  }
+
+  cyInstance.on("tap", "node", (ev) => {
+    const id = ev.target.id();
+    selectedInspectorEntityId.value = id;
+    selectedInspectorRelId.value = null;
+    syncGraphHighlights(true);
+  });
+
+  cyInstance.on("tap", "edge", (ev) => {
+    const relId = ev.target.data("relId") as string | undefined;
+    if (relId) {
+      selectedInspectorRelId.value = relId;
+      selectedInspectorEntityId.value = null;
+      syncGraphHighlights(true);
+    }
+  });
+
+  cyInstance.on("tap", (ev) => {
+    if (ev.target === cyInstance) {
+      selectedInspectorEntityId.value = null;
+      selectedInspectorRelId.value = null;
+      syncGraphHighlights(true);
+    }
+  });
+
+  cyInstance.on("mouseover", "node", (ev) => {
+    hoveredNodeId = ev.target.id();
+    hoveredEdgeId = null;
+    syncGraphHighlights(totalGraphElementsCount <= 2500);
+  });
+
+  cyInstance.on("mouseover", "edge", (ev) => {
+    hoveredEdgeId = (ev.target.data("relId") as string | undefined) || null;
+    hoveredNodeId = null;
+    syncGraphHighlights(totalGraphElementsCount <= 2500);
+  });
+
+  cyInstance.on("mouseout", "node, edge", () => {
+    if (hoveredNodeId !== null || hoveredEdgeId !== null) {
+      hoveredNodeId = null;
+      hoveredEdgeId = null;
+      syncGraphHighlights(selectedInspectorEntityId.value !== null || selectedInspectorRelId.value !== null);
+    }
+  });
+
+  syncGraphHighlights(true);
+
+  if (workerNodes.length === 0) {
+    isGraphLayouting.value = false;
+    return;
+  }
+
+  isGraphLayouting.value = true;
+  const worker = ensureLayoutWorker();
+  if (worker) {
+    const payload: NerGraphLayoutRequest = {
+      id: reqId,
+      nodes: workerNodes,
+      edges: workerEdges,
+    };
+    worker.postMessage(payload);
+  } else {
+    const { computeNerGraphLayout } = await import("../../utils/nerGraphLayoutSolver");
+    if (isUnmounted || reqId !== activeLayoutReqId) return;
+    const positions = computeNerGraphLayout(workerNodes, workerEdges);
+    applySettledPositions(reqId, positions, nodeIds);
+  }
 };
 
 const zoomGraph = (factor: number) => {
-  scale = Math.min(3.5, Math.max(0.35, scale * factor));
-  drawGraph();
+  if (!cyInstance) return;
+  const targetZoom = Math.min(4, Math.max(0.02, cyInstance.zoom() * factor));
+  cyInstance.zoom({
+    level: targetZoom,
+    renderedPosition: {
+      x: cyInstance.width() * 0.5,
+      y: cyInstance.height() * 0.5,
+    },
+  });
 };
 
 const resetGraphLayout = () => {
-  scale = 1;
-  offsetX = 0;
-  offsetY = 0;
-  buildGraphData();
+  hoveredNodeId = null;
+  hoveredEdgeId = null;
+  void buildGraphData();
 };
 
 watch(
@@ -1181,13 +1337,43 @@ watch(
   () => {
     if (props.open && modalMode.value === "graph") {
       nextTick(() => {
-        buildGraphData();
+        if (graphWrapperRef.value && !resizeObserver && typeof ResizeObserver !== "undefined") {
+          resizeObserver = new ResizeObserver(() => {
+            cyInstance?.resize();
+          });
+          resizeObserver.observe(graphWrapperRef.value);
+        }
+        void buildGraphData();
       });
+    } else {
+      activeLayoutReqId += 1;
+      isGraphLayouting.value = false;
+      destroyCytoscape();
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+        resizeObserver = null;
+      }
     }
   }
 );
 
+watch([selectedInspectorEntityId, selectedInspectorRelId], () => {
+  if (props.open && modalMode.value === "graph") {
+    syncGraphHighlights(true);
+  }
+});
+
 onBeforeUnmount(() => {
-  if (animFrameId !== null) cancelAnimationFrame(animFrameId);
+  isUnmounted = true;
+  activeLayoutReqId += 1;
+  destroyCytoscape();
+  if (layoutWorker) {
+    layoutWorker.terminate();
+    layoutWorker = null;
+  }
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
 });
 </script>

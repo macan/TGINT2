@@ -3,6 +3,8 @@
  * Analyzes local IndexedDB posts across date ranges: Hot Topics, Hot Posts, Hot Channels.
  */
 
+import { probeApiBackend } from './apiCapabilities';
+
 export type HotsDateRange = 'today' | 'yesterday' | '3days' | 'week' | 'all';
 
 export interface StructuredLinkPreview {
@@ -1195,6 +1197,11 @@ export async function clusterWithGeminiAI(
     }));
 
   try {
+    const backendCap = await probeApiBackend();
+    if (!backendCap.hasApiBackend || (!backendCap.serverHasGeminiKey && !apiKey)) {
+      return [];
+    }
+
     const res = await fetch('/api/gemini/cluster', {
       method: 'POST',
       headers: {
@@ -1389,23 +1396,38 @@ export async function clusterWithGeminiAI(
     const titles = Array.from(new Set(toTranslate.map(t => t.title.trim())));
     const translations: Record<string, string> = {};
 
-    // Tier 1: Try server endpoint via POST
+    // Tier 1: Try server endpoint via POST only when live API backend is present
     let success = false;
-    try {
-      const res = await fetch('/api/translate-titles', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ titles })
-      });
+    const backendCap = await probeApiBackend();
+    if (backendCap.hasApiBackend) {
+      try {
+        const res = await fetch('/api/translate-titles', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ titles })
+        });
 
-      if (res.ok) {
-        const data = await res.json();
-        Object.assign(translations, data.translations || {});
-        success = true;
-      } else if (res.status === 405) {
-        // Cloudflare Workers or static asset handler rejected POST -> Tier 2: Try GET
+        if (res.ok) {
+          const data = await res.json();
+          Object.assign(translations, data.translations || {});
+          success = true;
+        } else if (res.status === 405) {
+          // Cloudflare Workers or static asset handler rejected POST -> Tier 2: Try GET
+          try {
+            const getRes = await fetch(`/api/translate-titles?titles=${encodeURIComponent(JSON.stringify(titles))}`, {
+              method: 'GET'
+            });
+            if (getRes.ok) {
+              const data = await getRes.json();
+              Object.assign(translations, data.translations || {});
+              success = true;
+            }
+          } catch {}
+        }
+      } catch {
+        // Network/abort failure on POST -> Tier 2: Try GET fallback
         try {
           const getRes = await fetch(`/api/translate-titles?titles=${encodeURIComponent(JSON.stringify(titles))}`, {
             method: 'GET'
@@ -1417,18 +1439,6 @@ export async function clusterWithGeminiAI(
           }
         } catch {}
       }
-    } catch {
-      // Network/abort failure on POST -> Tier 2: Try GET fallback
-      try {
-        const getRes = await fetch(`/api/translate-titles?titles=${encodeURIComponent(JSON.stringify(titles))}`, {
-          method: 'GET'
-        });
-        if (getRes.ok) {
-          const data = await getRes.json();
-          Object.assign(translations, data.translations || {});
-          success = true;
-        }
-      } catch {}
     }
 
     // Tier 3: Client-side direct fallback if server endpoint is blocked by Cloudflare (405) or not hosted

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { useI18n, t } from "../../i18n";
+import { probeApiBackend } from "../../utils/apiCapabilities";
 import {
   Flame,
   TrendingUp,
@@ -107,16 +108,11 @@ const apiKeyInput = ref(geminiApiKey.value);
 const apiKeyFeedback = ref("");
 
 const checkServerGeminiStatus = async () => {
-  try {
-    const res = await fetch('/api/gemini/status');
-    if (res.ok) {
-      const data = await res.json();
-      serverHasGemini.value = !!data.available;
-      if (data.available && !localStorage.getItem("listen_hots_ai_mode")) {
-        isAiModeEnabled.value = true;
-      }
-    }
-  } catch {}
+  const cap = await probeApiBackend();
+  serverHasGemini.value = cap.serverHasGeminiKey;
+  if (cap.serverHasGeminiKey && !localStorage.getItem("listen_hots_ai_mode")) {
+    isAiModeEnabled.value = true;
+  }
 };
 
 // Full List Modal / Drill-Down State
