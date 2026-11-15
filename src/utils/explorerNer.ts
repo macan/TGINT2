@@ -151,7 +151,19 @@ export const RELATION_CLASS_MAP = new Map<RelationClassId, RelationClassMeta>(
   RELATION_CLASSES.map((r) => [r.id, r])
 );
 
-export const EXPLORER_NER_EXTRACTOR_VERSION = 1;
+export const EXPLORER_NER_EXTRACTOR_VERSION = 2;
+export const EXPLORER_NER_LOCAL_VERSION = 2;
+
+export function isNerRecordCurrent(
+  rec: PostNerExtractionRecord | null | undefined,
+  channelId: string
+): boolean {
+  if (!rec || rec.channelId !== channelId) return false;
+  if (rec.engine === "gemini") {
+    return rec.extractorVersion >= 1;
+  }
+  return rec.extractorVersion >= EXPLORER_NER_LOCAL_VERSION;
+}
 
 export interface ExtractedPostEntity {
   name: string;
@@ -510,41 +522,60 @@ export async function clearChannelNerExtractions(channel: string): Promise<void>
 // ---------------------------------------------------------------------------
 
 const NATION_ENTRIES: Array<{ canonical: string; patterns: string[] }> = [
-  { canonical: "United States", patterns: ["United States", "U.S.A.", "USA", "U.S.", "America", "美國", "美国", "美方", "США", "Соединённые Штаты"] },
-  { canonical: "China", patterns: ["China", "PRC", "Mainland China", "中國", "中国", "中方", "Китай", "КНР"] },
-  { canonical: "United Kingdom", patterns: ["United Kingdom", "Britain", "Great Britain", "UK", "U.K.", "英國", "英国", "英方", "Великобритания"] },
-  { canonical: "Ukraine", patterns: ["Ukraine", "烏克蘭", "乌克兰", "烏方", "Украина"] },
+  { canonical: "United States", patterns: ["United States", "U.S.A.", "USA", "U.S.", "America", "美國", "美国", "美方", "美利堅", "США", "Соединённые Штаты", "Америка"] },
+  { canonical: "China", patterns: ["China", "PRC", "Mainland China", "中國", "中国", "中方", "中國大陸", "內地", "内地", "Китай", "КНР"] },
+  { canonical: "United Kingdom", patterns: ["United Kingdom", "Britain", "Great Britain", "UK", "U.K.", "英國", "英国", "英方", "大不列顛", "Великобритания"] },
+  { canonical: "Ukraine", patterns: ["Ukraine", "烏克蘭", "乌克兰", "烏方", "乌方", "Украина"] },
   { canonical: "Russia", patterns: ["Russia", "Russian Federation", "俄羅斯", "俄罗斯", "俄國", "俄方", "Россия", "РФ"] },
-  { canonical: "Taiwan", patterns: ["Taiwan", "ROC", "台灣", "臺灣", "台方", "Тайвань"] },
+  { canonical: "Taiwan", patterns: ["Taiwan", "ROC", "台灣", "臺灣", "台方", "中華民國", "中华民国", "Тайвань"] },
   { canonical: "Japan", patterns: ["Japan", "日本", "日方", "Япония"] },
-  { canonical: "South Korea", patterns: ["South Korea", "Republic of Korea", "ROK", "韓國", "韩国", "南韓", "Южная Корея"] },
-  { canonical: "North Korea", patterns: ["North Korea", "DPRK", "朝鮮", "北韓", "朝鲜", "КНДР"] },
-  { canonical: "European Union", patterns: ["European Union", "EU", "歐盟", "欧盟", "Евросоюз", "ЕС"] },
-  { canonical: "Germany", patterns: ["Germany", "德國", "德国", "德方", "Германия"] },
+  { canonical: "South Korea", patterns: ["South Korea", "Republic of Korea", "ROK", "韓國", "韩国", "南韓", "南韩", "韓方", "Южная Корея"] },
+  { canonical: "North Korea", patterns: ["North Korea", "DPRK", "朝鮮", "北韓", "北韩", "朝鲜", "КНДР"] },
+  { canonical: "European Union", patterns: ["European Union", "EU", "歐盟", "欧盟", "歐洲聯盟", "Евросоюз", "ЕС"] },
+  { canonical: "Germany", patterns: ["Germany", "德國", "德国", "德方", "Германия", "ФРГ"] },
   { canonical: "France", patterns: ["France", "法國", "法国", "法方", "Франция"] },
   { canonical: "Israel", patterns: ["Israel", "以色列", "以方", "Израиль"] },
-  { canonical: "Palestine", patterns: ["Palestine", "巴勒斯坦", "Палестина"] },
-  { canonical: "Iran", patterns: ["Iran", "伊朗", "Иран"] },
-  { canonical: "India", patterns: ["India", "印度", "Индия"] },
-  { canonical: "Canada", patterns: ["Canada", "加拿大", "Канада"] },
-  { canonical: "Australia", patterns: ["Australia", "澳洲", "澳大利亞", "澳大利亚", "Австралия"] },
-  { canonical: "Philippines", patterns: ["Philippines", "菲律賓", "菲律宾", "Филиппины"] },
-  { canonical: "Singapore", patterns: ["Singapore", "新加坡", "Сингапур"] },
-  { canonical: "Vietnam", patterns: ["Vietnam", "越南", "Вьетнам"] },
+  { canonical: "Palestine", patterns: ["Palestine", "巴勒斯坦", "巴方", "Палестина"] },
+  { canonical: "Iran", patterns: ["Iran", "伊朗", "伊方", "Иран"] },
+  { canonical: "India", patterns: ["India", "印度", "印方", "Индия"] },
+  { canonical: "Canada", patterns: ["Canada", "加拿大", "加方", "Канада"] },
+  { canonical: "Australia", patterns: ["Australia", "澳洲", "澳大利亞", "澳大利亚", "澳方", "Австралия"] },
+  { canonical: "Philippines", patterns: ["Philippines", "菲律賓", "菲律宾", "菲方", "Филиппины"] },
+  { canonical: "Singapore", patterns: ["Singapore", "新加坡", "星洲", "Сингапур"] },
+  { canonical: "Vietnam", patterns: ["Vietnam", "Viet Nam", "越南", "越方", "Вьетнам"] },
   { canonical: "Poland", patterns: ["Poland", "波蘭", "波兰", "Польша"] },
   { canonical: "Turkey", patterns: ["Turkey", "Türkiye", "土耳其", "Турция"] },
   { canonical: "Syria", patterns: ["Syria", "敘利亞", "叙利亚", "Сирия"] },
   { canonical: "Brazil", patterns: ["Brazil", "巴西", "Бразилия"] },
   { canonical: "Mexico", patterns: ["Mexico", "墨西哥", "Мексика"] },
+  { canonical: "Italy", patterns: ["Italy", "意大利", "義大利", "Италия"] },
+  { canonical: "Spain", patterns: ["Spain", "西班牙", "Испания"] },
+  { canonical: "Netherlands", patterns: ["Netherlands", "Holland", "荷蘭", "荷兰", "Нидерланды"] },
+  { canonical: "Switzerland", patterns: ["Switzerland", "瑞士", "Швейцария"] },
+  { canonical: "Saudi Arabia", patterns: ["Saudi Arabia", "沙地阿拉伯", "沙特阿拉伯", "沙烏地阿拉伯", "Саудовская Аравия"] },
+  { canonical: "United Arab Emirates", patterns: ["United Arab Emirates", "UAE", "阿聯酋", "阿联酋", "ОАЭ"] },
+  { canonical: "Egypt", patterns: ["Egypt", "埃及", "Египет"] },
+  { canonical: "Lebanon", patterns: ["Lebanon", "黎巴嫩", "Ливан"] },
+  { canonical: "Yemen", patterns: ["Yemen", "也門", "葉門", "Йемен"] },
+  { canonical: "Belarus", patterns: ["Belarus", "白俄羅斯", "白俄罗斯", "Беларусь"] },
+  { canonical: "Sweden", patterns: ["Sweden", "瑞典", "Швеция"] },
+  { canonical: "Finland", patterns: ["Finland", "芬蘭", "芬兰", "Финляндия"] },
+  { canonical: "Norway", patterns: ["Norway", "挪威", "Норвегия"] },
+  { canonical: "Indonesia", patterns: ["Indonesia", "印尼", "印度尼西亞", "Индонезия"] },
+  { canonical: "Malaysia", patterns: ["Malaysia", "馬來西亞", "马来西亚", "大馬", "Малайзия"] },
+  { canonical: "Thailand", patterns: ["Thailand", "泰國", "泰国", "Таиланд"] },
+  { canonical: "Myanmar", patterns: ["Myanmar", "Burma", "緬甸", "缅甸", "Мьянма"] },
 ];
 
 const LOCATION_ENTRIES: Array<{ canonical: string; patterns: string[] }> = [
-  { canonical: "Washington, D.C.", patterns: ["Washington, D.C.", "Washington DC", "Washington", "華盛頓", "华盛顿", "Вашингтон"] },
+  { canonical: "Washington, D.C.", patterns: ["Washington, D.C.", "Washington DC", "Washington", "華盛頓", "华盛顿", "華府", "Вашингтон"] },
   { canonical: "London", patterns: ["London", "倫敦", "伦敦", "Лондон"] },
   { canonical: "Beijing", patterns: ["Beijing", "北京", "Пекин"] },
   { canonical: "Shanghai", patterns: ["Shanghai", "上海", "Шанхай"] },
+  { canonical: "Guangzhou", patterns: ["Guangzhou", "Canton", "廣州", "广州"] },
   { canonical: "Shenzhen", patterns: ["Shenzhen", "深圳"] },
-  { canonical: "Hong Kong", patterns: ["Hong Kong", "香港", "Гонконг"] },
+  { canonical: "Hong Kong", patterns: ["Hong Kong", "HK", "香港", "本港", "Гонконг"] },
+  { canonical: "Macau", patterns: ["Macau", "Macao", "澳門", "澳门"] },
   { canonical: "Taipei", patterns: ["Taipei", "台北", "臺北", "Тайбэй"] },
   { canonical: "Kaohsiung", patterns: ["Kaohsiung", "高雄"] },
   { canonical: "Tokyo", patterns: ["Tokyo", "東京", "东京", "Токио"] },
@@ -553,19 +584,44 @@ const LOCATION_ENTRIES: Array<{ canonical: string; patterns: string[] }> = [
   { canonical: "Moscow", patterns: ["Moscow", "莫斯科", "Москва"] },
   { canonical: "Brussels", patterns: ["Brussels", "布魯塞爾", "布鲁塞尔", "Брюссель"] },
   { canonical: "New York", patterns: ["New York", "NYC", "紐約", "纽约", "Нью-Йорк"] },
+  { canonical: "Los Angeles", patterns: ["Los Angeles", "洛杉磯", "洛杉矶"] },
   { canonical: "San Francisco", patterns: ["San Francisco", "舊金山", "圣弗朗西斯科", "三藩市"] },
   { canonical: "Silicon Valley", patterns: ["Silicon Valley", "矽谷", "硅谷"] },
   { canonical: "Paris", patterns: ["Paris", "巴黎", "Париж"] },
   { canonical: "Berlin", patterns: ["Berlin", "柏林", "Берлин"] },
   { canonical: "Jerusalem", patterns: ["Jerusalem", "耶路撒冷", "Иерусалим"] },
-  { canonical: "Gaza", patterns: ["Gaza", "Gaza Strip", "加薩", "加沙", "Газа"] },
+  { canonical: "Tel Aviv", patterns: ["Tel Aviv", "特拉維夫", "特拉维夫", "Тель-Авив"] },
+  { canonical: "Gaza", patterns: ["Gaza", "Gaza Strip", "加薩", "加沙", "加沙地帶", "Газа"] },
+  { canonical: "Rafah", patterns: ["Rafah", "拉法"] },
+  { canonical: "Beirut", patterns: ["Beirut", "貝魯特", "Бейрут"] },
   { canonical: "Tehran", patterns: ["Tehran", "德黑蘭", "德黑兰", "Тегеран"] },
   { canonical: "Geneva", patterns: ["Geneva", "日內瓦", "日内瓦", "Женева"] },
   { canonical: "Munich", patterns: ["Munich", "慕尼黑", "Мюнхен"] },
+  { canonical: "Crimea", patterns: ["Crimea", "克里米亞", "克里米亚", "Крым"] },
+  { canonical: "Donbas", patterns: ["Donbas", "Donbass", "頓巴斯", "顿巴斯", "Донбасс"] },
+  { canonical: "Kursk", patterns: ["Kursk", "庫爾斯克", "Курск"] },
+  { canonical: "Taiwan Strait", patterns: ["Taiwan Strait", "台海", "台灣海峽", "臺灣海峽"] },
+  { canonical: "South China Sea", patterns: ["South China Sea", "南海", "南中國海"] },
+  { canonical: "Red Sea", patterns: ["Red Sea", "紅海", "红海"] },
+  { canonical: "Black Sea", patterns: ["Black Sea", "黑海", "Чёрное море"] },
+  { canonical: "Kowloon", patterns: ["Kowloon", "九龍", "九龙"] },
+  { canonical: "New Territories", patterns: ["New Territories", "新界"] },
   { canonical: "Central, HK", patterns: ["Central", "中環"] },
   { canonical: "Admiralty, HK", patterns: ["Admiralty", "金鐘"] },
+  { canonical: "Causeway Bay", patterns: ["Causeway Bay", "銅鑼灣"] },
   { canonical: "Wan Chai", patterns: ["Wan Chai", "灣仔"] },
   { canonical: "Mong Kok", patterns: ["Mong Kok", "旺角"] },
+  { canonical: "Tsim Sha Tsui", patterns: ["Tsim Sha Tsui", "TST", "尖沙咀"] },
+  { canonical: "Yau Ma Tei", patterns: ["Yau Ma Tei", "油麻地"] },
+  { canonical: "Sham Shui Po", patterns: ["Sham Shui Po", "深水埗"] },
+  { canonical: "Sha Tin", patterns: ["Sha Tin", "沙田"] },
+  { canonical: "Tsuen Wan", patterns: ["Tsuen Wan", "荃灣"] },
+  { canonical: "Tuen Mun", patterns: ["Tuen Mun", "屯門"] },
+  { canonical: "Yuen Long", patterns: ["Yuen Long", "元朗"] },
+  { canonical: "Kwun Tong", patterns: ["Kwun Tong", "觀塘"] },
+  { canonical: "Tseung Kwan O", patterns: ["Tseung Kwan O", "將軍澳"] },
+  { canonical: "Tung Chung", patterns: ["Tung Chung", "東涌"] },
+  { canonical: "West Kowloon", patterns: ["West Kowloon", "西九龍"] },
 ];
 
 const LAT_STOPWORDS = new Set([
@@ -580,28 +636,177 @@ const LAT_STOPWORDS = new Set([
   "President", "Prime", "Minister", "Deputy", "Secretary", "Chairman", "Chairwoman",
   "Director", "Commissioner", "Spokesperson", "Governor", "Senator", "Representative",
   "Chancellor", "Premier", "Mayor", "Judge", "Prosecutor", "General", "Admiral",
-  "Commander", "Ambassador", "Chief", "Executive", "Officer",
+  "Commander", "Ambassador", "Chief", "Executive", "Officer", "Defense", "Defence",
+  "Foreign", "Finance", "National", "Security", "Special", "Armed", "Forces",
+  "Northern", "Southern", "Eastern", "Western", "United", "Royal", "Federal",
 ]);
-
-function splitSentences(text: string): string[] {
-  return text
-    .split(/(?<=[.!?。！？\n])\s+|\n+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length >= 4);
-}
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function findPatternMatch(sentence: string, pattern: string): string | null {
-  const isAscii = /^[\x00-\x7F]+$/.test(pattern);
-  if (isAscii) {
-    const rx = new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(pattern)}(?![A-Za-z0-9])`, "i");
-    const m = sentence.match(rx);
-    return m ? m[0] : null;
+// Precompile fast single-pass lookup indices for Nations & Locations (eliminates nested RegExp construction)
+function buildDictionaryMatcher(entries: Array<{ canonical: string; patterns: string[] }>) {
+  const asciiLookup = new Map<string, string>();
+  const nonAsciiLookup = new Map<string, string>();
+  const asciiPatterns: string[] = [];
+  const nonAsciiPatterns: string[] = [];
+
+  for (const entry of entries) {
+    for (const pat of entry.patterns) {
+      if (/^[\x00-\x7F]+$/.test(pat)) {
+        asciiLookup.set(pat.toLowerCase(), entry.canonical);
+        asciiPatterns.push(escapeRegExp(pat));
+      } else {
+        nonAsciiLookup.set(pat.toLowerCase(), entry.canonical);
+        nonAsciiPatterns.push(escapeRegExp(pat));
+      }
+    }
   }
-  return sentence.includes(pattern) ? pattern : null;
+
+  // Sort longest-first so multi-word names match before abbreviations
+  asciiPatterns.sort((a, b) => b.length - a.length);
+  nonAsciiPatterns.sort((a, b) => b.length - a.length);
+
+  const asciiRx = asciiPatterns.length
+    ? new RegExp(`(?<![A-Za-z0-9])(?:${asciiPatterns.join("|")})(?![A-Za-z0-9])`, "gi")
+    : null;
+  const nonAsciiRx = nonAsciiPatterns.length
+    ? new RegExp(`(?:${nonAsciiPatterns.join("|")})`, "gi")
+    : null;
+
+  return { asciiRx, asciiLookup, nonAsciiRx, nonAsciiLookup };
+}
+
+const NATION_MATCHER = buildDictionaryMatcher(NATION_ENTRIES);
+const LOCATION_MATCHER = buildDictionaryMatcher(LOCATION_ENTRIES);
+
+// Precompiled Extractor RegExps (Module-level for maximum throughput)
+const RX_LATLON_DECIMAL =
+  /(?<prefix>(?:lat(?:itude)?|coord(?:inates)?|gps|座標|經緯度|经纬度)\s*[:：=]?\s*)?(?<lat>[+-]?\d{1,2}\.\d{2,8})\s*(?<latDeg>°)?\s*(?<latHem>[NSns])?\s*[,;\/\s]+\s*(?:lon(?:gitude)?\s*[:：=]?\s*)?(?<lon>[+-]?\d{1,3}\.\d{2,8})\s*(?<lonDeg>°)?\s*(?<lonHem>[EWew])?/g;
+const RX_LATLON_DMS =
+  /(\d{1,2})\s*°\s*(\d{1,2})\s*[′']\s*(?:(\d{1,2}(?:\.\d+)?)\s*[″"]\s*)?([NSns])\s*[,;\s]+\s*(\d{1,3})\s*°\s*(\d{1,2})\s*[′']\s*(?:(\d{1,2}(?:\.\d+)?)\s*[″"]\s*)?([EWew])/g;
+
+// English + Romanized Yue/Mandarin Addresses & Facilities
+const RX_ADDR_EN =
+  /\b(?:\d{1,5}(?:-\d{1,5})?\s+(?:[A-Z][A-Za-z0-9.'-]+\s+){1,4}(?:Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Boulevard|Blvd\.?|Lane|Ln\.?|Drive|Dr\.?|Court|Ct\.?|Way|Square|Sq\.?|Plaza|Place|Pl\.?|Terrace|Crescent|Quay|Promenade)|(?:10\s+)?Downing Street|White House|Kremlin|Pentagon|Capitol Hill|Westminster|Buckingham Palace|Élysée Palace|Elysee Palace|Zhongnanhai|Great Hall of the People|Tiananmen Square|Red Square|Times Square|Trafalgar Square|Piccadilly Circus|Wall Street|Champs-[EÉ]lys[eé]es|Queen'?s Road(?:\s+(?:Central|East|West))?|Hennessy Road|Nathan Road|Des Voeux Road(?:\s+(?:Central|West))?|Connaught Road(?:\s+(?:Central|West))?|Chater Road|Argyle Street|Sai Yeung Choi Street|Canton Road|Tamar Park|Chek Lap Kok|Victoria Harbour|Harbour City|Pacific Place|Langham Place|Chungking Mansions|Port of [A-Z][a-z]+|(?:[A-Z][A-Za-z0-9'&-]+\s+){1,3}(?:International Airport|Airport|Air Base|Airfield|Naval Base|Military Base|Army Base|Garrison|Embassy|Consulate|Hospital|Prison|Detention Cent(?:er|re)|Courthouse|High Court|Supreme Court|Headquarters|HQ|Train Station|Railway Station|Metro Station|MTR Station|Station|Terminal|Border Crossing|Checkpoint|Building|Tower|Center|Centre|Plaza|Mall|Square|Palace))\b/g;
+
+// Translated Foreign Addresses/Landmarks & Native Chinese/Yue (廣東話/繁簡中文) Addresses
+const RX_ADDR_CJK_TRANSLATED =
+  /(?:唐寧街(?:\d+號)?|賓夕法尼亞大道(?:\d+號)?|香榭麗舍(?:大道|大街)|第五大道|第五街|華爾街(?:\d+號)?|华尔街(?:\d+号)?|百老匯(?:大道)?|艦隊街|牛津街|攝政街|皮卡迪利(?:廣場|圓環)|特拉法加(?:廣場|廣塲)|愛麗舍宮|愛麗榭宮|白金漢宮|肯辛頓宮|溫莎(?:城堡|堡)|西敏宮|威斯敏斯特(?:宮|教堂)|國會(?:山莊|山|大廈|大樓)|白宮|五角(?:大廈|大樓)|克里姆林宮|克宮|紅場|盧比揚卡|中南海|人民大會堂|天安門廣場|故宮博物院|青瓦台|龍山總統府|首相官邸|聯合國總部|世貿中心|時代(?:廣場|廣塲)|希斯(?:路|羅)機場|蓋特威克機場|格域機場|史坦斯特機場|甘迺迪機場|肯尼迪機場|紐(?:華|瓦)克機場|戴高樂機場|法蘭克福機場|史基(?:浦|蒲)機場|羽田機場|成田機場|關西機場|仁川(?:國際)?機場|樟宜機場|赤鱲角機場|香港國際機場|桃園(?:國際)?機場|松山機場|大興(?:國際)?機場|首都(?:國際)?機場|啟德郵輪碼頭|啟德體育園|西九龍(?:高鐵)?站|高鐵西九龍站|紅磡(?:車|港鐵)?站|金鐘添馬公園|添馬艦|香港政府總部|政府總部|禮賓府|中聯辦|國安公署|駐港部隊大廈|終審法院|高等法院|西九龍裁判法院|東區裁判法院|荔枝角收押所|赤柱監獄|壁屋監獄|羅湖口岸|落馬洲(?:支線)?口岸|皇崗口岸|深圳灣口岸|蓮塘口岸|港珠澳大橋口岸|太古廣場|國際金融中心|環球貿易廣場|朗豪坊|海港城|又一城|置地廣場|合和中心|長江集團中心|中銀大廈|匯豐總行大廈|香港會展中心|灣仔會展|彌敦道|皇后大道(?:中|東|西)?|軒尼詩道|干諾道(?:中|西)?|德輔道(?:中|西)?|遮打道|亞皆老街|西洋菜(?:南|北)?街|波斯富街|羅素街|廣東道|上海街|駱克道)/g;
+
+const RX_ADDR_CJK_STRUCTURED =
+  /(?:[\u4e00-\u9fff]{2,6}(?:區|市|縣))?(?:[東西南北中]?[\u4e00-\u9fff]{2,8}(?:大道[東西南北中]?|馬路|海旁|斜路|公路|街|道[東西南北中]?|路(?:[一二三四五六七八九十]+段)?|巷|弄|里|坊|徑))\s*(?:\d+(?:至\d+)?[A-Za-z]?號|[一二三四五六七八九十百千]+號)(?:\s*\d+[樓層F字樓座室鋪舖])?|[\u4e00-\u9fffA-Za-z0-9]{2,12}(?:\d+號)?(?:商業大廈|工業大廈|工廈|商場|廣場|廣塲|大廈|大樓|機場|火車站|高鐵站|地鐵站|港鐵站|碼頭|口岸|海軍基地|空軍基地|軍事基地|基地|大使館|總領事館|領事館|法院|裁判法院|監獄|收押所|警署|警察總部|政府總部)/g;
+
+const RX_ADDR_CJK_BLACKLIST =
+  /^(?:這條|呢條|嗰條|一條|整條|全條|大街|小巷|過馬|出街|逛街|行街|上路|問路|心路|活路|退路|後路|生路|死路|正路|歪路|大路|小路|中心|廣場舞|全場|現場|商場內|大廈內|大樓內)/;
+
+// Platforms & Handles
+const RX_HANDLE = /(?:^|[\s(])(@[A-Za-z0-9_]{3,32})\b/g;
+const RX_URL_PLAT =
+  /\b(?:https?:\/\/)?(?:t\.me|x\.com|twitter\.com|youtube\.com|youtu\.be|github\.com|facebook\.com|instagram\.com|threads\.net|bsky\.app|lihkg\.com|substack\.com)\/[A-Za-z0-9_./-]+/gi;
+const RX_PLAT_NAMED =
+  /\b(?:Telegram|Signal|WhatsApp|YouTube|GitHub|TikTok|Instagram|Facebook|Twitter|Discord|Reddit|WeChat|Threads|Bluesky|Mastodon|Line|LIHKG|Douyin|Xiaohongshu|Bilibili)\b|連登|微博|小紅書|抖音|微信|電報/gi;
+
+// Financial & Metrics
+const RX_MONEY_EN =
+  /(?:USD|EUR|GBP|HKD|MOP|TWD|RMB|CNY|JPY|KRW|AUD|CAD|SGD)?\s*(?:HK\$|US\$|NT\$|AU\$|S\$|\$|€|£|¥)\s?\d+(?:[.,]\d+)?\s*(?:trillion|billion|million|thousand|[TBMK]\b)?|\b\d+(?:[.,]\d+)?\s*(?:trillion|billion|million|thousand)\s*(?:dollars|USD|euros|EUR|pounds|GBP|yuan|RMB|CNY|yen|JPY|HKD)\b|\b\d+(?:\.\d+)?%|\b\d{1,4}\s*bps\b|\b\d{1,3}(?:,\d{3})+\s*(?:people|troops|soldiers|casualties|deaths|injured|protesters|voters|users|subscribers|shares|barrels|drones|missiles)\b/gi;
+const RX_MONEY_CJK =
+  /(?:(?:新台幣|港幣|港元|澳門幣|澳門元|人民幣|美元|美金|歐元|英鎊|日圓|日元)?\s*\d+(?:\.\d+)?[億萬千百]*\s*(?:美元|美金|港元|港幣|澳門元|澳門幣|台幣|人民幣|歐元|英鎊|日圓|日元|元))|(?:\d+(?:\.\d+)?(?:%|％|個基點))|(?:\d+(?:\.\d+)?[億萬千]?(?:人|名|架|枚|艘|輛)(?:死亡|受傷|失蹤|被捕|參加|失業|軍人|士兵|無人機|導彈|戰機))/g;
+
+// Organizations: General + Military Forces + Political Parties (EN, CJK/Yue, RU)
+const RX_ORG_EN =
+  /\b(?:[A-Z][A-Za-z0-9&'-]+\s+){1,4}(?:Inc\.?|Corp\.?|Corporation|Ltd\.?|LLC|PLC|Group|Holdings|Bank|Exchange|Agency|Ministry|Department|Committee|Commission|Council|Authority|Parliament|Congress|Senate|House|Court|Police|Bureau|Institute|University|College|Foundation|Federation|Union|Association|Alliance|Command|Airlines|Motors|Networks|Labs|AI|Media|Times|Post|News|Herald|Journal|Observatory|Fund)\b/g;
+
+const RX_ORG_MILITARY_EN =
+  /\b(?:(?:\d+(?:st|nd|rd|th)\s+)?(?:[A-Z][A-Za-z0-9.&'-]+\s+){0,3}(?:Armed Forces|Ground Forces|Air Force|Air Defence Forces|Air Defense Forces|Navy|Naval Fleet|Pacific Fleet|Black Sea Fleet|Northern Fleet|Baltic Fleet|Marine Corps|Marines|Special Forces|Special Operations|National Guard|Coast Guard|Border Guard|Mechanized Brigade|Armored Brigade|Assault Brigade|Airborne Brigade|Artillery Brigade|Brigade|Regiment|Battalion|Division|Squadron|Corps|Task Force|Militia|Paramilitary Forces|Defense Forces|Defence Forces|Revolutionary Guard|Guards|Reconnaissance)|Wagner Group|Azov Brigade|Iron Dome|IDF|AFU|UAF|PLA|PLAN|PLAAF|PLARF|IRGC|USSOCOM|CENTCOM|INDOPACOM|EUCOM|NORAD|RAF|USAF|USN|USMC|FSB|GRU|SVR|SBU|GUR|HUR|MI5|MI6|GCHQ|DGSE|Mossad|Shin Bet|SDF|PKK|YPG|RSF|SAF|Hamas|Hezbollah|Houthis|Taliban)\b/g;
+
+const RX_ORG_PARTY_EN =
+  /\b(?:(?:[A-Z][A-Za-z0-9&'-]+\s+){0,3}(?:Democratic Party|Republican Party|Labour Party|Conservative Party|Liberal Party|Liberal Democratic Party|Socialist Party|Communist Party|Green Party|Libertarian Party|Nationalist Party|Reform Party|Civic Party|People'?s Party|Political Party|Party|Coalition|Bloc|Caucus|Parliamentary Group|Political Front)|GOP|DNC|RNC|CCP|CPC|KMT|DPP|TPP|LDP|CDU|CSU|SPD|FDP|AfD|SNP|DUP|BJP|INC|ANC|PAP|DAB|FTU|NPP|Likud|Fidesz|Syriza|Podemos|Sinn F[eé]in|National Rally|Reform UK)\b/g;
+
+const RX_ORG_ACRO =
+  /\b(?:NATO|WHO|IMF|WTO|UN|UNESCO|UNHCR|UNICEF|FBI|CIA|NSA|SEC|DOJ|DOD|FED|ECB|OPEC|BRICS|ASEAN|APEC|NASA|SpaceX|OpenAI|Anthropic|Google|DeepMind|Mistral|xAI|Apple|Microsoft|Meta|Nvidia|NVIDIA|Tesla|Amazon|TSMC|ASML|Intel|AMD|ARM|ByteDance|Tencent|Alibaba|Huawei|Samsung|Sony|HKEX|NYSE|NASDAQ|Binance|Coinbase|ICAC|Reuters|Bloomberg|BBC|CNN|AP|AFP|SCMP|Xinhua|TASS)\b/g;
+
+const RX_ORG_CJK =
+  /(?:中國人民解放軍|人民解放軍|中國共產黨|中共|中國國民黨|國民黨|民主進步黨|民進黨|台灣民眾黨|民眾黨|時代力量|民主建港協進聯盟|民建聯|香港工會聯合會|工聯會|新民黨|經民聯|公民黨|自由黨|民主黨|社民連|實政圓桌|自民黨|立憲民主黨|公明黨|維新會|共和黨|工黨|保守黨|綠黨|統一俄羅斯黨|人民行動黨|執政黨|在野黨|反對派聯盟|革命衛隊|國民警衛隊|自衛隊|維和部隊|特種部隊|海軍陸戰隊|國防軍|武警部隊|武警|海警局|海警|廉政公署|警務處|國安處|入境處|海關|懲教署|金管局|證監會|港交所|聯準會|美聯儲|央視|新華社|路透社|彭博社|美聯社|法新社|南華早報|明報|星島日報|香港電台|無線電視|國軍|美軍|俄軍|烏軍|以軍|日軍|韓軍|英軍|法軍|北約部隊|聯軍)|[\u4e00-\u9fffA-Za-z0-9第]{2,10}(?:公司|集團|控股|銀行|交易所|部|委員會|管理局|局|署|院|廳|法院|最高法院|警署|警方|檢察院|檢方|大學|學院|研究所|學會|協會|聯合會|基金會|政黨|黨團|戰區|軍區|艦隊|軍團|兵團|航空兵|裝甲師|步兵師|機械化旅|摩步旅|空降旅|砲兵旅|特戰旅|陸戰旅|防衛省|總參謀部|軍情局|安全局|情報局|中央銀行|通訊社|電視台|日報|時報|周刊)/g;
+
+const RX_ORG_RU =
+  /(?<![А-Яа-яЁёA-Za-z0-9_])(?:ВСУ|ВС РФ|ЧВК Вагнер|Росгвардия|ГРУ|ФСБ|СБУ|ГУР|МО РФ|СВР|Единая Россия|КПРФ|ЛДПР|Яблоко|ЦБ РФ|МИД РФ|(?:\d+-я\s+)?[А-ЯЁA-Z][а-яёА-ЯЁa-zA-Z-]{2,24}\s+(?:бригада|дивизия|армия|флот|полк|батальон|партия|министерство|комитет))(?![А-Яа-яЁёA-Za-z0-9_])/g;
+
+// Job Positions & Persons (EN, CJK/Yue, RU)
+const RX_ROLE_PERSON_EN =
+  /\b(President|Prime Minister|Deputy Prime Minister|Minister|Secretary of State|Defense Secretary|Defence Secretary|Treasury Secretary|CEO|Chief Executive Officer|CFO|CTO|COO|Chief Executive|Chairman|Chairwoman|Director|Commissioner|Spokesperson|Spokeswoman|Spokesman|Press Secretary|Governor|Senator|Representative|Chancellor|Premier|Mayor|Judge|Prosecutor|General|Admiral|Commander|Ambassador|Special Envoy|Secretary-General)\s+([A-Z][A-Za-zÀ-ÖØ-öø-ÿ'-]+(?:\s+(?:(?:van|von|de|al|bin)\s+)?[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'-]+){1,2})/g;
+
+const RX_ROLE_STANDALONE_EN =
+  /\b(President|Prime Minister|Deputy Prime Minister|Secretary of State|Defense Minister|Defence Minister|Foreign Minister|Finance Minister|Chief Executive Officer|Chief Executive|CEO|CFO|CTO|Chairman|Chairwoman|Central Bank Governor|Attorney General|Supreme Leader|Speaker of the House|Secretary-General|Special Envoy|High Representative|Commander-in-Chief)\b/g;
+
+const RX_ROLE_PERSON_CJK =
+  /(特首|行政長官|政務司司長|財政司司長|律政司司長|副司長|司長|總統|副總統|總理|副總理|首相|國務卿|外長|外交部長|防長|國防部長|財長|財政部長|主席|副主席|執行長|行政總裁|首席執行官|總裁|副總裁|董事長|副董事長|總編輯|創辦人|聯合創辦人|秘書長|主任|局長|處長|署長|專員|市長|省長|州長|議員|立法會議員|區議員|國會議員|發言人|大使|特使|將軍|司令員|司令|總參謀長|法官|檢察官)([\u4e00-\u9fff]{2,4})/g;
+
+const RX_CJK_ROLE_STANDALONE =
+  /(?:行政長官|特首|政務司司長|財政司司長|律政司司長|國務卿|外交部長|國防部長|財政部長|行政總裁|首席執行官|秘書長|總參謀長|檢察官|新聞秘書|發言人)/g;
+
+const RX_PERSON_EN =
+  /\b([A-Z][a-zÀ-ÖØ-öø-ÿ]{1,15}(?:\s+[A-Z]\.)?\s+(?:(?:van|von|de|la|al|bin|Mc|Mac|O')\s*)?[A-Z][a-zÀ-ÖØ-öø-ÿ'-]{1,20}(?:\s+[A-Z][a-zÀ-ÖØ-öø-ÿ'-]{1,18})?)\b/g;
+
+const RX_PERSON_RU =
+  /(?<![А-Яа-яЁёA-Za-z0-9_])([А-ЯЁ][а-яё]{1,18}\s+[А-ЯЁ][а-яё]{2,22})(?![А-Яа-яЁёA-Za-z0-9_])/g;
+
+const RX_CJK_PERSON_CUE =
+  /(?:^|[，。；：\s「『（(])([\u4e00-\u9fff]{2,3})(?:表示|指出|強調|透露|稱|說|批評|警告|宣布|簽署|會見|訪問|出席|回應|認為|呼籲)/g;
+
+const CJK_PERSON_STOP = new Set([
+  "今天", "昨天", "明天", "日前", "目前", "今年", "去年", "明年", "最近", "同時",
+  "此外", "另外", "然而", "但是", "不過", "因此", "所以", "我們", "他們", "她們",
+  "大家", "記者", "消息", "報導", "報道", "當局", "政府", "官方", "方面", "部門",
+  "專家", "學者", "分析", "調查", "報告", "文件", "聲明", "公告", "會議", "法院",
+  "警方", "軍方", "市場", "公司", "企業", "銀行", "機構", "組織", "國家", "地區",
+  "香港", "台灣", "中國", "美國", "英國", "日本", "韓國", "俄國", "烏方", "美方",
+  "中方", "英方", "日方", "韓方", "俄方", "以方", "民眾", "市民", "網友", "網民",
+]);
+
+const RX_CJK_LEAD_NOISE =
+  /^(?:香港方面|台灣方面|台北方面|北京方面|美方|中方|俄方|烏方|代表團|當局|警方|軍方|以及|關於|針對|來自|代表|隨後|目前|今天|今日|昨天|昨日|明天|並於|並在|並向|並赴|位於|坐落於?|前往|抵達|來到|返回|重返|撤離|駐守|召開|舉行|參加|出席|發起|實施|違反|討論|簽署|通過|公布|發布|提出|推動|於|在|到|抵|赴|往|經|從|由|向|及|和|與|跟|同|或|並|把|被|將|是|有)+/;
+const RX_CJK_MID_PREP_BLEED =
+  /^[\u4e00-\u9fff]{1,2}(?:前往|抵達|來到|駐守|位於|坐落於?|到達|回到|赴往)/;
+
+function stripCjkLeadNoise(raw: string): string {
+  let prev = "";
+  let cur = raw.trim().replace(RX_CJK_MID_PREP_BLEED, "");
+  while (cur !== prev) {
+    prev = cur;
+    cur = cur.replace(RX_CJK_LEAD_NOISE, "").trim();
+  }
+  return cur;
+}
+
+// Events & Incidents (multi-word summit/event phrases matched BEFORE bare G7/G20 acronyms)
+const RX_EVENT_EN =
+  /\b(?:(?:[A-Z][A-Za-z0-9-]+\s+){1,2}(?:Summit|Ministerial|Election|By-election|Referendum|Hearing|Protests?|Rally|March|Offensive|Ceasefire|Sanctions?|Inquiry|Trial|Verdict|Earthquake|Typhoon|IPO|Earnings)|World Economic Forum|Munich Security Conference|UN General Assembly|Operation\s+[A-Z][A-Za-z0-9-]+|Signal No\.\s*\d+|G7|G20|COP\d{2}|Davos)\b/g;
+const RX_EVENT_CJK =
+  /(?:八號風球|九號風球|十號風球|黑色暴雨警告|施政報告|財政預算案|全國兩會|兩會|三中全會|奧運會|世界盃|亞洲盃|進博會)|[\u4e00-\u9fffA-Za-z0-9]{2,10}(?:峰會|大選|選舉|補選|初選|公投|聽證會|抗議|遊行|示威|罷工|罷課|演習|軍演|停火|審判|判決|宣判|記者會|論壇|暴動|衝突|地震|風災|颱風|襲擊)/g;
+
+// Products / Assets / Laws
+const RX_ASSET_LAW_EN =
+  /\b(?:(?:[A-Z][A-Za-z0-9-]+\s+){1,3}(?:Act|Bill|Treaty|Accord|Agreement|Resolution|Charter|Directive|Regulation|Ordinance|Law|Sanctions Package)|Article\s+\d+|Section\s+\d+|Resolution\s+\d+|Basic Law|National Security Law|GDPR|CHIPS Act|NDAA|AI Act|GPT-\d[A-Za-z0-9.-]*|ChatGPT|Claude\s*\d?(?:\.\d)?|Gemini\s*\d?(?:\.\d)?|Llama\s*\d?(?:\.\d)?|Bitcoin|Ethereum|Solana|Ripple|BTC|ETH|USDT|USDC|SOL|XRP|BNB|F-16|F-35|Su-35|J-20|HIMARS|ATACMS|Storm Shadow|Patriot|Starlink|iPhone\s*\d*|MacBook|Hang Seng Index|S&P 500|Nasdaq|Dow Jones)\b/g;
+const RX_ASSET_LAW_CJK =
+  /(?:《[^》]{2,30}》|香港基本法|基本法|香港國安法|國安法|維護國家安全條例|第23條|廿三條|恆生指數|恒生指數|標普500|納斯達克|道瓊斯|比特幣|以太幣)|[\u4e00-\u9fffA-Za-z0-9]{2,12}(?:法案|條例|法例|協議|條約|憲法|決議|白皮書|關稅|晶片|飛彈|導彈|戰機|無人機)/g;
+
+// Precompiled Relation Cue RegExps
+const RX_REL_LOC = /\b(?:in|at|to|from|near|visited|met in|based in)\b|在|於|抵|赴|前往|位於|坐落|駐/i;
+const RX_REL_ISSUE = /\b(?:sign|signed|pass|passed|issue|issued|announce|announced|launch|launched|propose|proposed|release|released|enact|enacted|tabled)\b|簽署|通過|公布|發布|發表|提出|推出|頒布|立法/i;
+const RX_REL_FUND = /\b(?:invest|invested|fund|funded|pay|paid|grant|granted|fine|fined|spend|spent|donate|donated|raise|raised|worth|budget|aid|billion|million)\b|投資|撥款|資助|罰款|捐款|援助|花費|總值|集資|融資|億|萬/i;
+const RX_REL_OP_BY = /\b(?:operat(?:e|ed|es|ing)|own|owned|run|official|channel|account|via|posted|managed by)\b|營運|經營|官方|隸屬|帳號|頻道|由.*負責/i;
+const RX_REL_HOSTILE = /\b(?:sanction|sanctioned|sue|sued|attack|attacked|struck|strike|arrest|arrested|charge|charged|ban|banned|probe|probed|condemn|condemned|accuse|accused|warn|warned|oppose|opposed|clash|clashed|retaliat(?:e|ed|ing)|critic(?:ize|ized|ises|ised|izing|ising)?|slam|slammed|rebuke|rebuked|denounce|denounced|blame|blamed)\b|制裁|起訴|控告|檢控|攻擊|打擊|逮捕|拘捕|禁止|封殺|調查|譴責|指控|警告|反對|衝突|批評|指責|炮轟|駁斥/i;
+const RX_REL_OPPOSE = /\b(?:sanction|sanctioned|condemn|condemned|oppose|opposed|clash|clashed|dispute|disputed|critic(?:ize|ized|ises|ised|izing|ising)?|boycott|boycotted|slam|slammed|rebuke|rebuked|denounce|denounced)\b|反對|批評|指責|衝突|爭議|制裁|譴責|抵制|炮轟/i;
+const RX_REL_COOP = /\b(?:met|meet|partner|partnered|agree|agreed|ally|allied|cooperat(?:e|ed|ing)|joint|support|supported|welcome|welcomed|pact|deal)\b|會見|會談|會晤|合作|結盟|簽約|同意|支持|聯手|共同|攜手/i;
+
+function splitSentences(text: string): string[] {
+  // Do not split inside decimal numbers (35.6762) or abbreviations/initials (U.S., U.K., St., John A.)
+  return text
+    .split(/(?<!\d)(?<=[.!?。！？\n])(?<!\b(?:U\.S|U\.K|U\.N|E\.U|Mr|Ms|Mrs|Dr|St|Mt|No|Lt|Col|Gen|Sgt|Cmdr|Inc|Ltd|Corp|Co|vs)\.)(?<!\b[A-Z]\.)\s+|\n+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 4);
 }
 
 export function extractNerSinglePostLocal(
@@ -612,7 +817,7 @@ export function extractNerSinglePostLocal(
 ): { entities: ExtractedPostEntity[]; relations: ExtractedPostRelation[] } {
   const entities: ExtractedPostEntity[] = [];
   const relations: ExtractedPostRelation[] = [];
-  const seenEntityKey = new Set<string>();
+  const seenEntityMap = new Map<string, ExtractedPostEntity>();
   const seenRelKey = new Set<string>();
 
   const pushEntity = (
@@ -627,16 +832,17 @@ export function extractNerSinglePostLocal(
       return null;
     }
     const k = normalizeEntityKey(nerClass, cleanCanonical);
-    if (seenEntityKey.has(k)) {
-      return entities.find((e) => normalizeEntityKey(e.nerClass, e.canonical) === k) || null;
+    const existing = seenEntityMap.get(k);
+    if (existing) {
+      return existing;
     }
-    seenEntityKey.add(k);
     const ent: ExtractedPostEntity = {
       name: cleanName,
       canonical: cleanCanonical,
       nerClass,
       quote: quote.slice(0, 200),
     };
+    seenEntityMap.set(k, ent);
     entities.push(ent);
     return ent;
   };
@@ -664,7 +870,7 @@ export function extractNerSinglePostLocal(
     });
   };
 
-  // Optional contact person from post metadata
+  // Structured Telegram post metadata
   if (meta?.contactName) {
     pushEntity(meta.contactName, meta.contactName, "person", `Contact: ${meta.contactName}`);
   }
@@ -679,6 +885,7 @@ export function extractNerSinglePostLocal(
 
   for (const sentence of sentences) {
     const sentEntities: ExtractedPostEntity[] = [];
+    const sentEntityKeys = new Set<string>();
 
     const addSentEntity = (
       name: string,
@@ -686,101 +893,203 @@ export function extractNerSinglePostLocal(
       nerClass: NerClassId
     ) => {
       const e = pushEntity(name, canonical, nerClass, sentence);
-      if (e && !sentEntities.some((x) => normalizeEntityKey(x.nerClass, x.canonical) === normalizeEntityKey(e.nerClass, e.canonical))) {
-        sentEntities.push(e);
+      if (e) {
+        const k = normalizeEntityKey(e.nerClass, e.canonical);
+        if (!sentEntityKeys.has(k)) {
+          sentEntityKeys.add(k);
+          sentEntities.push(e);
+        }
       }
       return e;
     };
 
-    // 1. Nations
-    for (const entry of NATION_ENTRIES) {
-      for (const pat of entry.patterns) {
-        const hit = findPatternMatch(sentence, pat);
-        if (hit) {
-          addSentEntity(hit, entry.canonical, "nation");
-          break;
-        }
+    // 1. Nations (single-pass precompiled regex matchers)
+    if (NATION_MATCHER.asciiRx) {
+      NATION_MATCHER.asciiRx.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = NATION_MATCHER.asciiRx.exec(sentence)) !== null) {
+        const canon = NATION_MATCHER.asciiLookup.get(m[0].toLowerCase());
+        if (canon) addSentEntity(m[0], canon, "nation");
+      }
+    }
+    if (NATION_MATCHER.nonAsciiRx) {
+      NATION_MATCHER.nonAsciiRx.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = NATION_MATCHER.nonAsciiRx.exec(sentence)) !== null) {
+        const canon = NATION_MATCHER.nonAsciiLookup.get(m[0].toLowerCase());
+        if (canon) addSentEntity(m[0], canon, "nation");
       }
     }
 
-    // 2. Locations
-    for (const entry of LOCATION_ENTRIES) {
-      for (const pat of entry.patterns) {
-        const hit = findPatternMatch(sentence, pat);
-        if (hit) {
-          addSentEntity(hit, entry.canonical, "location");
-          break;
-        }
+    // 2. Locations (places + lat,long decimal & DMS coordinates)
+    if (LOCATION_MATCHER.asciiRx) {
+      LOCATION_MATCHER.asciiRx.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = LOCATION_MATCHER.asciiRx.exec(sentence)) !== null) {
+        const canon = LOCATION_MATCHER.asciiLookup.get(m[0].toLowerCase());
+        if (canon) addSentEntity(m[0], canon, "location");
+      }
+    }
+    if (LOCATION_MATCHER.nonAsciiRx) {
+      LOCATION_MATCHER.nonAsciiRx.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = LOCATION_MATCHER.nonAsciiRx.exec(sentence)) !== null) {
+        const canon = LOCATION_MATCHER.nonAsciiLookup.get(m[0].toLowerCase());
+        if (canon) addSentEntity(m[0], canon, "location");
       }
     }
 
-    // 3. Addresses / Facilities
-    const enAddrRx =
-      /\b(?:\d{1,5}\s+(?:[A-Z][A-Za-z0-9.'-]+\s+){1,4}(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Square|Sq|Plaza|Place|Pl)|(?:White House|Kremlin|Pentagon|Downing Street|10 Downing Street|Capitol Hill|Westminster|Zhongnanhai|Great Hall of the People|Tiananmen Square|Port of [A-Z][a-z]+|[A-Z][A-Za-z0-9'&-]+\s+(?:Airport|Air Base|Naval Base|Embassy|Consulate|Hospital|Prison|Courthouse|Headquarters|HQ|Station|Terminal|Building|Tower|Center|Centre)))\b/g;
-    for (const m of sentence.matchAll(enAddrRx)) {
+    // 2b. Decimal lat,long coordinates -> location
+    RX_LATLON_DECIMAL.lastIndex = 0;
+    let dm: RegExpExecArray | null;
+    while ((dm = RX_LATLON_DECIMAL.exec(sentence)) !== null) {
+      const g = dm.groups;
+      if (!g) continue;
+      const hasMarker = Boolean(g.prefix || g.latDeg || g.latHem || g.lonDeg || g.lonHem);
+      const latFrac = (g.lat.split(".")[1] || "").length;
+      const lonFrac = (g.lon.split(".")[1] || "").length;
+      if (!hasMarker && (latFrac < 3 || lonFrac < 3)) continue;
+
+      let latVal = parseFloat(g.lat);
+      let lonVal = parseFloat(g.lon);
+      if (g.latHem && g.latHem.toUpperCase() === "S") latVal = -Math.abs(latVal);
+      if (g.lonHem && g.lonHem.toUpperCase() === "W") lonVal = -Math.abs(lonVal);
+
+      if (
+        Number.isFinite(latVal) &&
+        Number.isFinite(lonVal) &&
+        Math.abs(latVal) <= 90 &&
+        Math.abs(lonVal) <= 180 &&
+        !(latVal === 0 && lonVal === 0)
+      ) {
+        const canon = `${latVal.toFixed(4)}, ${lonVal.toFixed(4)}`;
+        addSentEntity(dm[0].trim(), canon, "location");
+      }
+    }
+
+    // 2c. DMS coordinates -> location
+    RX_LATLON_DMS.lastIndex = 0;
+    while ((dm = RX_LATLON_DMS.exec(sentence)) !== null) {
+      const latD = Number(dm[1]);
+      const latM = Number(dm[2]);
+      const latS = Number(dm[3] || 0);
+      const latH = dm[4].toUpperCase();
+      const lonD = Number(dm[5]);
+      const lonM = Number(dm[6]);
+      const lonS = Number(dm[7] || 0);
+      const lonH = dm[8].toUpperCase();
+      if (latD <= 90 && lonD <= 180 && latM < 60 && lonM < 60 && latS < 60 && lonS < 60) {
+        let decLat = latD + latM / 60 + latS / 3600;
+        let decLon = lonD + lonM / 60 + lonS / 3600;
+        if (latH === "S") decLat = -decLat;
+        if (lonH === "W") decLon = -decLon;
+        const canon = `${decLat.toFixed(4)}, ${decLon.toFixed(4)}`;
+        addSentEntity(dm[0].trim(), canon, "location");
+      }
+    }
+
+    // 3. Addresses & Facilities (structured HK/TW/CN streets matched alongside translated landmarks, deduplicating left-bleed)
+    RX_ADDR_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ADDR_EN)) {
       const val = m[0].trim();
       addSentEntity(val, val, "address");
     }
-    const cjkAddrRx =
-      /[\u4e00-\u9fff]{2,12}(?:[0-9一二三四五六七八九十百千]+號)?(?:大廈|大樓|廣場|中心|機場|車站|港口|碼頭|基地|大使館|領事館|法院|警署|警察局|政府總部|白宮|克里姆林宮|五角大廈|中南海)/g;
-    for (const m of sentence.matchAll(cjkAddrRx)) {
+    const translatedCjkAddrs: string[] = [];
+    RX_ADDR_CJK_TRANSLATED.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ADDR_CJK_TRANSLATED)) {
       const val = m[0].trim();
+      translatedCjkAddrs.push(val);
+    }
+    const structuredCjkAddrs: string[] = [];
+    RX_ADDR_CJK_STRUCTURED.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ADDR_CJK_STRUCTURED)) {
+      const val = stripCjkLeadNoise(m[0]);
+      if (val.length < 3 || RX_ADDR_CJK_BLACKLIST.test(val)) continue;
+      // Skip if structured match merely prepends noise to an already-recognized translated address with no trailing street number
+      const isLeftBleedOverTranslated = translatedCjkAddrs.some(
+        (tr) => val.length > tr.length && val.endsWith(tr)
+      );
+      if (isLeftBleedOverTranslated) continue;
+      structuredCjkAddrs.push(val);
+    }
+    for (const val of structuredCjkAddrs) {
       addSentEntity(val, val, "address");
+    }
+    for (const val of translatedCjkAddrs) {
+      // Avoid emitting bare road (e.g., "彌敦道", "亞皆老街") when a numbered address ("彌敦道300號", "旺角亞皆老街8號") was already added
+      const supersededByNumbered = structuredCjkAddrs.some((st) => {
+        const idx = st.indexOf(val);
+        return (
+          idx !== -1 &&
+          st.length > val.length &&
+          /^\d|[一二三四五六七八九十]/.test(st.slice(idx + val.length))
+        );
+      });
+      if (!supersededByNumbered) {
+        addSentEntity(val, val, "address");
+      }
     }
 
     // 4. Platforms & Handles
-    const handleRx = /(?:^|[\s(])(@[A-Za-z0-9_]{3,32})\b/g;
-    for (const m of sentence.matchAll(handleRx)) {
+    RX_HANDLE.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_HANDLE)) {
       addSentEntity(m[1], m[1], "platform");
     }
-    const urlRx = /\b(?:https?:\/\/)?(?:t\.me|x\.com|twitter\.com|youtube\.com|youtu\.be|github\.com|facebook\.com|instagram\.com)\/[A-Za-z0-9_./-]+/gi;
-    for (const m of sentence.matchAll(urlRx)) {
+    RX_URL_PLAT.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_URL_PLAT)) {
       const val = m[0].replace(/[.,;)]+$/, "");
       addSentEntity(val, val, "platform");
     }
-    const platNamedRx = /\b(?:Telegram|Signal|WhatsApp|YouTube|GitHub|TikTok|Instagram|Facebook|Twitter|Discord|Reddit|WeChat)\b/gi;
-    for (const m of sentence.matchAll(platNamedRx)) {
+    RX_PLAT_NAMED.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_PLAT_NAMED)) {
       addSentEntity(m[0], m[0], "platform");
     }
 
     // 5. Financial & Metrics
-    const moneyRx =
-      /(?:USD|EUR|GBP|HKD|TWD|RMB|CNY|JPY)?\s*(?:\$|€|£|¥|HK\$|NT\$)\s?\d+(?:[.,]\d+)?\s*(?:trillion|billion|million|thousand|[TBMK]\b)?|\b\d+(?:[.,]\d+)?\s*(?:trillion|billion|million)\s*(?:dollars|USD|euros|EUR|pounds|GBP|yuan|RMB|yen)\b|\b\d+(?:\.\d+)?%|\b\d{1,3}(?:,\d{3})+\s*(?:people|troops|soldiers|casualties|deaths|injured|protesters|voters|users|subscribers|shares|barrels)\b/gi;
-    for (const m of sentence.matchAll(moneyRx)) {
+    RX_MONEY_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_MONEY_EN)) {
       const val = m[0].trim();
       addSentEntity(val, val, "financial_metric");
     }
-    const cjkMoneyRx =
-      /(?:[新台幣港幣人民幣美元歐元日圓]*\s*\d+(?:\.\d+)?[億萬千百]*\s*(?:美元|港元|台幣|人民幣|歐元|英鎊|日圓|元))|(?:\d+(?:\.\d+)?(?:%|％))|(?:\d+(?:\.\d+)?[億萬千]?(?:人|名)(?:死亡|受傷|失蹤|被捕|參加|失業))/g;
-    for (const m of sentence.matchAll(cjkMoneyRx)) {
+    RX_MONEY_CJK.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_MONEY_CJK)) {
       const val = m[0].trim();
       addSentEntity(val, val, "financial_metric");
     }
 
-    // 6. Organizations (EN + CJK + Acronyms)
-    const enOrgRx =
-      /\b(?:[A-Z][A-Za-z0-9&'-]+\s+){1,4}(?:Inc\.?|Corp\.?|Corporation|Ltd\.?|LLC|PLC|Group|Holdings|Bank|Exchange|Agency|Ministry|Department|Committee|Commission|Council|Authority|Parliament|Congress|Senate|House|Court|Police|Bureau|Institute|University|College|Foundation|Party|Federation|Union|Association|Alliance|Command|Forces|Airlines|Motors|Networks|Labs|AI|Media|Times|Post|News|Herald|Journal)\b/g;
-    for (const m of sentence.matchAll(enOrgRx)) {
+    // 6. Organizations (General + Military Forces + Political Parties + Acronyms + RU + CJK/Yue)
+    RX_ORG_MILITARY_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ORG_MILITARY_EN)) {
       const val = m[0].trim().replace(/^(?:The|A|An)\s+/i, "");
-      if (!LAT_STOPWORDS.has(val)) {
-        addSentEntity(val, val, "organization");
-      }
+      if (!LAT_STOPWORDS.has(val)) addSentEntity(val, val, "organization");
     }
-    const acroOrgRx = /\b(?:NATO|WHO|IMF|WTO|UN|UNESCO|UNHCR|FBI|CIA|NSA|SEC|DOJ|DOD|FED|ECB|OPEC|BRICS|ASEAN|NASA|SpaceX|OpenAI|Anthropic|Google|Apple|Microsoft|Meta|Nvidia|NVIDIA|Tesla|Amazon|TSMC|Reuters|Bloomberg|BBC|CNN|AP|AFP|Xinhua|TASS|IDF|Hamas|Hezbollah)\b/g;
-    for (const m of sentence.matchAll(acroOrgRx)) {
+    RX_ORG_PARTY_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ORG_PARTY_EN)) {
+      const val = m[0].trim().replace(/^(?:The|A|An)\s+/i, "");
+      if (!LAT_STOPWORDS.has(val)) addSentEntity(val, val, "organization");
+    }
+    RX_ORG_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ORG_EN)) {
+      const val = m[0].trim().replace(/^(?:The|A|An)\s+/i, "");
+      if (!LAT_STOPWORDS.has(val)) addSentEntity(val, val, "organization");
+    }
+    RX_ORG_ACRO.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ORG_ACRO)) {
       addSentEntity(m[0], m[0], "organization");
     }
-    const cjkOrgRx =
-      /[\u4e00-\u9fffA-Za-z0-9]{2,10}(?:公司|集團|銀行|交易所|部|委員會|管理局|局|署|院|廳|法院|最高法院|警署|警方|檢察院|檢方|大學|學院|研究所|學會|協會|聯合會|基金會|政黨|工黨|民主黨|共和黨|軍方|國防部|外交部|財政部|商務部|中央銀行|聯準會|美聯儲|通訊社|電視台|日報|時報)/g;
-    for (const m of sentence.matchAll(cjkOrgRx)) {
-      const val = m[0].trim();
-      addSentEntity(val, val, "organization");
+    RX_ORG_CJK.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ORG_CJK)) {
+      const val = stripCjkLeadNoise(m[0]);
+      if (val.length >= 2) addSentEntity(val, val, "organization");
+    }
+    RX_ORG_RU.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ORG_RU)) {
+      addSentEntity(m[0].trim(), m[0].trim(), "organization");
     }
 
     // 7. Job Position + Adjacent Person pairing
-    const titlePersonEnRx =
-      /\b(President|Prime Minister|Minister|Deputy Prime Minister|Secretary of State|Defense Secretary|Treasury Secretary|CEO|Chief Executive Officer|Chairman|Chairwoman|Director|Commissioner|Spokesperson|Governor|Senator|Representative|Chancellor|Premier|Mayor|Judge|Prosecutor|General|Admiral|Commander|Ambassador)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z'-]+){1,2})/g;
-    for (const m of sentence.matchAll(titlePersonEnRx)) {
+    RX_ROLE_PERSON_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ROLE_PERSON_EN)) {
       const role = addSentEntity(m[1].trim(), m[1].trim(), "job_position");
       const person = addSentEntity(m[2].trim(), m[2].trim(), "person");
       if (role && person) {
@@ -793,19 +1102,24 @@ export function extractNerSinglePostLocal(
         );
       }
     }
-    const enStandaloneRoleRx =
-      /\b(President|Prime Minister|Secretary of State|Defense Minister|Foreign Minister|Finance Minister|Chief Executive Officer|CEO|Chairman|Central Bank Governor|Attorney General|Supreme Leader|Speaker of the House)\b/g;
-    for (const m of sentence.matchAll(enStandaloneRoleRx)) {
+    RX_ROLE_STANDALONE_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ROLE_STANDALONE_EN)) {
       addSentEntity(m[1].trim(), m[1].trim(), "job_position");
     }
 
-    const cjkRolePersonRx =
-      /(總統|副總統|總理|副總理|首相|國務卿|外長|外交部長|防長|國防部長|財長|財政部長|主席|副主席|執行長|行政總裁|總裁|董事長|主任|局長|署長|市長|州長|議員|發言人|大使|將軍|司令|法官|檢察官)([\u4e00-\u9fff]{2,4})/g;
-    for (const m of sentence.matchAll(cjkRolePersonRx)) {
+    RX_ROLE_PERSON_CJK.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ROLE_PERSON_CJK)) {
       const roleStr = m[1].trim();
-      const candName = m[2].trim().replace(/[今昨明將並在於與及說稱表示會被]+$/g, "");
+      const candName = m[2]
+        .trim()
+        .replace(/(?:前往|抵達|來到|表示|指出|強調|透露|宣布|宣佈|簽署|會見|訪問|出席|回應|認為|呼籲|[今昨明將並在於與及說稱會被的向到赴前])$/, "")
+        .replace(/[今昨明將並在於與及說稱表示會被的向到前]+$/g, "");
       addSentEntity(roleStr, roleStr, "job_position");
-      if (candName.length >= 2 && !/[的是在與和及並將稱表示說會被]/.test(candName)) {
+      if (
+        candName.length >= 2 &&
+        !CJK_PERSON_STOP.has(candName) &&
+        !/[的是在與和及並將稱表示說會被]/.test(candName)
+      ) {
         addSentEntity(candName, candName, "person");
         pushRelation(
           { name: candName, nerClass: "person" },
@@ -816,47 +1130,68 @@ export function extractNerSinglePostLocal(
         );
       }
     }
+    RX_CJK_ROLE_STANDALONE.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_CJK_ROLE_STANDALONE)) {
+      addSentEntity(m[0].trim(), m[0].trim(), "job_position");
+    }
 
-    // 8. Standalone Multi-Word Capitalized Person Names
-    const enPersonRx = /\b([A-Z][a-z]{1,15}\s+(?:(?:van|von|de|al|bin)\s+)?[A-Z][a-z'-]{1,18}(?:\s+[A-Z][a-z'-]{1,18})?)\b/g;
-    for (const m of sentence.matchAll(enPersonRx)) {
+    // 8. Standalone Person Names (EN, RU, CJK speech/action cue)
+    RX_PERSON_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_PERSON_EN)) {
       const candidate = m[1].trim();
       const words = candidate.split(/\s+/);
       if (words.some((w) => LAT_STOPWORDS.has(w))) continue;
-      // Avoid shadowing already captured Org/Loc/Nat/Addr
+      const lowerCand = candidate.toLowerCase();
       const alreadyCaptured = sentEntities.some(
-        (e) => e.canonical.toLowerCase() === candidate.toLowerCase() || e.canonical.toLowerCase().includes(candidate.toLowerCase())
+        (e) =>
+          e.canonical.toLowerCase() === lowerCand ||
+          e.canonical.toLowerCase().includes(lowerCand)
       );
       if (!alreadyCaptured) {
         addSentEntity(candidate, candidate, "person");
       }
     }
 
+    RX_PERSON_RU.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_PERSON_RU)) {
+      const cand = m[1].trim();
+      const lowerCand = cand.toLowerCase();
+      if (!sentEntities.some((e) => e.canonical.toLowerCase().includes(lowerCand))) {
+        addSentEntity(cand, cand, "person");
+      }
+    }
+
+    RX_CJK_PERSON_CUE.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_CJK_PERSON_CUE)) {
+      const cand = m[1].trim();
+      if (
+        cand.length >= 2 &&
+        !CJK_PERSON_STOP.has(cand) &&
+        !sentEntities.some((e) => e.canonical.includes(cand))
+      ) {
+        addSentEntity(cand, cand, "person");
+      }
+    }
+
     // 9. Events & Incidents
-    const enEventRx =
-      /\b(?:G7|G20|COP\d{2}|World Economic Forum|Munich Security Conference|UN General Assembly|Operation\s+[A-Z][A-Za-z0-9-]+|[A-Z][A-Za-z0-9-]+\s+(?:Summit|Election|Referendum|Hearing|Protests?|Rally|Offensive|Ceasefire|Sanctions?|Inquiry|Trial|Verdict))\b/g;
-    for (const m of sentence.matchAll(enEventRx)) {
+    RX_EVENT_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_EVENT_EN)) {
       addSentEntity(m[0].trim(), m[0].trim(), "event");
     }
-    const cjkEventRx =
-      /[\u4e00-\u9fffA-Za-z0-9]{2,10}(?:峰會|大選|選舉|公投|聽證會|抗議|遊行|示威|罷工|演習|軍演|停火|審判|判決|記者會|論壇|暴動|衝突)/g;
-    for (const m of sentence.matchAll(cjkEventRx)) {
-      addSentEntity(m[0].trim(), m[0].trim(), "event");
+    RX_EVENT_CJK.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_EVENT_CJK)) {
+      const val = stripCjkLeadNoise(m[0]);
+      if (val.length >= 3) addSentEntity(val, val, "event");
     }
 
     // 10. Products / Assets / Laws
-    const enAssetLawRx =
-      /\b(?:[A-Z][A-Za-z0-9-]+\s+(?:Act|Bill|Treaty|Accord|Resolution|Charter|Sanctions Package)|Resolution\s+\d+|Article\s+\d+|Section\s+\d+|GPT-\d(?:\.\d)?|Claude\s*\d?(?:\.\d)?|Gemini\s*\d?(?:\.\d)?|Bitcoin|Ethereum|BTC|ETH|USDT|F-16|F-35|HIMARS|Patriot|Starlink)\b/g;
-    for (const m of sentence.matchAll(enAssetLawRx)) {
+    RX_ASSET_LAW_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ASSET_LAW_EN)) {
       addSentEntity(m[0].trim(), m[0].trim(), "asset_law");
     }
-    const cjkAssetLawRx =
-      /(?:《[^》]{2,30}》|[\u4e00-\u9fffA-Za-z0-9]{2,12}(?:法案|條例|協議|條約|憲法|決議|白皮書|關稅))/g;
-    for (const m of sentence.matchAll(cjkAssetLawRx)) {
-      const val = m[0]
-        .replace(/[《》]/g, "")
-        .replace(/^(?:討論|簽署|通過|公布|發布|提出|推動|違反|實施|修訂)/, "")
-        .trim();
+    RX_ASSET_LAW_CJK.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ASSET_LAW_CJK)) {
+      const val = stripCjkLeadNoise(m[0].replace(/[《》]/g, ""));
       if (val.length >= 3) {
         addSentEntity(val, val, "asset_law");
       }
@@ -864,7 +1199,6 @@ export function extractNerSinglePostLocal(
 
     // Sentence-level Relation Linking among detected entities
     if (sentEntities.length >= 2) {
-      const lower = sentence.toLowerCase();
       const actors = sentEntities.filter(
         (e) => e.nerClass === "person" || e.nerClass === "organization" || e.nerClass === "nation"
       );
@@ -876,8 +1210,9 @@ export function extractNerSinglePostLocal(
       const metrics = sentEntities.filter((e) => e.nerClass === "financial_metric");
       const platforms = sentEntities.filter((e) => e.nerClass === "platform");
       const roles = sentEntities.filter((e) => e.nerClass === "job_position");
+      const facilities = sentEntities.filter((e) => e.nerClass === "address");
 
-      const primaryActor = actors[0] || sentEntities[0];
+      const primaryActor = actors[0] || null;
 
       // holds_role / affiliated_with
       if (actors.length >= 1 && roles.length >= 1) {
@@ -903,18 +1238,30 @@ export function extractNerSinglePostLocal(
         );
       }
 
-      // located_at
+      // located_at (actors or events -> address/location/nation)
       if (primaryActor && places.length >= 1) {
         const targetPlace = places.find((pl) => pl.canonical !== primaryActor.canonical);
-        if (targetPlace && /\b(?:in|at|to|from|near|visited|met in)\b|在|於|抵|赴|前往|位於/.test(lower)) {
-          pushRelation(
-            { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
-            "located_at",
-            { name: targetPlace.canonical, nerClass: targetPlace.nerClass },
-            sentence,
-            0.74
-          );
+        if (targetPlace) {
+          const hasCue = RX_REL_LOC.test(sentence);
+          if (hasCue || targetPlace.nerClass === "address") {
+            pushRelation(
+              { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
+              "located_at",
+              { name: targetPlace.canonical, nerClass: targetPlace.nerClass },
+              sentence,
+              hasCue ? 0.8 : 0.68
+            );
+          }
         }
+      }
+      if (events.length >= 1 && places.length >= 1) {
+        pushRelation(
+          { name: events[0].canonical, nerClass: "event" },
+          "located_at",
+          { name: places[0].canonical, nerClass: places[0].nerClass },
+          sentence,
+          0.75
+        );
       }
 
       // participated_in
@@ -929,7 +1276,7 @@ export function extractNerSinglePostLocal(
       }
 
       // issued_or_authored
-      if (primaryActor && laws.length >= 1 && /\b(?:sign|signed|pass|passed|issue|issued|announce|announced|launch|launched|propose|proposed|release|released)\b|簽署|通過|公布|發布|發表|提出|推出/.test(lower)) {
+      if (primaryActor && laws.length >= 1 && RX_REL_ISSUE.test(sentence)) {
         pushRelation(
           { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
           "issued_or_authored",
@@ -940,7 +1287,7 @@ export function extractNerSinglePostLocal(
       }
 
       // transferred_or_funded
-      if (primaryActor && metrics.length >= 1 && /\b(?:invest|fund|pay|paid|grant|fine|fined|spend|spent|donate|raise|raised|worth|budget|aid|billion|million)\b|投資|撥款|資助|罰款|捐款|援助|花費|總值|億|萬/.test(lower)) {
+      if (primaryActor && metrics.length >= 1 && RX_REL_FUND.test(sentence)) {
         const recipient = actors[1] || places[0];
         pushRelation(
           { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
@@ -953,25 +1300,33 @@ export function extractNerSinglePostLocal(
         );
       }
 
-      // operated_by
+      // operated_by (platform or facility -> actor)
       if (platforms.length >= 1 && primaryActor && primaryActor.nerClass !== "platform") {
-        if (/\b(?:operat|own|run|official|channel|account|via|posted)\b|營運|經營|官方|隸屬|帳號|頻道/.test(lower)) {
+        if (RX_REL_OP_BY.test(sentence)) {
           pushRelation(
             { name: platforms[0].canonical, nerClass: "platform" },
             "operated_by",
             { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
             sentence,
-            0.72
+            0.74
           );
         }
+      } else if (facilities.length >= 1 && orgActor && RX_REL_OP_BY.test(sentence)) {
+        pushRelation(
+          { name: facilities[0].canonical, nerClass: "address" },
+          "operated_by",
+          { name: orgActor.canonical, nerClass: "organization" },
+          sentence,
+          0.72
+        );
       }
 
       // Actor-to-Actor relations: opposed_to / targets_or_acts_on / cooperated_with
       if (actors.length >= 2) {
         const a1 = actors[0];
         const a2 = actors[1];
-        if (/\b(?:sanction|sue|sued|attack|struck|strike|arrest|ban|banned|probe|condemn|accuse|warn|oppose|clash|retaliat)\b|制裁|起訴|控告|攻擊|打擊|逮捕|禁止|封殺|調查|譴責|指控|警告|反對|衝突/.test(lower)) {
-          const isOpposed = /\b(?:sanction|condemn|oppose|clash|dispute|critic)\b|反對|批評|衝突|爭議|制裁|譴責/.test(lower);
+        if (RX_REL_HOSTILE.test(sentence)) {
+          const isOpposed = RX_REL_OPPOSE.test(sentence);
           pushRelation(
             { name: a1.canonical, nerClass: a1.nerClass },
             isOpposed ? "opposed_to" : "targets_or_acts_on",
@@ -979,7 +1334,7 @@ export function extractNerSinglePostLocal(
             sentence,
             0.79
           );
-        } else if (/\b(?:met|meet|partner|agree|agreed|ally|allied|cooperat|joint|support|welcome|pact|deal)\b|會見|會談|合作|結盟|簽約|同意|支持|聯手|共同/.test(lower)) {
+        } else if (RX_REL_COOP.test(sentence)) {
           pushRelation(
             { name: a1.canonical, nerClass: a1.nerClass },
             "cooperated_with",
@@ -1058,7 +1413,7 @@ export async function runChannelNerExtractionBatch(
 
   if (!options.forceReextract) {
     for (const rec of options.existingRecords) {
-      if (rec.channelId === channelId && rec.extractorVersion === EXPLORER_NER_EXTRACTOR_VERSION) {
+      if (isNerRecordCurrent(rec, channelId)) {
         existingMap.set(rec.postKey, rec);
       }
     }
@@ -1129,14 +1484,16 @@ export async function runChannelNerExtractionBatch(
 
   options.onProgress?.({ ...progress });
 
-  const CHUNK_SIZE = 20;
+  const GEMINI_CHUNK_SIZE = 20;
+  const LOCAL_CHUNK_SIZE = 80;
   const storedGeminiKey =
     typeof localStorage !== "undefined" ? localStorage.getItem("gemini_api_key") || "" : "";
   let geminiUnavailable = false;
   let usedGemini = false;
   let usedLocal = false;
 
-  for (let i = 0; i < candidatePosts.length; i += CHUNK_SIZE) {
+  let cursor = 0;
+  while (cursor < candidatePosts.length) {
     if (options.signal?.aborted) {
       return {
         records: Array.from(existingMap.values()),
@@ -1145,7 +1502,9 @@ export async function runChannelNerExtractionBatch(
       };
     }
 
-    const chunk = candidatePosts.slice(i, i + CHUNK_SIZE);
+    const chunkSize = geminiUnavailable ? LOCAL_CHUNK_SIZE : GEMINI_CHUNK_SIZE;
+    const chunk = candidatePosts.slice(cursor, cursor + chunkSize);
+    cursor += chunk.length;
     let batchRecords: PostNerExtractionRecord[] | null = null;
 
     if (!geminiUnavailable) {
@@ -1254,6 +1613,11 @@ export async function runChannelNerExtractionBatch(
     const merged = Array.from(existingMap.values());
     options.onRecordsUpdated?.(merged);
     options.onProgress?.({ ...progress });
+
+    // Yield briefly between local chunks so large batches keep UI responsive
+    if (geminiUnavailable && cursor < candidatePosts.length) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
   }
 
   return {

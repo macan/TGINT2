@@ -166,11 +166,11 @@ import DateRangePicker from "./components/listen/DateRangePicker.vue";
 import ExplorerNerWidget from "./components/explorer/ExplorerNerWidget.vue";
 const ExplorerNerModal = defineAsyncComponent(() => import("./components/explorer/ExplorerNerModal.vue"));
 import {
-  EXPLORER_NER_EXTRACTOR_VERSION,
   aggregateNerIndex,
   clearChannelNerExtractions,
   extractPostPlainText,
   highlightNerTextInHtml,
+  isNerRecordCurrent,
   loadChannelNerExtractions,
   normalizeNerChannelKey,
   runChannelNerExtractionBatch,
@@ -11842,7 +11842,7 @@ const explorerNerUncachedCount = computed(() => {
   if (!chKey || posts.value.length === 0) return 0;
   const cachedSet = new Set(
     explorerNerRecords.value
-      .filter((r) => r.channelId === chKey && r.extractorVersion === EXPLORER_NER_EXTRACTOR_VERSION)
+      .filter((r) => isNerRecordCurrent(r, chKey))
       .map((r) => r.postKey)
   );
   let count = 0;

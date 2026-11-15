@@ -132,7 +132,14 @@ Output MUST be a valid JSON array of clusters:
 });
 
 // Structured 10-class NER & timestamped 10-class relation extraction using gemini-4-hydrogen
-app.post('/api/gemini/ner', async (req, res) => {
+app.all('/api/gemini/ner', async (req, res) => {
+  res.header('Allow', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
   try {
     const { posts: rawPosts, channelName, apiKey: customKey } = req.body;
     const ai = getGeminiClient(customKey);
