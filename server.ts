@@ -132,16 +132,51 @@ Output MUST be a valid JSON array of clusters:
 });
 
 // Structured 10-class NER & timestamped 10-class relation extraction using gemini-4-hydrogen
+// Supports both POST and GET (plus HEAD/OPTIONS) to prevent 405 Method Not Allowed behind Cloudflare Workers / reverse proxies
 app.all('/api/gemini/ner', async (req, res) => {
-  res.header('Allow', 'GET, POST, OPTIONS');
+  res.header('Allow', 'GET, POST, HEAD, OPTIONS');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
   }
-  if (req.method !== 'POST') {
+  if (req.method === 'HEAD') {
+    return res.status(200).end();
+  }
+  if (req.method !== 'POST' && req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
   try {
-    const { posts: rawPosts, channelName, apiKey: customKey } = req.body;
+    let rawPosts: any = req.body?.posts;
+    let channelName: any = req.body?.channelName;
+    let customKey: string | undefined = req.body?.apiKey;
+
+    if (req.method === 'GET' || !rawPosts) {
+      if (typeof req.query.payload === 'string' && req.query.payload.trim()) {
+        try {
+          const decoded = JSON.parse(req.query.payload);
+          if (decoded && typeof decoded === 'object') {
+            rawPosts = decoded.posts ?? rawPosts;
+            channelName = decoded.channelName ?? channelName;
+            customKey = decoded.apiKey ?? customKey;
+          }
+        } catch {
+          // ignore malformed payload query param
+        }
+      }
+      if (!rawPosts && typeof req.query.posts === 'string' && req.query.posts.trim()) {
+        try {
+          rawPosts = JSON.parse(req.query.posts);
+        } catch {
+          rawPosts = [];
+        }
+      }
+      if (!channelName && typeof req.query.channelName === 'string') {
+        channelName = req.query.channelName;
+      }
+      if (!customKey && typeof req.query.apiKey === 'string') {
+        customKey = req.query.apiKey;
+      }
+    }
+
     const ai = getGeminiClient(customKey);
 
     if (!ai) {
@@ -151,7 +186,7 @@ app.all('/api/gemini/ner', async (req, res) => {
     }
 
     if (!Array.isArray(rawPosts) || rawPosts.length === 0) {
-      return res.json({ extractions: [] });
+      return res.json({ extractions: [], engine: 'gemini' });
     }
 
     const inputPosts = rawPosts.slice(0, 30).map((p: any) => ({

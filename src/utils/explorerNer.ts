@@ -1484,11 +1484,157 @@ export async function runChannelNerExtractionBatch(
 
   options.onProgress?.({ ...progress });
 
+  const mapGeminiExtractionsToRecords = (
+    chunkItems: typeof candidatePosts,
+    extractions: any[]
+  ): PostNerExtractionRecord[] => {
+    const byKey = new Map<string, any>();
+    for (const ex of extractions) {
+      if (ex && ex.postKey) byKey.set(String(ex.postKey), ex);
+    }
+    const now = Date.now();
+    return chunkItems.map((c) => {
+      const raw = byKey.get(c.postKey);
+      const rawEntities = Array.isArray(raw?.entities) ? raw.entities : [];
+      const rawRelations = Array.isArray(raw?.relations) ? raw.relations : [];
+
+      const cleanEntities: ExtractedPostEntity[] = rawEntities
+        .filter((e: any) => e && (e.canonical || e.name))
+        .map((e: any) => ({
+          name: String(e.name || e.canonical).trim(),
+          canonical: String(e.canonical || e.name).trim(),
+          nerClass: coerceNerClass(e.nerClass),
+          quote: String(e.quote || "").trim().slice(0, 220),
+        }));
+
+      const cleanRelations: ExtractedPostRelation[] = rawRelations
+        .filter((r: any) => r && r.subject && r.object)
+        .map((r: any) => ({
+          subject: String(r.subject).trim(),
+          subjectClass: coerceNerClass(r.subjectClass),
+          relationClass: coerceRelationClass(r.relationClass),
+          object: String(r.object).trim(),
+          objectClass: coerceNerClass(r.objectClass),
+          quote: String(r.quote || "").trim().slice(0, 240),
+          confidence: Math.min(1, Math.max(0.1, Number(r.confidence ?? 0.85))),
+        }));
+
+      return {
+        id: `${channelId}::${c.postKey}`,
+        channelId,
+        postKey: c.postKey,
+        timestampMs: c.timestampMs,
+        extractorVersion: EXPLORER_NER_EXTRACTOR_VERSION,
+        engine: "gemini" as const,
+        entities: cleanEntities,
+        relations: cleanRelations,
+        updatedAt: now,
+      };
+    });
+  };
+
+  const callDirectGeminiNer = async (
+    chunkItems: typeof candidatePosts,
+    apiKey: string,
+    signal?: AbortSignal
+  ): Promise<any[] | null> => {
+    const inputPosts = chunkItems.map((c) => ({
+      postKey: c.postKey,
+      dateLabel: c.dateLabel,
+      author: c.author || "",
+      text: c.text.slice(0, 2400),
+    }));
+    const systemInstruction = `You are a strict multilingual Named Entity Recognition (NER) and Relation Extraction analyst inspecting posts from channel "${String(options.channelName || "unknown")}".
+For every input post, extract named entities and directed/undirected relations grounded strictly in the post text.
+Allowed nerClass values (exactly 10): person, organization, nation, job_position, location, address, event, platform, asset_law, financial_metric.
+Allowed relationClass values (exactly 10): holds_role, affiliated_with, located_at, participated_in, targets_or_acts_on, issued_or_authored, cooperated_with, opposed_to, transferred_or_funded, operated_by.
+Rules:
+1. Canonicalize entity names cleanly (e.g. "US" / "U.S." -> "United States" for canonical, keep exact surface span in name).
+2. Always include a concise verbatim quote snippet from that post supporting each entity and relation.
+3. Preserve exact postKey values.`;
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-4-hydrogen:generateContent?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal,
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          contents: [{ role: "user", parts: [{ text: JSON.stringify(inputPosts) }] }],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: "OBJECT",
+              properties: {
+                extractions: {
+                  type: "ARRAY",
+                  items: {
+                    type: "OBJECT",
+                    properties: {
+                      postKey: { type: "STRING" },
+                      entities: {
+                        type: "ARRAY",
+                        items: {
+                          type: "OBJECT",
+                          properties: {
+                            name: { type: "STRING" },
+                            canonical: { type: "STRING" },
+                            nerClass: { type: "STRING" },
+                            quote: { type: "STRING" },
+                          },
+                          required: ["name", "canonical", "nerClass", "quote"],
+                        },
+                      },
+                      relations: {
+                        type: "ARRAY",
+                        items: {
+                          type: "OBJECT",
+                          properties: {
+                            subject: { type: "STRING" },
+                            subjectClass: { type: "STRING" },
+                            relationClass: { type: "STRING" },
+                            object: { type: "STRING" },
+                            objectClass: { type: "STRING" },
+                            quote: { type: "STRING" },
+                            confidence: { type: "NUMBER" },
+                          },
+                          required: [
+                            "subject",
+                            "subjectClass",
+                            "relationClass",
+                            "object",
+                            "objectClass",
+                            "quote",
+                            "confidence",
+                          ],
+                        },
+                      },
+                    },
+                    required: ["postKey", "entities", "relations"],
+                  },
+                },
+              },
+              required: ["extractions"],
+            },
+          },
+        }),
+      }
+    );
+    if (!res.ok) return null;
+    const json = await res.json().catch(() => null);
+    const rawText = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!rawText) return null;
+    const parsed = JSON.parse(rawText);
+    return Array.isArray(parsed?.extractions) ? parsed.extractions : [];
+  };
+
   const GEMINI_CHUNK_SIZE = 20;
   const LOCAL_CHUNK_SIZE = 80;
   const storedGeminiKey =
     typeof localStorage !== "undefined" ? localStorage.getItem("gemini_api_key") || "" : "";
   let geminiUnavailable = false;
+  let serverNerEndpointMissing = false;
   let usedGemini = false;
   let usedLocal = false;
 
@@ -1509,74 +1655,78 @@ export async function runChannelNerExtractionBatch(
 
     if (!geminiUnavailable) {
       try {
-        const res = await fetch("/api/gemini/ner", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: options.signal,
-          body: JSON.stringify({
-            channelName: options.channelName,
-            apiKey: storedGeminiKey || undefined,
-            posts: chunk.map((c) => ({
-              postKey: c.postKey,
-              timestampMs: c.timestampMs,
-              dateLabel: c.dateLabel,
-              author: c.author,
-              text: c.text,
-            })),
-          }),
-        });
+        const requestBody = {
+          channelName: options.channelName,
+          apiKey: storedGeminiKey || undefined,
+          posts: chunk.map((c) => ({
+            postKey: c.postKey,
+            timestampMs: c.timestampMs,
+            dateLabel: c.dateLabel,
+            author: c.author,
+            text: c.text,
+          })),
+        };
 
-        if (res.ok) {
+        let res: Response | null = null;
+        if (!serverNerEndpointMissing) {
+          res = await fetch("/api/gemini/ner", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: options.signal,
+            body: JSON.stringify(requestBody),
+          });
+
+          // Behind Cloudflare Workers / proxies that block POST (405), try GET if payload fits in URL
+          if (res.status === 405) {
+            const encodedPayload = encodeURIComponent(JSON.stringify(requestBody));
+            if (encodedPayload.length <= 5500) {
+              const getRes = await fetch(`/api/gemini/ner?payload=${encodedPayload}`, {
+                method: "GET",
+                signal: options.signal,
+              });
+              const ctGet = getRes.headers.get("content-type") || "";
+              if (getRes.ok && ctGet.includes("application/json")) {
+                res = getRes;
+              }
+            }
+          }
+        }
+
+        const ct = res ? res.headers.get("content-type") || "" : "";
+        const isJsonResponse = ct.includes("application/json");
+
+        if (res && res.ok && isJsonResponse) {
           const payload = await res.json();
           const extractions = Array.isArray(payload?.extractions) ? payload.extractions : [];
-          const byKey = new Map<string, any>();
-          for (const ex of extractions) {
-            if (ex && ex.postKey) byKey.set(String(ex.postKey), ex);
+          batchRecords = mapGeminiExtractionsToRecords(chunk, extractions);
+          usedGemini = true;
+        } else if (
+          serverNerEndpointMissing ||
+          !res ||
+          res.status === 400 ||
+          res.status === 404 ||
+          res.status === 405 ||
+          res.status === 501 ||
+          (res.ok && !isJsonResponse)
+        ) {
+          // Server endpoint missing or blocked on static Cloudflare Workers/Pages (405/404/HTML rewrite)
+          if (res && (res.status === 404 || res.status === 405 || res.status === 501 || (res.ok && !isJsonResponse))) {
+            serverNerEndpointMissing = true;
           }
 
-          const now = Date.now();
-          batchRecords = chunk.map((c) => {
-            const raw = byKey.get(c.postKey);
-            const rawEntities = Array.isArray(raw?.entities) ? raw.entities : [];
-            const rawRelations = Array.isArray(raw?.relations) ? raw.relations : [];
-
-            const cleanEntities: ExtractedPostEntity[] = rawEntities
-              .filter((e: any) => e && (e.canonical || e.name))
-              .map((e: any) => ({
-                name: String(e.name || e.canonical).trim(),
-                canonical: String(e.canonical || e.name).trim(),
-                nerClass: coerceNerClass(e.nerClass),
-                quote: String(e.quote || "").trim().slice(0, 220),
-              }));
-
-            const cleanRelations: ExtractedPostRelation[] = rawRelations
-              .filter((r: any) => r && r.subject && r.object)
-              .map((r: any) => ({
-                subject: String(r.subject).trim(),
-                subjectClass: coerceNerClass(r.subjectClass),
-                relationClass: coerceRelationClass(r.relationClass),
-                object: String(r.object).trim(),
-                objectClass: coerceNerClass(r.objectClass),
-                quote: String(r.quote || "").trim().slice(0, 240),
-                confidence: Math.min(1, Math.max(0.1, Number(r.confidence ?? 0.85))),
-              }));
-
-            return {
-              id: `${channelId}::${c.postKey}`,
-              channelId,
-              postKey: c.postKey,
-              timestampMs: c.timestampMs,
-              extractorVersion: EXPLORER_NER_EXTRACTOR_VERSION,
-              engine: "gemini" as const,
-              entities: cleanEntities,
-              relations: cleanRelations,
-              updatedAt: now,
-            };
-          });
-          usedGemini = true;
-        } else if (res.status === 400 || res.status === 404) {
-          // Server Gemini key not configured -> switch cleanly to local structured NLP
-          geminiUnavailable = true;
+          // If user explicitly provided a client-side Gemini API key, attempt direct Gemini REST fallback
+          if (storedGeminiKey && (!res || res.status !== 400)) {
+            const directExtractions = await callDirectGeminiNer(chunk, storedGeminiKey, options.signal);
+            if (directExtractions) {
+              batchRecords = mapGeminiExtractionsToRecords(chunk, directExtractions);
+              usedGemini = true;
+            } else {
+              geminiUnavailable = true;
+            }
+          } else {
+            // Switch cleanly to optimized local structured NLP without flagging HTTP 405/404 as failure
+            geminiUnavailable = true;
+          }
         } else {
           const errBody = await res.json().catch(() => ({}));
           progress.failedBatches += 1;
