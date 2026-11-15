@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 
 dotenv.config();
 
@@ -127,6 +127,142 @@ Output MUST be a valid JSON array of clusters:
     console.error('Gemini cluster error:', error);
     res.status(500).json({
       error: error?.message || 'Failed to cluster posts with Gemini',
+    });
+  }
+});
+
+// Structured 10-class NER & timestamped 10-class relation extraction using gemini-4-hydrogen
+app.post('/api/gemini/ner', async (req, res) => {
+  try {
+    const { posts: rawPosts, channelName, apiKey: customKey } = req.body;
+    const ai = getGeminiClient(customKey);
+
+    if (!ai) {
+      return res.status(400).json({
+        error: 'Gemini API key is not configured. Falling back to local extraction.',
+      });
+    }
+
+    if (!Array.isArray(rawPosts) || rawPosts.length === 0) {
+      return res.json({ extractions: [] });
+    }
+
+    const inputPosts = rawPosts.slice(0, 30).map((p: any) => ({
+      postKey: String(p?.postKey || ''),
+      dateLabel: String(p?.dateLabel || ''),
+      author: p?.author ? String(p.author) : '',
+      text: String(p?.text || '').slice(0, 2400),
+    }));
+
+    const systemInstruction = `You are a strict multilingual Named Entity Recognition (NER) and Relation Extraction analyst inspecting posts from channel "${String(channelName || 'unknown')}".
+For every input post, extract named entities and directed/undirected relations grounded strictly in the post text.
+Allowed nerClass values (exactly 10):
+- person: Named human individuals
+- organization: Companies, agencies, NGOs, military units, political parties, media outlets
+- nation: Sovereign states, territories, governments, geopolitical blocs
+- job_position: Executive, governmental, military, judicial, or institutional titles/roles
+- location: Cities, provinces, regions, districts, landmarks, geographic features
+- address: Street addresses, buildings, bases, ports, airports, embassies, compounds
+- event: Named summits, protests, hearings, elections, operations, clashes, disasters
+- platform: Online platforms, Telegram channels, @handles, domains, URLs
+- asset_law: Bills, laws, treaties, decrees, weapons, software, products, crypto assets
+- financial_metric: Monetary sums, percentages, casualty/crowd counts, economic metrics
+
+Allowed relationClass values (exactly 10):
+- holds_role (person -> job_position or organization)
+- affiliated_with (person/group -> organization or nation)
+- located_at (actor/event -> location/address/nation)
+- participated_in (actor -> event)
+- targets_or_acts_on (actor -> person/organization/nation/address)
+- issued_or_authored (actor -> asset_law/statement)
+- cooperated_with (actor <-> actor)
+- opposed_to (actor <-> actor)
+- transferred_or_funded (actor -> asset/organization/nation/metric)
+- operated_by (platform/address -> organization/person)
+
+Rules:
+1. Canonicalize entity names cleanly (e.g. "US" / "U.S." -> "United States" for canonical, keep exact surface span in name).
+2. Always include a concise verbatim quote snippet from that post supporting each entity and relation.
+3. Preserve exact postKey values.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: JSON.stringify(inputPosts) },
+          ],
+        },
+      ],
+      config: {
+        systemInstruction,
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            extractions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  postKey: { type: Type.STRING },
+                  entities: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        name: { type: Type.STRING },
+                        canonical: { type: Type.STRING },
+                        nerClass: { type: Type.STRING },
+                        quote: { type: Type.STRING },
+                      },
+                      required: ['name', 'canonical', 'nerClass', 'quote'],
+                    },
+                  },
+                  relations: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        subject: { type: Type.STRING },
+                        subjectClass: { type: Type.STRING },
+                        relationClass: { type: Type.STRING },
+                        object: { type: Type.STRING },
+                        objectClass: { type: Type.STRING },
+                        quote: { type: Type.STRING },
+                        confidence: { type: Type.NUMBER },
+                      },
+                      required: [
+                        'subject',
+                        'subjectClass',
+                        'relationClass',
+                        'object',
+                        'objectClass',
+                        'quote',
+                        'confidence',
+                      ],
+                    },
+                  },
+                },
+                required: ['postKey', 'entities', 'relations'],
+              },
+            },
+          },
+          required: ['extractions'],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text || '{"extractions":[]}');
+    res.json({
+      extractions: Array.isArray(parsed?.extractions) ? parsed.extractions : [],
+      engine: 'gemini',
+    });
+  } catch (error: any) {
+    console.error('Gemini NER extraction error:', error);
+    res.status(500).json({
+      error: error?.message || 'Failed to extract entities with Gemini',
     });
   }
 });

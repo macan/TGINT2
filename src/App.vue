@@ -163,6 +163,21 @@ const HotsDashboard = defineAsyncComponent(() => import("./components/listen/Hot
 const TileTreemapView = defineAsyncComponent(() => import("./components/listen/TileTreemapView.vue"));
 const StorageMonitorWidget = defineAsyncComponent(() => import("./components/listen/StorageMonitorWidget.vue"));
 import DateRangePicker from "./components/listen/DateRangePicker.vue";
+import ExplorerNerWidget from "./components/explorer/ExplorerNerWidget.vue";
+const ExplorerNerModal = defineAsyncComponent(() => import("./components/explorer/ExplorerNerModal.vue"));
+import {
+  EXPLORER_NER_EXTRACTOR_VERSION,
+  aggregateNerIndex,
+  clearChannelNerExtractions,
+  extractPostPlainText,
+  highlightNerTextInHtml,
+  loadChannelNerExtractions,
+  normalizeNerChannelKey,
+  runChannelNerExtractionBatch,
+  type ActiveNerFeedFilter,
+  type NerBatchProgress,
+  type PostNerExtractionRecord,
+} from "./utils/explorerNer";
 import {
   type ListenDateRangeValue,
   DEFAULT_LISTEN_DATE_RANGE,
@@ -315,6 +330,9 @@ const formatVersionTime = (time: any): string => {
   }
 };
 
+const activeNerFeedFilter = ref<ActiveNerFeedFilter | null>(null);
+const activeNerQuoteIndex = ref(0);
+
 const getSafePostContent = (post: any): string => {
   if (!post || !post.data) return "";
   const raw = post.data.rawcontent || post.data.content || "";
@@ -334,7 +352,21 @@ const getSafePostContent = (post: any): string => {
     link.setAttribute("rel", "noopener noreferrer");
     link.classList.add("text-blue-500", "hover:underline", "break-all");
   });
-  const processedRaw = doc.body.innerHTML;
+  let processedRaw = doc.body.innerHTML;
+
+  if (
+    activeNerFeedFilter.value &&
+    activeTab?.value === "explorer" &&
+    post?.key &&
+    activeNerFeedFilter.value.postKeys.includes(String(post.key))
+  ) {
+    const activeQuote = activeNerFeedFilter.value.quotes[activeNerQuoteIndex.value];
+    const terms = [...activeNerFeedFilter.value.surfaceTerms];
+    if (activeQuote && activeQuote.postKey === String(post.key) && activeQuote.quote) {
+      terms.push(activeQuote.quote.slice(0, 80));
+    }
+    processedRaw = highlightNerTextInHtml(processedRaw, terms);
+  }
 
   if (post.key && post.key in translatedPosts.value) {
     const translation = translatedPosts.value[post.key];
@@ -1288,6 +1320,12 @@ const filteredPosts = computed(() => {
       const username = parts[parts.length - 1];
       return selectedUsernamesExplorer.value.includes(username);
     });
+  }
+
+  // filter by active Explorer NER Entity / Relation selection
+  if (activeNerFeedFilter.value && activeNerFeedFilter.value.postKeys.length > 0) {
+    const allowedKeys = new Set(activeNerFeedFilter.value.postKeys.map((k) => String(k)));
+    result = result.filter((p) => allowedKeys.has(String(p?.key || p?.id || "")));
   }
 
   return result;
@@ -11784,12 +11822,187 @@ const fetchChannelProfile = async (channel?: string) => {
   }
 };
 
-watch(currentChannelName, (newChannel) => {
+// Explorer NER & Relations State
+const EXPLORER_NER_AUTO_KEY = "gingko_explorer_ner_auto_extract";
+const explorerNerRecords = shallowRef<PostNerExtractionRecord[]>([]);
+const explorerNerAutoExtract = ref<boolean>(
+  typeof localStorage !== "undefined" && localStorage.getItem(EXPLORER_NER_AUTO_KEY) === "1"
+);
+const isExtractingNer = ref(false);
+const explorerNerProgress = ref<NerBatchProgress | null>(null);
+const explorerNerError = ref<string | null>(null);
+const isNerModalOpen = ref(false);
+let nerExtractAbortController: AbortController | null = null;
+let nerActiveChannelRequestToken = 0;
+
+const explorerNerIndex = computed(() => aggregateNerIndex(explorerNerRecords.value));
+
+const explorerNerUncachedCount = computed(() => {
+  const chKey = normalizeNerChannelKey(currentChannelName.value || "");
+  if (!chKey || posts.value.length === 0) return 0;
+  const cachedSet = new Set(
+    explorerNerRecords.value
+      .filter((r) => r.channelId === chKey && r.extractorVersion === EXPLORER_NER_EXTRACTOR_VERSION)
+      .map((r) => r.postKey)
+  );
+  let count = 0;
+  for (const p of posts.value) {
+    const pk = String(p?.key || p?.id || "").trim();
+    if (!pk || cachedSet.has(pk)) continue;
+    const txt = extractPostPlainText(p);
+    if (txt && txt.length >= 3) count += 1;
+  }
+  return count;
+});
+
+const toggleExplorerNerAuto = (enabled: boolean) => {
+  explorerNerAutoExtract.value = enabled;
+  try {
+    localStorage.setItem(EXPLORER_NER_AUTO_KEY, enabled ? "1" : "0");
+  } catch {
+    // ignore storage quota errors
+  }
+  if (enabled && explorerNerUncachedCount.value > 0 && !isExtractingNer.value) {
+    runExplorerNerExtraction(false);
+  }
+};
+
+const cancelExplorerNerExtraction = () => {
+  if (nerExtractAbortController) {
+    nerExtractAbortController.abort();
+    nerExtractAbortController = null;
+  }
+  isExtractingNer.value = false;
+};
+
+const clearExplorerNerCache = async () => {
+  cancelExplorerNerExtraction();
+  const ch = currentChannelName.value;
+  if (!ch) return;
+  await clearChannelNerExtractions(ch);
+  explorerNerRecords.value = [];
+  explorerNerProgress.value = null;
+  explorerNerError.value = null;
+  activeNerFeedFilter.value = null;
+  activeNerQuoteIndex.value = 0;
+};
+
+const runExplorerNerExtraction = async (forceReextract = false) => {
+  const targetChannel = currentChannelName.value;
+  if (!targetChannel || posts.value.length === 0) return;
+
+  if (nerExtractAbortController) {
+    nerExtractAbortController.abort();
+  }
+  nerExtractAbortController = new AbortController();
+  const signal = nerExtractAbortController.signal;
+  const reqToken = ++nerActiveChannelRequestToken;
+
+  isExtractingNer.value = true;
+  explorerNerError.value = null;
+
+  try {
+    const result = await runChannelNerExtractionBatch({
+      channelName: targetChannel,
+      posts: posts.value,
+      existingRecords: explorerNerRecords.value,
+      forceReextract,
+      signal,
+      onProgress: (prog) => {
+        if (reqToken === nerActiveChannelRequestToken) {
+          explorerNerProgress.value = prog;
+        }
+      },
+      onRecordsUpdated: (updated) => {
+        if (reqToken === nerActiveChannelRequestToken) {
+          explorerNerRecords.value = updated;
+        }
+      },
+    });
+
+    if (reqToken === nerActiveChannelRequestToken && !result.aborted) {
+      explorerNerRecords.value = result.records;
+      if (result.progress.failedBatches > 0 && result.progress.lastError) {
+        explorerNerError.value = result.progress.lastError;
+      }
+    }
+  } catch (err: any) {
+    if (err?.name !== "AbortError" && reqToken === nerActiveChannelRequestToken) {
+      explorerNerError.value = err?.message || "Extraction failed";
+    }
+  } finally {
+    if (reqToken === nerActiveChannelRequestToken) {
+      isExtractingNer.value = false;
+    }
+  }
+};
+
+const applyExplorerNerFeedFilter = (
+  filter: ActiveNerFeedFilter,
+  targetPostKey?: string
+) => {
+  activeNerFeedFilter.value = filter;
+  if (targetPostKey) {
+    const qIdx = filter.quotes.findIndex((q) => q.postKey === targetPostKey);
+    activeNerQuoteIndex.value = qIdx >= 0 ? qIdx : 0;
+    scrollToPost(targetPostKey);
+  } else {
+    activeNerQuoteIndex.value = 0;
+    const firstKey = filter.quotes[0]?.postKey || filter.postKeys[0];
+    if (firstKey) {
+      scrollToPost(firstKey);
+    }
+  }
+};
+
+const stepExplorerNerQuote = (delta: number) => {
+  const f = activeNerFeedFilter.value;
+  if (!f || f.quotes.length === 0) return;
+  const len = f.quotes.length;
+  const nextIdx = (activeNerQuoteIndex.value + delta + len) % len;
+  activeNerQuoteIndex.value = nextIdx;
+  const targetKey = f.quotes[nextIdx]?.postKey;
+  if (targetKey) scrollToPost(targetKey);
+};
+
+const clearExplorerNerFeedFilter = () => {
+  activeNerFeedFilter.value = null;
+  activeNerQuoteIndex.value = 0;
+};
+
+watch(currentChannelName, async (newChannel) => {
     if (newChannel) {
       fetchChannelProfile(newChannel);
       postsRenderLimit.value = 50;
+      cancelExplorerNerExtraction();
+      nerActiveChannelRequestToken += 1;
+      const myToken = nerActiveChannelRequestToken;
+      explorerNerRecords.value = [];
+      explorerNerProgress.value = null;
+      explorerNerError.value = null;
+      activeNerFeedFilter.value = null;
+      activeNerQuoteIndex.value = 0;
+      const cached = await loadChannelNerExtractions(newChannel);
+      if (myToken === nerActiveChannelRequestToken) {
+        explorerNerRecords.value = cached;
+      }
     }
 });
+
+watch(
+  () => posts.value.length,
+  (len) => {
+    if (
+      len > 0 &&
+      activeTab.value === "explorer" &&
+      explorerNerAutoExtract.value &&
+      !isExtractingNer.value &&
+      explorerNerUncachedCount.value > 0
+    ) {
+      runExplorerNerExtraction(false);
+    }
+  }
+);
 
 interface FolderCrumb {
   id: string;
@@ -20809,6 +21022,26 @@ onUnmounted(() => {
               </div>
             </div>
 
+            <!-- Named Entities & Timestamped Relations Widget (Directly Below Channel Profile) -->
+            <ExplorerNerWidget
+              v-if="isProfileVisible"
+              :index="explorerNerIndex"
+              :total-posts-count="posts.length"
+              :uncached-count="explorerNerUncachedCount"
+              :is-extracting="isExtractingNer"
+              :auto-extract="explorerNerAutoExtract"
+              :progress="explorerNerProgress"
+              :error-message="explorerNerError"
+              :active-filter="activeNerFeedFilter"
+              @extract="runExplorerNerExtraction"
+              @cancel="cancelExplorerNerExtraction"
+              @toggle-auto="toggleExplorerNerAuto"
+              @clear-cache="clearExplorerNerCache"
+              @expand="isNerModalOpen = true"
+              @select-filter="applyExplorerNerFeedFilter"
+              @clear-filter="clearExplorerNerFeedFilter"
+            />
+
             <!-- Sticky Sidebar Block -->
             <div
               v-show="isProfileVisible"
@@ -21451,6 +21684,66 @@ onUnmounted(() => {
                       >{{ t('explorer.spanStarts', { span: postsTimelineStats.spanText }) }}</span
                     >
                     <span class="truncate max-w-[30%] text-right">{{ postsTimelineStats.end }}</span>
+                  </div>
+                </div>
+
+                <!-- Active NER Entity / Relation Filter Banner -->
+                <div
+                  v-if="activeNerFeedFilter"
+                  class="mb-4 px-4 py-3 rounded-2xl border border-teal-200/80 dark:border-teal-800/60 bg-teal-50/70 dark:bg-teal-950/30 flex flex-wrap items-center justify-between gap-3"
+                >
+                  <div class="min-w-0 flex-1">
+                    <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+                      <span class="font-bold text-teal-700 dark:text-teal-300">
+                        {{ t('explorer.ner.activeBannerPrefix') }}:
+                      </span>
+                      <span class="font-bold text-gray-900 dark:text-white truncate">
+                        {{ activeNerFeedFilter.label }}
+                      </span>
+                      <span v-if="activeNerFeedFilter.sublabel" class="text-gray-500 dark:text-gray-400">
+                        · {{ activeNerFeedFilter.sublabel }}
+                      </span>
+                      <span class="font-mono tabular-nums text-gray-600 dark:text-gray-300">
+                        · {{ t('explorer.ner.matchingPostsCount', { count: filteredPosts.length }) }}
+                      </span>
+                    </div>
+                    <p
+                      v-if="activeNerFeedFilter.quotes[activeNerQuoteIndex]?.quote"
+                      class="mt-1 text-xs text-gray-600 dark:text-gray-300 truncate"
+                    >
+                      “{{ activeNerFeedFilter.quotes[activeNerQuoteIndex].quote }}”
+                    </p>
+                  </div>
+
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <template v-if="activeNerFeedFilter.quotes.length > 0">
+                      <span class="text-[11px] font-mono tabular-nums text-gray-500 dark:text-gray-400 mr-1">
+                        {{ t('explorer.ner.quoteStepLabel', { current: activeNerQuoteIndex + 1, total: activeNerFeedFilter.quotes.length }) }}
+                      </span>
+                      <button
+                        type="button"
+                        @click="stepExplorerNerQuote(-1)"
+                        class="p-1.5 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+                        :title="t('explorer.ner.prevQuote')"
+                      >
+                        <ChevronLeft class="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        @click="stepExplorerNerQuote(1)"
+                        class="p-1.5 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+                        :title="t('explorer.ner.nextQuote')"
+                      >
+                        <ChevronRight class="w-3.5 h-3.5" />
+                      </button>
+                    </template>
+                    <button
+                      type="button"
+                      @click="clearExplorerNerFeedFilter"
+                      class="px-2.5 py-1.5 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-xs font-semibold text-gray-700 dark:text-gray-200 hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      {{ t('explorer.ner.clearActiveFilter') }}
+                    </button>
                   </div>
                 </div>
 
@@ -23702,6 +23995,20 @@ onUnmounted(() => {
           </div>
         </div>
       </Transition>
+
+      <!-- Explorer NER & Timestamped Relations Expanded Modal -->
+      <ExplorerNerModal
+        :open="isNerModalOpen"
+        :channel-name="currentChannelName"
+        :index="explorerNerIndex"
+        :total-posts-count="posts.length"
+        :uncached-count="explorerNerUncachedCount"
+        :is-extracting="isExtractingNer"
+        @close="isNerModalOpen = false"
+        @extract="runExplorerNerExtraction"
+        @cancel="cancelExplorerNerExtraction"
+        @select-filter="applyExplorerNerFeedFilter"
+      />
 
       <!-- Photo Lightbox -->
       <Transition
