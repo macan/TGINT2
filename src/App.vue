@@ -175,6 +175,7 @@ import {
   normalizeNerChannelKey,
   runChannelNerExtractionBatch,
   type ActiveNerFeedFilter,
+  type NerBackgroundUpgradeState,
   type NerBatchProgress,
   type PostNerExtractionRecord,
 } from "./utils/explorerNer";
@@ -188,6 +189,7 @@ import {
   subscribeNerMlState,
   warmupLocalMlModel,
   type NerMlState,
+  type WorkerExecutorPreference,
 } from "./utils/nerMlClient";
 import {
   type ListenDateRangeValue,
@@ -11841,22 +11843,87 @@ const explorerNerAutoExtract = ref<boolean>(
 );
 const isExtractingNer = ref(false);
 const explorerNerProgress = ref<NerBatchProgress | null>(null);
+const explorerNerBgUpgrade = ref<NerBackgroundUpgradeState | null>(null);
 const explorerNerError = ref<string | null>(null);
 const isNerModalOpen = ref(false);
 let nerExtractAbortController: AbortController | null = null;
 let nerActiveChannelRequestToken = 0;
+let nerBgUpgradeAbortController: AbortController | null = null;
+let nerBgUpgradeToken = 0;
+let isBgUpgradingNer = false;
+let nerBgUpgradeDoneTimer: ReturnType<typeof setTimeout> | null = null;
+const nerBgUpgradeSkippedIds = new Set<string>();
 
 const explorerNerMlState = ref<NerMlState>(getNerMlState());
 let unsubscribeNerMlState: (() => void) | null = null;
+
+const isLocalMlEngineActive = computed(() => {
+  const ml = explorerNerMlState.value;
+  return (
+    ml.enabled &&
+    ml.executionProvider !== null &&
+    (ml.status === "ready" || ml.status === "inferring")
+  );
+});
+
+const dismissExplorerNerBgUpgrade = () => {
+  if (nerBgUpgradeDoneTimer) {
+    clearTimeout(nerBgUpgradeDoneTimer);
+    nerBgUpgradeDoneTimer = null;
+  }
+  if (explorerNerBgUpgrade.value?.status === "completed") {
+    explorerNerBgUpgrade.value = null;
+  }
+};
+
+const cancelExplorerNerBgUpgrade = (skipRemaining = true) => {
+  if (nerBgUpgradeDoneTimer) {
+    clearTimeout(nerBgUpgradeDoneTimer);
+    nerBgUpgradeDoneTimer = null;
+  }
+  if (skipRemaining) {
+    const chKey = normalizeNerChannelKey(currentChannelName.value || "");
+    if (chKey) {
+      for (const rec of explorerNerRecords.value) {
+        if (rec.channelId === chKey && rec.engine === "local" && rec.localTier !== "ml") {
+          nerBgUpgradeSkippedIds.add(`${chKey}::${rec.postKey}`);
+        }
+      }
+    }
+  }
+  nerBgUpgradeToken += 1;
+  if (nerBgUpgradeAbortController) {
+    nerBgUpgradeAbortController.abort();
+    nerBgUpgradeAbortController = null;
+  }
+  isBgUpgradingNer = false;
+  explorerNerBgUpgrade.value = null;
+};
 
 onMounted(() => {
   unsubscribeNerMlState = subscribeNerMlState((s) => {
     explorerNerMlState.value = s;
   });
-  checkLocalMlModelCached().catch(() => {});
+  checkLocalMlModelCached()
+    .then((cached) => {
+      if (
+        cached &&
+        explorerNerMlState.value.enabled &&
+        activeTab.value === "explorer" &&
+        explorerNerMlState.value.status === "idle" &&
+        !explorerNerMlState.value.executionProvider
+      ) {
+        warmupExplorerNerLocalMl();
+      }
+    })
+    .catch(() => {});
 });
 
 onUnmounted(() => {
+  if (nerBgUpgradeDoneTimer) {
+    clearTimeout(nerBgUpgradeDoneTimer);
+    nerBgUpgradeDoneTimer = null;
+  }
   if (unsubscribeNerMlState) {
     unsubscribeNerMlState();
     unsubscribeNerMlState = null;
@@ -11864,6 +11931,31 @@ onUnmounted(() => {
 });
 
 const explorerNerIndex = computed(() => aggregateNerIndex(explorerNerRecords.value));
+
+const explorerNerRulePendingKeys = computed(() => {
+  const chKey = normalizeNerChannelKey(currentChannelName.value || "");
+  if (!chKey || posts.value.length === 0) return [];
+  const ruleKeySet = new Set<string>();
+  for (const r of explorerNerRecords.value) {
+    if (
+      r.channelId === chKey &&
+      r.engine === "local" &&
+      r.localTier !== "ml" &&
+      !nerBgUpgradeSkippedIds.has(`${chKey}::${r.postKey}`)
+    ) {
+      ruleKeySet.add(r.postKey);
+    }
+  }
+  if (ruleKeySet.size === 0) return [];
+  const matched: string[] = [];
+  for (const p of posts.value) {
+    const pk = String(p?.key || p?.id || "").trim();
+    if (!pk || !ruleKeySet.has(pk)) continue;
+    const txt = extractPostPlainText(p);
+    if (txt && txt.length >= 3) matched.push(pk);
+  }
+  return matched;
+});
 
 const explorerNerUncachedCount = computed(() => {
   const chKey = normalizeNerChannelKey(currentChannelName.value || "");
@@ -11884,16 +11976,144 @@ const explorerNerUncachedCount = computed(() => {
   return count;
 });
 
+const runExplorerNerBackgroundUpgrade = async () => {
+  const targetChannel = currentChannelName.value;
+  const chKey = normalizeNerChannelKey(targetChannel || "");
+  const pendingCount = explorerNerRulePendingKeys.value.length;
+  if (
+    !targetChannel ||
+    !chKey ||
+    pendingCount === 0 ||
+    !isLocalMlEngineActive.value ||
+    isExtractingNer.value ||
+    isBgUpgradingNer
+  ) {
+    return;
+  }
+
+  dismissExplorerNerBgUpgrade();
+  if (nerBgUpgradeAbortController) {
+    nerBgUpgradeAbortController.abort();
+  }
+  nerBgUpgradeAbortController = new AbortController();
+  const signal = nerBgUpgradeAbortController.signal;
+  const myToken = ++nerBgUpgradeToken;
+  const channelTokenSnapshot = nerActiveChannelRequestToken;
+  isBgUpgradingNer = true;
+
+  const initialProvider = explorerNerMlState.value.executionProvider || "wasm";
+  explorerNerBgUpgrade.value = {
+    status: "running",
+    done: 0,
+    total: pendingCount,
+    provider: initialProvider,
+  };
+
+  try {
+    const result = await runChannelNerExtractionBatch({
+      channelName: targetChannel,
+      posts: posts.value,
+      existingRecords: explorerNerRecords.value,
+      useLocalMl: true,
+      onlyUpgradeRuleRecords: true,
+      signal,
+      onProgress: (prog) => {
+        if (myToken !== nerBgUpgradeToken || channelTokenSnapshot !== nerActiveChannelRequestToken) {
+          return;
+        }
+        const liveProvider = explorerNerMlState.value.executionProvider || initialProvider;
+        explorerNerBgUpgrade.value = {
+          status: "running",
+          done: prog.done,
+          total: prog.total || pendingCount,
+          provider: liveProvider,
+        };
+      },
+      onRecordsUpdated: (updated) => {
+        if (myToken !== nerBgUpgradeToken || channelTokenSnapshot !== nerActiveChannelRequestToken) {
+          return;
+        }
+        explorerNerRecords.value = updated;
+      },
+    });
+
+    if (
+      myToken === nerBgUpgradeToken &&
+      channelTokenSnapshot === nerActiveChannelRequestToken &&
+      !result.aborted
+    ) {
+      explorerNerRecords.value = result.records;
+      const finalProvider = explorerNerMlState.value.executionProvider || initialProvider;
+      if (result.progress.failedBatches > 0) {
+        for (const rec of result.records) {
+          if (rec.channelId === chKey && rec.engine === "local" && rec.localTier !== "ml") {
+            nerBgUpgradeSkippedIds.add(`${chKey}::${rec.postKey}`);
+          }
+        }
+        explorerNerBgUpgrade.value = null;
+      } else if (result.progress.done > 0) {
+        explorerNerBgUpgrade.value = {
+          status: "completed",
+          done: result.progress.done,
+          total: result.progress.done,
+          provider: finalProvider,
+        };
+        nerBgUpgradeDoneTimer = setTimeout(() => {
+          if (explorerNerBgUpgrade.value?.status === "completed") {
+            explorerNerBgUpgrade.value = null;
+          }
+          nerBgUpgradeDoneTimer = null;
+        }, 6000);
+      } else {
+        explorerNerBgUpgrade.value = null;
+      }
+    }
+  } catch (err: any) {
+    if (
+      err?.name !== "AbortError" &&
+      myToken === nerBgUpgradeToken &&
+      channelTokenSnapshot === nerActiveChannelRequestToken
+    ) {
+      for (const rec of explorerNerRecords.value) {
+        if (rec.channelId === chKey && rec.engine === "local" && rec.localTier !== "ml") {
+          nerBgUpgradeSkippedIds.add(`${chKey}::${rec.postKey}`);
+        }
+      }
+      explorerNerBgUpgrade.value = null;
+    }
+  } finally {
+    if (myToken === nerBgUpgradeToken) {
+      isBgUpgradingNer = false;
+      nerBgUpgradeAbortController = null;
+    }
+  }
+};
+
+const maybeTriggerExplorerNerBackgroundUpgrade = () => {
+  if (
+    activeTab.value === "explorer" &&
+    isLocalMlEngineActive.value &&
+    !isExtractingNer.value &&
+    !isBgUpgradingNer &&
+    explorerNerRulePendingKeys.value.length > 0
+  ) {
+    runExplorerNerBackgroundUpgrade();
+  }
+};
+
 const warmupExplorerNerLocalMl = async () => {
   try {
     await warmupLocalMlModel();
     if (
       explorerNerMlState.value.enabled &&
       activeTab.value === "explorer" &&
-      explorerNerUncachedCount.value > 0 &&
       !isExtractingNer.value
     ) {
-      runExplorerNerExtraction(false);
+      if (explorerNerRulePendingKeys.value.length > 0) {
+        maybeTriggerExplorerNerBackgroundUpgrade();
+      } else if (explorerNerAutoExtract.value && explorerNerUncachedCount.value > 0) {
+        runExplorerNerExtraction(false);
+      }
     }
   } catch {
     // Error status already reflected in explorerNerMlState
@@ -11901,13 +12121,24 @@ const warmupExplorerNerLocalMl = async () => {
 };
 
 const toggleExplorerNerLocalMl = (enabled: boolean) => {
+  nerBgUpgradeSkippedIds.clear();
+  if (!enabled) {
+    cancelExplorerNerBgUpgrade(false);
+  }
   setLocalMlEnabled(enabled);
   if (enabled) {
     warmupExplorerNerLocalMl();
   }
 };
 
+const setExplorerNerLocalMlExecutor = (pref: WorkerExecutorPreference) => {
+  nerBgUpgradeSkippedIds.clear();
+  cancelExplorerNerBgUpgrade(false);
+  setLocalMlExecutorPreference(pref);
+};
+
 const clearExplorerNerLocalMlModel = async () => {
+  cancelExplorerNerBgUpgrade(false);
   await clearLocalMlModelCache();
 };
 
@@ -11933,6 +12164,8 @@ const cancelExplorerNerExtraction = () => {
 
 const clearExplorerNerCache = async () => {
   cancelExplorerNerExtraction();
+  cancelExplorerNerBgUpgrade(false);
+  nerBgUpgradeSkippedIds.clear();
   const ch = currentChannelName.value;
   if (!ch) return;
   await clearChannelNerExtractions(ch);
@@ -11947,6 +12180,8 @@ const runExplorerNerExtraction = async (forceReextract = false) => {
   const targetChannel = currentChannelName.value;
   if (!targetChannel || posts.value.length === 0) return;
 
+  cancelExplorerNerBgUpgrade(false);
+
   if (nerExtractAbortController) {
     nerExtractAbortController.abort();
   }
@@ -11958,12 +12193,14 @@ const runExplorerNerExtraction = async (forceReextract = false) => {
   explorerNerError.value = null;
 
   try {
+    // Use GLiNER only when WASM/WebGPU engine is already active; otherwise immediately run rules and auto-upgrade in background when ML activates.
+    const useActiveMlNow = isLocalMlEngineActive.value;
     const result = await runChannelNerExtractionBatch({
       channelName: targetChannel,
       posts: posts.value,
       existingRecords: explorerNerRecords.value,
       forceReextract,
-      useLocalMl: explorerNerMlState.value.enabled,
+      useLocalMl: useActiveMlNow,
       signal,
       onProgress: (prog) => {
         if (reqToken === nerActiveChannelRequestToken) {
@@ -11990,6 +12227,7 @@ const runExplorerNerExtraction = async (forceReextract = false) => {
   } finally {
     if (reqToken === nerActiveChannelRequestToken) {
       isExtractingNer.value = false;
+      maybeTriggerExplorerNerBackgroundUpgrade();
     }
   }
 };
@@ -12032,6 +12270,7 @@ watch(currentChannelName, async (newChannel) => {
       fetchChannelProfile(newChannel);
       postsRenderLimit.value = 50;
       cancelExplorerNerExtraction();
+      cancelExplorerNerBgUpgrade(false);
       nerActiveChannelRequestToken += 1;
       const myToken = nerActiveChannelRequestToken;
       explorerNerRecords.value = [];
@@ -12059,6 +12298,39 @@ watch(
       runExplorerNerExtraction(false);
     }
   }
+);
+
+watch(
+  [
+    activeTab,
+    () => explorerNerMlState.value.enabled,
+    () => explorerNerMlState.value.isModelCached,
+    () => explorerNerMlState.value.status,
+  ],
+  ([tab, mlEnabled, isCached, status]) => {
+    if (
+      tab === "explorer" &&
+      mlEnabled &&
+      isCached &&
+      status === "idle" &&
+      !explorerNerMlState.value.executionProvider
+    ) {
+      warmupExplorerNerLocalMl();
+    }
+  }
+);
+
+watch(
+  [
+    isLocalMlEngineActive,
+    activeTab,
+    currentChannelName,
+    () => explorerNerRulePendingKeys.value.length,
+  ],
+  () => {
+    maybeTriggerExplorerNerBackgroundUpgrade();
+  },
+  { flush: "post" }
 );
 
 interface FolderCrumb {
@@ -21088,6 +21360,7 @@ onUnmounted(() => {
               :is-extracting="isExtractingNer"
               :auto-extract="explorerNerAutoExtract"
               :ml-state="explorerNerMlState"
+              :bg-upgrade="explorerNerBgUpgrade"
               :progress="explorerNerProgress"
               :error-message="explorerNerError"
               :active-filter="activeNerFeedFilter"
@@ -21095,10 +21368,12 @@ onUnmounted(() => {
               @cancel="cancelExplorerNerExtraction"
               @toggle-auto="toggleExplorerNerAuto"
               @toggle-local-ml="toggleExplorerNerLocalMl"
-              @set-executor-ml="setLocalMlExecutorPreference"
+              @set-executor-ml="setExplorerNerLocalMlExecutor"
               @warmup-local-ml="warmupExplorerNerLocalMl"
               @abort-local-ml="abortLocalMlModel"
               @clear-local-ml="clearExplorerNerLocalMlModel"
+              @cancel-bg-upgrade="cancelExplorerNerBgUpgrade(true)"
+              @dismiss-bg-upgrade="dismissExplorerNerBgUpgrade"
               @clear-cache="clearExplorerNerCache"
               @expand="isNerModalOpen = true"
               @select-filter="applyExplorerNerFeedFilter"

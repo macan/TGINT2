@@ -233,6 +233,8 @@ export default {
       localMlNoticeWasmTitle: "WASM SIMD（推薦）",
       localMlNoticeWasmBody: "原生執行 INT8 量化核心，無著色器編譯與 GPU 回傳延遲，速度通常更穩定；未開啟跨源隔離時以單執行緒 SIMD 運行。",
       localMlNoticeSwitching: "切換執行器僅從本地快取重新載入（約 1 秒，無需重新下載模型）。",
+      bgUpgradeRunning: "背景正在透過 {provider} 更新 {done}/{total} 則規則擷取結果...",
+      bgUpgradeDone: "已在背景透過 {provider} 更新 {count} 則貼文的識別結果",
       extractingProgress: "正在擷取命名實體與關係...",
       emptyNoPosts: "搜尋或開啟頻道後即可擷取命名實體與關係。",
       emptyReady: "已準備對目前載入的 {count} 則貼文執行實體與時間戳關係抽取。",

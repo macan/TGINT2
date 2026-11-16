@@ -233,6 +233,8 @@ export default {
       localMlNoticeWasmTitle: "WASM SIMD (Recomendado)",
       localMlNoticeWasmBody: "Ejecuta núcleos INT8 de forma nativa en SIMD sin pausas de compilación de shaders ni transferencias GPU↔CPU; un hilo salvo cabeceras COOP/COEP.",
       localMlNoticeSwitching: "Cambiar de ejecutor recarga desde caché (~1s, sin volver a descargar).",
+      bgUpgradeRunning: "Actualizando {done}/{total} publicaciones con {provider} en segundo plano...",
+      bgUpgradeDone: "Se actualizaron {count} publicaciones con {provider}",
       extractingProgress: "Extrayendo entidades y relaciones...",
       emptyNoPosts: "Busca o carga un canal para extraer entidades y relaciones.",
       emptyReady: "Listo para extraer entidades y relaciones en {count} publicaciones cargadas.",

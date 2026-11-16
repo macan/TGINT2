@@ -233,6 +233,8 @@ export default {
       localMlNoticeWasmTitle: "WASM SIMD（推奨）",
       localMlNoticeWasmBody: "INT8 量子化演算を CPU SIMD で直接実行し、シェーダーコンパイル待ちなしで安定動作します（クロスオリジン分離が無効時はシングルスレッド SIMD）。",
       localMlNoticeSwitching: "エンジン切替はキャッシュから再読込するため再ダウンロードは不要です（約1秒）。",
+      bgUpgradeRunning: "バックグラウンドで {provider} により {done}/{total} 件を再抽出中...",
+      bgUpgradeDone: "{provider} で {count} 件の抽出結果をバックグラウンド更新しました",
       extractingProgress: "固有表現と関係性を抽出中...",
       emptyNoPosts: "チャンネルを検索すると固有表現と関係性を抽出できます。",
       emptyReady: "取得済み {count} 件の投稿から固有表現と関係性を抽出できます。",

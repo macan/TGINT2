@@ -273,6 +273,13 @@ export interface NerBatchProgress {
   lastError: string | null;
 }
 
+export interface NerBackgroundUpgradeState {
+  status: "running" | "completed";
+  done: number;
+  total: number;
+  provider: "webgpu" | "wasm";
+}
+
 // ---------------------------------------------------------------------------
 // Normalization & Utility Helpers
 // ---------------------------------------------------------------------------
@@ -1846,6 +1853,7 @@ export interface RunNerBatchOptions {
   existingRecords: PostNerExtractionRecord[];
   forceReextract?: boolean;
   useLocalMl?: boolean;
+  onlyUpgradeRuleRecords?: boolean;
   signal?: AbortSignal;
   onProgress?: (progress: NerBatchProgress) => void;
   onRecordsUpdated?: (allRecords: PostNerExtractionRecord[]) => void;
@@ -1860,11 +1868,14 @@ export async function runChannelNerExtractionBatch(
 }> {
   const channelId = normalizeNerChannelKey(options.channelName);
   const existingMap = new Map<string, PostNerExtractionRecord>();
+  const ruleUpgradeKeys = new Set<string>();
 
-  if (!options.forceReextract) {
+  if (!options.forceReextract || options.onlyUpgradeRuleRecords) {
     for (const rec of options.existingRecords) {
-      if (isNerRecordCurrent(rec, channelId, Boolean(options.useLocalMl))) {
-        existingMap.set(rec.postKey, rec);
+      if (!rec || rec.channelId !== channelId) continue;
+      existingMap.set(rec.postKey, rec);
+      if (rec.engine === "local" && rec.localTier !== "ml") {
+        ruleUpgradeKeys.add(rec.postKey);
       }
     }
   }
@@ -1882,7 +1893,14 @@ export async function runChannelNerExtractionBatch(
   for (const post of options.posts || []) {
     const postKey = String(post?.key || post?.id || "").trim();
     if (!postKey) continue;
-    if (!options.forceReextract && existingMap.has(postKey)) continue;
+    if (options.onlyUpgradeRuleRecords) {
+      if (!ruleUpgradeKeys.has(postKey)) continue;
+    } else if (!options.forceReextract) {
+      const existingRec = existingMap.get(postKey);
+      if (existingRec && isNerRecordCurrent(existingRec, channelId, Boolean(options.useLocalMl))) {
+        continue;
+      }
+    }
 
     const text = extractPostPlainText(post);
     if (!text || text.length < 3) continue;
@@ -2255,9 +2273,17 @@ Rules:
           // Fall back gracefully to fast deterministic rules if WebGPU/WASM or model fetch fails
           localMlBroken = true;
           progress.lastError = mlErr?.message || "Local ML fallback to rules";
+          if (options.onlyUpgradeRuleRecords) {
+            progress.failedBatches += 1;
+            break;
+          }
         }
       }
       if (!batchRecords) {
+        if (options.onlyUpgradeRuleRecords) {
+          progress.failedBatches += 1;
+          break;
+        }
         batchRecords = extractNerBatchLocal(channelId, chunk);
         usedLocal = true;
       }

@@ -248,6 +248,8 @@ export default {
       localMlNoticeWasmTitle: "WASM SIMD (Recommended)",
       localMlNoticeWasmBody: "Executes INT8 quantized kernels natively on CPU SIMD with zero shader compile overhead or GPU readback stalls; single-threaded unless COOP/COEP headers enable multi-threading.",
       localMlNoticeSwitching: "Switching executor reloads the cached model (~1s, no re-download).",
+      bgUpgradeRunning: "Upgrading {done}/{total} rule-based posts via {provider}...",
+      bgUpgradeDone: "Updated {count} rule-based posts using {provider}",
       extractingProgress: "Extracting entities & relations...",
       emptyNoPosts: "Search or load a channel to extract named entities and relations.",
       emptyReady: "Ready to extract named entities and timestamped relations across {count} fetched posts.",

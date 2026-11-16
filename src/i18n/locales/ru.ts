@@ -233,6 +233,8 @@ export default {
       localMlNoticeWasmTitle: "WASM SIMD (Рекомендуется)",
       localMlNoticeWasmBody: "Нативно выполняет INT8-операции на CPU SIMD без компиляции шейдеров и копирования GPU↔CPU; однопоточно без заголовков COOP/COEP.",
       localMlNoticeSwitching: "Смена движка перезагрузит модель из кэша (~1 с, без повторного скачивания).",
+      bgUpgradeRunning: "Фоновое обновление {done}/{total} постов через {provider}...",
+      bgUpgradeDone: "Обновлено {count} постов с помощью {provider}",
       extractingProgress: "Извлечение сущностей и связей...",
       emptyNoPosts: "Загрузите канал для извлечения сущностей и связей.",
       emptyReady: "Готово к анализу {count} загруженных постов.",

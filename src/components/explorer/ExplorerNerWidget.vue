@@ -335,6 +335,72 @@
       </div>
     </div>
 
+    <!-- Background Upgrade Notification (when WASM/WebGPU upgrades prior rule-based extractions) -->
+    <div
+      v-if="bgUpgrade"
+      :class="[
+        'mb-3 px-2.5 py-2 rounded-xl border text-[11px] space-y-1.5 transition-colors',
+        bgUpgrade.status === 'running'
+          ? 'border-teal-200/80 dark:border-teal-800/60 bg-teal-50/70 dark:bg-teal-950/25 text-teal-800 dark:text-teal-200'
+          : 'border-emerald-200/80 dark:border-emerald-800/60 bg-emerald-50/70 dark:bg-emerald-950/25 text-emerald-800 dark:text-emerald-200',
+      ]"
+    >
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex items-center gap-1.5 min-w-0">
+          <Loader2
+            v-if="bgUpgrade.status === 'running'"
+            class="w-3.5 h-3.5 animate-spin shrink-0 text-teal-600 dark:text-teal-400"
+          />
+          <CheckCircle2
+            v-else
+            class="w-3.5 h-3.5 shrink-0 text-emerald-600 dark:text-emerald-400"
+          />
+          <span class="truncate font-medium">
+            {{
+              bgUpgrade.status === 'running'
+                ? t('explorer.ner.bgUpgradeRunning', {
+                    done: bgUpgrade.done,
+                    total: bgUpgrade.total,
+                    provider: bgUpgrade.provider.toUpperCase(),
+                  })
+                : t('explorer.ner.bgUpgradeDone', {
+                    count: bgUpgrade.total,
+                    provider: bgUpgrade.provider.toUpperCase(),
+                  })
+            }}
+          </span>
+        </div>
+
+        <button
+          v-if="bgUpgrade.status === 'running'"
+          type="button"
+          @click="$emit('cancel-bg-upgrade')"
+          class="text-[10px] font-semibold text-rose-600 dark:text-rose-400 hover:underline cursor-pointer whitespace-nowrap shrink-0"
+        >
+          {{ t('explorer.ner.cancel') }}
+        </button>
+        <button
+          v-else
+          type="button"
+          @click="$emit('dismiss-bg-upgrade')"
+          class="text-emerald-600/70 hover:text-emerald-800 dark:text-emerald-400/70 dark:hover:text-emerald-200 cursor-pointer shrink-0"
+          :title="t('common.close')"
+        >
+          <X class="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      <div
+        v-if="bgUpgrade.status === 'running'"
+        class="w-full h-1 bg-teal-100 dark:bg-teal-900/50 rounded-full overflow-hidden"
+      >
+        <div
+          class="h-full bg-teal-600 dark:bg-teal-400 transition-all duration-200"
+          :style="{ width: `${bgUpgrade.total > 0 ? Math.round((bgUpgrade.done / bgUpgrade.total) * 100) : 0}%` }"
+        ></div>
+      </div>
+    </div>
+
     <!-- Extraction Progress Bar -->
     <div v-if="isExtracting && progress" class="mb-3 space-y-1.5">
       <div class="flex items-center justify-between text-[11px] font-medium text-teal-700 dark:text-teal-300">
@@ -613,6 +679,7 @@
 import { ref, computed } from "vue";
 import { useI18n } from "../../i18n";
 import {
+  CheckCircle2,
   Info,
   Loader2,
   Maximize2,
@@ -631,6 +698,7 @@ import {
   type AggregatedNerEntity,
   type AggregatedNerIndex,
   type AggregatedNerRelation,
+  type NerBackgroundUpgradeState,
   type NerBatchProgress,
   type NerClassId,
   type RelationClassId,
@@ -644,6 +712,7 @@ const props = defineProps<{
   isExtracting: boolean;
   autoExtract: boolean;
   mlState: NerMlState;
+  bgUpgrade?: NerBackgroundUpgradeState | null;
   progress: NerBatchProgress | null;
   errorMessage: string | null;
   activeFilter: ActiveNerFeedFilter | null;
@@ -658,6 +727,8 @@ const emit = defineEmits<{
   (e: "warmup-local-ml"): void;
   (e: "abort-local-ml"): void;
   (e: "clear-local-ml"): void;
+  (e: "cancel-bg-upgrade"): void;
+  (e: "dismiss-bg-upgrade"): void;
   (e: "clear-cache"): void;
   (e: "expand"): void;
   (e: "select-filter", filter: ActiveNerFeedFilter): void;
@@ -677,6 +748,7 @@ const executorOptions = computed<Array<{ id: WorkerExecutorPreference; label: st
 const isMlBusy = computed(
   () =>
     props.isExtracting ||
+    props.bgUpgrade?.status === "running" ||
     props.mlState.status === "downloading" ||
     props.mlState.status === "retrying" ||
     props.mlState.status === "loading_cache" ||

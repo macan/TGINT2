@@ -248,6 +248,8 @@ export default {
       localMlNoticeWasmTitle: "WASM SIMD（推荐）",
       localMlNoticeWasmBody: "原生执行 INT8 量化矩阵指令，无着色器编译与 GPU 回传延迟，稳定性与吞吐通常优于 WebGPU；未启用跨源隔离时以单线程 SIMD 运行。",
       localMlNoticeSwitching: "切换执行器仅从本地缓存重载会话（约 1 秒，无需重新下载模型）。",
+      bgUpgradeRunning: "后台正在通过 {provider} 更新 {done}/{total} 条规则识别结果...",
+      bgUpgradeDone: "已在后台通过 {provider} 更新 {count} 条帖子的识别结果",
       extractingProgress: "正在提取命名实体与关系...",
       emptyNoPosts: "搜索或打开频道后即可提取命名实体与关系。",
       emptyReady: "已准备对当前已加载的 {count} 条帖子执行实体与时间戳关系抽取。",
