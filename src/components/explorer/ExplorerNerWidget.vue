@@ -125,7 +125,7 @@
           <div class="flex items-center gap-1.5 text-[10px] text-gray-400 dark:text-gray-500 font-mono tabular-nums shrink-0">
             <template v-if="mlState.status === 'downloading'">
               <span class="text-teal-600 dark:text-teal-400">
-                {{ t('explorer.ner.localMlDownloading', { percent: mlState.downloadPercent }) }}
+                {{ mlModelShortPrefix }}{{ t('explorer.ner.localMlDownloading', { percent: mlState.downloadPercent }) }}
               </span>
               <span v-if="mlState.totalBytes > 0" aria-hidden="true">·</span>
               <span v-if="mlState.totalBytes > 0">
@@ -141,7 +141,7 @@
             </template>
             <template v-else-if="mlState.status === 'retrying'">
               <span class="text-amber-600 dark:text-amber-400">
-                {{
+                {{ mlModelShortPrefix }}{{
                   t('explorer.ner.localMlRetrying', {
                     attempt: mlState.retryAttempt,
                     max: mlState.maxRetries,
@@ -196,10 +196,12 @@
               </button>
             </template>
             <template v-else-if="mlState.isModelCached">
+              <span v-if="cachedModelsBadge">{{ cachedModelsBadge }}</span>
+              <span v-if="cachedModelsBadge && mlState.executionProvider" aria-hidden="true">·</span>
               <span v-if="mlState.executionProvider">
                 {{ mlState.executionProvider === 'webgpu' ? 'WebGPU' : 'WASM' }}
               </span>
-              <span v-if="mlState.executionProvider" aria-hidden="true">·</span>
+              <span v-if="mlState.executionProvider || cachedModelsBadge" aria-hidden="true">·</span>
               <span>{{ t('explorer.ner.localMlCached') }}</span>
               <button
                 v-if="!isExtracting"
@@ -755,6 +757,19 @@ const isMlBusy = computed(
     props.mlState.status === "initializing" ||
     props.mlState.status === "inferring"
 );
+
+const mlModelShortPrefix = computed(() => {
+  if (props.mlState.downloadingModel === "cjkBert") return "CJK ";
+  if (props.mlState.downloadingModel === "gliner") return "Multi ";
+  return "";
+});
+
+const cachedModelsBadge = computed(() => {
+  if (props.mlState.cjkCached && props.mlState.glinerCached) return "CJK+Multi";
+  if (props.mlState.cjkCached) return "CJK";
+  if (props.mlState.glinerCached) return "Multi";
+  return "";
+});
 
 const compactSubTab = ref<"entities" | "relations">("entities");
 const selectedNerClass = ref<"all" | NerClassId>("all");

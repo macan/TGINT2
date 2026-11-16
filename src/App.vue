@@ -171,6 +171,7 @@ import {
   extractPostPlainText,
   highlightNerTextInHtml,
   isNerRecordCurrent,
+  isRecordUpgradeableToCurrentMl,
   loadChannelNerExtractions,
   normalizeNerChannelKey,
   runChannelNerExtractionBatch,
@@ -179,6 +180,7 @@ import {
   type NerBatchProgress,
   type PostNerExtractionRecord,
 } from "./utils/explorerNer";
+import { detectBatchModelHint } from "./utils/nerCjkUtils";
 import {
   abortLocalMlModel,
   checkLocalMlModelCached,
@@ -11884,10 +11886,8 @@ const cancelExplorerNerBgUpgrade = (skipRemaining = true) => {
   if (skipRemaining) {
     const chKey = normalizeNerChannelKey(currentChannelName.value || "");
     if (chKey) {
-      for (const rec of explorerNerRecords.value) {
-        if (rec.channelId === chKey && rec.engine === "local" && rec.localTier !== "ml") {
-          nerBgUpgradeSkippedIds.add(`${chKey}::${rec.postKey}`);
-        }
+      for (const pk of explorerNerRulePendingKeys.value) {
+        nerBgUpgradeSkippedIds.add(`${chKey}::${pk}`);
       }
     }
   }
@@ -11935,24 +11935,21 @@ const explorerNerIndex = computed(() => aggregateNerIndex(explorerNerRecords.val
 const explorerNerRulePendingKeys = computed(() => {
   const chKey = normalizeNerChannelKey(currentChannelName.value || "");
   if (!chKey || posts.value.length === 0) return [];
-  const ruleKeySet = new Set<string>();
+  const recMap = new Map<string, PostNerExtractionRecord>();
   for (const r of explorerNerRecords.value) {
-    if (
-      r.channelId === chKey &&
-      r.engine === "local" &&
-      r.localTier !== "ml" &&
-      !nerBgUpgradeSkippedIds.has(`${chKey}::${r.postKey}`)
-    ) {
-      ruleKeySet.add(r.postKey);
-    }
+    if (r.channelId === chKey) recMap.set(r.postKey, r);
   }
-  if (ruleKeySet.size === 0) return [];
+  if (recMap.size === 0) return [];
   const matched: string[] = [];
   for (const p of posts.value) {
     const pk = String(p?.key || p?.id || "").trim();
-    if (!pk || !ruleKeySet.has(pk)) continue;
+    if (!pk || nerBgUpgradeSkippedIds.has(`${chKey}::${pk}`)) continue;
+    const rec = recMap.get(pk);
+    if (!rec) continue;
     const txt = extractPostPlainText(p);
-    if (txt && txt.length >= 3) matched.push(pk);
+    if (txt && txt.length >= 3 && isRecordUpgradeableToCurrentMl(rec, chKey, txt)) {
+      matched.push(pk);
+    }
   }
   return matched;
 });
@@ -11961,17 +11958,20 @@ const explorerNerUncachedCount = computed(() => {
   const chKey = normalizeNerChannelKey(currentChannelName.value || "");
   if (!chKey || posts.value.length === 0) return 0;
   const preferLocalMl = explorerNerMlState.value.enabled;
-  const cachedSet = new Set(
-    explorerNerRecords.value
-      .filter((r) => isNerRecordCurrent(r, chKey, preferLocalMl))
-      .map((r) => r.postKey)
-  );
+  const recMap = new Map<string, PostNerExtractionRecord>();
+  for (const r of explorerNerRecords.value) {
+    if (r.channelId === chKey) recMap.set(r.postKey, r);
+  }
   let count = 0;
   for (const p of posts.value) {
     const pk = String(p?.key || p?.id || "").trim();
-    if (!pk || cachedSet.has(pk)) continue;
+    if (!pk) continue;
     const txt = extractPostPlainText(p);
-    if (txt && txt.length >= 3) count += 1;
+    if (!txt || txt.length < 3) continue;
+    const existing = recMap.get(pk);
+    if (!isNerRecordCurrent(existing, chKey, preferLocalMl, txt)) {
+      count += 1;
+    }
   }
   return count;
 });
@@ -12045,10 +12045,8 @@ const runExplorerNerBackgroundUpgrade = async () => {
       explorerNerRecords.value = result.records;
       const finalProvider = explorerNerMlState.value.executionProvider || initialProvider;
       if (result.progress.failedBatches > 0) {
-        for (const rec of result.records) {
-          if (rec.channelId === chKey && rec.engine === "local" && rec.localTier !== "ml") {
-            nerBgUpgradeSkippedIds.add(`${chKey}::${rec.postKey}`);
-          }
+        for (const pk of explorerNerRulePendingKeys.value) {
+          nerBgUpgradeSkippedIds.add(`${chKey}::${pk}`);
         }
         explorerNerBgUpgrade.value = null;
       } else if (result.progress.done > 0) {
@@ -12074,10 +12072,8 @@ const runExplorerNerBackgroundUpgrade = async () => {
       myToken === nerBgUpgradeToken &&
       channelTokenSnapshot === nerActiveChannelRequestToken
     ) {
-      for (const rec of explorerNerRecords.value) {
-        if (rec.channelId === chKey && rec.engine === "local" && rec.localTier !== "ml") {
-          nerBgUpgradeSkippedIds.add(`${chKey}::${rec.postKey}`);
-        }
+      for (const pk of explorerNerRulePendingKeys.value) {
+        nerBgUpgradeSkippedIds.add(`${chKey}::${pk}`);
       }
       explorerNerBgUpgrade.value = null;
     }
@@ -12103,7 +12099,12 @@ const maybeTriggerExplorerNerBackgroundUpgrade = () => {
 
 const warmupExplorerNerLocalMl = async () => {
   try {
-    await warmupLocalMlModel();
+    const sampleTexts = posts.value
+      .slice(0, 30)
+      .map((p) => extractPostPlainText(p))
+      .filter((t) => t && t.length >= 3);
+    const modelHint = detectBatchModelHint(sampleTexts);
+    await warmupLocalMlModel(modelHint);
     if (
       explorerNerMlState.value.enabled &&
       activeTab.value === "explorer" &&

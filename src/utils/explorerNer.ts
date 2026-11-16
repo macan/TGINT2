@@ -8,7 +8,12 @@
  */
 
 import { probeApiBackend } from "./apiCapabilities";
-import { inferEntitiesWithMlWorker, type WorkerMlSpan } from "./nerMlClient";
+import {
+  inferEntitiesWithMlWorker,
+  type WorkerMlModelFlavor,
+  type WorkerMlSpan,
+} from "./nerMlClient";
+import { EXPLORER_NER_ML_CJK_VERSION, hasCjkCharacters } from "./nerCjkUtils";
 
 export type NerClassId =
   | "person"
@@ -156,19 +161,45 @@ export const RELATION_CLASS_MAP = new Map<RelationClassId, RelationClassMeta>(
 
 export const EXPLORER_NER_EXTRACTOR_VERSION = 2;
 export const EXPLORER_NER_LOCAL_VERSION = 2;
+export { EXPLORER_NER_ML_CJK_VERSION };
+
+export function isRecordUpgradeableToCurrentMl(
+  rec: PostNerExtractionRecord | null | undefined,
+  channelId: string,
+  postText?: string
+): boolean {
+  if (!rec || rec.channelId !== channelId || rec.engine !== "local") return false;
+  if (rec.localTier !== "ml") return true;
+  if (
+    postText &&
+    hasCjkCharacters(postText) &&
+    (rec.mlPipelineVersion || 2) < EXPLORER_NER_ML_CJK_VERSION
+  ) {
+    return true;
+  }
+  return false;
+}
 
 export function isNerRecordCurrent(
   rec: PostNerExtractionRecord | null | undefined,
   channelId: string,
-  preferLocalMl = false
+  preferLocalMl = false,
+  postText?: string
 ): boolean {
   if (!rec || rec.channelId !== channelId) return false;
   if (rec.engine === "gemini") {
     return rec.extractorVersion >= 1;
   }
   if (rec.extractorVersion < EXPLORER_NER_LOCAL_VERSION) return false;
-  if (preferLocalMl && rec.localTier !== "ml") {
-    return false;
+  if (preferLocalMl) {
+    if (rec.localTier !== "ml") return false;
+    if (
+      postText &&
+      hasCjkCharacters(postText) &&
+      (rec.mlPipelineVersion || 2) < EXPLORER_NER_ML_CJK_VERSION
+    ) {
+      return false;
+    }
   }
   return true;
 }
@@ -199,6 +230,8 @@ export interface PostNerExtractionRecord {
   engine: "gemini" | "local";
   localTier?: "rules" | "ml";
   mlProvider?: "webgpu" | "wasm";
+  mlModel?: WorkerMlModelFlavor;
+  mlPipelineVersion?: number;
   entities: ExtractedPostEntity[];
   relations: ExtractedPostRelation[];
   updatedAt: number;
@@ -712,26 +745,26 @@ const RX_ADDR_EN =
 
 // Translated Foreign Addresses/Landmarks & Native Chinese/Yue (廣東話/繁簡中文) Addresses
 const RX_ADDR_CJK_TRANSLATED =
-  /(?:唐寧街(?:\d+號)?|賓夕法尼亞大道(?:\d+號)?|香榭麗舍(?:大道|大街)|第五大道|第五街|華爾街(?:\d+號)?|华尔街(?:\d+号)?|百老匯(?:大道)?|艦隊街|牛津街|攝政街|皮卡迪利(?:廣場|圓環)|特拉法加(?:廣場|廣塲)|愛麗舍宮|愛麗榭宮|白金漢宮|肯辛頓宮|溫莎(?:城堡|堡)|西敏宮|威斯敏斯特(?:宮|教堂)|國會(?:山莊|山|大廈|大樓)|白宮|五角(?:大廈|大樓)|克里姆林宮|克宮|紅場|盧比揚卡|中南海|人民大會堂|天安門廣場|故宮博物院|青瓦台|龍山總統府|首相官邸|聯合國總部|世貿中心|時代(?:廣場|廣塲)|希斯(?:路|羅)機場|蓋特威克機場|格域機場|史坦斯特機場|甘迺迪機場|肯尼迪機場|紐(?:華|瓦)克機場|戴高樂機場|法蘭克福機場|史基(?:浦|蒲)機場|羽田機場|成田機場|關西機場|仁川(?:國際)?機場|樟宜機場|赤鱲角機場|香港國際機場|桃園(?:國際)?機場|松山機場|大興(?:國際)?機場|首都(?:國際)?機場|啟德郵輪碼頭|啟德體育園|西九龍(?:高鐵)?站|高鐵西九龍站|紅磡(?:車|港鐵)?站|金鐘添馬公園|添馬艦|香港政府總部|政府總部|禮賓府|中聯辦|國安公署|駐港部隊大廈|終審法院|高等法院|西九龍裁判法院|東區裁判法院|荔枝角收押所|赤柱監獄|壁屋監獄|羅湖口岸|落馬洲(?:支線)?口岸|皇崗口岸|深圳灣口岸|蓮塘口岸|港珠澳大橋口岸|太古廣場|國際金融中心|環球貿易廣場|朗豪坊|海港城|又一城|置地廣場|合和中心|長江集團中心|中銀大廈|匯豐總行大廈|香港會展中心|灣仔會展|彌敦道|皇后大道(?:中|東|西)?|軒尼詩道|干諾道(?:中|西)?|德輔道(?:中|西)?|遮打道|亞皆老街|西洋菜(?:南|北)?街|波斯富街|羅素街|廣東道|上海街|駱克道)/g;
+  /(?:唐寧街(?:\d+號)?|唐宁街(?:\d+号)?|賓夕法尼亞大道(?:\d+號)?|宾夕法尼亚大道(?:\d+号)?|香榭麗舍(?:大道|大街)|香榭丽舍(?:大道|大街)|第五大道|第五街|華爾街(?:\d+號)?|华尔街(?:\d+号)?|百老匯(?:大道)?|艦隊街|牛津街|攝政街|皮卡迪利(?:廣場|圓環)|特拉法加(?:廣場|廣塲)|愛麗舍宮|愛麗榭宮|白金漢宮|白金汉宫|肯辛頓宮|溫莎(?:城堡|堡)|西敏宮|威斯敏斯特(?:宮|教堂)|國會(?:山莊|山|大廈|大樓)|国会山|白宮|白宫|五角(?:大廈|大樓)|五角大楼|克里姆林宮|克里姆林宫|克宮|克宫|紅場|红场|盧比揚卡|中南海|人民大會堂|人民大会堂|天安門廣場|天安门广场|故宮博物院|青瓦台|龍山總統府|首相官邸|聯合國總部|联合国总部|世貿中心|時代(?:廣場|廣塲)|希斯(?:路|羅)機場|希思罗机场|蓋特威克機場|格域機場|史坦斯特機場|甘迺迪機場|肯尼迪机场|紐(?:華|瓦)克機場|戴高樂機場|法蘭克福機場|史基(?:浦|蒲)機場|羽田機場|成田機場|關西機場|仁川(?:國際)?機場|樟宜機場|赤鱲角機場|香港國際機場|桃園(?:國際)?機場|松山機場|大興(?:國際)?機場|首都(?:國際)?機場|啟德郵輪碼頭|啟德體育園|西九龍(?:高鐵)?站|高鐵西九龍站|紅磡(?:車|港鐵)?站|金鐘添馬公園|添馬艦|香港政府總部|政府總部|政府总部|禮賓府|中聯辦|中联办|國安公署|駐港部隊大廈|終審法院|高等法院|西九龍裁判法院|東區裁判法院|荔枝角收押所|赤柱監獄|壁屋監獄|羅湖口岸|落馬洲(?:支線)?口岸|皇崗口岸|深圳灣口岸|蓮塘口岸|港珠澳大橋口岸|太古廣場|國際金融中心|環球貿易廣場|朗豪坊|海港城|又一城|置地廣場|合和中心|長江集團中心|中銀大廈|匯豐總行大廈|香港會展中心|灣仔會展|彌敦道|皇后大道(?:中|東|西)?|軒尼詩道|干諾道(?:中|西)?|德輔道(?:中|西)?|遮打道|亞皆老街|西洋菜(?:南|北)?街|波斯富街|羅素街|廣東道|上海街|駱克道)/g;
 
 const RX_ADDR_CJK_STRUCTURED =
-  /(?:[\u4e00-\u9fff]{2,6}(?:區|市|縣))?(?:[東西南北中]?[\u4e00-\u9fff]{2,8}(?:大道[東西南北中]?|馬路|海旁|斜路|公路|街|道[東西南北中]?|路(?:[一二三四五六七八九十]+段)?|巷|弄|里|坊|徑))\s*(?:\d+(?:至\d+)?[A-Za-z]?號|[一二三四五六七八九十百千]+號)(?:\s*\d+[樓層F字樓座室鋪舖])?|[\u4e00-\u9fffA-Za-z0-9]{2,12}(?:\d+號)?(?:商業大廈|工業大廈|工廈|商場|廣場|廣塲|大廈|大樓|機場|火車站|高鐵站|地鐵站|港鐵站|碼頭|口岸|海軍基地|空軍基地|軍事基地|基地|大使館|總領事館|領事館|法院|裁判法院|監獄|收押所|警署|警察總部|政府總部)/g;
+  /(?:[\u4e00-\u9fff]{2,6}(?:區|区|市|縣|县))?(?:[東西南北中]?[\u4e00-\u9fff]{2,8}(?:大道[東西南北中]?|馬路|马路|海旁|斜路|公路|街|道[東西南北中]?|路(?:[一二三四五六七八九十]+段)?|巷|弄|里|坊|徑))\s*(?:\d+(?:至\d+)?[A-Za-z]?[號号]|[一二三四五六七八九十百千]+[號号])(?:\s*\d+[樓層层F字樓楼座室鋪舖])?|[\u4e00-\u9fffA-Za-z0-9]{2,12}(?:\d+[號号])?(?:商業大廈|商业大厦|工業大廈|工业大厦|工廈|商場|商场|廣場|廣塲|广场|大廈|大厦|大樓|大楼|機場|机场|火車站|火车站|高鐵站|高铁站|地鐵站|地铁站|港鐵站|碼頭|码头|口岸|海軍基地|空軍基地|軍事基地|基地|大使館|大使馆|總領事館|总领事馆|領事館|领事馆|法院|裁判法院|監獄|监狱|收押所|警署|警察總部|警察总部|政府總部|政府总部)/g;
 
 const RX_ADDR_CJK_BLACKLIST =
-  /^(?:這條|呢條|嗰條|一條|整條|全條|大街|小巷|過馬|出街|逛街|行街|上路|問路|心路|活路|退路|後路|生路|死路|正路|歪路|大路|小路|中心|廣場舞|全場|現場|商場內|大廈內|大樓內)/;
+  /^(?:這條|这條|这条|呢條|嗰條|一條|一条|整條|全條|大街|小巷|過馬|出街|逛街|行街|上路|問路|心路|活路|退路|後路|生路|死路|正路|歪路|大路|小路|中心|廣場舞|全場|現場|现场|商場內|大廈內|大樓內)/;
 
 // Platforms & Handles
 const RX_HANDLE = /(?:^|[\s(])(@[A-Za-z0-9_]{3,32})\b/g;
 const RX_URL_PLAT =
   /\b(?:https?:\/\/)?(?:t\.me|x\.com|twitter\.com|youtube\.com|youtu\.be|github\.com|facebook\.com|instagram\.com|threads\.net|bsky\.app|lihkg\.com|substack\.com)\/[A-Za-z0-9_./-]+/gi;
 const RX_PLAT_NAMED =
-  /\b(?:Telegram|Signal|WhatsApp|YouTube|GitHub|TikTok|Instagram|Facebook|Twitter|Discord|Reddit|WeChat|Threads|Bluesky|Mastodon|Line|LIHKG|Douyin|Xiaohongshu|Bilibili)\b|連登|微博|小紅書|抖音|微信|電報/gi;
+  /\b(?:Telegram|Signal|WhatsApp|YouTube|GitHub|TikTok|Instagram|Facebook|Twitter|Discord|Reddit|WeChat|Threads|Bluesky|Mastodon|Line|LIHKG|Douyin|Xiaohongshu|Bilibili)\b|連登|连登|微博|小紅書|小红书|抖音|微信|電報|电报/gi;
 
 // Financial & Metrics
 const RX_MONEY_EN =
   /(?:USD|EUR|GBP|HKD|MOP|TWD|RMB|CNY|JPY|KRW|AUD|CAD|SGD)?\s*(?:HK\$|US\$|NT\$|AU\$|S\$|\$|€|£|¥)\s?\d+(?:[.,]\d+)?\s*(?:trillion|billion|million|thousand|[TBMK]\b)?|\b\d+(?:[.,]\d+)?\s*(?:trillion|billion|million|thousand)\s*(?:dollars|USD|euros|EUR|pounds|GBP|yuan|RMB|CNY|yen|JPY|HKD)\b|\b\d+(?:\.\d+)?%|\b\d{1,4}\s*bps\b|\b\d{1,3}(?:,\d{3})+\s*(?:people|troops|soldiers|casualties|deaths|injured|protesters|voters|users|subscribers|shares|barrels|drones|missiles)\b/gi;
 const RX_MONEY_CJK =
-  /(?:(?:新台幣|港幣|港元|澳門幣|澳門元|人民幣|美元|美金|歐元|英鎊|日圓|日元)?\s*\d+(?:\.\d+)?[億萬千百]*\s*(?:美元|美金|港元|港幣|澳門元|澳門幣|台幣|人民幣|歐元|英鎊|日圓|日元|元))|(?:\d+(?:\.\d+)?(?:%|％|個基點))|(?:\d+(?:\.\d+)?[億萬千]?(?:人|名|架|枚|艘|輛)(?:死亡|受傷|失蹤|被捕|參加|失業|軍人|士兵|無人機|導彈|戰機))/g;
+  /(?:(?:新台幣|新台币|港幣|港币|港元|澳門幣|澳门币|澳門元|人民幣|人民币|美元|美金|歐元|欧元|英鎊|英镑|日圓|日元)?\s*\d+(?:\.\d+)?[億亿萬万千百]*\s*(?:美元|美金|港元|港幣|港币|澳門元|澳門幣|台幣|台币|人民幣|人民币|歐元|欧元|英鎊|英镑|日圓|日元|元))|(?:\d+(?:\.\d+)?(?:%|％|個基點|个基点))|(?:\d+(?:\.\d+)?[億亿萬万千]?(?:人|名|架|枚|艘|輛|辆)(?:死亡|受傷|受伤|失蹤|失踪|被捕|參加|参加|失業|失业|軍人|军人|士兵|無人機|无人机|導彈|导弹|戰機|战机))/g;
 
 // Organizations: General + Military Forces + Political Parties (EN, CJK/Yue, RU)
 const RX_ORG_EN =
@@ -747,7 +780,7 @@ const RX_ORG_ACRO =
   /\b(?:NATO|WHO|IMF|WTO|UN|UNESCO|UNHCR|UNICEF|FBI|CIA|NSA|SEC|DOJ|DOD|FED|ECB|OPEC|BRICS|ASEAN|APEC|NASA|SpaceX|OpenAI|Anthropic|Google|DeepMind|Mistral|xAI|Apple|Microsoft|Meta|Nvidia|NVIDIA|Tesla|Amazon|TSMC|ASML|Intel|AMD|ARM|ByteDance|Tencent|Alibaba|Huawei|Samsung|Sony|HKEX|NYSE|NASDAQ|Binance|Coinbase|ICAC|Reuters|Bloomberg|BBC|CNN|AP|AFP|SCMP|Xinhua|TASS)\b/g;
 
 const RX_ORG_CJK =
-  /(?:中國人民解放軍|人民解放軍|中國共產黨|中共|中國國民黨|國民黨|民主進步黨|民進黨|台灣民眾黨|民眾黨|時代力量|民主建港協進聯盟|民建聯|香港工會聯合會|工聯會|新民黨|經民聯|公民黨|自由黨|民主黨|社民連|實政圓桌|自民黨|立憲民主黨|公明黨|維新會|共和黨|工黨|保守黨|綠黨|統一俄羅斯黨|人民行動黨|執政黨|在野黨|反對派聯盟|革命衛隊|國民警衛隊|自衛隊|維和部隊|特種部隊|海軍陸戰隊|國防軍|武警部隊|武警|海警局|海警|廉政公署|警務處|國安處|入境處|海關|懲教署|金管局|證監會|港交所|聯準會|美聯儲|央視|新華社|路透社|彭博社|美聯社|法新社|南華早報|明報|星島日報|香港電台|無線電視|國軍|美軍|俄軍|烏軍|以軍|日軍|韓軍|英軍|法軍|北約部隊|聯軍)|[\u4e00-\u9fffA-Za-z0-9第]{2,10}(?:公司|集團|控股|銀行|交易所|部|委員會|管理局|局|署|院|廳|法院|最高法院|警署|警方|檢察院|檢方|大學|學院|研究所|學會|協會|聯合會|基金會|政黨|黨團|戰區|軍區|艦隊|軍團|兵團|航空兵|裝甲師|步兵師|機械化旅|摩步旅|空降旅|砲兵旅|特戰旅|陸戰旅|防衛省|總參謀部|軍情局|安全局|情報局|中央銀行|通訊社|電視台|日報|時報|周刊)/g;
+  /(?:中國人民解放軍|中国人民解放军|人民解放軍|人民解放军|中國共產黨|中国共产党|中共|中國國民黨|中国国民党|國民黨|国民党|民主進步黨|民主进步党|民進黨|民进党|台灣民眾黨|民众党|時代力量|民主建港協進聯盟|民建聯|香港工會聯合會|工聯會|新民黨|經民聯|公民黨|自由黨|民主黨|民主党|社民連|實政圓桌|自民黨|自民党|立憲民主黨|公明黨|維新會|共和黨|共和党|工黨|工党|保守黨|保守党|綠黨|绿党|統一俄羅斯黨|人民行動黨|執政黨|执政党|在野黨|反对派联盟|反對派聯盟|革命衛隊|革命卫队|國民警衛隊|国民警卫队|自衛隊|自卫队|維和部隊|特種部隊|特种部队|海軍陸戰隊|國防軍|武警部隊|武警|海警局|海警|廉政公署|警務處|國安處|入境處|海關|懲教署|金管局|證監會|证监会|港交所|聯準會|美联储|美聯儲|央視|央视|新華社|新华社|路透社|彭博社|美聯社|美联社|法新社|南華早報|南华早报|明報|星島日報|香港電台|無線電視|國軍|美軍|美军|俄軍|俄军|烏軍|乌军|以軍|以军|日軍|韓軍|英軍|法軍|北約部隊|聯軍)|[\u4e00-\u9fffA-Za-z0-9第]{2,10}(?:公司|集團|集团|控股|銀行|银行|交易所|部|委員會|委员会|管理局|局|署|院|廳|法院|最高法院|警署|警方|檢察院|检察院|檢方|检方|大學|大学|學院|学院|研究所|學會|协会|協會|聯合會|联合会|基金會|基金会|政黨|政党|黨團|戰區|战区|軍區|军区|艦隊|舰队|軍團|兵團|航空兵|裝甲師|步兵師|機械化旅|摩步旅|空降旅|砲兵旅|特戰旅|陸戰旅|防衛省|總參謀部|军情局|軍情局|安全局|情報局|中央銀行|中央银行|通訊社|通讯社|電視台|电视台|日報|日报|時報|时报|周刊)/g;
 
 const RX_ORG_RU =
   /(?<![А-Яа-яЁёA-Za-z0-9_])(?:ВСУ|ВС РФ|ЧВК Вагнер|Росгвардия|ГРУ|ФСБ|СБУ|ГУР|МО РФ|СВР|Единая Россия|КПРФ|ЛДПР|Яблоко|ЦБ РФ|МИД РФ|(?:\d+-я\s+)?[А-ЯЁA-Z][а-яёА-ЯЁa-zA-Z-]{2,24}\s+(?:бригада|дивизия|армия|флот|полк|батальон|партия|министерство|комитет))(?![А-Яа-яЁёA-Za-z0-9_])/g;
@@ -760,10 +793,10 @@ const RX_ROLE_STANDALONE_EN =
   /\b(President|Prime Minister|Deputy Prime Minister|Secretary of State|Defense Minister|Defence Minister|Foreign Minister|Finance Minister|Chief Executive Officer|Chief Executive|CEO|CFO|CTO|Chairman|Chairwoman|Central Bank Governor|Attorney General|Supreme Leader|Speaker of the House|Secretary-General|Special Envoy|High Representative|Commander-in-Chief)\b/g;
 
 const RX_ROLE_PERSON_CJK =
-  /(特首|行政長官|政務司司長|財政司司長|律政司司長|副司長|司長|總統|副總統|總理|副總理|首相|國務卿|外長|外交部長|防長|國防部長|財長|財政部長|主席|副主席|執行長|行政總裁|首席執行官|總裁|副總裁|董事長|副董事長|總編輯|創辦人|聯合創辦人|秘書長|主任|局長|處長|署長|專員|市長|省長|州長|議員|立法會議員|區議員|國會議員|發言人|大使|特使|將軍|司令員|司令|總參謀長|法官|檢察官)([\u4e00-\u9fff]{2,4})/g;
+  /(特首|行政長官|行政长官|政務司司長|政务司司长|財政司司長|财政司司长|律政司司長|律政司司长|副司長|副司长|司長|司长|總統|总统|副總統|副总统|總理|总理|副總理|副总理|首相|國務卿|国务卿|外長|外长|外交部長|外交部长|防長|防长|國防部長|国防部长|財長|财长|財政部長|财政部长|主席|副主席|執行長|执行长|行政總裁|行政总裁|首席執行官|首席执行官|總裁|总裁|副總裁|副总裁|董事長|董事长|副董事長|副董事长|總編輯|总编辑|創辦人|创办人|聯合創辦人|联合创办人|秘書長|秘书长|主任|局長|局长|處長|处长|署長|署长|專員|专员|市長|市长|省長|省长|州長|州长|議員|议员|立法會議員|立法会议员|區議員|区议员|國會議員|国会议员|發言人|发言人|大使|特使|將軍|将军|司令員|司令员|司令|總參謀長|总参谋长|法官|檢察官|检察官)([\u4e00-\u9fff]{2,4})/g;
 
 const RX_CJK_ROLE_STANDALONE =
-  /(?:行政長官|特首|政務司司長|財政司司長|律政司司長|國務卿|外交部長|國防部長|財政部長|行政總裁|首席執行官|秘書長|總參謀長|檢察官|新聞秘書|發言人)/g;
+  /(?:行政長官|行政长官|特首|政務司司長|政务司司长|財政司司長|财政司司长|律政司司長|律政司司长|國務卿|国务卿|外交部長|外交部长|國防部長|国防部长|財政部長|财政部长|行政總裁|行政总裁|首席執行官|首席执行官|秘書長|秘书长|總參謀長|总参谋长|檢察官|检察官|新聞秘書|新闻秘书|發言人|发言人)/g;
 
 const RX_PERSON_EN =
   /\b([A-Z][a-zÀ-ÖØ-öø-ÿ]{1,15}(?:\s+[A-Z]\.)?\s+(?:(?:van|von|de|la|al|bin|Mc|Mac|O')\s*)?[A-Z][a-zÀ-ÖØ-öø-ÿ'-]{1,20}(?:\s+[A-Z][a-zÀ-ÖØ-öø-ÿ'-]{1,18})?)\b/g;
@@ -785,9 +818,9 @@ const CJK_PERSON_STOP = new Set([
 ]);
 
 const RX_CJK_LEAD_NOISE =
-  /^(?:香港方面|台灣方面|台北方面|北京方面|美方|中方|俄方|烏方|代表團|當局|警方|軍方|以及|關於|針對|來自|代表|隨後|目前|今天|今日|昨天|昨日|明天|並於|並在|並向|並赴|位於|坐落於?|前往|抵達|來到|返回|重返|撤離|駐守|召開|舉行|參加|出席|發起|實施|違反|討論|簽署|通過|公布|發布|提出|推動|於|在|到|抵|赴|往|經|從|由|向|及|和|與|跟|同|或|並|把|被|將|是|有)+/;
+  /^(?:香港方面|台灣方面|台湾方面|台北方面|北京方面|美方|中方|俄方|烏方|乌方|代表團|代表团|當局|当局|警方|軍方|军方|以及|關於|关于|針對|针对|來自|来自|代表|隨後|随后|目前|今天|今日|昨天|昨日|明天|並於|并于|並在|并在|並向|并向|並赴|并赴|位於|位于|坐落於?|前往|抵達|抵达|來到|来到|返回|重返|撤離|撤离|駐守|驻守|召開|召开|舉行|举行|參加|参加|發起|发起|實施|实施|違反|违反|討論|讨论|簽署|签署|通過|通过|公布|發布|发布|宣布|宣佈|落實|落实|頒布|颁布|提出|推動|推动|制定|修訂|修订|執行|执行|發表|发表|於|于|在|到|抵|赴|往|經|经|從|从|由|向|及|和|與|与|跟|同|或|並|并|把|被|將|将|是|有)+/;
 const RX_CJK_MID_PREP_BLEED =
-  /^[\u4e00-\u9fff]{1,2}(?:前往|抵達|來到|駐守|位於|坐落於?|到達|回到|赴往)/;
+  /^[\u4e00-\u9fff]{1,2}(?:前往|抵達|抵达|來到|来到|駐守|驻守|位於|位于|坐落於?|到達|到达|回到|赴往|宣布|宣佈|落實|落实|通過|通过|簽署|签署|公布|發布|发布)/;
 
 function stripCjkLeadNoise(raw: string): string {
   let prev = "";
@@ -802,14 +835,22 @@ function stripCjkLeadNoise(raw: string): string {
 // Events & Incidents (multi-word summit/event phrases matched BEFORE bare G7/G20 acronyms)
 const RX_EVENT_EN =
   /\b(?:(?:[A-Z][A-Za-z0-9-]+\s+){1,2}(?:Summit|Ministerial|Election|By-election|Referendum|Hearing|Protests?|Rally|March|Offensive|Ceasefire|Sanctions?|Inquiry|Trial|Verdict|Earthquake|Typhoon|IPO|Earnings)|World Economic Forum|Munich Security Conference|UN General Assembly|Operation\s+[A-Z][A-Za-z0-9-]+|Signal No\.\s*\d+|G7|G20|COP\d{2}|Davos)\b/g;
-const RX_EVENT_CJK =
-  /(?:八號風球|九號風球|十號風球|黑色暴雨警告|施政報告|財政預算案|全國兩會|兩會|三中全會|奧運會|世界盃|亞洲盃|進博會)|[\u4e00-\u9fffA-Za-z0-9]{2,10}(?:峰會|大選|選舉|補選|初選|公投|聽證會|抗議|遊行|示威|罷工|罷課|演習|軍演|停火|審判|判決|宣判|記者會|論壇|暴動|衝突|地震|風災|颱風|襲擊)/g;
+const RX_CJK_EVENT_VERB_STOP =
+  "(?:宣布|宣佈|召開|召开|舉行|举行|舉辦|举办|參加|参加|出席|發起|发起|總部|总部|[在於于從从向並并将把被是由與与和及的了])";
+const RX_EVENT_CJK = new RegExp(
+  `(?:八號風球|八号风球|九號風球|九号风球|十號風球|十号风球|黑色暴雨警告|施政報告|施政报告|財政預算案|财政预算案|全國兩會|全国两会|兩會|两会|三中全會|三中全会|奧運會|奥运会|世界盃|世界杯|亞洲盃|亚洲杯|進博會|进博会)|(?:${RX_CJK_EVENT_VERB_STOP}*)((?:(?!${RX_CJK_EVENT_VERB_STOP})[\\u4e00-\\u9fffA-Za-z0-9]){2,10}(?:峰會|峰会|大選|大选|選舉|选举|補選|补选|初選|初选|公投|聽證會|听证会|抗議|抗议|遊行|游行|示威|罷工|罢工|罷課|罢课|演習|演习|軍演|军演|停火|審判|审判|判決|判决|宣判|記者會|记者会|論壇|论坛|暴動|暴动|衝突|冲突|地震|風災|风灾|颱風|台风|襲擊|袭击))`,
+  "g"
+);
 
 // Products / Assets / Laws
 const RX_ASSET_LAW_EN =
   /\b(?:(?:[A-Z][A-Za-z0-9-]+\s+){1,3}(?:Act|Bill|Treaty|Accord|Agreement|Resolution|Charter|Directive|Regulation|Ordinance|Law|Sanctions Package)|Article\s+\d+|Section\s+\d+|Resolution\s+\d+|Basic Law|National Security Law|GDPR|CHIPS Act|NDAA|AI Act|GPT-\d[A-Za-z0-9.-]*|ChatGPT|Claude\s*\d?(?:\.\d)?|Gemini\s*\d?(?:\.\d)?|Llama\s*\d?(?:\.\d)?|Bitcoin|Ethereum|Solana|Ripple|BTC|ETH|USDT|USDC|SOL|XRP|BNB|F-16|F-35|Su-35|J-20|HIMARS|ATACMS|Storm Shadow|Patriot|Starlink|iPhone\s*\d*|MacBook|Hang Seng Index|S&P 500|Nasdaq|Dow Jones)\b/g;
-const RX_ASSET_LAW_CJK =
-  /(?:《[^》]{2,30}》|香港基本法|基本法|香港國安法|國安法|維護國家安全條例|第23條|廿三條|恆生指數|恒生指數|標普500|納斯達克|道瓊斯|比特幣|以太幣)|[\u4e00-\u9fffA-Za-z0-9]{2,12}(?:法案|條例|法例|協議|條約|憲法|決議|白皮書|關稅|晶片|飛彈|導彈|戰機|無人機)/g;
+const RX_CJK_LAW_VERB_STOP =
+  "(?:宣布|宣佈|落實|落实|通過|通过|簽署|签署|公布|發布|发布|頒布|颁布|實施|实施|推動|推动|推行|制定|修訂|修订|違反|违反|執行|执行|總部|总部|[在於于從从向並并将把被是由與与和及的了])";
+const RX_ASSET_LAW_CJK = new RegExp(
+  `(?:《[^》]{2,30}》|香港基本法|基本法|香港國安法|香港国安法|國安法|国安法|維護國家安全條例|维护国家安全条例|第23條|第23条|廿三條|廿三条|恆生指數|恒生指數|恒生指数|標普500|标普500|納斯達克|纳斯达克|道瓊斯|道琼斯|比特幣|比特币|以太幣|以太币)|(?:${RX_CJK_LAW_VERB_STOP}*)((?:(?!${RX_CJK_LAW_VERB_STOP})[\\u4e00-\\u9fffA-Za-z0-9]){2,10}(?:法案|條例|条例|法例|協議|协议|條約|条约|憲法|宪法|決議|决议|白皮書|白皮书|關稅|关税|晶片|芯片|飛彈|飞弹|導彈|导弹|戰機|战机|無人機|无人机))`,
+  "g"
+);
 
 // Precompiled Relation Cue RegExps (EN, Traditional/Simplified ZH, Yue, RU)
 const RX_REL_ROLE =
@@ -1246,7 +1287,7 @@ export function extractNerSinglePostLocal(
     }
     RX_EVENT_CJK.lastIndex = 0;
     for (const m of sentence.matchAll(RX_EVENT_CJK)) {
-      const val = stripCjkLeadNoise(m[0]);
+      const val = stripCjkLeadNoise(m[1] || m[0]);
       if (val.length >= 3) addSentEntity(val, val, "event");
     }
 
@@ -1257,7 +1298,7 @@ export function extractNerSinglePostLocal(
     }
     RX_ASSET_LAW_CJK.lastIndex = 0;
     for (const m of sentence.matchAll(RX_ASSET_LAW_CJK)) {
-      const val = stripCjkLeadNoise(m[0].replace(/[《》]/g, ""));
+      const val = stripCjkLeadNoise((m[1] || m[0]).replace(/[《》]/g, ""));
       if (val.length >= 3) {
         addSentEntity(val, val, "asset_law");
       }
@@ -1427,6 +1468,9 @@ function linkRelationsInSentence(
   }
 }
 
+const RX_CJK_PERSON_TITLE_PREFIX =
+  /^(?:行政長官|行政长官|特首|副總統|副总统|總統|总统|副總理|副总理|總理|总理|首相|國務卿|国务卿|外長|外长|防長|防长|財長|财长|主席|執行長|执行长|市長|市长|州長|州长|部長|部长|局長|局长|司長|司长|司令|大使|將軍|将军)([\u4e00-\u9fff]{2,4})$/;
+
 function canonicalizeMlSpan(
   spanText: string,
   nerClass: NerClassId
@@ -1447,6 +1491,10 @@ function canonicalizeMlSpan(
     clean = stripCjkLeadNoise(clean);
     if (clean.length < 2) return null;
   } else if (nerClass === "person") {
+    const strippedRole = clean.match(RX_CJK_PERSON_TITLE_PREFIX);
+    if (strippedRole && strippedRole[1]) {
+      clean = strippedRole[1];
+    }
     if (CJK_PERSON_STOP.has(clean) || LAT_STOPWORDS.has(clean)) return null;
   }
 
@@ -1656,6 +1704,12 @@ export function extractNerSinglePostHybrid(
     const translatedCjkAddrs: string[] = [];
     RX_ADDR_CJK_TRANSLATED.lastIndex = 0;
     for (const m of sentence.matchAll(RX_ADDR_CJK_TRANSLATED)) {
+      if (m.index != null) {
+        protectedRanges.push({
+          start: sent.startOffset + m.index,
+          end: sent.startOffset + m.index + m[0].length,
+        });
+      }
       translatedCjkAddrs.push(m[0].trim());
     }
     const structuredCjkAddrs: string[] = [];
@@ -1664,6 +1718,12 @@ export function extractNerSinglePostHybrid(
       const val = stripCjkLeadNoise(m[0]);
       if (val.length < 3 || RX_ADDR_CJK_BLACKLIST.test(val)) continue;
       if (translatedCjkAddrs.some((tr) => val.length > tr.length && val.endsWith(tr))) continue;
+      if (m.index != null) {
+        protectedRanges.push({
+          start: sent.startOffset + m.index,
+          end: sent.startOffset + m.index + m[0].length,
+        });
+      }
       structuredCjkAddrs.push(val);
     }
     for (const val of structuredCjkAddrs) addSentEntity(val, val, "address");
@@ -1770,13 +1830,13 @@ export function extractNerSinglePostHybrid(
       const roleStr = m[1].trim();
       const candName = m[2]
         .trim()
-        .replace(/(?:前往|抵達|來到|表示|指出|強調|透露|宣布|宣佈|簽署|會見|訪問|出席|回應|認為|呼籲|[今昨明將並在於與及說稱會被的向到赴前])$/, "")
-        .replace(/[今昨明將並在於與及說稱表示會被的向到前]+$/g, "");
+        .replace(/(?:前往|抵達|抵达|來到|来到|表示|指出|強調|强调|透露|宣布|宣佈|簽署|签署|會見|会见|訪問|访问|出席|回應|回应|認為|认为|呼籲|呼吁|[今昨明將并在於與及說稱會被的向到赴前])$/, "")
+        .replace(/[今昨明將并在於與及說稱會被的向到前]+$/g, "");
       addSentEntity(roleStr, roleStr, "job_position");
       if (
         candName.length >= 2 &&
         !CJK_PERSON_STOP.has(candName) &&
-        !/[的是在與和及並將稱表示說會被]/.test(candName)
+        !/[的是在與和及並將稱表示說會被与并称说会]/.test(candName)
       ) {
         addSentEntity(candName, candName, "person");
         pushRelation(
@@ -1794,7 +1854,7 @@ export function extractNerSinglePostHybrid(
     }
     RX_ASSET_LAW_CJK.lastIndex = 0;
     for (const m of sentence.matchAll(RX_ASSET_LAW_CJK)) {
-      const val = stripCjkLeadNoise(m[0].replace(/[《》]/g, ""));
+      const val = stripCjkLeadNoise((m[1] || m[0]).replace(/[《》]/g, ""));
       if (val.length >= 3) addSentEntity(val, val, "asset_law");
     }
 
@@ -1868,15 +1928,10 @@ export async function runChannelNerExtractionBatch(
 }> {
   const channelId = normalizeNerChannelKey(options.channelName);
   const existingMap = new Map<string, PostNerExtractionRecord>();
-  const ruleUpgradeKeys = new Set<string>();
-
   if (!options.forceReextract || options.onlyUpgradeRuleRecords) {
     for (const rec of options.existingRecords) {
       if (!rec || rec.channelId !== channelId) continue;
       existingMap.set(rec.postKey, rec);
-      if (rec.engine === "local" && rec.localTier !== "ml") {
-        ruleUpgradeKeys.add(rec.postKey);
-      }
     }
   }
 
@@ -1893,17 +1948,21 @@ export async function runChannelNerExtractionBatch(
   for (const post of options.posts || []) {
     const postKey = String(post?.key || post?.id || "").trim();
     if (!postKey) continue;
-    if (options.onlyUpgradeRuleRecords) {
-      if (!ruleUpgradeKeys.has(postKey)) continue;
-    } else if (!options.forceReextract) {
-      const existingRec = existingMap.get(postKey);
-      if (existingRec && isNerRecordCurrent(existingRec, channelId, Boolean(options.useLocalMl))) {
-        continue;
-      }
-    }
 
     const text = extractPostPlainText(post);
     if (!text || text.length < 3) continue;
+
+    const existingRec = existingMap.get(postKey);
+    if (options.onlyUpgradeRuleRecords) {
+      if (!isRecordUpgradeableToCurrentMl(existingRec, channelId, text)) continue;
+    } else if (!options.forceReextract) {
+      if (
+        existingRec &&
+        isNerRecordCurrent(existingRec, channelId, Boolean(options.useLocalMl), text)
+      ) {
+        continue;
+      }
+    }
 
     const timestampMs = extractExplorerPostTimestampMs(post);
     const contact = post?.data?.contact;
@@ -2234,7 +2293,8 @@ Rules:
           );
           const now = Date.now();
           batchRecords = chunk.map((item) => {
-            const spans = results.get(item.postKey) || [];
+            const out = results.get(item.postKey);
+            const spans = out?.spans || [];
             const { entities, relations } = extractNerSinglePostHybrid(
               item.postKey,
               item.timestampMs,
@@ -2255,6 +2315,8 @@ Rules:
               engine: "local" as const,
               localTier: "ml" as const,
               mlProvider: provider,
+              mlModel: out?.mlModel || "gliner",
+              mlPipelineVersion: EXPLORER_NER_ML_CJK_VERSION,
               entities,
               relations,
               updatedAt: now,

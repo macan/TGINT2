@@ -1,6 +1,7 @@
 /**
- * Client-side controller for the dedicated Web Worker running GLiNER.js
- * multilingual NER inference (`onnx-community/gliner_multi-v2.1`).
+ * Client-side controller for the dedicated Web Worker running hybrid local NER:
+ *   - CJK-native BERT (`Xenova/bert-base-chinese-ner`, ~98 MB) for Chinese posts
+ *   - Segmented GLiNER.js (`onnx-community/gliner_multi-v2.1`, ~333 MB) for JP/EN/RU/Mixed
  *
  * Manages opt-in preference persistence, Cache Storage detection, model download
  * progress telemetry, abort handling, and batched worker RPC calls.
@@ -9,16 +10,19 @@
 import {
   clearAllModelCaches,
   inspectModelCacheState,
+  type NerModelId,
 } from "./nerModelCache";
+import type { BatchModelHint } from "./nerCjkUtils";
 import type {
   WorkerExecutorPreference,
   WorkerInMessage,
+  WorkerMlModelFlavor,
   WorkerMlSpan,
   WorkerOutMessage,
   WorkerPostInput,
 } from "../workers/nerInference.worker";
 
-export type { WorkerExecutorPreference, WorkerMlSpan };
+export type { BatchModelHint, NerModelId, WorkerExecutorPreference, WorkerMlModelFlavor, WorkerMlSpan };
 
 export const EXPLORER_NER_LOCAL_ML_KEY = "gingko_explorer_ner_local_ml";
 export const EXPLORER_NER_LOCAL_ML_EXECUTOR_KEY = "gingko_explorer_ner_local_ml_executor";
@@ -40,6 +44,9 @@ export interface NerMlState {
   executorPreference: WorkerExecutorPreference;
   status: NerMlStatus;
   isModelCached: boolean;
+  cjkCached: boolean;
+  glinerCached: boolean;
+  downloadingModel: NerModelId | null;
   executionProvider: "webgpu" | "wasm" | null;
   downloadPercent: number;
   loadedBytes: number;
@@ -78,6 +85,9 @@ let state: NerMlState = {
   executorPreference: readInitialExecutorPreference(),
   status: readInitialEnabled() ? "idle" : "disabled",
   isModelCached: false,
+  cjkCached: false,
+  glinerCached: false,
+  downloadingModel: null,
   executionProvider: null,
   downloadPercent: 0,
   loadedBytes: 0,
@@ -134,6 +144,7 @@ export function setLocalMlEnabled(enabled: boolean): void {
     patchState({
       enabled: false,
       status: "disabled",
+      downloadingModel: null,
       error: null,
     });
     return;
@@ -167,7 +178,13 @@ export function setLocalMlExecutorPreference(pref: WorkerExecutorPreference): vo
   });
 
   if (state.enabled && state.isModelCached && mismatch && !activeWarmupPromise) {
-    warmupLocalMlModel().catch(() => {});
+    const hint: BatchModelHint =
+      state.cjkCached && state.glinerCached
+        ? "both"
+        : state.glinerCached
+          ? "gliner"
+          : "cjk";
+    warmupLocalMlModel(hint).catch(() => {});
   }
 }
 
@@ -180,8 +197,17 @@ export async function checkLocalMlModelCached(): Promise<boolean> {
         : info.totalBytes > 0 && info.partialBytes > 0
           ? Math.min(99, Math.round((info.partialBytes / info.totalBytes) * 100))
           : 0;
+    const partialModel: NerModelId | null =
+      !info.cjk.isCached && info.cjk.partialBytes > 0
+        ? "cjkBert"
+        : !info.gliner.isCached && info.gliner.partialBytes > 0
+          ? "gliner"
+          : null;
     patchState({
       isModelCached: info.isCached,
+      cjkCached: info.cjkCached,
+      glinerCached: info.glinerCached,
+      downloadingModel: partialModel ?? state.downloadingModel,
       partialBytes: info.partialBytes,
       totalBytes: info.totalBytes || state.totalBytes,
       loadedBytes: info.partialBytes || state.loadedBytes,
@@ -189,7 +215,7 @@ export async function checkLocalMlModelCached(): Promise<boolean> {
     });
     return info.isCached;
   } catch {
-    patchState({ isModelCached: false });
+    patchState({ isModelCached: false, cjkCached: false, glinerCached: false });
     return false;
   }
 }
@@ -209,6 +235,7 @@ function handleWorkerMessage(ev: MessageEvent<WorkerOutMessage>) {
     patchState({
       status: msg.stage,
       loadedBytes: msg.loadedBytes,
+      ...(msg.modelId !== undefined ? { downloadingModel: msg.modelId } : {}),
       ...(msg.loadedBytes > 0 ? { partialBytes: msg.loadedBytes } : {}),
       ...(msg.totalBytes > 0 ? { totalBytes: msg.totalBytes } : {}),
       downloadPercent: msg.percent,
@@ -216,6 +243,8 @@ function handleWorkerMessage(ev: MessageEvent<WorkerOutMessage>) {
       maxRetries: msg.maxRetries || 0,
       ...(msg.provider !== undefined ? { executionProvider: msg.provider } : {}),
       ...(msg.cached !== undefined ? { isModelCached: msg.cached } : {}),
+      ...(msg.cjkCached !== undefined ? { cjkCached: msg.cjkCached } : {}),
+      ...(msg.glinerCached !== undefined ? { glinerCached: msg.glinerCached } : {}),
       ...(msg.stage === "ready" || msg.stage === "downloading" ? { error: null } : {}),
     });
     return;
@@ -246,7 +275,7 @@ function getOrCreateWorker(): Worker {
   w.addEventListener("message", handleWorkerMessage);
   w.addEventListener("error", (ev) => {
     const msg = ev.message || "ML worker crashed";
-    patchState({ status: "error", error: msg });
+    patchState({ status: "error", downloadingModel: null, error: msg });
     for (const [, p] of pendingRpcs) {
       p.reject(new Error(msg));
     }
@@ -302,14 +331,24 @@ let activeWarmupPromise: Promise<{ provider: "webgpu" | "wasm" }> | null = null;
 let warmupAbortController: AbortController | null = null;
 
 export async function warmupLocalMlModel(
+  modelHintOrSignal?: BatchModelHint | AbortSignal,
   externalSignal?: AbortSignal
 ): Promise<{ provider: "webgpu" | "wasm" }> {
+  const modelHint: BatchModelHint =
+    typeof modelHintOrSignal === "string" ? modelHintOrSignal : "cjk";
+  const resolvedSignal =
+    typeof modelHintOrSignal === "string" ? externalSignal : modelHintOrSignal;
+
   const pref = state.executorPreference;
   const providerMatchesPref =
     state.executionProvider !== null &&
     (pref === "auto" || pref === state.executionProvider);
+  const modelSatisfied =
+    (modelHint === "cjk" && state.cjkCached) ||
+    (modelHint === "gliner" && state.glinerCached) ||
+    (modelHint === "both" && state.cjkCached && state.glinerCached);
 
-  if (providerMatchesPref && state.status === "ready") {
+  if (providerMatchesPref && state.status === "ready" && modelSatisfied) {
     return { provider: state.executionProvider! };
   }
   if (activeWarmupPromise) {
@@ -317,17 +356,23 @@ export async function warmupLocalMlModel(
   }
 
   warmupAbortController = new AbortController();
-  const signal = externalSignal || warmupAbortController.signal;
+  const signal = resolvedSignal || warmupAbortController.signal;
   patchState({ error: null });
 
   activeWarmupPromise = (async () => {
     try {
-      const msg = await callWorker({ type: "warmup", executor: state.executorPreference }, signal);
+      const msg = await callWorker(
+        { type: "warmup", executor: state.executorPreference, modelHint },
+        signal
+      );
       if (msg.type === "warmup-done") {
         patchState({
           status: state.enabled ? "ready" : "disabled",
           executionProvider: msg.provider,
-          isModelCached: true,
+          isModelCached: msg.cjkCached || msg.glinerCached,
+          cjkCached: msg.cjkCached,
+          glinerCached: msg.glinerCached,
+          downloadingModel: null,
           downloadPercent: 100,
           retryAttempt: 0,
           maxRetries: 0,
@@ -342,6 +387,7 @@ export async function warmupLocalMlModel(
       if (e?.name === "AbortError") {
         patchState({
           status: state.enabled ? "idle" : "disabled",
+          downloadingModel: null,
           retryAttempt: 0,
           maxRetries: 0,
           error: null,
@@ -349,6 +395,7 @@ export async function warmupLocalMlModel(
       } else {
         patchState({
           status: "error",
+          downloadingModel: null,
           retryAttempt: 0,
           maxRetries: 0,
           error: e?.message || "Failed to load ML model",
@@ -384,6 +431,7 @@ export function abortLocalMlModel(): void {
   ) {
     patchState({
       status: state.enabled ? (state.executionProvider ? "ready" : "idle") : "disabled",
+      downloadingModel: null,
       retryAttempt: 0,
       maxRetries: 0,
     });
@@ -402,6 +450,9 @@ export async function clearLocalMlModelCache(): Promise<void> {
   await clearAllModelCaches();
   patchState({
     isModelCached: false,
+    cjkCached: false,
+    glinerCached: false,
+    downloadingModel: null,
     executionProvider: null,
     downloadPercent: 0,
     loadedBytes: 0,
@@ -414,12 +465,17 @@ export async function clearLocalMlModelCache(): Promise<void> {
   });
 }
 
+export interface WorkerPostInferenceOutput {
+  spans: WorkerMlSpan[];
+  mlModel: WorkerMlModelFlavor;
+}
+
 export async function inferEntitiesWithMlWorker(
   posts: WorkerPostInput[],
   signal?: AbortSignal
 ): Promise<{
   provider: "webgpu" | "wasm";
-  results: Map<string, WorkerMlSpan[]>;
+  results: Map<string, WorkerPostInferenceOutput>;
 }> {
   if (!posts || posts.length === 0) {
     return {
@@ -439,14 +495,20 @@ export async function inferEntitiesWithMlWorker(
       signal
     );
     if (msg.type === "infer-done") {
-      const resultsMap = new Map<string, WorkerMlSpan[]>();
+      const resultsMap = new Map<string, WorkerPostInferenceOutput>();
       for (const item of msg.results) {
-        resultsMap.set(item.postKey, item.spans);
+        resultsMap.set(item.postKey, {
+          spans: item.spans,
+          mlModel: item.mlModel,
+        });
       }
       patchState({
         status: state.enabled ? "ready" : "disabled",
         executionProvider: msg.provider,
-        isModelCached: true,
+        isModelCached: msg.cjkCached || msg.glinerCached,
+        cjkCached: msg.cjkCached,
+        glinerCached: msg.glinerCached,
+        downloadingModel: null,
         downloadPercent: 100,
         error: null,
       });
@@ -458,10 +520,12 @@ export async function inferEntitiesWithMlWorker(
     if (e?.name === "AbortError") {
       patchState({
         status: state.enabled ? (state.executionProvider ? "ready" : "idle") : "disabled",
+        downloadingModel: null,
       });
     } else {
       patchState({
         status: "error",
+        downloadingModel: null,
         error: e?.message || "Local ML inference failed",
       });
     }

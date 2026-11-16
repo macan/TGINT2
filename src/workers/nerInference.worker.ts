@@ -1,23 +1,24 @@
 /**
- * Dedicated Web Worker for in-browser multilingual GLiNER.js NER inference.
+ * Dedicated Web Worker for hybrid local NER inference:
+ *   1. Chinese-native `Xenova/bert-base-chinese-ner` (~98.2 MB INT8 ONNX) for Han-dominant
+ *      (Simplified / Traditional / Cantonese) posts -> 5-15x faster single-pass BIESO decoding.
+ *   2. Segmented `onnx-community/gliner_multi-v2.1` (~333 MB INT8 ONNX) with native ICU
+ *      `Intl.Segmenter` (`CjkAwareWordSplitter`) for Japanese, English, Russian, and mixed posts.
  *
- * Streams & persists `onnx-community/gliner_multi-v2.1` quantized weights in
- * Browser Cache Storage (`gingko-ner-models-v1`), initializes ONNX Runtime Web
- * prioritizing WebGPU with automatic WASM SIMD fallback, and chunks input
- * posts safely within the mDeBERTa 384-token window so CJK, Cantonese (Yue),
- * Russian, and English texts extract cleanly without overflowing.
+ * Both models use 8 MiB HTTP Range resumable chunk downloading with stall watchdog,
+ * IndexedDB chunk recovery, Browser Cache Storage persistence, and WebGPU/WASM execution.
  */
 
 import { Gliner } from "gliner";
+import { AutoTokenizer, env } from "@xenova/transformers";
+import ortCpu from "onnxruntime-web";
+import ortWebGpu from "onnxruntime-web/webgpu";
 import {
-  APPROX_MODEL_BYTES,
   CHUNK_SIZE_BYTES,
-  MODEL_CACHE_NAME,
-  MODEL_ONNX_URL,
-  MODEL_TOKENIZER_ID,
+  NER_MODEL_SPECS,
   assembleModelFromChunks,
   clearAllModelCaches,
-  clearPartialChunksDb,
+  clearPartialChunksForModel,
   computeSavedBytes,
   deleteModelChunk,
   expectedChunkLength,
@@ -26,19 +27,20 @@ import {
   readModelMeta,
   writeModelMeta,
   type ModelDownloadMeta,
+  type NerModelId,
 } from "../utils/nerModelCache";
+import {
+  CJK_BERT_ID2LABEL,
+  CjkAwareWordSplitter,
+  decodeBiesoTokenLogits,
+  isChineseDominantText,
+  splitIntoCjkBertChunks,
+  type BatchModelHint,
+  type CjkWorkerNerClassId,
+} from "../utils/nerCjkUtils";
 
-export type WorkerNerClassId =
-  | "person"
-  | "organization"
-  | "nation"
-  | "job_position"
-  | "location"
-  | "address"
-  | "event"
-  | "platform"
-  | "asset_law"
-  | "financial_metric";
+export type WorkerNerClassId = CjkWorkerNerClassId;
+export type WorkerMlModelFlavor = "cjk-bert" | "gliner";
 
 export interface WorkerMlSpan {
   spanText: string;
@@ -57,8 +59,18 @@ export interface WorkerPostInput {
 export type WorkerExecutorPreference = "auto" | "wasm" | "webgpu";
 
 export type WorkerInMessage =
-  | { id: number; type: "warmup"; executor?: WorkerExecutorPreference }
-  | { id: number; type: "infer-batch"; posts: WorkerPostInput[]; executor?: WorkerExecutorPreference }
+  | {
+      id: number;
+      type: "warmup";
+      executor?: WorkerExecutorPreference;
+      modelHint?: BatchModelHint;
+    }
+  | {
+      id: number;
+      type: "infer-batch";
+      posts: WorkerPostInput[];
+      executor?: WorkerExecutorPreference;
+    }
   | { id: number; type: "clear-cache" }
   | { id: number; type: "abort" };
 
@@ -69,8 +81,11 @@ export type WorkerOutMessage =
       loadedBytes: number;
       totalBytes: number;
       percent: number;
+      modelId?: NerModelId;
       provider?: "webgpu" | "wasm" | null;
       cached?: boolean;
+      cjkCached?: boolean;
+      glinerCached?: boolean;
       retryAttempt?: number;
       maxRetries?: number;
     }
@@ -79,12 +94,16 @@ export type WorkerOutMessage =
       type: "warmup-done";
       provider: "webgpu" | "wasm";
       cached: boolean;
+      cjkCached: boolean;
+      glinerCached: boolean;
     }
   | {
       id: number;
       type: "infer-done";
       provider: "webgpu" | "wasm";
-      results: Array<{ postKey: string; spans: WorkerMlSpan[] }>;
+      cjkCached: boolean;
+      glinerCached: boolean;
+      results: Array<{ postKey: string; spans: WorkerMlSpan[]; mlModel: WorkerMlModelFlavor }>;
     }
   | {
       id: number;
@@ -101,6 +120,13 @@ const ONNX_WASM_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/
 const CHUNK_STALL_TIMEOUT_MS = 25_000;
 const MAX_CHUNK_RETRIES = 5;
 const MAX_TOKENIZER_RETRIES = 3;
+
+// Sync @xenova/transformers runtime ONNX WASM paths to match gliner's onnxruntime-web@1.19.2
+env.allowLocalModels = false;
+env.useBrowserCache = true;
+if ((env.backends as { onnx?: { wasm?: { wasmPaths?: string } } })?.onnx?.wasm) {
+  (env.backends as { onnx: { wasm: { wasmPaths: string } } }).onnx.wasm.wasmPaths = ONNX_WASM_CDN;
+}
 
 // 11 zero-shot labels (well below model max_types = 25) mapped back to our 10 NER classes
 const GLINER_LABEL_DEFS: Array<{ prompt: string; nerClass: WorkerNerClassId }> = [
@@ -122,15 +148,38 @@ const PROMPT_TO_NER_CLASS = new Map<string, WorkerNerClassId>(
   GLINER_LABEL_DEFS.map((d) => [d.prompt, d.nerClass])
 );
 
-const MAX_CHUNK_WORDS = 95;
-const MAX_CHUNK_CHARS = 190;
-const OVERLAP_CHARS = 18;
-const INFER_SUBBATCH_SIZE = 4;
+const MAX_GLINER_CHUNK_WORDS = 95;
+const MAX_GLINER_CHUNK_CHARS = 190;
+const GLINER_OVERLAP_CHARS = 18;
+const GLINER_SUBBATCH_SIZE = 4;
+const CJK_BERT_SUBBATCH_SIZE = 8;
 const ML_CONFIDENCE_THRESHOLD = 0.42;
 
+// Session state for both neural models
 let glinerInstance: Gliner | null = null;
-let activeProvider: "webgpu" | "wasm" | null = null;
-let initPromise: Promise<"webgpu" | "wasm"> | null = null;
+let glinerProvider: "webgpu" | "wasm" | null = null;
+let glinerInitPromise: Promise<{ provider: "webgpu" | "wasm"; cached: boolean }> | null = null;
+
+type TransformersTokenizer = Awaited<ReturnType<typeof AutoTokenizer.from_pretrained>> & {
+  (
+    texts: string | string[],
+    opts?: Record<string, unknown>
+  ): Promise<{
+    input_ids: { data: ArrayLike<number | bigint>; dims: number[] };
+    attention_mask: { data: ArrayLike<number | bigint>; dims: number[] };
+    token_type_ids?: { data: ArrayLike<number | bigint>; dims: number[] };
+  }>;
+  model: {
+    convert_ids_to_tokens(ids: number[]): string[];
+  };
+};
+
+let cjkTokenizer: TransformersTokenizer | null = null;
+let cjkSession: ortCpu.InferenceSession | null = null;
+let cjkOrtRuntime: typeof ortCpu | null = null;
+let cjkProvider: "webgpu" | "wasm" | null = null;
+let cjkInitPromise: Promise<{ provider: "webgpu" | "wasm"; cached: boolean }> | null = null;
+
 let activeAbortController: AbortController | null = null;
 let abortRequested = false;
 
@@ -140,7 +189,9 @@ function emit(msg: WorkerOutMessage) {
 
 async function detectWebGpuSupport(): Promise<boolean> {
   try {
-    const nav = (self as unknown as { navigator?: { gpu?: { requestAdapter?: () => Promise<unknown> } } }).navigator;
+    const nav = (
+      self as unknown as { navigator?: { gpu?: { requestAdapter?: () => Promise<unknown> } } }
+    ).navigator;
     if (!nav?.gpu || typeof nav.gpu.requestAdapter !== "function") {
       return false;
     }
@@ -151,10 +202,11 @@ async function detectWebGpuSupport(): Promise<boolean> {
   }
 }
 
-async function persistModelToCache(bytes: Uint8Array): Promise<boolean> {
+async function persistModelToCache(modelId: NerModelId, bytes: Uint8Array): Promise<boolean> {
   if (typeof caches === "undefined") return false;
+  const spec = NER_MODEL_SPECS[modelId];
   try {
-    const cache = await caches.open(MODEL_CACHE_NAME);
+    const cache = await caches.open(spec.cacheName);
     const resp = new Response(
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
       {
@@ -164,18 +216,19 @@ async function persistModelToCache(bytes: Uint8Array): Promise<boolean> {
         },
       }
     );
-    await cache.put(MODEL_ONNX_URL, resp);
+    await cache.put(spec.onnxUrl, resp);
     return true;
   } catch {
     return false;
   }
 }
 
-async function readModelFromCacheStorage(): Promise<Uint8Array | null> {
+async function readModelFromCacheStorage(modelId: NerModelId): Promise<Uint8Array | null> {
   if (typeof caches === "undefined") return null;
+  const spec = NER_MODEL_SPECS[modelId];
   try {
-    const cache = await caches.open(MODEL_CACHE_NAME);
-    const cached = await cache.match(MODEL_ONNX_URL);
+    const cache = await caches.open(spec.cacheName);
+    const cached = await cache.match(spec.onnxUrl);
     if (!cached) return null;
     emit({
       type: "progress",
@@ -183,13 +236,16 @@ async function readModelFromCacheStorage(): Promise<Uint8Array | null> {
       loadedBytes: 0,
       totalBytes: 0,
       percent: 100,
+      modelId,
       cached: true,
+      cjkCached: modelId === "cjkBert" ? true : undefined,
+      glinerCached: modelId === "gliner" ? true : undefined,
     });
     const buf = await cached.arrayBuffer();
-    if (buf.byteLength > 50_000_000) {
+    if (buf.byteLength > spec.minValidBytes) {
       return new Uint8Array(buf);
     }
-    await cache.delete(MODEL_ONNX_URL).catch(() => {});
+    await cache.delete(spec.onnxUrl).catch(() => {});
   } catch {
     // Cache Storage unavailable
   }
@@ -253,7 +309,11 @@ interface RemoteProbeInfo {
   supportsRange: boolean;
 }
 
-async function probeRemoteModelInfo(signal: AbortSignal): Promise<RemoteProbeInfo> {
+async function probeRemoteModelInfo(
+  modelId: NerModelId,
+  signal: AbortSignal
+): Promise<RemoteProbeInfo> {
+  const spec = NER_MODEL_SPECS[modelId];
   let lastErr: unknown = null;
   for (let attempt = 0; attempt <= 2; attempt++) {
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
@@ -262,8 +322,7 @@ async function probeRemoteModelInfo(signal: AbortSignal): Promise<RemoteProbeInf
     const onUserAbort = () => stallCtrl.abort();
     signal.addEventListener("abort", onUserAbort, { once: true });
     try {
-      // Tiny 1-byte Range GET reliably resolves redirects + Content-Range + ETag across CORS proxies
-      const res = await fetch(MODEL_ONNX_URL, {
+      const res = await fetch(spec.onnxUrl, {
         method: "GET",
         headers: { Range: "bytes=0-0" },
         signal: stallCtrl.signal,
@@ -275,10 +334,11 @@ async function probeRemoteModelInfo(signal: AbortSignal): Promise<RemoteProbeInf
         await res.body?.cancel().catch(() => {});
         const cr = res.headers.get("content-range") || "";
         const match = cr.match(/\/(\d+)\s*$/);
-        const totalBytes = match ? Number(match[1]) : APPROX_MODEL_BYTES;
+        const totalBytes = match ? Number(match[1]) : spec.approxBytes;
         const etag = (res.headers.get("etag") || "").replace(/"/g, "");
         return {
-          totalBytes: Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : APPROX_MODEL_BYTES,
+          totalBytes:
+            Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : spec.approxBytes,
           etag,
           supportsRange: true,
         };
@@ -289,7 +349,7 @@ async function probeRemoteModelInfo(signal: AbortSignal): Promise<RemoteProbeInf
         const etag = (res.headers.get("etag") || "").replace(/"/g, "");
         await res.body?.cancel().catch(() => {});
         return {
-          totalBytes: Number.isFinite(len) && len > 0 ? len : APPROX_MODEL_BYTES,
+          totalBytes: Number.isFinite(len) && len > 0 ? len : spec.approxBytes,
           etag,
           supportsRange: false,
         };
@@ -313,6 +373,7 @@ async function probeRemoteModelInfo(signal: AbortSignal): Promise<RemoteProbeInf
 }
 
 async function fetchSingleRangeChunkWithWatchdog(
+  modelId: NerModelId,
   startByte: number,
   endByte: number,
   expectedLen: number,
@@ -320,6 +381,7 @@ async function fetchSingleRangeChunkWithWatchdog(
   totalBytes: number,
   signal: AbortSignal
 ): Promise<ArrayBuffer> {
+  const spec = NER_MODEL_SPECS[modelId];
   const chunkCtrl = new AbortController();
   let timedOut = false;
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
@@ -337,7 +399,7 @@ async function fetchSingleRangeChunkWithWatchdog(
   resetWatchdog();
 
   try {
-    const res = await fetch(MODEL_ONNX_URL, {
+    const res = await fetch(spec.onnxUrl, {
       method: "GET",
       headers: { Range: `bytes=${startByte}-${endByte}` },
       signal: chunkCtrl.signal,
@@ -389,6 +451,7 @@ async function fetchSingleRangeChunkWithWatchdog(
           emit({
             type: "progress",
             stage: "downloading",
+            modelId,
             loadedBytes: totalLoaded,
             totalBytes,
             percent: pct,
@@ -397,7 +460,6 @@ async function fetchSingleRangeChunkWithWatchdog(
       }
     }
 
-    // If intermediary proxy returned 200 full file even though Range was requested
     if (res.status === 200 && chunkReceived > expectedLen && startByte === 0) {
       const fullBuf = new Uint8Array(chunkReceived);
       let off = 0;
@@ -434,10 +496,12 @@ async function fetchSingleRangeChunkWithWatchdog(
 }
 
 async function streamFullFallbackWithChunkSaves(
+  modelId: NerModelId,
   totalBytesHint: number,
   signal: AbortSignal
 ): Promise<Uint8Array> {
-  const res = await fetch(MODEL_ONNX_URL, {
+  const spec = NER_MODEL_SPECS[modelId];
+  const res = await fetch(spec.onnxUrl, {
     signal,
     mode: "cors",
     credentials: "omit",
@@ -473,6 +537,7 @@ async function streamFullFallbackWithChunkSaves(
         emit({
           type: "progress",
           stage: "downloading",
+          modelId,
           loadedBytes: loaded,
           totalBytes: Math.max(loaded, totalBytes),
           percent: Math.min(99, Math.round((loaded / Math.max(loaded, totalBytes)) * 100)),
@@ -484,47 +549,50 @@ async function streamFullFallbackWithChunkSaves(
 }
 
 async function loadOrDownloadModelBytes(
+  modelId: NerModelId,
   signal: AbortSignal
 ): Promise<{ bytes: Uint8Array; fromCache: boolean }> {
+  const spec = NER_MODEL_SPECS[modelId];
   emit({
     type: "progress",
     stage: "checking",
+    modelId,
     loadedBytes: 0,
     totalBytes: 0,
     percent: 0,
   });
 
   // 1. Fast path: assembled model already in Cache Storage
-  const fromCacheStorage = await readModelFromCacheStorage();
+  const fromCacheStorage = await readModelFromCacheStorage(modelId);
   if (fromCacheStorage) {
-    await clearPartialChunksDb();
+    await clearPartialChunksForModel(modelId);
     return { bytes: fromCacheStorage, fromCache: true };
   }
 
-  // 2. Check if IndexedDB already holds all verified chunks (offline/private Cache Storage fallback)
-  const existingMeta = await readModelMeta();
-  if (existingMeta && existingMeta.totalBytes > 50_000_000) {
-    const completed = await getCompletedChunkIndices();
+  // 2. Check if IndexedDB already holds all verified chunks for this model
+  const existingMeta = await readModelMeta(modelId);
+  if (existingMeta && existingMeta.totalBytes > spec.minValidBytes) {
+    const completed = await getCompletedChunkIndices(modelId);
     if (completed.size >= existingMeta.numChunks) {
-      const assembled = await assembleModelFromChunks(existingMeta);
+      const assembled = await assembleModelFromChunks(existingMeta, modelId);
       if (assembled.bytes) {
-        const persisted = await persistModelToCache(assembled.bytes);
-        if (persisted) await clearPartialChunksDb();
+        const persisted = await persistModelToCache(modelId, assembled.bytes);
+        if (persisted) await clearPartialChunksForModel(modelId);
         return { bytes: assembled.bytes, fromCache: true };
       }
       for (const badIdx of assembled.invalidIndices) {
-        await deleteModelChunk(badIdx);
+        await deleteModelChunk(badIdx, modelId);
       }
     }
   }
 
   // 3. Probe remote metadata (totalBytes, ETag, Range support)
-  const probe = await probeRemoteModelInfo(signal);
+  const probe = await probeRemoteModelInfo(modelId, signal);
   const numChunks = Math.ceil(probe.totalBytes / CHUNK_SIZE_BYTES);
 
   let meta: ModelDownloadMeta = {
-    key: "gliner_multi_v2_1_quantized",
-    url: MODEL_ONNX_URL,
+    key: spec.metaKey,
+    url: spec.onnxUrl,
     etag: probe.etag,
     totalBytes: probe.totalBytes,
     chunkSize: CHUNK_SIZE_BYTES,
@@ -539,34 +607,36 @@ async function loadOrDownloadModelBytes(
     existingMeta.chunkSize === CHUNK_SIZE_BYTES &&
     (!probe.etag || !existingMeta.etag || existingMeta.etag === probe.etag)
   ) {
-    completed = await getCompletedChunkIndices();
+    completed = await getCompletedChunkIndices(modelId);
     meta = { ...existingMeta, etag: probe.etag || existingMeta.etag, updatedAt: Date.now() };
-    await writeModelMeta(meta);
+    await writeModelMeta(meta, modelId);
   } else {
-    await clearPartialChunksDb();
-    await writeModelMeta(meta);
+    await clearPartialChunksForModel(modelId);
+    await writeModelMeta(meta, modelId);
   }
 
   let completedBytes = computeSavedBytes(completed, meta.totalBytes, meta.chunkSize);
   emit({
     type: "progress",
     stage: "downloading",
+    modelId,
     loadedBytes: completedBytes,
     totalBytes: meta.totalBytes,
     percent: Math.min(99, Math.round((completedBytes / meta.totalBytes) * 100)),
   });
 
   if (!probe.supportsRange && completed.size === 0) {
-    const fullBytes = await streamFullFallbackWithChunkSaves(meta.totalBytes, signal);
+    const fullBytes = await streamFullFallbackWithChunkSaves(modelId, meta.totalBytes, signal);
     emit({
       type: "progress",
       stage: "downloading",
+      modelId,
       loadedBytes: fullBytes.byteLength,
       totalBytes: fullBytes.byteLength,
       percent: 100,
     });
-    const persisted = await persistModelToCache(fullBytes);
-    if (persisted) await clearPartialChunksDb();
+    const persisted = await persistModelToCache(modelId, fullBytes);
+    if (persisted) await clearPartialChunksForModel(modelId);
     return { bytes: fullBytes, fromCache: false };
   }
 
@@ -588,6 +658,7 @@ async function loadOrDownloadModelBytes(
       for (let attempt = 0; attempt <= MAX_CHUNK_RETRIES; attempt++) {
         try {
           chunkBuf = await fetchSingleRangeChunkWithWatchdog(
+            modelId,
             startByte,
             endByte,
             expectedLen,
@@ -608,11 +679,13 @@ async function loadOrDownloadModelBytes(
           if (attempt >= MAX_CHUNK_RETRIES) {
             throw err;
           }
-          const delayMs = Math.min(20_000, 1500 * Math.pow(2, attempt)) + Math.round(Math.random() * 400);
+          const delayMs =
+            Math.min(20_000, 1500 * Math.pow(2, attempt)) + Math.round(Math.random() * 400);
           const pct = Math.min(99, Math.round((completedBytes / meta.totalBytes) * 100));
           emit({
             type: "progress",
             stage: "retrying",
+            modelId,
             loadedBytes: completedBytes,
             totalBytes: meta.totalBytes,
             percent: pct,
@@ -627,62 +700,401 @@ async function loadOrDownloadModelBytes(
         throw lastErr instanceof Error ? lastErr : new Error("Failed downloading model chunk");
       }
 
-      // Handle rare 200 full-body response from proxy ignoring Range header
       if (idx === 0 && chunkBuf.byteLength === meta.totalBytes && expectedLen < meta.totalBytes) {
         const full = new Uint8Array(chunkBuf);
         emit({
           type: "progress",
           stage: "downloading",
+          modelId,
           loadedBytes: full.byteLength,
           totalBytes: full.byteLength,
           percent: 100,
         });
-        const persisted = await persistModelToCache(full);
-        if (persisted) await clearPartialChunksDb();
+        const persisted = await persistModelToCache(modelId, full);
+        if (persisted) await clearPartialChunksForModel(modelId);
         return { bytes: full, fromCache: false };
       }
 
-      await putModelChunk(idx, chunkBuf);
+      await putModelChunk(idx, chunkBuf, modelId);
       completed.add(idx);
       completedBytes = computeSavedBytes(completed, meta.totalBytes, meta.chunkSize);
 
       emit({
         type: "progress",
         stage: "downloading",
+        modelId,
         loadedBytes: completedBytes,
         totalBytes: meta.totalBytes,
-        percent: completed.size >= meta.numChunks
-          ? 100
-          : Math.min(99, Math.round((completedBytes / meta.totalBytes) * 100)),
+        percent:
+          completed.size >= meta.numChunks
+            ? 100
+            : Math.min(99, Math.round((completedBytes / meta.totalBytes) * 100)),
       });
     }
 
     // Assemble & verify all chunks
-    const assembled = await assembleModelFromChunks(meta);
+    const assembled = await assembleModelFromChunks(meta, modelId);
     if (assembled.bytes) {
       emit({
         type: "progress",
         stage: "downloading",
+        modelId,
         loadedBytes: assembled.bytes.byteLength,
         totalBytes: assembled.bytes.byteLength,
         percent: 100,
       });
-      const persisted = await persistModelToCache(assembled.bytes);
+      const persisted = await persistModelToCache(modelId, assembled.bytes);
       if (persisted) {
-        await clearPartialChunksDb();
+        await clearPartialChunksForModel(modelId);
       }
       return { bytes: assembled.bytes, fromCache: false };
     }
 
     for (const badIdx of assembled.invalidIndices) {
       completed.delete(badIdx);
-      await deleteModelChunk(badIdx);
+      await deleteModelChunk(badIdx, modelId);
     }
     completedBytes = computeSavedBytes(completed, meta.totalBytes, meta.chunkSize);
   }
 
   throw new Error("Model verification failed after assembling chunks");
 }
+
+async function resolveTargetProvider(
+  preference: WorkerExecutorPreference
+): Promise<"webgpu" | "wasm"> {
+  if (preference === "wasm") return "wasm";
+  const canWebGpu = await detectWebGpuSupport();
+  if (preference === "webgpu") {
+    if (!canWebGpu) {
+      throw new Error(
+        "WebGPU adapter unavailable in this browser; switch executor to WASM or Auto."
+      );
+    }
+    return "webgpu";
+  }
+  return canWebGpu ? "webgpu" : "wasm";
+}
+
+function isWebGpuSessionError(err: unknown, provider: "webgpu" | "wasm"): boolean {
+  if (provider !== "webgpu") return false;
+  const msg = String((err as { message?: string })?.message || "").toLowerCase();
+  return (
+    msg.includes("webgpu") ||
+    msg.includes("gpu") ||
+    msg.includes("adapter") ||
+    msg.includes("session")
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 1. CJK-Native BERT Token Classifier (`Xenova/bert-base-chinese-ner`)
+// ---------------------------------------------------------------------------
+
+async function createCjkBertSession(
+  bytes: Uint8Array,
+  provider: "webgpu" | "wasm",
+  signal: AbortSignal
+): Promise<{
+  tokenizer: TransformersTokenizer;
+  session: ortCpu.InferenceSession;
+  ortRuntime: typeof ortCpu;
+}> {
+  const isCrossOriginIsolated = Boolean(
+    (self as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated
+  );
+  const ortRuntime: typeof ortCpu =
+    provider === "webgpu" ? (ortWebGpu as unknown as typeof ortCpu) : ortCpu;
+
+  ortRuntime.env.wasm.wasmPaths = ONNX_WASM_CDN;
+  if (provider === "wasm") {
+    const maxThreads = (self.navigator?.hardwareConcurrency ?? 2);
+    ortRuntime.env.wasm.numThreads = isCrossOriginIsolated ? Math.min(4, maxThreads) : 1;
+  }
+
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < MAX_TOKENIZER_RETRIES; attempt++) {
+    if (signal.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+    try {
+      const tokenizer = (await AutoTokenizer.from_pretrained(
+        NER_MODEL_SPECS.cjkBert.repoId
+      )) as unknown as TransformersTokenizer;
+      const session = await ortRuntime.InferenceSession.create(bytes, {
+        executionProviders: [provider],
+      });
+      return { tokenizer, session, ortRuntime };
+    } catch (err) {
+      lastErr = err;
+      if (isWebGpuSessionError(err, provider)) {
+        throw err;
+      }
+      if (attempt < MAX_TOKENIZER_RETRIES - 1) {
+        await waitForReconnectOrDelay(1500 * (attempt + 1), signal);
+      }
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("Failed initializing CJK BERT NER session");
+}
+
+async function ensureCjkBertInitialized(
+  signal: AbortSignal,
+  preference: WorkerExecutorPreference = "auto"
+): Promise<{ provider: "webgpu" | "wasm"; cached: boolean }> {
+  const needsSwitch =
+    Boolean(cjkSession && cjkTokenizer && cjkProvider) &&
+    ((preference === "wasm" && cjkProvider !== "wasm") ||
+      (preference === "webgpu" && cjkProvider !== "webgpu"));
+
+  if (needsSwitch) {
+    cjkSession = null;
+    cjkOrtRuntime = null;
+    cjkProvider = null;
+  }
+
+  if (cjkSession && cjkTokenizer && cjkProvider) {
+    return { provider: cjkProvider, cached: true };
+  }
+
+  if (cjkInitPromise) {
+    return await cjkInitPromise;
+  }
+
+  cjkInitPromise = (async () => {
+    const { bytes, fromCache } = await loadOrDownloadModelBytes("cjkBert", signal);
+    if (signal.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+
+    const preferred = await resolveTargetProvider(preference);
+    emit({
+      type: "progress",
+      stage: "initializing",
+      modelId: "cjkBert",
+      loadedBytes: bytes.byteLength,
+      totalBytes: bytes.byteLength,
+      percent: 100,
+      provider: preferred,
+      cached: true,
+    });
+
+    if (preferred === "webgpu") {
+      try {
+        const res = await createCjkBertSession(bytes, "webgpu", signal);
+        cjkTokenizer = res.tokenizer;
+        cjkSession = res.session;
+        cjkOrtRuntime = res.ortRuntime;
+        cjkProvider = "webgpu";
+      } catch (err) {
+        if (signal.aborted || (err as { name?: string })?.name === "AbortError") {
+          throw err;
+        }
+        if (preference === "webgpu") {
+          throw err;
+        }
+        emit({
+          type: "progress",
+          stage: "initializing",
+          modelId: "cjkBert",
+          loadedBytes: bytes.byteLength,
+          totalBytes: bytes.byteLength,
+          percent: 100,
+          provider: "wasm",
+          cached: true,
+        });
+        const fallbackBytes = (await readModelFromCacheStorage("cjkBert")) || bytes;
+        const res = await createCjkBertSession(fallbackBytes, "wasm", signal);
+        cjkTokenizer = res.tokenizer;
+        cjkSession = res.session;
+        cjkOrtRuntime = res.ortRuntime;
+        cjkProvider = "wasm";
+      }
+    } else {
+      const res = await createCjkBertSession(bytes, "wasm", signal);
+      cjkTokenizer = res.tokenizer;
+      cjkSession = res.session;
+      cjkOrtRuntime = res.ortRuntime;
+      cjkProvider = "wasm";
+    }
+
+    emit({
+      type: "progress",
+      stage: "ready",
+      modelId: "cjkBert",
+      loadedBytes: bytes.byteLength,
+      totalBytes: bytes.byteLength,
+      percent: 100,
+      provider: cjkProvider,
+      cached: fromCache,
+      cjkCached: true,
+      glinerCached: Boolean(glinerInstance),
+    });
+
+    return { provider: cjkProvider, cached: fromCache };
+  })();
+
+  try {
+    return await cjkInitPromise;
+  } catch (err) {
+    cjkSession = null;
+    cjkOrtRuntime = null;
+    cjkProvider = null;
+    throw err;
+  } finally {
+    cjkInitPromise = null;
+  }
+}
+
+function toInt64Tensor(
+  ortMod: typeof ortCpu,
+  tensorLike: { data: ArrayLike<number | bigint>; dims: number[] }
+) {
+  const src = tensorLike.data;
+  const big =
+    src instanceof BigInt64Array
+      ? src
+      : BigInt64Array.from({ length: src.length }, (_, k) => BigInt(src[k]));
+  return new ortMod.Tensor("int64", big, tensorLike.dims);
+}
+
+async function runCjkBertBatchWithAutoFallback(
+  texts: string[],
+  signal: AbortSignal,
+  preference: WorkerExecutorPreference
+): Promise<WorkerMlSpan[][]> {
+  if (!cjkSession || !cjkTokenizer || !cjkOrtRuntime) {
+    await ensureCjkBertInitialized(signal, preference);
+  }
+
+  const execOnce = async (): Promise<WorkerMlSpan[][]> => {
+    const tokenizer = cjkTokenizer!;
+    const session = cjkSession!;
+    const ortMod = cjkOrtRuntime!;
+
+    const encoded = await tokenizer(texts, {
+      padding: true,
+      truncation: true,
+      max_length: 512,
+    });
+
+    const dims = encoded.input_ids.dims || [texts.length, 0];
+    const batchSize = dims[0] || texts.length;
+    const seqLen = dims[1] || Math.floor(encoded.input_ids.data.length / Math.max(1, batchSize));
+
+    const feeds: Record<string, ortCpu.Tensor> = {};
+    const expectedInputs = new Set(session.inputNames || ["input_ids", "attention_mask"]);
+    if (expectedInputs.has("input_ids")) {
+      feeds.input_ids = toInt64Tensor(ortMod, {
+        data: encoded.input_ids.data,
+        dims: [batchSize, seqLen],
+      });
+    }
+    if (expectedInputs.has("attention_mask") && encoded.attention_mask) {
+      feeds.attention_mask = toInt64Tensor(ortMod, {
+        data: encoded.attention_mask.data,
+        dims: [batchSize, seqLen],
+      });
+    }
+    if (expectedInputs.has("token_type_ids")) {
+      if (encoded.token_type_ids) {
+        feeds.token_type_ids = toInt64Tensor(ortMod, {
+          data: encoded.token_type_ids.data,
+          dims: [batchSize, seqLen],
+        });
+      } else {
+        feeds.token_type_ids = new ortMod.Tensor(
+          "int64",
+          new BigInt64Array(batchSize * seqLen),
+          [batchSize, seqLen]
+        );
+      }
+    }
+
+    const outputs = await session.run(feeds);
+    const outName = session.outputNames?.[0] || "logits";
+    const logitsTensor = outputs.logits || outputs[outName];
+    if (!logitsTensor || !logitsTensor.data) {
+      return texts.map(() => []);
+    }
+
+    const logitsData = logitsTensor.data as Float32Array;
+    const outDims = logitsTensor.dims || [batchSize, seqLen, 73];
+    const numLabels = outDims[2] || 73;
+
+    const batchDecoded: WorkerMlSpan[][] = [];
+    for (let b = 0; b < batchSize; b++) {
+      const rowOffset = b * seqLen;
+      const rowIds: number[] = new Array(seqLen);
+      const rowMask: number[] = new Array(seqLen);
+      for (let t = 0; t < seqLen; t++) {
+        rowIds[t] = Number(encoded.input_ids.data[rowOffset + t]);
+        rowMask[t] = encoded.attention_mask
+          ? Number(encoded.attention_mask.data[rowOffset + t])
+          : 1;
+      }
+      const tokens = tokenizer.model.convert_ids_to_tokens(rowIds);
+      const spans = decodeBiesoTokenLogits({
+        text: texts[b],
+        tokens,
+        attentionMask: rowMask,
+        logitsData,
+        batchIndex: b,
+        seqLen,
+        numLabels,
+        id2label: CJK_BERT_ID2LABEL,
+        confidenceThreshold: 0.48,
+      });
+      batchDecoded.push(spans);
+    }
+    return batchDecoded;
+  };
+
+  try {
+    return await execOnce();
+  } catch (err) {
+    if (cjkProvider === "webgpu" && preference !== "webgpu") {
+      cjkSession = null;
+      cjkOrtRuntime = null;
+      cjkProvider = null;
+      const { bytes, fromCache } = await loadOrDownloadModelBytes("cjkBert", signal);
+      emit({
+        type: "progress",
+        stage: "initializing",
+        modelId: "cjkBert",
+        loadedBytes: bytes.byteLength,
+        totalBytes: bytes.byteLength,
+        percent: 100,
+        provider: "wasm",
+        cached: fromCache,
+      });
+      const res = await createCjkBertSession(bytes, "wasm", signal);
+      cjkTokenizer = res.tokenizer;
+      cjkSession = res.session;
+      cjkOrtRuntime = res.ortRuntime;
+      cjkProvider = "wasm";
+      emit({
+        type: "progress",
+        stage: "ready",
+        modelId: "cjkBert",
+        loadedBytes: bytes.byteLength,
+        totalBytes: bytes.byteLength,
+        percent: 100,
+        provider: "wasm",
+        cached: fromCache,
+        cjkCached: true,
+      });
+      return await execOnce();
+    }
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. Multilingual Segmented GLiNER (`onnx-community/gliner_multi-v2.1`)
+// ---------------------------------------------------------------------------
 
 async function createGlinerSession(
   bytes: Uint8Array,
@@ -699,7 +1111,7 @@ async function createGlinerSession(
     }
     try {
       const gliner = new Gliner({
-        tokenizerPath: MODEL_TOKENIZER_ID,
+        tokenizerPath: NER_MODEL_SPECS.gliner.repoId,
         modelType: "span-level",
         maxWidth: 12,
         onnxSettings: {
@@ -715,12 +1127,17 @@ async function createGlinerSession(
         },
       });
       await gliner.initialize();
+      // Swap default character-splitting WhitespaceTokenSplitter with native ICU Intl.Segmenter splitter
+      const glinerInternal = gliner as unknown as {
+        model?: { processor?: { wordsSplitter?: unknown } };
+      };
+      if (glinerInternal.model?.processor) {
+        glinerInternal.model.processor.wordsSplitter = new CjkAwareWordSplitter();
+      }
       return gliner;
     } catch (err) {
       lastErr = err;
-      // Don't retry if WebGPU execution provider itself is unsupported; let caller fall back to WASM immediately
-      const msg = String((err as { message?: string })?.message || "").toLowerCase();
-      if (provider === "webgpu" && (msg.includes("webgpu") || msg.includes("gpu") || msg.includes("adapter") || msg.includes("session"))) {
+      if (isWebGpuSessionError(err, provider)) {
         throw err;
       }
       if (attempt < MAX_TOKENIZER_RETRIES - 1) {
@@ -731,7 +1148,7 @@ async function createGlinerSession(
   throw lastErr instanceof Error ? lastErr : new Error("Failed initializing GLiNER session");
 }
 
-async function ensureInitialized(
+async function ensureGlinerInitialized(
   signal: AbortSignal,
   preference: WorkerExecutorPreference = "auto"
 ): Promise<{
@@ -739,50 +1156,34 @@ async function ensureInitialized(
   cached: boolean;
 }> {
   const needsSwitch =
-    Boolean(glinerInstance && activeProvider) &&
-    ((preference === "wasm" && activeProvider !== "wasm") ||
-      (preference === "webgpu" && activeProvider !== "webgpu"));
+    Boolean(glinerInstance && glinerProvider) &&
+    ((preference === "wasm" && glinerProvider !== "wasm") ||
+      (preference === "webgpu" && glinerProvider !== "webgpu"));
 
   if (needsSwitch) {
     glinerInstance = null;
-    activeProvider = null;
+    glinerProvider = null;
   }
 
-  if (glinerInstance && activeProvider) {
-    return { provider: activeProvider, cached: true };
+  if (glinerInstance && glinerProvider) {
+    return { provider: glinerProvider, cached: true };
   }
 
-  if (initPromise) {
-    const provider = await initPromise;
-    return { provider, cached: true };
+  if (glinerInitPromise) {
+    return await glinerInitPromise;
   }
 
-  let wasCached = false;
-  initPromise = (async () => {
-    const { bytes, fromCache } = await loadOrDownloadModelBytes(signal);
-    wasCached = fromCache;
-
+  glinerInitPromise = (async () => {
+    const { bytes, fromCache } = await loadOrDownloadModelBytes("gliner", signal);
     if (signal.aborted) {
       throw new DOMException("Aborted", "AbortError");
     }
 
-    let preferred: "webgpu" | "wasm";
-    if (preference === "wasm") {
-      preferred = "wasm";
-    } else if (preference === "webgpu") {
-      const canWebGpu = await detectWebGpuSupport();
-      if (!canWebGpu) {
-        throw new Error("WebGPU adapter unavailable in this browser; switch executor to WASM or Auto.");
-      }
-      preferred = "webgpu";
-    } else {
-      const canWebGpu = await detectWebGpuSupport();
-      preferred = canWebGpu ? "webgpu" : "wasm";
-    }
-
+    const preferred = await resolveTargetProvider(preference);
     emit({
       type: "progress",
       stage: "initializing",
+      modelId: "gliner",
       loadedBytes: bytes.byteLength,
       totalBytes: bytes.byteLength,
       percent: 100,
@@ -793,7 +1194,7 @@ async function ensureInitialized(
     if (preferred === "webgpu") {
       try {
         glinerInstance = await createGlinerSession(bytes, "webgpu", signal);
-        activeProvider = "webgpu";
+        glinerProvider = "webgpu";
       } catch (err) {
         if (signal.aborted || (err as { name?: string })?.name === "AbortError") {
           throw err;
@@ -804,50 +1205,57 @@ async function ensureInitialized(
         emit({
           type: "progress",
           stage: "initializing",
+          modelId: "gliner",
           loadedBytes: bytes.byteLength,
           totalBytes: bytes.byteLength,
           percent: 100,
           provider: "wasm",
           cached: true,
         });
-        // Reload from Cache Storage/IDB cleanly without keeping a second 333 MB buffer alive during WebGPU attempt
-        const fallbackBytes = (await readModelFromCacheStorage()) || bytes;
+        const fallbackBytes = (await readModelFromCacheStorage("gliner")) || bytes;
         glinerInstance = await createGlinerSession(fallbackBytes, "wasm", signal);
-        activeProvider = "wasm";
+        glinerProvider = "wasm";
       }
     } else {
       glinerInstance = await createGlinerSession(bytes, "wasm", signal);
-      activeProvider = "wasm";
+      glinerProvider = "wasm";
     }
 
     emit({
       type: "progress",
       stage: "ready",
+      modelId: "gliner",
       loadedBytes: bytes.byteLength,
       totalBytes: bytes.byteLength,
       percent: 100,
-      provider: activeProvider,
+      provider: glinerProvider,
       cached: fromCache,
+      cjkCached: Boolean(cjkSession),
+      glinerCached: true,
     });
 
-    return activeProvider;
+    return { provider: glinerProvider, cached: fromCache };
   })();
 
   try {
-    const provider = await initPromise;
-    return { provider, cached: wasCached };
+    return await glinerInitPromise;
   } catch (err) {
     glinerInstance = null;
-    activeProvider = null;
+    glinerProvider = null;
     throw err;
   } finally {
-    initPromise = null;
+    glinerInitPromise = null;
   }
 }
 
-function countApproxSplitterWords(s: string): number {
-  const matches = s.match(/\w+(?:[-_]\w+)*|\S/g);
-  return matches ? matches.length : 0;
+const cjkWordSplitter = new CjkAwareWordSplitter();
+
+function countSegmentedWords(s: string): number {
+  let n = 0;
+  for (const _tok of cjkWordSplitter.call(s)) {
+    n += 1;
+  }
+  return n;
 }
 
 interface TextChunk {
@@ -857,13 +1265,12 @@ interface TextChunk {
 
 /**
  * Splits post text into clause-sized chunks whose token length stays comfortably
- * inside GLiNER's 384-token mDeBERTa window across Latin, CJK, and Cyrillic scripts.
+ * inside GLiNER's 384-token mDeBERTa window across Latin, Japanese, CJK, and Cyrillic scripts.
  */
 function splitIntoGlinerChunks(text: string): TextChunk[] {
   if (!text || text.trim().length < 2) return [];
   const rawSegments: Array<{ text: string; startOffset: number }> = [];
 
-  // 1. Split first along newlines and major sentence punctuation
   const rxBoundary = /[^\n.!?。！？]+(?:[.!?。！？]+|$)/g;
   let m: RegExpExecArray | null;
   while ((m = rxBoundary.exec(text)) !== null) {
@@ -876,18 +1283,16 @@ function splitIntoGlinerChunks(text: string): TextChunk[] {
     rawSegments.push({ text, startOffset: 0 });
   }
 
-  // 2. Further split oversized segments at clause punctuation or sliding window
   const finalChunks: TextChunk[] = [];
   for (const seg of rawSegments) {
     if (
-      seg.text.length <= MAX_CHUNK_CHARS &&
-      countApproxSplitterWords(seg.text) <= MAX_CHUNK_WORDS
+      seg.text.length <= MAX_GLINER_CHUNK_CHARS &&
+      countSegmentedWords(seg.text) <= MAX_GLINER_CHUNK_WORDS
     ) {
       finalChunks.push({ chunkText: seg.text, startOffset: seg.startOffset });
       continue;
     }
 
-    // Try splitting by clause punctuation first
     const subParts: Array<{ text: string; startOffset: number }> = [];
     const rxClause = /[^,，;；:：\n]+(?:[,，;；:：]+|$)/g;
     let cm: RegExpExecArray | null;
@@ -900,17 +1305,16 @@ function splitIntoGlinerChunks(text: string): TextChunk[] {
     const partsToPack = subParts.length > 1 ? subParts : [seg];
     for (const part of partsToPack) {
       if (
-        part.text.length <= MAX_CHUNK_CHARS &&
-        countApproxSplitterWords(part.text) <= MAX_CHUNK_WORDS
+        part.text.length <= MAX_GLINER_CHUNK_CHARS &&
+        countSegmentedWords(part.text) <= MAX_GLINER_CHUNK_WORDS
       ) {
         finalChunks.push({ chunkText: part.text, startOffset: part.startOffset });
         continue;
       }
 
-      // Sliding window slice with boundary snap on ASCII spaces
       let pos = 0;
       while (pos < part.text.length) {
-        let end = Math.min(part.text.length, pos + MAX_CHUNK_CHARS);
+        let end = Math.min(part.text.length, pos + MAX_GLINER_CHUNK_CHARS);
         if (end < part.text.length) {
           const spaceBack = part.text.lastIndexOf(" ", end);
           if (spaceBack > pos + 40) {
@@ -925,7 +1329,7 @@ function splitIntoGlinerChunks(text: string): TextChunk[] {
           });
         }
         if (end >= part.text.length) break;
-        pos = Math.max(pos + 24, end - OVERLAP_CHARS);
+        pos = Math.max(pos + 24, end - GLINER_OVERLAP_CHARS);
       }
     }
   }
@@ -933,13 +1337,13 @@ function splitIntoGlinerChunks(text: string): TextChunk[] {
   return finalChunks;
 }
 
-async function runInferenceWithAutoFallback(
+async function runGlinerInferenceWithAutoFallback(
   texts: string[],
   signal: AbortSignal,
   preference: WorkerExecutorPreference = "auto"
 ): ReturnType<Gliner["inference"]> {
   if (!glinerInstance) {
-    await ensureInitialized(signal, preference);
+    await ensureGlinerInitialized(signal, preference);
   }
   try {
     return await glinerInstance!.inference({
@@ -950,14 +1354,14 @@ async function runInferenceWithAutoFallback(
       multiLabel: false,
     });
   } catch (err) {
-    // Some WebGPU drivers fail on int8 DeBERTa ops during first inference rather than session create
-    if (activeProvider === "webgpu" && preference !== "webgpu") {
+    if (glinerProvider === "webgpu" && preference !== "webgpu") {
       glinerInstance = null;
-      activeProvider = null;
-      const { bytes, fromCache } = await loadOrDownloadModelBytes(signal);
+      glinerProvider = null;
+      const { bytes, fromCache } = await loadOrDownloadModelBytes("gliner", signal);
       emit({
         type: "progress",
         stage: "initializing",
+        modelId: "gliner",
         loadedBytes: bytes.byteLength,
         totalBytes: bytes.byteLength,
         percent: 100,
@@ -965,15 +1369,18 @@ async function runInferenceWithAutoFallback(
         cached: fromCache,
       });
       glinerInstance = await createGlinerSession(bytes, "wasm", signal);
-      activeProvider = "wasm";
+      glinerProvider = "wasm";
       emit({
         type: "progress",
         stage: "ready",
+        modelId: "gliner",
         loadedBytes: bytes.byteLength,
         totalBytes: bytes.byteLength,
         percent: 100,
         provider: "wasm",
         cached: fromCache,
+        cjkCached: Boolean(cjkSession),
+        glinerCached: true,
       });
       return await glinerInstance.inference({
         texts,
@@ -987,96 +1394,164 @@ async function runInferenceWithAutoFallback(
   }
 }
 
+// ---------------------------------------------------------------------------
+// 3. Unified Batch Dispatcher (Chinese BERT + Multilingual Segmented GLiNER)
+// ---------------------------------------------------------------------------
+
+function deduplicatePostSpans(rawSpans: WorkerMlSpan[], overlapWindow: number): WorkerMlSpan[] {
+  const spans = [...rawSpans].sort((a, b) => b.score - a.score);
+  const kept: WorkerMlSpan[] = [];
+  for (const s of spans) {
+    const overlaps = kept.some(
+      (k) =>
+        (s.start < k.end && s.end > k.start) ||
+        (s.nerClass === k.nerClass &&
+          s.spanText.toLowerCase() === k.spanText.toLowerCase() &&
+          Math.abs(s.start - k.start) <= overlapWindow)
+    );
+    if (!overlaps) {
+      kept.push(s);
+    }
+  }
+  kept.sort((a, b) => a.start - b.start);
+  return kept;
+}
+
 async function handleInferBatch(
   posts: WorkerPostInput[],
   signal: AbortSignal,
   preference: WorkerExecutorPreference = "auto"
 ) {
-  const { provider } = await ensureInitialized(signal, preference);
-  let resolvedProvider = provider;
-
   interface ChunkJob {
     postIndex: number;
     chunkText: string;
     startOffset: number;
   }
 
-  const allJobs: ChunkJob[] = [];
+  const cjkJobs: ChunkJob[] = [];
+  const glinerJobs: ChunkJob[] = [];
+  const perPostModelFlavor: WorkerMlModelFlavor[] = posts.map(() => "gliner");
   const perPostRawSpans: WorkerMlSpan[][] = posts.map(() => []);
 
   posts.forEach((p, idx) => {
-    const chunks = splitIntoGlinerChunks(p.text || "");
-    for (const ch of chunks) {
-      allJobs.push({
-        postIndex: idx,
-        chunkText: ch.chunkText,
-        startOffset: ch.startOffset,
-      });
+    const text = p.text || "";
+    if (isChineseDominantText(text)) {
+      perPostModelFlavor[idx] = "cjk-bert";
+      for (const ch of splitIntoCjkBertChunks(text)) {
+        cjkJobs.push({
+          postIndex: idx,
+          chunkText: ch.chunkText,
+          startOffset: ch.startOffset,
+        });
+      }
+    } else {
+      perPostModelFlavor[idx] = "gliner";
+      for (const ch of splitIntoGlinerChunks(text)) {
+        glinerJobs.push({
+          postIndex: idx,
+          chunkText: ch.chunkText,
+          startOffset: ch.startOffset,
+        });
+      }
     }
   });
 
-  // Sort chunks by character length so sub-batches have uniform padding & minimal WebGPU shape churn
-  allJobs.sort((a, b) => a.chunkText.length - b.chunkText.length);
+  let resolvedProvider: "webgpu" | "wasm" =
+    cjkProvider || glinerProvider || (preference === "webgpu" ? "webgpu" : "wasm");
 
-  for (let i = 0; i < allJobs.length; i += INFER_SUBBATCH_SIZE) {
-    if (abortRequested || signal.aborted) {
-      throw new DOMException("Inference aborted", "AbortError");
-    }
+  // 1. Fast CJK BERT Token Classification Pass
+  if (cjkJobs.length > 0) {
+    const cjkInit = await ensureCjkBertInitialized(signal, preference);
+    resolvedProvider = cjkInit.provider;
 
-    const batchJobs = allJobs.slice(i, i + INFER_SUBBATCH_SIZE);
-    const batchResults = await runInferenceWithAutoFallback(
-      batchJobs.map((j) => j.chunkText),
-      signal,
-      preference
-    );
-    if (activeProvider) {
-      resolvedProvider = activeProvider;
-    }
+    cjkJobs.sort((a, b) => a.chunkText.length - b.chunkText.length);
+    for (let i = 0; i < cjkJobs.length; i += CJK_BERT_SUBBATCH_SIZE) {
+      if (abortRequested || signal.aborted) {
+        throw new DOMException("Inference aborted", "AbortError");
+      }
+      const batchJobs = cjkJobs.slice(i, i + CJK_BERT_SUBBATCH_SIZE);
+      const batchSpans = await runCjkBertBatchWithAutoFallback(
+        batchJobs.map((j) => j.chunkText),
+        signal,
+        preference
+      );
+      if (cjkProvider) {
+        resolvedProvider = cjkProvider;
+      }
 
-    for (let j = 0; j < batchJobs.length; j++) {
-      const job = batchJobs[j];
-      const entities = batchResults[j] || [];
-      for (const ent of entities) {
-        const nerClass = PROMPT_TO_NER_CLASS.get(ent.label);
-        if (!nerClass) continue;
-        const cleanSpan = String(ent.spanText || "").trim();
-        if (cleanSpan.length < 2) continue;
-        perPostRawSpans[job.postIndex].push({
-          spanText: cleanSpan,
-          start: job.startOffset + Math.max(0, ent.start),
-          end: job.startOffset + Math.max(0, ent.end),
-          nerClass,
-          rawLabel: ent.label,
-          score: Number(ent.score || 0),
-        });
+      for (let j = 0; j < batchJobs.length; j++) {
+        const job = batchJobs[j];
+        const entities = batchSpans[j] || [];
+        for (const ent of entities) {
+          perPostRawSpans[job.postIndex].push({
+            spanText: ent.spanText,
+            start: job.startOffset + Math.max(0, ent.start),
+            end: job.startOffset + Math.max(0, ent.end),
+            nerClass: ent.nerClass,
+            rawLabel: ent.rawLabel,
+            score: ent.score,
+          });
+        }
       }
     }
   }
 
-  // Deduplicate overlapping window hits inside each post, keeping highest score
-  const output = posts.map((p, idx) => {
-    const spans = perPostRawSpans[idx].sort((a, b) => b.score - a.score);
-    const kept: WorkerMlSpan[] = [];
-    for (const s of spans) {
-      const overlaps = kept.some(
-        (k) =>
-          (s.start < k.end && s.end > k.start) ||
-          (s.nerClass === k.nerClass &&
-            s.spanText.toLowerCase() === k.spanText.toLowerCase() &&
-            Math.abs(s.start - k.start) <= OVERLAP_CHARS)
+  // 2. Segmented Multilingual GLiNER Pass (Japanese, English, Russian, Mixed)
+  if (glinerJobs.length > 0) {
+    const glInit = await ensureGlinerInitialized(signal, preference);
+    resolvedProvider = glInit.provider;
+
+    glinerJobs.sort((a, b) => a.chunkText.length - b.chunkText.length);
+    for (let i = 0; i < glinerJobs.length; i += GLINER_SUBBATCH_SIZE) {
+      if (abortRequested || signal.aborted) {
+        throw new DOMException("Inference aborted", "AbortError");
+      }
+      const batchJobs = glinerJobs.slice(i, i + GLINER_SUBBATCH_SIZE);
+      const batchResults = await runGlinerInferenceWithAutoFallback(
+        batchJobs.map((j) => j.chunkText),
+        signal,
+        preference
       );
-      if (!overlaps) {
-        kept.push(s);
+      if (glinerProvider) {
+        resolvedProvider = glinerProvider;
+      }
+
+      for (let j = 0; j < batchJobs.length; j++) {
+        const job = batchJobs[j];
+        const entities = batchResults[j] || [];
+        for (const ent of entities) {
+          const nerClass = PROMPT_TO_NER_CLASS.get(ent.label);
+          if (!nerClass) continue;
+          const cleanSpan = String(ent.spanText || "").trim();
+          if (cleanSpan.length < 2) continue;
+          perPostRawSpans[job.postIndex].push({
+            spanText: cleanSpan,
+            start: job.startOffset + Math.max(0, ent.start),
+            end: job.startOffset + Math.max(0, ent.end),
+            nerClass,
+            rawLabel: ent.label,
+            score: Number(ent.score || 0),
+          });
+        }
       }
     }
-    kept.sort((a, b) => a.start - b.start);
-    return { postKey: p.postKey, spans: kept };
-  });
+  }
 
-  return { provider: resolvedProvider, results: output };
+  const results = posts.map((p, idx) => ({
+    postKey: p.postKey,
+    mlModel: perPostModelFlavor[idx],
+    spans: deduplicatePostSpans(perPostRawSpans[idx], 24),
+  }));
+
+  return {
+    provider: resolvedProvider,
+    cjkCached: Boolean(cjkSession),
+    glinerCached: Boolean(glinerInstance),
+    results,
+  };
 }
 
-// Serialize async operations inside worker so ONNX session isn't mutated concurrently
+// Serialize async operations inside worker so ONNX sessions aren't mutated concurrently
 let taskQueue: Promise<void> = Promise.resolve();
 
 self.addEventListener("message", (ev: MessageEvent<WorkerInMessage>) => {
@@ -1097,21 +1572,59 @@ self.addEventListener("message", (ev: MessageEvent<WorkerInMessage>) => {
     try {
       if (msg.type === "clear-cache") {
         glinerInstance = null;
-        activeProvider = null;
+        glinerProvider = null;
+        cjkSession = null;
+        cjkTokenizer = null;
+        cjkOrtRuntime = null;
+        cjkProvider = null;
         await clearAllModelCaches();
         emit({ id: msg.id, type: "clear-done" });
         return;
       }
 
       if (msg.type === "warmup") {
-        const { provider, cached } = await ensureInitialized(signal, msg.executor || "auto");
-        emit({ id: msg.id, type: "warmup-done", provider, cached });
+        const pref = msg.executor || "auto";
+        const hint: BatchModelHint = msg.modelHint || "cjk";
+
+        let provider: "webgpu" | "wasm" = pref === "webgpu" ? "webgpu" : "wasm";
+        let cached = true;
+
+        if (hint === "cjk" || hint === "both") {
+          const cjkRes = await ensureCjkBertInitialized(signal, pref);
+          provider = cjkRes.provider;
+          cached = cjkRes.cached;
+        }
+        if (hint === "gliner" || (hint === "both" && !signal.aborted)) {
+          const glRes = await ensureGlinerInitialized(signal, pref);
+          provider = glRes.provider;
+          cached = hint === "both" ? cached && glRes.cached : glRes.cached;
+        }
+
+        emit({
+          id: msg.id,
+          type: "warmup-done",
+          provider,
+          cached,
+          cjkCached: Boolean(cjkSession),
+          glinerCached: Boolean(glinerInstance),
+        });
         return;
       }
 
       if (msg.type === "infer-batch") {
-        const { provider, results } = await handleInferBatch(msg.posts, signal, msg.executor || "auto");
-        emit({ id: msg.id, type: "infer-done", provider, results });
+        const { provider, cjkCached, glinerCached, results } = await handleInferBatch(
+          msg.posts,
+          signal,
+          msg.executor || "auto"
+        );
+        emit({
+          id: msg.id,
+          type: "infer-done",
+          provider,
+          cjkCached,
+          glinerCached,
+          results,
+        });
       }
     } catch (err: unknown) {
       const e = err as { name?: string; message?: string };
