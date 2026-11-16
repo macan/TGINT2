@@ -139,6 +139,24 @@
                 {{ t('explorer.ner.cancel') }}
               </button>
             </template>
+            <template v-else-if="mlState.status === 'retrying'">
+              <span class="text-amber-600 dark:text-amber-400">
+                {{
+                  t('explorer.ner.localMlRetrying', {
+                    attempt: mlState.retryAttempt,
+                    max: mlState.maxRetries,
+                    percent: mlState.downloadPercent,
+                  })
+                }}
+              </span>
+              <button
+                type="button"
+                @click="$emit('abort-local-ml')"
+                class="text-rose-600 dark:text-rose-400 hover:underline cursor-pointer whitespace-nowrap ml-0.5"
+              >
+                {{ t('explorer.ner.cancel') }}
+              </button>
+            </template>
             <template v-else-if="mlState.status === 'checking'">
               <span>{{ t('explorer.ner.localMlChecking') }}</span>
             </template>
@@ -161,7 +179,20 @@
                 @click="$emit('warmup-local-ml')"
                 class="text-rose-600 dark:text-rose-400 hover:underline font-semibold cursor-pointer whitespace-nowrap"
               >
-                {{ t('explorer.ner.retry') }}
+                {{
+                  mlState.partialBytes > 0 && mlState.downloadPercent > 0
+                    ? t('explorer.ner.localMlResume', { percent: mlState.downloadPercent })
+                    : t('explorer.ner.retry')
+                }}
+              </button>
+              <button
+                v-if="mlState.partialBytes > 0 && !isExtracting"
+                type="button"
+                @click="$emit('clear-local-ml')"
+                class="hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer whitespace-nowrap ml-0.5"
+                :title="t('explorer.ner.localMlClearModelHint')"
+              >
+                {{ t('explorer.ner.localMlClearModel') }}
               </button>
             </template>
             <template v-else-if="mlState.isModelCached">
@@ -180,6 +211,32 @@
                 {{ t('explorer.ner.localMlClearModel') }}
               </button>
             </template>
+            <template v-else-if="mlState.partialBytes > 0 && mlState.totalBytes > 0">
+              <span>
+                {{ t('explorer.ner.localMlPartialSaved', { percent: mlState.downloadPercent }) }}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span>
+                {{ Math.round(mlState.partialBytes / 1048576) }}/{{ Math.max(1, Math.round(mlState.totalBytes / 1048576)) }} MB
+              </span>
+              <button
+                v-if="mlState.enabled"
+                type="button"
+                @click="$emit('warmup-local-ml')"
+                class="text-teal-600 dark:text-teal-400 hover:underline font-semibold cursor-pointer whitespace-nowrap ml-0.5"
+              >
+                {{ t('explorer.ner.localMlResume', { percent: mlState.downloadPercent }) }}
+              </button>
+              <button
+                v-if="!isExtracting"
+                type="button"
+                @click="$emit('clear-local-ml')"
+                class="hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer whitespace-nowrap ml-0.5"
+                :title="t('explorer.ner.localMlClearModelHint')"
+              >
+                {{ t('explorer.ner.localMlClearModel') }}
+              </button>
+            </template>
             <template v-else>
               <span>{{ t('explorer.ner.localMlDownloadSize') }}</span>
             </template>
@@ -188,7 +245,7 @@
 
         <!-- Model Download / Initialization Progress Bar -->
         <div
-          v-if="mlState.status === 'downloading' || mlState.status === 'initializing' || mlState.status === 'loading_cache'"
+          v-if="mlState.status === 'downloading' || mlState.status === 'retrying' || mlState.status === 'initializing' || mlState.status === 'loading_cache'"
           class="w-full h-1 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden"
         >
           <div
@@ -196,9 +253,11 @@
               'h-full transition-all duration-200',
               mlState.status === 'initializing' || mlState.status === 'loading_cache'
                 ? 'bg-teal-500/80 animate-pulse w-full'
-                : 'bg-teal-600 dark:bg-teal-400',
+                : mlState.status === 'retrying'
+                  ? 'bg-amber-500 dark:bg-amber-400'
+                  : 'bg-teal-600 dark:bg-teal-400',
             ]"
-            :style="mlState.status === 'downloading' ? { width: `${mlState.downloadPercent}%` } : undefined"
+            :style="mlState.status === 'downloading' || mlState.status === 'retrying' ? { width: `${mlState.downloadPercent}%` } : undefined"
           ></div>
         </div>
 

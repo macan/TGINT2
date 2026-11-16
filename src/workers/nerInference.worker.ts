@@ -9,6 +9,24 @@
  */
 
 import { Gliner } from "gliner";
+import {
+  APPROX_MODEL_BYTES,
+  CHUNK_SIZE_BYTES,
+  MODEL_CACHE_NAME,
+  MODEL_ONNX_URL,
+  MODEL_TOKENIZER_ID,
+  assembleModelFromChunks,
+  clearAllModelCaches,
+  clearPartialChunksDb,
+  computeSavedBytes,
+  deleteModelChunk,
+  expectedChunkLength,
+  getCompletedChunkIndices,
+  putModelChunk,
+  readModelMeta,
+  writeModelMeta,
+  type ModelDownloadMeta,
+} from "../utils/nerModelCache";
 
 export type WorkerNerClassId =
   | "person"
@@ -45,12 +63,14 @@ export type WorkerInMessage =
 export type WorkerOutMessage =
   | {
       type: "progress";
-      stage: "checking" | "downloading" | "loading_cache" | "initializing" | "ready";
+      stage: "checking" | "downloading" | "retrying" | "loading_cache" | "initializing" | "ready";
       loadedBytes: number;
       totalBytes: number;
       percent: number;
       provider?: "webgpu" | "wasm" | null;
       cached?: boolean;
+      retryAttempt?: number;
+      maxRetries?: number;
     }
   | {
       id: number;
@@ -75,12 +95,10 @@ export type WorkerOutMessage =
       aborted?: boolean;
     };
 
-const MODEL_TOKENIZER_ID = "onnx-community/gliner_multi-v2.1";
-const MODEL_ONNX_URL =
-  "https://huggingface.co/onnx-community/gliner_multi-v2.1/resolve/main/onnx/model_quantized.onnx";
-const CACHE_NAME = "gingko-ner-models-v1";
-const APPROX_MODEL_BYTES = 349_175_808; // ~333 MiB fallback when Content-Length omitted
 const ONNX_WASM_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/";
+const CHUNK_STALL_TIMEOUT_MS = 25_000;
+const MAX_CHUNK_RETRIES = 5;
+const MAX_TOKENIZER_RETRIES = 3;
 
 // 11 zero-shot labels (well below model max_types = 25) mapped back to our 10 NER classes
 const GLINER_LABEL_DEFS: Array<{ prompt: string; nerClass: WorkerNerClassId }> = [
@@ -134,18 +152,333 @@ async function detectWebGpuSupport(): Promise<boolean> {
 async function persistModelToCache(bytes: Uint8Array): Promise<boolean> {
   if (typeof caches === "undefined") return false;
   try {
-    const cache = await caches.open(CACHE_NAME);
-    const resp = new Response(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), {
-      headers: {
-        "Content-Type": "application/octet-stream",
-        "Content-Length": String(bytes.byteLength),
-      },
-    });
+    const cache = await caches.open(MODEL_CACHE_NAME);
+    const resp = new Response(
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+      {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(bytes.byteLength),
+        },
+      }
+    );
     await cache.put(MODEL_ONNX_URL, resp);
     return true;
   } catch {
     return false;
   }
+}
+
+async function readModelFromCacheStorage(): Promise<Uint8Array | null> {
+  if (typeof caches === "undefined") return null;
+  try {
+    const cache = await caches.open(MODEL_CACHE_NAME);
+    const cached = await cache.match(MODEL_ONNX_URL);
+    if (!cached) return null;
+    emit({
+      type: "progress",
+      stage: "loading_cache",
+      loadedBytes: 0,
+      totalBytes: 0,
+      percent: 100,
+      cached: true,
+    });
+    const buf = await cached.arrayBuffer();
+    if (buf.byteLength > 50_000_000) {
+      return new Uint8Array(buf);
+    }
+    await cache.delete(MODEL_ONNX_URL).catch(() => {});
+  } catch {
+    // Cache Storage unavailable
+  }
+  return null;
+}
+
+function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function waitForReconnectOrDelay(ms: number, signal: AbortSignal): Promise<void> {
+  const nav = (self as unknown as { navigator?: { onLine?: boolean } }).navigator;
+  if (nav && nav.onLine === false && typeof self.addEventListener === "function") {
+    await new Promise<void>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new DOMException("Aborted", "AbortError"));
+        return;
+      }
+      const fallbackTimer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, Math.max(ms, 15_000));
+      const onOnline = () => {
+        cleanup();
+        resolve();
+      };
+      const onAbort = () => {
+        cleanup();
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+      const cleanup = () => {
+        clearTimeout(fallbackTimer);
+        self.removeEventListener("online", onOnline);
+        signal.removeEventListener("abort", onAbort);
+      };
+      self.addEventListener("online", onOnline, { once: true });
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    return;
+  }
+  await sleepWithAbort(ms, signal);
+}
+
+interface RemoteProbeInfo {
+  totalBytes: number;
+  etag: string;
+  supportsRange: boolean;
+}
+
+async function probeRemoteModelInfo(signal: AbortSignal): Promise<RemoteProbeInfo> {
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt <= 2; attempt++) {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const stallCtrl = new AbortController();
+    const timer = setTimeout(() => stallCtrl.abort(), 15_000);
+    const onUserAbort = () => stallCtrl.abort();
+    signal.addEventListener("abort", onUserAbort, { once: true });
+    try {
+      // Tiny 1-byte Range GET reliably resolves redirects + Content-Range + ETag across CORS proxies
+      const res = await fetch(MODEL_ONNX_URL, {
+        method: "GET",
+        headers: { Range: "bytes=0-0" },
+        signal: stallCtrl.signal,
+        mode: "cors",
+        credentials: "omit",
+      });
+
+      if (res.status === 206) {
+        await res.body?.cancel().catch(() => {});
+        const cr = res.headers.get("content-range") || "";
+        const match = cr.match(/\/(\d+)\s*$/);
+        const totalBytes = match ? Number(match[1]) : APPROX_MODEL_BYTES;
+        const etag = (res.headers.get("etag") || "").replace(/"/g, "");
+        return {
+          totalBytes: Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : APPROX_MODEL_BYTES,
+          etag,
+          supportsRange: true,
+        };
+      }
+
+      if (res.ok) {
+        const len = Number(res.headers.get("content-length") || "0");
+        const etag = (res.headers.get("etag") || "").replace(/"/g, "");
+        await res.body?.cancel().catch(() => {});
+        return {
+          totalBytes: Number.isFinite(len) && len > 0 ? len : APPROX_MODEL_BYTES,
+          etag,
+          supportsRange: false,
+        };
+      }
+
+      throw new Error(`HTTP ${res.status}`);
+    } catch (err) {
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      lastErr = err;
+      if (attempt < 2) {
+        await waitForReconnectOrDelay(1500 * (attempt + 1), signal);
+      }
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onUserAbort);
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("Unable to reach Hugging Face CDN");
+}
+
+async function fetchSingleRangeChunkWithWatchdog(
+  startByte: number,
+  endByte: number,
+  expectedLen: number,
+  baseLoadedBytes: number,
+  totalBytes: number,
+  signal: AbortSignal
+): Promise<ArrayBuffer> {
+  const chunkCtrl = new AbortController();
+  let timedOut = false;
+  let stallTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const resetWatchdog = () => {
+    if (stallTimer) clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => {
+      timedOut = true;
+      chunkCtrl.abort();
+    }, CHUNK_STALL_TIMEOUT_MS);
+  };
+
+  const onUserAbort = () => chunkCtrl.abort();
+  signal.addEventListener("abort", onUserAbort, { once: true });
+  resetWatchdog();
+
+  try {
+    const res = await fetch(MODEL_ONNX_URL, {
+      method: "GET",
+      headers: { Range: `bytes=${startByte}-${endByte}` },
+      signal: chunkCtrl.signal,
+      mode: "cors",
+      credentials: "omit",
+    });
+
+    if (res.status !== 206 && !res.ok) {
+      const err = new Error(`Failed chunk fetch (HTTP ${res.status})`);
+      (err as Error & { status?: number }).status = res.status;
+      throw err;
+    }
+
+    if (!res.body) {
+      const buf = await res.arrayBuffer();
+      if (res.status === 200 && buf.byteLength > expectedLen && startByte === 0) {
+        return buf;
+      }
+      if (buf.byteLength !== expectedLen) {
+        throw new Error(`Incomplete chunk (${buf.byteLength}/${expectedLen} bytes)`);
+      }
+      return buf;
+    }
+
+    const reader = res.body.getReader();
+    const parts: Uint8Array[] = [];
+    let chunkReceived = 0;
+    let lastEmit = 0;
+
+    while (true) {
+      if (signal.aborted) {
+        await reader.cancel().catch(() => {});
+        throw new DOMException("Download aborted", "AbortError");
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.byteLength > 0) {
+        resetWatchdog();
+        parts.push(value);
+        chunkReceived += value.byteLength;
+        const now = performance.now();
+        if (now - lastEmit >= 120) {
+          lastEmit = now;
+          const totalLoaded = Math.min(totalBytes, baseLoadedBytes + chunkReceived);
+          const pct = Math.min(
+            99,
+            Math.round((totalLoaded / Math.max(totalLoaded, totalBytes)) * 100)
+          );
+          emit({
+            type: "progress",
+            stage: "downloading",
+            loadedBytes: totalLoaded,
+            totalBytes,
+            percent: pct,
+          });
+        }
+      }
+    }
+
+    // If intermediary proxy returned 200 full file even though Range was requested
+    if (res.status === 200 && chunkReceived > expectedLen && startByte === 0) {
+      const fullBuf = new Uint8Array(chunkReceived);
+      let off = 0;
+      for (const p of parts) {
+        fullBuf.set(p, off);
+        off += p.byteLength;
+      }
+      return fullBuf.buffer;
+    }
+
+    if (chunkReceived !== expectedLen) {
+      throw new Error(`Truncated chunk (${chunkReceived}/${expectedLen} bytes)`);
+    }
+
+    const out = new Uint8Array(chunkReceived);
+    let offset = 0;
+    for (const p of parts) {
+      out.set(p, offset);
+      offset += p.byteLength;
+    }
+    return out.buffer;
+  } catch (err: unknown) {
+    if (signal.aborted) {
+      throw new DOMException("Download aborted", "AbortError");
+    }
+    if (timedOut) {
+      throw new Error("Connection stalled while downloading chunk");
+    }
+    throw err;
+  } finally {
+    if (stallTimer) clearTimeout(stallTimer);
+    signal.removeEventListener("abort", onUserAbort);
+  }
+}
+
+async function streamFullFallbackWithChunkSaves(
+  totalBytesHint: number,
+  signal: AbortSignal
+): Promise<Uint8Array> {
+  const res = await fetch(MODEL_ONNX_URL, {
+    signal,
+    mode: "cors",
+    credentials: "omit",
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch model weights (HTTP ${res.status})`);
+  }
+  const len = Number(res.headers.get("content-length") || "0");
+  const totalBytes = len > 0 ? len : totalBytesHint;
+  const reader = res.body?.getReader();
+  if (!reader) {
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  const out = new Uint8Array(totalBytes);
+  let loaded = 0;
+  let lastEmit = 0;
+  while (true) {
+    if (signal.aborted) {
+      await reader.cancel().catch(() => {});
+      throw new DOMException("Download aborted", "AbortError");
+    }
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.byteLength > 0) {
+      if (loaded + value.byteLength <= out.byteLength) {
+        out.set(value, loaded);
+      }
+      loaded += value.byteLength;
+      const now = performance.now();
+      if (now - lastEmit >= 150) {
+        lastEmit = now;
+        emit({
+          type: "progress",
+          stage: "downloading",
+          loadedBytes: loaded,
+          totalBytes: Math.max(loaded, totalBytes),
+          percent: Math.min(99, Math.round((loaded / Math.max(loaded, totalBytes)) * 100)),
+        });
+      }
+    }
+  }
+  return loaded === out.byteLength ? out : out.slice(0, loaded);
 }
 
 async function loadOrDownloadModelBytes(
@@ -159,130 +492,241 @@ async function loadOrDownloadModelBytes(
     percent: 0,
   });
 
-  if (typeof caches !== "undefined") {
-    try {
-      const cache = await caches.open(CACHE_NAME);
-      const cached = await cache.match(MODEL_ONNX_URL);
-      if (cached) {
-        emit({
-          type: "progress",
-          stage: "loading_cache",
-          loadedBytes: 0,
-          totalBytes: 0,
-          percent: 100,
-          cached: true,
-        });
-        const buf = await cached.arrayBuffer();
-        if (buf.byteLength > 50_000_000) {
-          return { bytes: new Uint8Array(buf), fromCache: true };
-        }
-        await cache.delete(MODEL_ONNX_URL).catch(() => {});
+  // 1. Fast path: assembled model already in Cache Storage
+  const fromCacheStorage = await readModelFromCacheStorage();
+  if (fromCacheStorage) {
+    await clearPartialChunksDb();
+    return { bytes: fromCacheStorage, fromCache: true };
+  }
+
+  // 2. Check if IndexedDB already holds all verified chunks (offline/private Cache Storage fallback)
+  const existingMeta = await readModelMeta();
+  if (existingMeta && existingMeta.totalBytes > 50_000_000) {
+    const completed = await getCompletedChunkIndices();
+    if (completed.size >= existingMeta.numChunks) {
+      const assembled = await assembleModelFromChunks(existingMeta);
+      if (assembled.bytes) {
+        const persisted = await persistModelToCache(assembled.bytes);
+        if (persisted) await clearPartialChunksDb();
+        return { bytes: assembled.bytes, fromCache: true };
       }
-    } catch {
-      // Cache Storage may be unavailable in restricted contexts; proceed to fetch
-    }
-  }
-
-  const res = await fetch(MODEL_ONNX_URL, {
-    signal,
-    mode: "cors",
-    credentials: "omit",
-  });
-  if (!res.ok) {
-    throw new Error(`Failed to fetch model weights (HTTP ${res.status})`);
-  }
-
-  const contentLen = Number(res.headers.get("content-length") || "0");
-  const totalBytes = Number.isFinite(contentLen) && contentLen > 0 ? contentLen : APPROX_MODEL_BYTES;
-
-  if (!res.body) {
-    const buf = await res.arrayBuffer();
-    const bytes = new Uint8Array(buf);
-    await persistModelToCache(bytes);
-    emit({
-      type: "progress",
-      stage: "downloading",
-      loadedBytes: bytes.byteLength,
-      totalBytes: bytes.byteLength,
-      percent: 100,
-    });
-    return { bytes, fromCache: false };
-  }
-
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let loadedBytes = 0;
-  let lastProgressAt = 0;
-
-  while (true) {
-    if (signal.aborted) {
-      await reader.cancel().catch(() => {});
-      throw new DOMException("Download aborted", "AbortError");
-    }
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value && value.byteLength > 0) {
-      chunks.push(value);
-      loadedBytes += value.byteLength;
-      const now = performance.now();
-      if (now - lastProgressAt >= 120) {
-        lastProgressAt = now;
-        const pct = Math.min(99, Math.round((loadedBytes / Math.max(loadedBytes, totalBytes)) * 100));
-        emit({
-          type: "progress",
-          stage: "downloading",
-          loadedBytes,
-          totalBytes: Math.max(loadedBytes, totalBytes),
-          percent: pct,
-        });
+      for (const badIdx of assembled.invalidIndices) {
+        await deleteModelChunk(badIdx);
       }
     }
   }
 
-  const combined = new Uint8Array(loadedBytes);
-  let writeOffset = 0;
-  for (const c of chunks) {
-    combined.set(c, writeOffset);
-    writeOffset += c.byteLength;
+  // 3. Probe remote metadata (totalBytes, ETag, Range support)
+  const probe = await probeRemoteModelInfo(signal);
+  const numChunks = Math.ceil(probe.totalBytes / CHUNK_SIZE_BYTES);
+
+  let meta: ModelDownloadMeta = {
+    key: "gliner_multi_v2_1_quantized",
+    url: MODEL_ONNX_URL,
+    etag: probe.etag,
+    totalBytes: probe.totalBytes,
+    chunkSize: CHUNK_SIZE_BYTES,
+    numChunks,
+    updatedAt: Date.now(),
+  };
+
+  let completed = new Set<number>();
+  if (
+    existingMeta &&
+    existingMeta.totalBytes === probe.totalBytes &&
+    existingMeta.chunkSize === CHUNK_SIZE_BYTES &&
+    (!probe.etag || !existingMeta.etag || existingMeta.etag === probe.etag)
+  ) {
+    completed = await getCompletedChunkIndices();
+    meta = { ...existingMeta, etag: probe.etag || existingMeta.etag, updatedAt: Date.now() };
+    await writeModelMeta(meta);
+  } else {
+    await clearPartialChunksDb();
+    await writeModelMeta(meta);
   }
 
+  let completedBytes = computeSavedBytes(completed, meta.totalBytes, meta.chunkSize);
   emit({
     type: "progress",
     stage: "downloading",
-    loadedBytes,
-    totalBytes: Math.max(loadedBytes, totalBytes),
-    percent: 100,
+    loadedBytes: completedBytes,
+    totalBytes: meta.totalBytes,
+    percent: Math.min(99, Math.round((completedBytes / meta.totalBytes) * 100)),
   });
 
-  await persistModelToCache(combined);
-  return { bytes: combined, fromCache: false };
+  if (!probe.supportsRange && completed.size === 0) {
+    const fullBytes = await streamFullFallbackWithChunkSaves(meta.totalBytes, signal);
+    emit({
+      type: "progress",
+      stage: "downloading",
+      loadedBytes: fullBytes.byteLength,
+      totalBytes: fullBytes.byteLength,
+      percent: 100,
+    });
+    const persisted = await persistModelToCache(fullBytes);
+    if (persisted) await clearPartialChunksDb();
+    return { bytes: fullBytes, fromCache: false };
+  }
+
+  // 4. Download missing 8 MiB chunks sequentially with stall timeout + exponential backoff retries
+  for (let pass = 0; pass < 2; pass++) {
+    for (let idx = 0; idx < meta.numChunks; idx++) {
+      if (completed.has(idx)) continue;
+      if (signal.aborted) {
+        throw new DOMException("Download aborted", "AbortError");
+      }
+
+      const startByte = idx * meta.chunkSize;
+      const expectedLen = expectedChunkLength(idx, meta.totalBytes, meta.chunkSize);
+      const endByte = startByte + expectedLen - 1;
+
+      let chunkBuf: ArrayBuffer | null = null;
+      let lastErr: unknown = null;
+
+      for (let attempt = 0; attempt <= MAX_CHUNK_RETRIES; attempt++) {
+        try {
+          chunkBuf = await fetchSingleRangeChunkWithWatchdog(
+            startByte,
+            endByte,
+            expectedLen,
+            completedBytes,
+            meta.totalBytes,
+            signal
+          );
+          break;
+        } catch (err: unknown) {
+          if (signal.aborted || (err as { name?: string })?.name === "AbortError") {
+            throw new DOMException("Download aborted", "AbortError");
+          }
+          const status = (err as { status?: number })?.status;
+          if (status === 404 || status === 403 || status === 416) {
+            throw err;
+          }
+          lastErr = err;
+          if (attempt >= MAX_CHUNK_RETRIES) {
+            throw err;
+          }
+          const delayMs = Math.min(20_000, 1500 * Math.pow(2, attempt)) + Math.round(Math.random() * 400);
+          const pct = Math.min(99, Math.round((completedBytes / meta.totalBytes) * 100));
+          emit({
+            type: "progress",
+            stage: "retrying",
+            loadedBytes: completedBytes,
+            totalBytes: meta.totalBytes,
+            percent: pct,
+            retryAttempt: attempt + 1,
+            maxRetries: MAX_CHUNK_RETRIES,
+          });
+          await waitForReconnectOrDelay(delayMs, signal);
+        }
+      }
+
+      if (!chunkBuf) {
+        throw lastErr instanceof Error ? lastErr : new Error("Failed downloading model chunk");
+      }
+
+      // Handle rare 200 full-body response from proxy ignoring Range header
+      if (idx === 0 && chunkBuf.byteLength === meta.totalBytes && expectedLen < meta.totalBytes) {
+        const full = new Uint8Array(chunkBuf);
+        emit({
+          type: "progress",
+          stage: "downloading",
+          loadedBytes: full.byteLength,
+          totalBytes: full.byteLength,
+          percent: 100,
+        });
+        const persisted = await persistModelToCache(full);
+        if (persisted) await clearPartialChunksDb();
+        return { bytes: full, fromCache: false };
+      }
+
+      await putModelChunk(idx, chunkBuf);
+      completed.add(idx);
+      completedBytes = computeSavedBytes(completed, meta.totalBytes, meta.chunkSize);
+
+      emit({
+        type: "progress",
+        stage: "downloading",
+        loadedBytes: completedBytes,
+        totalBytes: meta.totalBytes,
+        percent: completed.size >= meta.numChunks
+          ? 100
+          : Math.min(99, Math.round((completedBytes / meta.totalBytes) * 100)),
+      });
+    }
+
+    // Assemble & verify all chunks
+    const assembled = await assembleModelFromChunks(meta);
+    if (assembled.bytes) {
+      emit({
+        type: "progress",
+        stage: "downloading",
+        loadedBytes: assembled.bytes.byteLength,
+        totalBytes: assembled.bytes.byteLength,
+        percent: 100,
+      });
+      const persisted = await persistModelToCache(assembled.bytes);
+      if (persisted) {
+        await clearPartialChunksDb();
+      }
+      return { bytes: assembled.bytes, fromCache: false };
+    }
+
+    for (const badIdx of assembled.invalidIndices) {
+      completed.delete(badIdx);
+      await deleteModelChunk(badIdx);
+    }
+    completedBytes = computeSavedBytes(completed, meta.totalBytes, meta.chunkSize);
+  }
+
+  throw new Error("Model verification failed after assembling chunks");
 }
 
 async function createGlinerSession(
   bytes: Uint8Array,
-  provider: "webgpu" | "wasm"
+  provider: "webgpu" | "wasm",
+  signal: AbortSignal
 ): Promise<Gliner> {
   const isCrossOriginIsolated = Boolean(
     (self as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated
   );
-  const gliner = new Gliner({
-    tokenizerPath: MODEL_TOKENIZER_ID,
-    modelType: "span-level",
-    maxWidth: 12,
-    onnxSettings: {
-      modelPath: bytes,
-      executionProvider: provider,
-      wasmPaths: ONNX_WASM_CDN,
-      multiThread: provider === "wasm" ? isCrossOriginIsolated : false,
-      fetchBinary: false,
-    },
-    transformersSettings: {
-      allowLocalModels: false,
-      useBrowserCache: true,
-    },
-  });
-  await gliner.initialize();
-  return gliner;
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < MAX_TOKENIZER_RETRIES; attempt++) {
+    if (signal.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+    try {
+      const gliner = new Gliner({
+        tokenizerPath: MODEL_TOKENIZER_ID,
+        modelType: "span-level",
+        maxWidth: 12,
+        onnxSettings: {
+          modelPath: bytes,
+          executionProvider: provider,
+          wasmPaths: ONNX_WASM_CDN,
+          multiThread: provider === "wasm" ? isCrossOriginIsolated : false,
+          fetchBinary: false,
+        },
+        transformersSettings: {
+          allowLocalModels: false,
+          useBrowserCache: true,
+        },
+      });
+      await gliner.initialize();
+      return gliner;
+    } catch (err) {
+      lastErr = err;
+      // Don't retry if WebGPU execution provider itself is unsupported; let caller fall back to WASM immediately
+      const msg = String((err as { message?: string })?.message || "").toLowerCase();
+      if (provider === "webgpu" && (msg.includes("webgpu") || msg.includes("gpu") || msg.includes("adapter") || msg.includes("session"))) {
+        throw err;
+      }
+      if (attempt < MAX_TOKENIZER_RETRIES - 1) {
+        await waitForReconnectOrDelay(1500 * (attempt + 1), signal);
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("Failed initializing GLiNER session");
 }
 
 async function ensureInitialized(signal: AbortSignal): Promise<{
@@ -317,16 +761,17 @@ async function ensureInitialized(signal: AbortSignal): Promise<{
       totalBytes: bytes.byteLength,
       percent: 100,
       provider: preferred,
-      cached: fromCache,
+      cached: true,
     });
 
     if (preferred === "webgpu") {
       try {
-        // Slice buffer copy when trying WebGPU so WASM fallback still has intact weights if GPU driver rejects int8 ops
-        const gpuBytes = new Uint8Array(bytes);
-        glinerInstance = await createGlinerSession(gpuBytes, "webgpu");
+        glinerInstance = await createGlinerSession(bytes, "webgpu", signal);
         activeProvider = "webgpu";
-      } catch {
+      } catch (err) {
+        if (signal.aborted || (err as { name?: string })?.name === "AbortError") {
+          throw err;
+        }
         emit({
           type: "progress",
           stage: "initializing",
@@ -334,13 +779,15 @@ async function ensureInitialized(signal: AbortSignal): Promise<{
           totalBytes: bytes.byteLength,
           percent: 100,
           provider: "wasm",
-          cached: fromCache,
+          cached: true,
         });
-        glinerInstance = await createGlinerSession(bytes, "wasm");
+        // Reload from Cache Storage/IDB cleanly without keeping a second 333 MB buffer alive during WebGPU attempt
+        const fallbackBytes = (await readModelFromCacheStorage()) || bytes;
+        glinerInstance = await createGlinerSession(fallbackBytes, "wasm", signal);
         activeProvider = "wasm";
       }
     } else {
-      glinerInstance = await createGlinerSession(bytes, "wasm");
+      glinerInstance = await createGlinerSession(bytes, "wasm", signal);
       activeProvider = "wasm";
     }
 
@@ -487,7 +934,7 @@ async function runInferenceWithAutoFallback(
         provider: "wasm",
         cached: fromCache,
       });
-      glinerInstance = await createGlinerSession(bytes, "wasm");
+      glinerInstance = await createGlinerSession(bytes, "wasm", signal);
       activeProvider = "wasm";
       emit({
         type: "progress",
@@ -613,9 +1060,7 @@ self.addEventListener("message", (ev: MessageEvent<WorkerInMessage>) => {
       if (msg.type === "clear-cache") {
         glinerInstance = null;
         activeProvider = null;
-        if (typeof caches !== "undefined") {
-          await caches.delete(CACHE_NAME).catch(() => {});
-        }
+        await clearAllModelCaches();
         emit({ id: msg.id, type: "clear-done" });
         return;
       }

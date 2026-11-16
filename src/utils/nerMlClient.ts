@@ -6,6 +6,10 @@
  * progress telemetry, abort handling, and batched worker RPC calls.
  */
 
+import {
+  clearAllModelCaches,
+  inspectModelCacheState,
+} from "./nerModelCache";
 import type {
   WorkerInMessage,
   WorkerMlSpan,
@@ -16,15 +20,13 @@ import type {
 export type { WorkerMlSpan };
 
 export const EXPLORER_NER_LOCAL_ML_KEY = "gingko_explorer_ner_local_ml";
-const MODEL_ONNX_URL =
-  "https://huggingface.co/onnx-community/gliner_multi-v2.1/resolve/main/onnx/model_quantized.onnx";
-const CACHE_NAME = "gingko-ner-models-v1";
 
 export type NerMlStatus =
   | "disabled"
   | "idle"
   | "checking"
   | "downloading"
+  | "retrying"
   | "loading_cache"
   | "initializing"
   | "ready"
@@ -38,7 +40,10 @@ export interface NerMlState {
   executionProvider: "webgpu" | "wasm" | null;
   downloadPercent: number;
   loadedBytes: number;
+  partialBytes: number;
   totalBytes: number;
+  retryAttempt: number;
+  maxRetries: number;
   error: string | null;
 }
 
@@ -59,7 +64,10 @@ let state: NerMlState = {
   executionProvider: null,
   downloadPercent: 0,
   loadedBytes: 0,
+  partialBytes: 0,
   totalBytes: 0,
+  retryAttempt: 0,
+  maxRetries: 0,
   error: null,
 };
 
@@ -122,19 +130,22 @@ export function setLocalMlEnabled(enabled: boolean): void {
 }
 
 export async function checkLocalMlModelCached(): Promise<boolean> {
-  if (typeof caches === "undefined") {
-    patchState({ isModelCached: false });
-    return false;
-  }
   try {
-    const cache = await caches.open(CACHE_NAME);
-    const match = await cache.match(MODEL_ONNX_URL);
-    const hasValid = Boolean(match);
+    const info = await inspectModelCacheState();
+    const pct =
+      info.isCached
+        ? 100
+        : info.totalBytes > 0 && info.partialBytes > 0
+          ? Math.min(99, Math.round((info.partialBytes / info.totalBytes) * 100))
+          : 0;
     patchState({
-      isModelCached: hasValid,
-      ...(hasValid && state.downloadPercent === 0 ? { downloadPercent: 100 } : {}),
+      isModelCached: info.isCached,
+      partialBytes: info.partialBytes,
+      totalBytes: info.totalBytes || state.totalBytes,
+      loadedBytes: info.partialBytes || state.loadedBytes,
+      downloadPercent: info.isCached ? 100 : pct,
     });
-    return hasValid;
+    return info.isCached;
   } catch {
     patchState({ isModelCached: false });
     return false;
@@ -156,11 +167,14 @@ function handleWorkerMessage(ev: MessageEvent<WorkerOutMessage>) {
     patchState({
       status: msg.stage,
       loadedBytes: msg.loadedBytes,
-      totalBytes: msg.totalBytes,
+      ...(msg.loadedBytes > 0 ? { partialBytes: msg.loadedBytes } : {}),
+      ...(msg.totalBytes > 0 ? { totalBytes: msg.totalBytes } : {}),
       downloadPercent: msg.percent,
+      retryAttempt: msg.retryAttempt || 0,
+      maxRetries: msg.maxRetries || 0,
       ...(msg.provider !== undefined ? { executionProvider: msg.provider } : {}),
       ...(msg.cached !== undefined ? { isModelCached: msg.cached } : {}),
-      ...(msg.stage === "ready" ? { error: null } : {}),
+      ...(msg.stage === "ready" || msg.stage === "downloading" ? { error: null } : {}),
     });
     return;
   }
@@ -268,6 +282,8 @@ export async function warmupLocalMlModel(
           executionProvider: msg.provider,
           isModelCached: true,
           downloadPercent: 100,
+          retryAttempt: 0,
+          maxRetries: 0,
           error: null,
         });
         return { provider: msg.provider };
@@ -275,14 +291,19 @@ export async function warmupLocalMlModel(
       throw new Error("Unexpected response during model warmup");
     } catch (err: unknown) {
       const e = err as { name?: string; message?: string };
+      await checkLocalMlModelCached().catch(() => {});
       if (e?.name === "AbortError") {
         patchState({
           status: state.enabled ? "idle" : "disabled",
+          retryAttempt: 0,
+          maxRetries: 0,
           error: null,
         });
       } else {
         patchState({
           status: "error",
+          retryAttempt: 0,
+          maxRetries: 0,
           error: e?.message || "Failed to load ML model",
         });
       }
@@ -308,9 +329,16 @@ export function abortLocalMlModel(): void {
       // ignore
     }
   }
-  if (state.status === "downloading" || state.status === "initializing" || state.status === "inferring") {
+  if (
+    state.status === "downloading" ||
+    state.status === "retrying" ||
+    state.status === "initializing" ||
+    state.status === "inferring"
+  ) {
     patchState({
       status: state.enabled ? (state.executionProvider ? "ready" : "idle") : "disabled",
+      retryAttempt: 0,
+      maxRetries: 0,
     });
   }
 }
@@ -324,15 +352,16 @@ export async function clearLocalMlModelCache(): Promise<void> {
       // ignore
     }
   }
-  if (typeof caches !== "undefined") {
-    await caches.delete(CACHE_NAME).catch(() => {});
-  }
+  await clearAllModelCaches();
   patchState({
     isModelCached: false,
     executionProvider: null,
     downloadPercent: 0,
     loadedBytes: 0,
+    partialBytes: 0,
     totalBytes: 0,
+    retryAttempt: 0,
+    maxRetries: 0,
     status: state.enabled ? "idle" : "disabled",
     error: null,
   });
