@@ -38,6 +38,18 @@
               <span>{{ totalRelationOccurrences }} {{ t('explorer.ner.timestampedClaims') }}</span>
               <span aria-hidden="true">·</span>
               <span>{{ index.postsAnalyzed }}/{{ totalPostsCount }} {{ t('explorer.ner.postsShort') }}</span>
+              <template v-if="index.enginesUsed.size > 0">
+                <span aria-hidden="true">·</span>
+                <span>
+                  {{
+                    index.enginesUsed.has('gemini')
+                      ? t('explorer.ner.engineAi')
+                      : index.localTiersUsed?.has('ml')
+                        ? t('explorer.ner.engineNeuralLocal')
+                        : t('explorer.ner.engineStructured')
+                  }}
+                </span>
+              </template>
             </div>
           </div>
 

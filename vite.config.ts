@@ -11,12 +11,22 @@ export default defineConfig({
         '@': path.resolve(__dirname, '.'),
       },
     },
+    worker: {
+      format: 'es',
+    },
     build: {
       chunkSizeWarningLimit: 1000,
       rollupOptions: {
         output: {
           manualChunks(id) {
             if (id.includes('node_modules')) {
+              if (
+                id.includes('onnxruntime') ||
+                id.includes('@xenova/transformers') ||
+                id.includes('/node_modules/gliner/')
+              ) {
+                return 'vendor-ml';
+              }
               if (id.includes('cytoscape')) {
                 return 'vendor-cytoscape';
               }

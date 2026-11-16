@@ -23,6 +23,7 @@
     "dompurify": "^3.4.13",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "gliner": "^0.0.19",
     "lucide-react": "^0.546.0",
     "lucide-vue-next": "^1.0.0",
     "lz4js": "^0.2.0",

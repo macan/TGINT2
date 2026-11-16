@@ -1,0 +1,391 @@
+/**
+ * Client-side controller for the dedicated Web Worker running GLiNER.js
+ * multilingual NER inference (`onnx-community/gliner_multi-v2.1`).
+ *
+ * Manages opt-in preference persistence, Cache Storage detection, model download
+ * progress telemetry, abort handling, and batched worker RPC calls.
+ */
+
+import type {
+  WorkerInMessage,
+  WorkerMlSpan,
+  WorkerOutMessage,
+  WorkerPostInput,
+} from "../workers/nerInference.worker";
+
+export type { WorkerMlSpan };
+
+export const EXPLORER_NER_LOCAL_ML_KEY = "gingko_explorer_ner_local_ml";
+const MODEL_ONNX_URL =
+  "https://huggingface.co/onnx-community/gliner_multi-v2.1/resolve/main/onnx/model_quantized.onnx";
+const CACHE_NAME = "gingko-ner-models-v1";
+
+export type NerMlStatus =
+  | "disabled"
+  | "idle"
+  | "checking"
+  | "downloading"
+  | "loading_cache"
+  | "initializing"
+  | "ready"
+  | "inferring"
+  | "error";
+
+export interface NerMlState {
+  enabled: boolean;
+  status: NerMlStatus;
+  isModelCached: boolean;
+  executionProvider: "webgpu" | "wasm" | null;
+  downloadPercent: number;
+  loadedBytes: number;
+  totalBytes: number;
+  error: string | null;
+}
+
+const listeners = new Set<(state: NerMlState) => void>();
+
+function readInitialEnabled(): boolean {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem(EXPLORER_NER_LOCAL_ML_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+let state: NerMlState = {
+  enabled: readInitialEnabled(),
+  status: readInitialEnabled() ? "idle" : "disabled",
+  isModelCached: false,
+  executionProvider: null,
+  downloadPercent: 0,
+  loadedBytes: 0,
+  totalBytes: 0,
+  error: null,
+};
+
+function notify() {
+  const snapshot: NerMlState = { ...state };
+  listeners.forEach((cb) => {
+    try {
+      cb(snapshot);
+    } catch {
+      // ignore subscriber errors
+    }
+  });
+}
+
+function patchState(partial: Partial<NerMlState>) {
+  state = { ...state, ...partial };
+  notify();
+}
+
+export function getNerMlState(): NerMlState {
+  return { ...state };
+}
+
+export function subscribeNerMlState(cb: (s: NerMlState) => void): () => void {
+  listeners.add(cb);
+  cb({ ...state });
+  return () => {
+    listeners.delete(cb);
+  };
+}
+
+export function getLocalMlEnabled(): boolean {
+  return state.enabled;
+}
+
+export function setLocalMlEnabled(enabled: boolean): void {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(EXPLORER_NER_LOCAL_ML_KEY, enabled ? "1" : "0");
+    }
+  } catch {
+    // ignore storage errors
+  }
+
+  if (!enabled) {
+    abortLocalMlModel();
+    patchState({
+      enabled: false,
+      status: "disabled",
+      error: null,
+    });
+    return;
+  }
+
+  patchState({
+    enabled: true,
+    status: state.executionProvider ? "ready" : "idle",
+    error: null,
+  });
+}
+
+export async function checkLocalMlModelCached(): Promise<boolean> {
+  if (typeof caches === "undefined") {
+    patchState({ isModelCached: false });
+    return false;
+  }
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    const match = await cache.match(MODEL_ONNX_URL);
+    const hasValid = Boolean(match);
+    patchState({
+      isModelCached: hasValid,
+      ...(hasValid && state.downloadPercent === 0 ? { downloadPercent: 100 } : {}),
+    });
+    return hasValid;
+  } catch {
+    patchState({ isModelCached: false });
+    return false;
+  }
+}
+
+let workerInstance: Worker | null = null;
+let rpcSeq = 1;
+const pendingRpcs = new Map<
+  number,
+  { resolve: (msg: WorkerOutMessage) => void; reject: (err: Error) => void }
+>();
+
+function handleWorkerMessage(ev: MessageEvent<WorkerOutMessage>) {
+  const msg = ev.data;
+  if (!msg) return;
+
+  if (msg.type === "progress") {
+    patchState({
+      status: msg.stage,
+      loadedBytes: msg.loadedBytes,
+      totalBytes: msg.totalBytes,
+      downloadPercent: msg.percent,
+      ...(msg.provider !== undefined ? { executionProvider: msg.provider } : {}),
+      ...(msg.cached !== undefined ? { isModelCached: msg.cached } : {}),
+      ...(msg.stage === "ready" ? { error: null } : {}),
+    });
+    return;
+  }
+
+  if ("id" in msg && typeof msg.id === "number") {
+    const pending = pendingRpcs.get(msg.id);
+    if (!pending) return;
+    pendingRpcs.delete(msg.id);
+
+    if (msg.type === "error") {
+      const err = msg.aborted
+        ? new DOMException("Aborted", "AbortError")
+        : new Error(msg.message);
+      pending.reject(err as unknown as Error);
+      return;
+    }
+    pending.resolve(msg);
+  }
+}
+
+function getOrCreateWorker(): Worker {
+  if (workerInstance) return workerInstance;
+  const w = new Worker(
+    new URL("../workers/nerInference.worker.ts", import.meta.url),
+    { type: "module" }
+  );
+  w.addEventListener("message", handleWorkerMessage);
+  w.addEventListener("error", (ev) => {
+    const msg = ev.message || "ML worker crashed";
+    patchState({ status: "error", error: msg });
+    for (const [, p] of pendingRpcs) {
+      p.reject(new Error(msg));
+    }
+    pendingRpcs.clear();
+    workerInstance?.terminate();
+    workerInstance = null;
+  });
+  workerInstance = w;
+  return w;
+}
+
+function callWorker(
+  payload: Omit<WorkerInMessage, "id"> & Record<string, unknown>,
+  signal?: AbortSignal
+): Promise<WorkerOutMessage> {
+  const w = getOrCreateWorker();
+  const id = rpcSeq++;
+
+  return new Promise<WorkerOutMessage>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError") as unknown as Error);
+      return;
+    }
+
+    const onAbort = () => {
+      try {
+        w.postMessage({ id: 0, type: "abort" } satisfies WorkerInMessage);
+      } catch {
+        // ignore
+      }
+      pendingRpcs.delete(id);
+      reject(new DOMException("Aborted", "AbortError") as unknown as Error);
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    pendingRpcs.set(id, {
+      resolve: (res) => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(res);
+      },
+      reject: (err) => {
+        signal?.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    });
+
+    w.postMessage({ ...payload, id } as WorkerInMessage);
+  });
+}
+
+let activeWarmupPromise: Promise<{ provider: "webgpu" | "wasm" }> | null = null;
+let warmupAbortController: AbortController | null = null;
+
+export async function warmupLocalMlModel(
+  externalSignal?: AbortSignal
+): Promise<{ provider: "webgpu" | "wasm" }> {
+  if (state.executionProvider && state.status === "ready") {
+    return { provider: state.executionProvider };
+  }
+  if (activeWarmupPromise) {
+    return activeWarmupPromise;
+  }
+
+  warmupAbortController = new AbortController();
+  const signal = externalSignal || warmupAbortController.signal;
+  patchState({ error: null });
+
+  activeWarmupPromise = (async () => {
+    try {
+      const msg = await callWorker({ type: "warmup" }, signal);
+      if (msg.type === "warmup-done") {
+        patchState({
+          status: state.enabled ? "ready" : "disabled",
+          executionProvider: msg.provider,
+          isModelCached: true,
+          downloadPercent: 100,
+          error: null,
+        });
+        return { provider: msg.provider };
+      }
+      throw new Error("Unexpected response during model warmup");
+    } catch (err: unknown) {
+      const e = err as { name?: string; message?: string };
+      if (e?.name === "AbortError") {
+        patchState({
+          status: state.enabled ? "idle" : "disabled",
+          error: null,
+        });
+      } else {
+        patchState({
+          status: "error",
+          error: e?.message || "Failed to load ML model",
+        });
+      }
+      throw err;
+    } finally {
+      activeWarmupPromise = null;
+      warmupAbortController = null;
+    }
+  })();
+
+  return activeWarmupPromise;
+}
+
+export function abortLocalMlModel(): void {
+  if (warmupAbortController) {
+    warmupAbortController.abort();
+    warmupAbortController = null;
+  }
+  if (workerInstance) {
+    try {
+      workerInstance.postMessage({ id: 0, type: "abort" } satisfies WorkerInMessage);
+    } catch {
+      // ignore
+    }
+  }
+  if (state.status === "downloading" || state.status === "initializing" || state.status === "inferring") {
+    patchState({
+      status: state.enabled ? (state.executionProvider ? "ready" : "idle") : "disabled",
+    });
+  }
+}
+
+export async function clearLocalMlModelCache(): Promise<void> {
+  abortLocalMlModel();
+  if (workerInstance) {
+    try {
+      await callWorker({ type: "clear-cache" });
+    } catch {
+      // ignore
+    }
+  }
+  if (typeof caches !== "undefined") {
+    await caches.delete(CACHE_NAME).catch(() => {});
+  }
+  patchState({
+    isModelCached: false,
+    executionProvider: null,
+    downloadPercent: 0,
+    loadedBytes: 0,
+    totalBytes: 0,
+    status: state.enabled ? "idle" : "disabled",
+    error: null,
+  });
+}
+
+export async function inferEntitiesWithMlWorker(
+  posts: WorkerPostInput[],
+  signal?: AbortSignal
+): Promise<{
+  provider: "webgpu" | "wasm";
+  results: Map<string, WorkerMlSpan[]>;
+}> {
+  if (!posts || posts.length === 0) {
+    return {
+      provider: state.executionProvider || "wasm",
+      results: new Map(),
+    };
+  }
+
+  patchState({
+    status: state.executionProvider ? "inferring" : state.status,
+    error: null,
+  });
+
+  try {
+    const msg = await callWorker({ type: "infer-batch", posts }, signal);
+    if (msg.type === "infer-done") {
+      const resultsMap = new Map<string, WorkerMlSpan[]>();
+      for (const item of msg.results) {
+        resultsMap.set(item.postKey, item.spans);
+      }
+      patchState({
+        status: state.enabled ? "ready" : "disabled",
+        executionProvider: msg.provider,
+        isModelCached: true,
+        downloadPercent: 100,
+        error: null,
+      });
+      return { provider: msg.provider, results: resultsMap };
+    }
+    throw new Error("Unexpected ML inference worker response");
+  } catch (err: unknown) {
+    const e = err as { name?: string; message?: string };
+    if (e?.name === "AbortError") {
+      patchState({
+        status: state.enabled ? (state.executionProvider ? "ready" : "idle") : "disabled",
+      });
+    } else {
+      patchState({
+        status: "error",
+        error: e?.message || "Local ML inference failed",
+      });
+    }
+    throw err;
+  }
+}

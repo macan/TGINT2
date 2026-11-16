@@ -179,6 +179,16 @@ import {
   type PostNerExtractionRecord,
 } from "./utils/explorerNer";
 import {
+  abortLocalMlModel,
+  checkLocalMlModelCached,
+  clearLocalMlModelCache,
+  getNerMlState,
+  setLocalMlEnabled,
+  subscribeNerMlState,
+  warmupLocalMlModel,
+  type NerMlState,
+} from "./utils/nerMlClient";
+import {
   type ListenDateRangeValue,
   DEFAULT_LISTEN_DATE_RANGE,
   loadSavedListenDateRange,
@@ -11835,14 +11845,32 @@ const isNerModalOpen = ref(false);
 let nerExtractAbortController: AbortController | null = null;
 let nerActiveChannelRequestToken = 0;
 
+const explorerNerMlState = ref<NerMlState>(getNerMlState());
+let unsubscribeNerMlState: (() => void) | null = null;
+
+onMounted(() => {
+  unsubscribeNerMlState = subscribeNerMlState((s) => {
+    explorerNerMlState.value = s;
+  });
+  checkLocalMlModelCached().catch(() => {});
+});
+
+onUnmounted(() => {
+  if (unsubscribeNerMlState) {
+    unsubscribeNerMlState();
+    unsubscribeNerMlState = null;
+  }
+});
+
 const explorerNerIndex = computed(() => aggregateNerIndex(explorerNerRecords.value));
 
 const explorerNerUncachedCount = computed(() => {
   const chKey = normalizeNerChannelKey(currentChannelName.value || "");
   if (!chKey || posts.value.length === 0) return 0;
+  const preferLocalMl = explorerNerMlState.value.enabled;
   const cachedSet = new Set(
     explorerNerRecords.value
-      .filter((r) => isNerRecordCurrent(r, chKey))
+      .filter((r) => isNerRecordCurrent(r, chKey, preferLocalMl))
       .map((r) => r.postKey)
   );
   let count = 0;
@@ -11854,6 +11882,33 @@ const explorerNerUncachedCount = computed(() => {
   }
   return count;
 });
+
+const warmupExplorerNerLocalMl = async () => {
+  try {
+    await warmupLocalMlModel();
+    if (
+      explorerNerMlState.value.enabled &&
+      activeTab.value === "explorer" &&
+      explorerNerUncachedCount.value > 0 &&
+      !isExtractingNer.value
+    ) {
+      runExplorerNerExtraction(false);
+    }
+  } catch {
+    // Error status already reflected in explorerNerMlState
+  }
+};
+
+const toggleExplorerNerLocalMl = (enabled: boolean) => {
+  setLocalMlEnabled(enabled);
+  if (enabled) {
+    warmupExplorerNerLocalMl();
+  }
+};
+
+const clearExplorerNerLocalMlModel = async () => {
+  await clearLocalMlModelCache();
+};
 
 const toggleExplorerNerAuto = (enabled: boolean) => {
   explorerNerAutoExtract.value = enabled;
@@ -11907,6 +11962,7 @@ const runExplorerNerExtraction = async (forceReextract = false) => {
       posts: posts.value,
       existingRecords: explorerNerRecords.value,
       forceReextract,
+      useLocalMl: explorerNerMlState.value.enabled,
       signal,
       onProgress: (prog) => {
         if (reqToken === nerActiveChannelRequestToken) {
@@ -21030,12 +21086,17 @@ onUnmounted(() => {
               :uncached-count="explorerNerUncachedCount"
               :is-extracting="isExtractingNer"
               :auto-extract="explorerNerAutoExtract"
+              :ml-state="explorerNerMlState"
               :progress="explorerNerProgress"
               :error-message="explorerNerError"
               :active-filter="activeNerFeedFilter"
               @extract="runExplorerNerExtraction"
               @cancel="cancelExplorerNerExtraction"
               @toggle-auto="toggleExplorerNerAuto"
+              @toggle-local-ml="toggleExplorerNerLocalMl"
+              @warmup-local-ml="warmupExplorerNerLocalMl"
+              @abort-local-ml="abortLocalMlModel"
+              @clear-local-ml="clearExplorerNerLocalMlModel"
               @clear-cache="clearExplorerNerCache"
               @expand="isNerModalOpen = true"
               @select-filter="applyExplorerNerFeedFilter"

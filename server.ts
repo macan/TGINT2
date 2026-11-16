@@ -9,8 +9,31 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+function resolveServerPort(): number {
+  const argIdx = process.argv.findIndex(
+    (a) => a === '--port' || a.startsWith('--port=')
+  );
+  if (argIdx !== -1) {
+    const raw = process.argv[argIdx].includes('=')
+      ? process.argv[argIdx].split('=')[1]
+      : process.argv[argIdx + 1];
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  const envPort = Number(process.env.PORT);
+  const nginxPort = Number(process.env.NGINX_PORT);
+  if (
+    process.env.NODE_ENV !== 'production' &&
+    (!Number.isFinite(envPort) || envPort <= 0 || (nginxPort > 0 && envPort === nginxPort))
+  ) {
+    const appPort = Number(process.env.DEFAULT_APP_PORT);
+    return Number.isFinite(appPort) && appPort > 0 ? appPort : 3000;
+  }
+  return Number.isFinite(envPort) && envPort > 0 ? envPort : 3000;
+}
+
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = resolveServerPort();
 
 app.use(express.json({ limit: '10mb' }));
 

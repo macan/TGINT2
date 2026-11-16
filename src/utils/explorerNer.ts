@@ -8,6 +8,7 @@
  */
 
 import { probeApiBackend } from "./apiCapabilities";
+import { inferEntitiesWithMlWorker, type WorkerMlSpan } from "./nerMlClient";
 
 export type NerClassId =
   | "person"
@@ -158,13 +159,18 @@ export const EXPLORER_NER_LOCAL_VERSION = 2;
 
 export function isNerRecordCurrent(
   rec: PostNerExtractionRecord | null | undefined,
-  channelId: string
+  channelId: string,
+  preferLocalMl = false
 ): boolean {
   if (!rec || rec.channelId !== channelId) return false;
   if (rec.engine === "gemini") {
     return rec.extractorVersion >= 1;
   }
-  return rec.extractorVersion >= EXPLORER_NER_LOCAL_VERSION;
+  if (rec.extractorVersion < EXPLORER_NER_LOCAL_VERSION) return false;
+  if (preferLocalMl && rec.localTier !== "ml") {
+    return false;
+  }
+  return true;
 }
 
 export interface ExtractedPostEntity {
@@ -191,6 +197,8 @@ export interface PostNerExtractionRecord {
   timestampMs: number;
   extractorVersion: number;
   engine: "gemini" | "local";
+  localTier?: "rules" | "ml";
+  mlProvider?: "webgpu" | "wasm";
   entities: ExtractedPostEntity[];
   relations: ExtractedPostRelation[];
   updatedAt: number;
@@ -242,6 +250,7 @@ export interface AggregatedNerIndex {
   totalMentions: number;
   postsAnalyzed: number;
   enginesUsed: Set<"gemini" | "local">;
+  localTiersUsed: Set<"rules" | "ml">;
 }
 
 export interface ActiveNerFeedFilter {
@@ -259,6 +268,7 @@ export interface NerBatchProgress {
   total: number;
   cachedSkipped: number;
   engine: "gemini" | "local" | "mixed" | null;
+  localTier?: "rules" | "ml" | null;
   failedBatches: number;
   lastError: string | null;
 }
@@ -794,21 +804,68 @@ const RX_ASSET_LAW_EN =
 const RX_ASSET_LAW_CJK =
   /(?:《[^》]{2,30}》|香港基本法|基本法|香港國安法|國安法|維護國家安全條例|第23條|廿三條|恆生指數|恒生指數|標普500|納斯達克|道瓊斯|比特幣|以太幣)|[\u4e00-\u9fffA-Za-z0-9]{2,12}(?:法案|條例|法例|協議|條約|憲法|決議|白皮書|關稅|晶片|飛彈|導彈|戰機|無人機)/g;
 
-// Precompiled Relation Cue RegExps
-const RX_REL_LOC = /\b(?:in|at|to|from|near|visited|met in|based in)\b|在|於|抵|赴|前往|位於|坐落|駐/i;
-const RX_REL_ISSUE = /\b(?:sign|signed|pass|passed|issue|issued|announce|announced|launch|launched|propose|proposed|release|released|enact|enacted|tabled)\b|簽署|通過|公布|發布|發表|提出|推出|頒布|立法/i;
-const RX_REL_FUND = /\b(?:invest|invested|fund|funded|pay|paid|grant|granted|fine|fined|spend|spent|donate|donated|raise|raised|worth|budget|aid|billion|million)\b|投資|撥款|資助|罰款|捐款|援助|花費|總值|集資|融資|億|萬/i;
-const RX_REL_OP_BY = /\b(?:operat(?:e|ed|es|ing)|own|owned|run|official|channel|account|via|posted|managed by)\b|營運|經營|官方|隸屬|帳號|頻道|由.*負責/i;
-const RX_REL_HOSTILE = /\b(?:sanction|sanctioned|sue|sued|attack|attacked|struck|strike|arrest|arrested|charge|charged|ban|banned|probe|probed|condemn|condemned|accuse|accused|warn|warned|oppose|opposed|clash|clashed|retaliat(?:e|ed|ing)|critic(?:ize|ized|ises|ised|izing|ising)?|slam|slammed|rebuke|rebuked|denounce|denounced|blame|blamed)\b|制裁|起訴|控告|檢控|攻擊|打擊|逮捕|拘捕|禁止|封殺|調查|譴責|指控|警告|反對|衝突|批評|指責|炮轟|駁斥/i;
-const RX_REL_OPPOSE = /\b(?:sanction|sanctioned|condemn|condemned|oppose|opposed|clash|clashed|dispute|disputed|critic(?:ize|ized|ises|ised|izing|ising)?|boycott|boycotted|slam|slammed|rebuke|rebuked|denounce|denounced)\b|反對|批評|指責|衝突|爭議|制裁|譴責|抵制|炮轟/i;
-const RX_REL_COOP = /\b(?:met|meet|partner|partnered|agree|agreed|ally|allied|cooperat(?:e|ed|ing)|joint|support|supported|welcome|welcomed|pact|deal)\b|會見|會談|會晤|合作|結盟|簽約|同意|支持|聯手|共同|攜手/i;
+// Precompiled Relation Cue RegExps (EN, Traditional/Simplified ZH, Yue, RU)
+const RX_REL_ROLE =
+  /\b(?:appointed|named|elected|serves as|acting|former|as the)\b|擔任|担任|出任|任職|任职|兼任|獲委任|获委任|就任|назван|назначен/i;
+const RX_REL_LOC =
+  /\b(?:in|at|to|from|near|visited|met in|based in)\b|(?:^|[\sА-Яа-яЁё])(?:в|на|из)(?=\s)|посетил|прибыл|находится|在|於|于|抵|赴|前往|到訪|到访|位於|位于|坐落|駐|驻/i;
+const RX_REL_ISSUE =
+  /\b(?:sign|signed|pass|passed|issue|issued|announce|announced|launch|launched|propose|proposed|release|released|enact|enacted|tabled)\b|簽署|签署|通過|通过|公布|發布|发布|發表|发表|提出|推出|頒布|颁布|立法|выпустил|подписал|принял|опубликовал/i;
+const RX_REL_FUND =
+  /\b(?:invest|invested|fund|funded|pay|paid|grant|granted|fine|fined|spend|spent|donate|donated|raise|raised|worth|budget|aid|billion|million)\b|投資|投资|撥款|拨款|資助|资助|罰款|罚款|捐款|援助|花費|花费|總值|总值|集資|融資|融资|億|亿|萬|万|инвестировал|выделил|оштрафовал|профинансировал/i;
+const RX_REL_OP_BY =
+  /\b(?:operat(?:e|ed|es|ing)|own|owned|run|official|channel|account|via|posted|managed by)\b|營運|运营|經營|经营|官方|隸屬|隶属|帳號|账号|頻道|频道|由.*負責|由.*负责|управляет|управляется|принадлежит/i;
+const RX_REL_HOSTILE =
+  /\b(?:sanction|sanctioned|sue|sued|attack|attacked|struck|strike|arrest|arrested|charge|charged|ban|banned|probe|probed|condemn|condemned|accuse|accused|warn|warned|oppose|opposed|clash|clashed|retaliat(?:e|ed|ing)|critic(?:ize|ized|ises|ised|izing|ising)?|slam|slammed|rebuke|rebuked|denounce|denounced|blame|blamed)\b|制裁|起訴|起诉|控告|檢控|检控|攻擊|攻击|打擊|打击|逮捕|拘捕|禁止|封殺|封杀|調查|调查|譴責|谴责|指控|警告|反對|反对|衝突|冲突|批評|批评|指責|指责|炮轟|炮轰|駁斥|驳斥|санкц|обвинил|атаковал|запретил|арестовал|осудил|раскритиковал/i;
+const RX_REL_OPPOSE =
+  /\b(?:sanction|sanctioned|condemn|condemned|oppose|opposed|clash|clashed|dispute|disputed|critic(?:ize|ized|ises|ised|izing|ising)?|boycott|boycotted|slam|slammed|rebuke|rebuked|denounce|denounced)\b|反對|反对|批評|批评|指責|指责|衝突|冲突|爭議|争议|制裁|譴責|谴责|抵制|炮轟|炮轰|против|осудил|раскритиковал|возразил/i;
+const RX_REL_COOP =
+  /\b(?:met|meet|partner|partnered|agree|agreed|ally|allied|cooperat(?:e|ed|ing)|joint|support|supported|welcome|welcomed|pact|deal)\b|會見|会见|會談|会谈|會晤|会晤|合作|結盟|结盟|簽約|签约|同意|支持|聯手|联手|共同|攜手|携手|встретился|договорился|подписал соглашение|поддержал|сотруднич/i;
+
+interface SentenceSlice {
+  text: string;
+  startOffset: number;
+  endOffset: number;
+}
+
+function splitSentencesWithOffsets(text: string): SentenceSlice[] {
+  if (!text) return [];
+  const rx = /(?<!\d)(?<=[.!?。！？\n])(?<!\b(?:U\.S|U\.K|U\.N|E\.U|Mr|Ms|Mrs|Dr|St|Mt|No|Lt|Col|Gen|Sgt|Cmdr|Inc|Ltd|Corp|Co|vs)\.)(?<!\b[A-Z]\.)\s+|\n+/g;
+  const result: SentenceSlice[] = [];
+  let lastIdx = 0;
+  let m: RegExpExecArray | null;
+  while ((m = rx.exec(text)) !== null) {
+    const raw = text.slice(lastIdx, m.index);
+    const trimmed = raw.trim();
+    if (trimmed.length >= 4) {
+      const leadSpaces = raw.indexOf(trimmed);
+      const startOffset = lastIdx + Math.max(0, leadSpaces);
+      result.push({
+        text: trimmed,
+        startOffset,
+        endOffset: startOffset + trimmed.length,
+      });
+    }
+    lastIdx = m.index + m[0].length;
+  }
+  if (lastIdx < text.length) {
+    const raw = text.slice(lastIdx);
+    const trimmed = raw.trim();
+    if (trimmed.length >= 4) {
+      const leadSpaces = raw.indexOf(trimmed);
+      const startOffset = lastIdx + Math.max(0, leadSpaces);
+      result.push({
+        text: trimmed,
+        startOffset,
+        endOffset: startOffset + trimmed.length,
+      });
+    }
+  }
+  return result;
+}
 
 function splitSentences(text: string): string[] {
-  // Do not split inside decimal numbers (35.6762) or abbreviations/initials (U.S., U.K., St., John A.)
-  return text
-    .split(/(?<!\d)(?<=[.!?。！？\n])(?<!\b(?:U\.S|U\.K|U\.N|E\.U|Mr|Ms|Mrs|Dr|St|Mt|No|Lt|Col|Gen|Sgt|Cmdr|Inc|Ltd|Corp|Co|vs)\.)(?<!\b[A-Z]\.)\s+|\n+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length >= 4);
+  return splitSentencesWithOffsets(text).map((s) => s.text);
 }
 
 export function extractNerSinglePostLocal(
@@ -1200,153 +1257,542 @@ export function extractNerSinglePostLocal(
     }
 
     // Sentence-level Relation Linking among detected entities
-    if (sentEntities.length >= 2) {
-      const actors = sentEntities.filter(
-        (e) => e.nerClass === "person" || e.nerClass === "organization" || e.nerClass === "nation"
-      );
-      const places = sentEntities.filter(
-        (e) => e.nerClass === "address" || e.nerClass === "location" || e.nerClass === "nation"
-      );
-      const events = sentEntities.filter((e) => e.nerClass === "event");
-      const laws = sentEntities.filter((e) => e.nerClass === "asset_law");
-      const metrics = sentEntities.filter((e) => e.nerClass === "financial_metric");
-      const platforms = sentEntities.filter((e) => e.nerClass === "platform");
-      const roles = sentEntities.filter((e) => e.nerClass === "job_position");
-      const facilities = sentEntities.filter((e) => e.nerClass === "address");
+    linkRelationsInSentence(sentence, sentEntities, pushRelation);
+  }
 
-      const primaryActor = actors[0] || null;
+  return { entities, relations };
+}
 
-      // holds_role / affiliated_with
-      if (actors.length >= 1 && roles.length >= 1) {
-        const p = actors.find((a) => a.nerClass === "person") || actors[0];
+type RelationPusher = (
+  subj: { name: string; nerClass: NerClassId },
+  rel: RelationClassId,
+  obj: { name: string; nerClass: NerClassId },
+  quote: string,
+  confidence: number
+) => void;
+
+function linkRelationsInSentence(
+  sentence: string,
+  sentEntities: ExtractedPostEntity[],
+  pushRelation: RelationPusher
+): void {
+  if (sentEntities.length < 2) return;
+
+  const actors = sentEntities.filter(
+    (e) => e.nerClass === "person" || e.nerClass === "organization" || e.nerClass === "nation"
+  );
+  const places = sentEntities.filter(
+    (e) => e.nerClass === "address" || e.nerClass === "location" || e.nerClass === "nation"
+  );
+  const events = sentEntities.filter((e) => e.nerClass === "event");
+  const laws = sentEntities.filter((e) => e.nerClass === "asset_law");
+  const metrics = sentEntities.filter((e) => e.nerClass === "financial_metric");
+  const platforms = sentEntities.filter((e) => e.nerClass === "platform");
+  const roles = sentEntities.filter((e) => e.nerClass === "job_position");
+  const facilities = sentEntities.filter((e) => e.nerClass === "address");
+
+  const primaryActor = actors[0] || null;
+
+  // holds_role: link person/actor with adjacent role when present
+  if (actors.length >= 1 && roles.length >= 1) {
+    const p = actors.find((a) => a.nerClass === "person") || actors[0];
+    const hasRoleCue = RX_REL_ROLE.test(sentence);
+    pushRelation(
+      { name: p.canonical, nerClass: p.nerClass },
+      "holds_role",
+      { name: roles[0].canonical, nerClass: "job_position" },
+      sentence,
+      hasRoleCue ? 0.84 : 0.78
+    );
+  }
+
+  const personActor = actors.find((a) => a.nerClass === "person");
+  const orgActor = actors.find((a) => a.nerClass === "organization");
+  if (personActor && orgActor) {
+    pushRelation(
+      { name: personActor.canonical, nerClass: "person" },
+      "affiliated_with",
+      { name: orgActor.canonical, nerClass: "organization" },
+      sentence,
+      0.76
+    );
+  }
+
+  // located_at (actors or events -> address/location/nation)
+  if (primaryActor && places.length >= 1) {
+    const targetPlace = places.find((pl) => pl.canonical !== primaryActor.canonical);
+    if (targetPlace) {
+      const hasCue = RX_REL_LOC.test(sentence);
+      if (hasCue || targetPlace.nerClass === "address") {
         pushRelation(
-          { name: p.canonical, nerClass: p.nerClass },
-          "holds_role",
-          { name: roles[0].canonical, nerClass: "job_position" },
-          sentence,
-          0.78
-        );
-      }
-
-      const personActor = actors.find((a) => a.nerClass === "person");
-      const orgActor = actors.find((a) => a.nerClass === "organization");
-      if (personActor && orgActor) {
-        pushRelation(
-          { name: personActor.canonical, nerClass: "person" },
-          "affiliated_with",
-          { name: orgActor.canonical, nerClass: "organization" },
-          sentence,
-          0.76
-        );
-      }
-
-      // located_at (actors or events -> address/location/nation)
-      if (primaryActor && places.length >= 1) {
-        const targetPlace = places.find((pl) => pl.canonical !== primaryActor.canonical);
-        if (targetPlace) {
-          const hasCue = RX_REL_LOC.test(sentence);
-          if (hasCue || targetPlace.nerClass === "address") {
-            pushRelation(
-              { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
-              "located_at",
-              { name: targetPlace.canonical, nerClass: targetPlace.nerClass },
-              sentence,
-              hasCue ? 0.8 : 0.68
-            );
-          }
-        }
-      }
-      if (events.length >= 1 && places.length >= 1) {
-        pushRelation(
-          { name: events[0].canonical, nerClass: "event" },
+          { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
           "located_at",
-          { name: places[0].canonical, nerClass: places[0].nerClass },
+          { name: targetPlace.canonical, nerClass: targetPlace.nerClass },
           sentence,
-          0.75
+          hasCue ? 0.8 : 0.68
         );
-      }
-
-      // participated_in
-      if (primaryActor && events.length >= 1) {
-        pushRelation(
-          { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
-          "participated_in",
-          { name: events[0].canonical, nerClass: "event" },
-          sentence,
-          0.77
-        );
-      }
-
-      // issued_or_authored
-      if (primaryActor && laws.length >= 1 && RX_REL_ISSUE.test(sentence)) {
-        pushRelation(
-          { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
-          "issued_or_authored",
-          { name: laws[0].canonical, nerClass: "asset_law" },
-          sentence,
-          0.8
-        );
-      }
-
-      // transferred_or_funded
-      if (primaryActor && metrics.length >= 1 && RX_REL_FUND.test(sentence)) {
-        const recipient = actors[1] || places[0];
-        pushRelation(
-          { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
-          "transferred_or_funded",
-          recipient
-            ? { name: recipient.canonical, nerClass: recipient.nerClass }
-            : { name: metrics[0].canonical, nerClass: "financial_metric" },
-          sentence,
-          0.75
-        );
-      }
-
-      // operated_by (platform or facility -> actor)
-      if (platforms.length >= 1 && primaryActor && primaryActor.nerClass !== "platform") {
-        if (RX_REL_OP_BY.test(sentence)) {
-          pushRelation(
-            { name: platforms[0].canonical, nerClass: "platform" },
-            "operated_by",
-            { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
-            sentence,
-            0.74
-          );
-        }
-      } else if (facilities.length >= 1 && orgActor && RX_REL_OP_BY.test(sentence)) {
-        pushRelation(
-          { name: facilities[0].canonical, nerClass: "address" },
-          "operated_by",
-          { name: orgActor.canonical, nerClass: "organization" },
-          sentence,
-          0.72
-        );
-      }
-
-      // Actor-to-Actor relations: opposed_to / targets_or_acts_on / cooperated_with
-      if (actors.length >= 2) {
-        const a1 = actors[0];
-        const a2 = actors[1];
-        if (RX_REL_HOSTILE.test(sentence)) {
-          const isOpposed = RX_REL_OPPOSE.test(sentence);
-          pushRelation(
-            { name: a1.canonical, nerClass: a1.nerClass },
-            isOpposed ? "opposed_to" : "targets_or_acts_on",
-            { name: a2.canonical, nerClass: a2.nerClass },
-            sentence,
-            0.79
-          );
-        } else if (RX_REL_COOP.test(sentence)) {
-          pushRelation(
-            { name: a1.canonical, nerClass: a1.nerClass },
-            "cooperated_with",
-            { name: a2.canonical, nerClass: a2.nerClass },
-            sentence,
-            0.77
-          );
-        }
       }
     }
+  }
+  if (events.length >= 1 && places.length >= 1) {
+    pushRelation(
+      { name: events[0].canonical, nerClass: "event" },
+      "located_at",
+      { name: places[0].canonical, nerClass: places[0].nerClass },
+      sentence,
+      0.75
+    );
+  }
+
+  // participated_in
+  if (primaryActor && events.length >= 1) {
+    pushRelation(
+      { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
+      "participated_in",
+      { name: events[0].canonical, nerClass: "event" },
+      sentence,
+      0.77
+    );
+  }
+
+  // issued_or_authored
+  if (primaryActor && laws.length >= 1 && RX_REL_ISSUE.test(sentence)) {
+    pushRelation(
+      { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
+      "issued_or_authored",
+      { name: laws[0].canonical, nerClass: "asset_law" },
+      sentence,
+      0.8
+    );
+  }
+
+  // transferred_or_funded
+  if (primaryActor && metrics.length >= 1 && RX_REL_FUND.test(sentence)) {
+    const recipient = actors[1] || places[0];
+    pushRelation(
+      { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
+      "transferred_or_funded",
+      recipient
+        ? { name: recipient.canonical, nerClass: recipient.nerClass }
+        : { name: metrics[0].canonical, nerClass: "financial_metric" },
+      sentence,
+      0.75
+    );
+  }
+
+  // operated_by (platform or facility -> actor)
+  if (platforms.length >= 1 && primaryActor && primaryActor.nerClass !== "platform") {
+    if (RX_REL_OP_BY.test(sentence)) {
+      pushRelation(
+        { name: platforms[0].canonical, nerClass: "platform" },
+        "operated_by",
+        { name: primaryActor.canonical, nerClass: primaryActor.nerClass },
+        sentence,
+        0.74
+      );
+    }
+  } else if (facilities.length >= 1 && orgActor && RX_REL_OP_BY.test(sentence)) {
+    pushRelation(
+      { name: facilities[0].canonical, nerClass: "address" },
+      "operated_by",
+      { name: orgActor.canonical, nerClass: "organization" },
+      sentence,
+      0.72
+    );
+  }
+
+  // Actor-to-Actor relations: opposed_to / targets_or_acts_on / cooperated_with
+  if (actors.length >= 2) {
+    const isHostile = RX_REL_HOSTILE.test(sentence);
+    const isOpposed = isHostile && RX_REL_OPPOSE.test(sentence);
+    const isCoop = !isHostile && RX_REL_COOP.test(sentence);
+    if (isHostile || isCoop) {
+      const a1 = actors[0];
+      const a2 = actors[1];
+      pushRelation(
+        { name: a1.canonical, nerClass: a1.nerClass },
+        isHostile ? (isOpposed ? "opposed_to" : "targets_or_acts_on") : "cooperated_with",
+        { name: a2.canonical, nerClass: a2.nerClass },
+        sentence,
+        isHostile ? 0.79 : 0.77
+      );
+    }
+  }
+}
+
+function canonicalizeMlSpan(
+  spanText: string,
+  nerClass: NerClassId
+): { name: string; canonical: string; nerClass: NerClassId } | null {
+  let clean = spanText
+    .trim()
+    .replace(/^[「『《"'（(\s]+|[」』》"'）)\s。，；：,.!?]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!clean || clean.length < 2 || clean.length > 85) return null;
+  if (/^(?:https?:\/\/|@)/i.test(clean)) return null;
+
+  if (nerClass === "address") {
+    clean = stripCjkLeadNoise(clean);
+    if (clean.length < 2 || RX_ADDR_CJK_BLACKLIST.test(clean)) return null;
+  } else if (nerClass === "organization" || nerClass === "event" || nerClass === "asset_law") {
+    clean = stripCjkLeadNoise(clean);
+    if (clean.length < 2) return null;
+  } else if (nerClass === "person") {
+    if (CJK_PERSON_STOP.has(clean) || LAT_STOPWORDS.has(clean)) return null;
+  }
+
+  const lower = clean.toLowerCase();
+  const nationCanon =
+    NATION_MATCHER.asciiLookup.get(lower) || NATION_MATCHER.nonAsciiLookup.get(lower);
+  if (nationCanon) {
+    return { name: clean, canonical: nationCanon, nerClass: "nation" };
+  }
+  const locCanon =
+    LOCATION_MATCHER.asciiLookup.get(lower) || LOCATION_MATCHER.nonAsciiLookup.get(lower);
+  if (locCanon && (nerClass === "location" || nerClass === "nation")) {
+    return { name: clean, canonical: locCanon, nerClass: "location" };
+  }
+
+  return { name: clean, canonical: clean, nerClass };
+}
+
+export function extractNerSinglePostHybrid(
+  postKey: string,
+  timestampMs: number,
+  text: string,
+  mlSpans: WorkerMlSpan[],
+  meta?: { author?: string; forwardTarget?: string; contactName?: string }
+): { entities: ExtractedPostEntity[]; relations: ExtractedPostRelation[] } {
+  // Start with deterministic structured + rule extraction, then fuse GLiNER neural spans
+  // per sentence so multilingual (ZH/YUE/RU/EN) names, orgs, locations, and roles participate
+  // directly in sentence relation linking.
+  const entities: ExtractedPostEntity[] = [];
+  const relations: ExtractedPostRelation[] = [];
+  const seenEntityMap = new Map<string, ExtractedPostEntity>();
+  const seenRelKey = new Set<string>();
+
+  const pushEntity = (
+    name: string,
+    canonical: string,
+    nerClass: NerClassId,
+    quote: string
+  ): ExtractedPostEntity | null => {
+    const cleanName = name.trim();
+    const cleanCanonical = canonical.trim();
+    if (!cleanName || !cleanCanonical || cleanCanonical.length < 2 || cleanCanonical.length > 90) {
+      return null;
+    }
+    const k = normalizeEntityKey(nerClass, cleanCanonical);
+    const existing = seenEntityMap.get(k);
+    if (existing) return existing;
+    const ent: ExtractedPostEntity = {
+      name: cleanName,
+      canonical: cleanCanonical,
+      nerClass,
+      quote: quote.slice(0, 200),
+    };
+    seenEntityMap.set(k, ent);
+    entities.push(ent);
+    return ent;
+  };
+
+  const pushRelation: RelationPusher = (subj, rel, obj, quote, confidence) => {
+    if (!subj.name || !obj.name) return;
+    if (subj.name.toLowerCase() === obj.name.toLowerCase()) return;
+    const key = `${subj.name.toLowerCase()}|${rel}|${obj.name.toLowerCase()}`;
+    if (seenRelKey.has(key)) return;
+    seenRelKey.add(key);
+    relations.push({
+      subject: subj.name,
+      subjectClass: subj.nerClass,
+      relationClass: rel,
+      object: obj.name,
+      objectClass: obj.nerClass,
+      quote: quote.slice(0, 220),
+      confidence,
+    });
+  };
+
+  if (meta?.contactName) {
+    pushEntity(meta.contactName, meta.contactName, "person", `Contact: ${meta.contactName}`);
+  }
+  if (meta?.forwardTarget) {
+    const fwdHandle = meta.forwardTarget.startsWith("@")
+      ? meta.forwardTarget
+      : `@${meta.forwardTarget}`;
+    pushEntity(fwdHandle, fwdHandle, "platform", `Forwarded from ${fwdHandle}`);
+  }
+
+  const sentences = splitSentencesWithOffsets(text);
+  const consumedMlIndices = new Set<number>();
+
+  for (const sent of sentences) {
+    const sentence = sent.text;
+    const sentEntities: ExtractedPostEntity[] = [];
+    const sentEntityKeys = new Set<string>();
+    const protectedRanges: Array<{ start: number; end: number }> = [];
+
+    const addSentEntity = (
+      name: string,
+      canonical: string,
+      nerClass: NerClassId
+    ) => {
+      const e = pushEntity(name, canonical, nerClass, sentence);
+      if (e) {
+        const k = normalizeEntityKey(e.nerClass, e.canonical);
+        if (!sentEntityKeys.has(k)) {
+          sentEntityKeys.add(k);
+          sentEntities.push(e);
+        }
+      }
+      return e;
+    };
+
+    // A. High-precision deterministic structured matchers (coordinates, addresses, handles, metrics, dictionaries)
+    if (NATION_MATCHER.asciiRx) {
+      NATION_MATCHER.asciiRx.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = NATION_MATCHER.asciiRx.exec(sentence)) !== null) {
+        const canon = NATION_MATCHER.asciiLookup.get(m[0].toLowerCase());
+        if (canon) addSentEntity(m[0], canon, "nation");
+      }
+    }
+    if (NATION_MATCHER.nonAsciiRx) {
+      NATION_MATCHER.nonAsciiRx.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = NATION_MATCHER.nonAsciiRx.exec(sentence)) !== null) {
+        const canon = NATION_MATCHER.nonAsciiLookup.get(m[0].toLowerCase());
+        if (canon) addSentEntity(m[0], canon, "nation");
+      }
+    }
+    if (LOCATION_MATCHER.asciiRx) {
+      LOCATION_MATCHER.asciiRx.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = LOCATION_MATCHER.asciiRx.exec(sentence)) !== null) {
+        const canon = LOCATION_MATCHER.asciiLookup.get(m[0].toLowerCase());
+        if (canon) addSentEntity(m[0], canon, "location");
+      }
+    }
+    if (LOCATION_MATCHER.nonAsciiRx) {
+      LOCATION_MATCHER.nonAsciiRx.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = LOCATION_MATCHER.nonAsciiRx.exec(sentence)) !== null) {
+        const canon = LOCATION_MATCHER.nonAsciiLookup.get(m[0].toLowerCase());
+        if (canon) addSentEntity(m[0], canon, "location");
+      }
+    }
+
+    RX_LATLON_DECIMAL.lastIndex = 0;
+    let dm: RegExpExecArray | null;
+    while ((dm = RX_LATLON_DECIMAL.exec(sentence)) !== null) {
+      const g = dm.groups;
+      if (!g) continue;
+      const hasMarker = Boolean(g.prefix || g.latDeg || g.latHem || g.lonDeg || g.lonHem);
+      const latFrac = (g.lat.split(".")[1] || "").length;
+      const lonFrac = (g.lon.split(".")[1] || "").length;
+      if (!hasMarker && (latFrac < 3 || lonFrac < 3)) continue;
+      let latVal = parseFloat(g.lat);
+      let lonVal = parseFloat(g.lon);
+      if (g.latHem && g.latHem.toUpperCase() === "S") latVal = -Math.abs(latVal);
+      if (g.lonHem && g.lonHem.toUpperCase() === "W") lonVal = -Math.abs(lonVal);
+      if (
+        Number.isFinite(latVal) &&
+        Number.isFinite(lonVal) &&
+        Math.abs(latVal) <= 90 &&
+        Math.abs(lonVal) <= 180 &&
+        !(latVal === 0 && lonVal === 0)
+      ) {
+        protectedRanges.push({
+          start: sent.startOffset + dm.index,
+          end: sent.startOffset + dm.index + dm[0].length,
+        });
+        addSentEntity(dm[0].trim(), `${latVal.toFixed(4)}, ${lonVal.toFixed(4)}`, "location");
+      }
+    }
+
+    RX_LATLON_DMS.lastIndex = 0;
+    while ((dm = RX_LATLON_DMS.exec(sentence)) !== null) {
+      const latD = Number(dm[1]);
+      const latM = Number(dm[2]);
+      const latS = Number(dm[3] || 0);
+      const latH = dm[4].toUpperCase();
+      const lonD = Number(dm[5]);
+      const lonM = Number(dm[6]);
+      const lonS = Number(dm[7] || 0);
+      const lonH = dm[8].toUpperCase();
+      if (latD <= 90 && lonD <= 180 && latM < 60 && lonM < 60 && latS < 60 && lonS < 60) {
+        let decLat = latD + latM / 60 + latS / 3600;
+        let decLon = lonD + lonM / 60 + lonS / 3600;
+        if (latH === "S") decLat = -decLat;
+        if (lonH === "W") decLon = -decLon;
+        protectedRanges.push({
+          start: sent.startOffset + dm.index,
+          end: sent.startOffset + dm.index + dm[0].length,
+        });
+        addSentEntity(dm[0].trim(), `${decLat.toFixed(4)}, ${decLon.toFixed(4)}`, "location");
+      }
+    }
+
+    RX_ADDR_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ADDR_EN)) {
+      const val = m[0].trim();
+      if (m.index != null) {
+        protectedRanges.push({
+          start: sent.startOffset + m.index,
+          end: sent.startOffset + m.index + m[0].length,
+        });
+      }
+      addSentEntity(val, val, "address");
+    }
+    const translatedCjkAddrs: string[] = [];
+    RX_ADDR_CJK_TRANSLATED.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ADDR_CJK_TRANSLATED)) {
+      translatedCjkAddrs.push(m[0].trim());
+    }
+    const structuredCjkAddrs: string[] = [];
+    RX_ADDR_CJK_STRUCTURED.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ADDR_CJK_STRUCTURED)) {
+      const val = stripCjkLeadNoise(m[0]);
+      if (val.length < 3 || RX_ADDR_CJK_BLACKLIST.test(val)) continue;
+      if (translatedCjkAddrs.some((tr) => val.length > tr.length && val.endsWith(tr))) continue;
+      structuredCjkAddrs.push(val);
+    }
+    for (const val of structuredCjkAddrs) addSentEntity(val, val, "address");
+    for (const val of translatedCjkAddrs) {
+      const superseded = structuredCjkAddrs.some((st) => {
+        const idx = st.indexOf(val);
+        return idx !== -1 && st.length > val.length && /^\d|[一二三四五六七八九十]/.test(st.slice(idx + val.length));
+      });
+      if (!superseded) addSentEntity(val, val, "address");
+    }
+
+    RX_HANDLE.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_HANDLE)) {
+      if (m.index != null) {
+        protectedRanges.push({
+          start: sent.startOffset + m.index,
+          end: sent.startOffset + m.index + m[0].length,
+        });
+      }
+      addSentEntity(m[1], m[1], "platform");
+    }
+    RX_URL_PLAT.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_URL_PLAT)) {
+      const val = m[0].replace(/[.,;)]+$/, "");
+      if (m.index != null) {
+        protectedRanges.push({
+          start: sent.startOffset + m.index,
+          end: sent.startOffset + m.index + m[0].length,
+        });
+      }
+      addSentEntity(val, val, "platform");
+    }
+    RX_PLAT_NAMED.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_PLAT_NAMED)) {
+      addSentEntity(m[0], m[0], "platform");
+    }
+
+    RX_MONEY_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_MONEY_EN)) {
+      if (m.index != null) {
+        protectedRanges.push({
+          start: sent.startOffset + m.index,
+          end: sent.startOffset + m.index + m[0].length,
+        });
+      }
+      addSentEntity(m[0].trim(), m[0].trim(), "financial_metric");
+    }
+    RX_MONEY_CJK.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_MONEY_CJK)) {
+      if (m.index != null) {
+        protectedRanges.push({
+          start: sent.startOffset + m.index,
+          end: sent.startOffset + m.index + m[0].length,
+        });
+      }
+      addSentEntity(m[0].trim(), m[0].trim(), "financial_metric");
+    }
+
+    // B. Fuse GLiNER neural spans anchored inside this sentence
+    const mlCoveredRanges: Array<{ start: number; end: number }> = [];
+    for (let i = 0; i < mlSpans.length; i++) {
+      if (consumedMlIndices.has(i)) continue;
+      const ms = mlSpans[i];
+      const inBounds =
+        ms.start >= sent.startOffset - 2 && ms.end <= sent.endOffset + 2;
+      if (!inBounds && !sentence.includes(ms.spanText)) continue;
+      consumedMlIndices.add(i);
+
+      // Keep deterministic coordinate/handle/money/street matches if overlapping
+      const hitsProtected = protectedRanges.some(
+        (pr) => ms.start < pr.end && ms.end > pr.start
+      );
+      if (hitsProtected && ms.nerClass !== "person" && ms.nerClass !== "organization") {
+        continue;
+      }
+
+      const norm = canonicalizeMlSpan(ms.spanText, coerceNerClass(ms.nerClass));
+      if (!norm) continue;
+      addSentEntity(norm.name, norm.canonical, norm.nerClass);
+      mlCoveredRanges.push({ start: ms.start, end: ms.end });
+    }
+
+    // C. Supplement with explicit Role+Person & domain acronyms/laws not already covered by ML
+    RX_ORG_ACRO.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ORG_ACRO)) {
+      addSentEntity(m[0], m[0], "organization");
+    }
+    RX_ROLE_PERSON_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ROLE_PERSON_EN)) {
+      const role = addSentEntity(m[1].trim(), m[1].trim(), "job_position");
+      const person = addSentEntity(m[2].trim(), m[2].trim(), "person");
+      if (role && person) {
+        pushRelation(
+          { name: person.canonical, nerClass: "person" },
+          "holds_role",
+          { name: role.canonical, nerClass: "job_position" },
+          sentence,
+          0.9
+        );
+      }
+    }
+    RX_ROLE_PERSON_CJK.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ROLE_PERSON_CJK)) {
+      const roleStr = m[1].trim();
+      const candName = m[2]
+        .trim()
+        .replace(/(?:前往|抵達|來到|表示|指出|強調|透露|宣布|宣佈|簽署|會見|訪問|出席|回應|認為|呼籲|[今昨明將並在於與及說稱會被的向到赴前])$/, "")
+        .replace(/[今昨明將並在於與及說稱表示會被的向到前]+$/g, "");
+      addSentEntity(roleStr, roleStr, "job_position");
+      if (
+        candName.length >= 2 &&
+        !CJK_PERSON_STOP.has(candName) &&
+        !/[的是在與和及並將稱表示說會被]/.test(candName)
+      ) {
+        addSentEntity(candName, candName, "person");
+        pushRelation(
+          { name: candName, nerClass: "person" },
+          "holds_role",
+          { name: roleStr, nerClass: "job_position" },
+          sentence,
+          0.88
+        );
+      }
+    }
+    RX_ASSET_LAW_EN.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ASSET_LAW_EN)) {
+      addSentEntity(m[0].trim(), m[0].trim(), "asset_law");
+    }
+    RX_ASSET_LAW_CJK.lastIndex = 0;
+    for (const m of sentence.matchAll(RX_ASSET_LAW_CJK)) {
+      const val = stripCjkLeadNoise(m[0].replace(/[《》]/g, ""));
+      if (val.length >= 3) addSentEntity(val, val, "asset_law");
+    }
+
+    // D. Sentence-level relation linking over fused entities
+    linkRelationsInSentence(sentence, sentEntities, pushRelation);
   }
 
   return { entities, relations };
@@ -1382,6 +1828,7 @@ export function extractNerBatchLocal(
       timestampMs: item.timestampMs,
       extractorVersion: EXPLORER_NER_EXTRACTOR_VERSION,
       engine: "local",
+      localTier: "rules",
       entities,
       relations,
       updatedAt: now,
@@ -1398,6 +1845,7 @@ export interface RunNerBatchOptions {
   posts: any[];
   existingRecords: PostNerExtractionRecord[];
   forceReextract?: boolean;
+  useLocalMl?: boolean;
   signal?: AbortSignal;
   onProgress?: (progress: NerBatchProgress) => void;
   onRecordsUpdated?: (allRecords: PostNerExtractionRecord[]) => void;
@@ -1415,7 +1863,7 @@ export async function runChannelNerExtractionBatch(
 
   if (!options.forceReextract) {
     for (const rec of options.existingRecords) {
-      if (isNerRecordCurrent(rec, channelId)) {
+      if (isNerRecordCurrent(rec, channelId, Boolean(options.useLocalMl))) {
         existingMap.set(rec.postKey, rec);
       }
     }
@@ -1471,6 +1919,7 @@ export async function runChannelNerExtractionBatch(
     total: totalToProcess,
     cachedSkipped,
     engine: null,
+    localTier: null,
     failedBatches: 0,
     lastError: null,
   };
@@ -1633,6 +2082,7 @@ Rules:
 
   const GEMINI_CHUNK_SIZE = 20;
   const LOCAL_CHUNK_SIZE = 80;
+  const LOCAL_ML_CHUNK_SIZE = 12;
   const storedGeminiKey =
     typeof localStorage !== "undefined" ? localStorage.getItem("gemini_api_key") || "" : "";
   const backendCap = await probeApiBackend();
@@ -1642,6 +2092,8 @@ Rules:
     (backendCap.hasApiBackend && !backendCap.serverHasGeminiKey && !storedGeminiKey);
   let usedGemini = false;
   let usedLocal = false;
+  let usedLocalMl = false;
+  let localMlBroken = false;
 
   let cursor = 0;
   while (cursor < candidatePosts.length) {
@@ -1653,7 +2105,12 @@ Rules:
       };
     }
 
-    const chunkSize = geminiUnavailable ? LOCAL_CHUNK_SIZE : GEMINI_CHUNK_SIZE;
+    const useMlForChunk = geminiUnavailable && Boolean(options.useLocalMl) && !localMlBroken;
+    const chunkSize = geminiUnavailable
+      ? useMlForChunk
+        ? LOCAL_ML_CHUNK_SIZE
+        : LOCAL_CHUNK_SIZE
+      : GEMINI_CHUNK_SIZE;
     const chunk = candidatePosts.slice(cursor, cursor + chunkSize);
     cursor += chunk.length;
     let batchRecords: PostNerExtractionRecord[] | null = null;
@@ -1751,8 +2208,59 @@ Rules:
     }
 
     if (!batchRecords) {
-      batchRecords = extractNerBatchLocal(channelId, chunk);
-      usedLocal = true;
+      if (options.useLocalMl && !localMlBroken) {
+        try {
+          const { provider, results } = await inferEntitiesWithMlWorker(
+            chunk.map((c) => ({ postKey: c.postKey, text: c.text })),
+            options.signal
+          );
+          const now = Date.now();
+          batchRecords = chunk.map((item) => {
+            const spans = results.get(item.postKey) || [];
+            const { entities, relations } = extractNerSinglePostHybrid(
+              item.postKey,
+              item.timestampMs,
+              item.text,
+              spans,
+              {
+                author: item.author,
+                forwardTarget: item.forwardTarget,
+                contactName: item.contactName,
+              }
+            );
+            return {
+              id: `${channelId}::${item.postKey}`,
+              channelId,
+              postKey: item.postKey,
+              timestampMs: item.timestampMs,
+              extractorVersion: EXPLORER_NER_EXTRACTOR_VERSION,
+              engine: "local" as const,
+              localTier: "ml" as const,
+              mlProvider: provider,
+              entities,
+              relations,
+              updatedAt: now,
+            };
+          });
+          usedLocalMl = true;
+          usedLocal = true;
+        } catch (mlErr: any) {
+          if (mlErr?.name === "AbortError") {
+            return {
+              records: Array.from(existingMap.values()),
+              progress,
+              aborted: true,
+            };
+          }
+          // Fall back gracefully to fast deterministic rules if WebGPU/WASM or model fetch fails
+          localMlBroken = true;
+          progress.lastError = mlErr?.message || "Local ML fallback to rules";
+        }
+      }
+      if (!batchRecords) {
+        batchRecords = extractNerBatchLocal(channelId, chunk);
+        usedLocal = true;
+      }
     }
 
     for (const rec of batchRecords) {
@@ -1764,6 +2272,7 @@ Rules:
     progress.done += chunk.length;
     progress.engine =
       usedGemini && usedLocal ? "mixed" : usedGemini ? "gemini" : "local";
+    progress.localTier = usedLocalMl ? "ml" : usedLocal ? "rules" : null;
 
     const merged = Array.from(existingMap.values());
     options.onRecordsUpdated?.(merged);
@@ -1802,6 +2311,7 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
   ) as Record<RelationClassId, number>;
 
   const enginesUsed = new Set<"gemini" | "local">();
+  const localTiersUsed = new Set<"rules" | "ml">();
   let totalMentions = 0;
 
   const ensureEntity = (
@@ -1860,6 +2370,9 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
 
   for (const rec of records) {
     enginesUsed.add(rec.engine);
+    if (rec.engine === "local") {
+      localTiersUsed.add(rec.localTier === "ml" ? "ml" : "rules");
+    }
     const postEntityIds: string[] = [];
 
     for (const ent of rec.entities || []) {
@@ -1997,6 +2510,7 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
     totalMentions,
     postsAnalyzed: records.length,
     enginesUsed,
+    localTiersUsed,
   };
 }
 

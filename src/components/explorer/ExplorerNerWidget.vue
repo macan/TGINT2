@@ -71,31 +71,144 @@
       </div>
     </div>
 
-    <!-- Auto-run toggle & engine status line -->
-    <div class="flex items-center justify-between gap-2 pb-3 mb-3 border-b border-gray-100 dark:border-gray-700/60">
-      <label class="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-600 dark:text-gray-300 cursor-pointer select-none">
-        <input
-          type="checkbox"
-          :checked="autoExtract"
-          @change="$emit('toggle-auto', ($event.target as HTMLInputElement).checked)"
-          class="rounded border-gray-300 dark:border-gray-600 text-teal-600 focus:ring-teal-500/30 cursor-pointer"
-        />
-        <span>{{ t('explorer.ner.autoRunLabel') }}</span>
-      </label>
+    <!-- Auto-run & Enhanced Local ML controls -->
+    <div class="pb-3 mb-3 border-b border-gray-100 dark:border-gray-700/60 space-y-2">
+      <div class="flex items-center justify-between gap-2">
+        <label class="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-600 dark:text-gray-300 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            :checked="autoExtract"
+            @change="$emit('toggle-auto', ($event.target as HTMLInputElement).checked)"
+            class="rounded border-gray-300 dark:border-gray-600 text-teal-600 focus:ring-teal-500/30 cursor-pointer"
+          />
+          <span>{{ t('explorer.ner.autoRunLabel') }}</span>
+        </label>
 
-      <div class="flex items-center gap-2 text-[10px] text-gray-400 dark:text-gray-500">
-        <span v-if="index.enginesUsed.size > 0" class="font-mono">
-          {{ index.enginesUsed.has('gemini') ? t('explorer.ner.engineAi') : t('explorer.ner.engineStructured') }}
-        </span>
-        <button
-          v-if="index.postsAnalyzed > 0 && !isExtracting"
-          type="button"
-          @click="$emit('clear-cache')"
-          class="hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer whitespace-nowrap"
-          :title="t('explorer.ner.clearCache')"
+        <div class="flex items-center gap-2 text-[10px] text-gray-400 dark:text-gray-500">
+          <span v-if="index.enginesUsed.size > 0" class="font-mono">
+            {{
+              index.enginesUsed.has('gemini')
+                ? t('explorer.ner.engineAi')
+                : index.localTiersUsed?.has('ml')
+                  ? t('explorer.ner.engineNeuralLocal')
+                  : t('explorer.ner.engineStructured')
+            }}
+          </span>
+          <button
+            v-if="index.postsAnalyzed > 0 && !isExtracting"
+            type="button"
+            @click="$emit('clear-cache')"
+            class="hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer whitespace-nowrap"
+            :title="t('explorer.ner.clearCache')"
+          >
+            {{ t('explorer.ner.clear') }}
+          </button>
+        </div>
+      </div>
+
+      <!-- Enhanced Local ML (GLiNER.js WebGPU / WASM SIMD) Opt-In Row -->
+      <div class="space-y-1.5">
+        <div class="flex items-center justify-between gap-2">
+          <label
+            class="inline-flex items-center gap-1.5 text-[11px] font-medium text-gray-600 dark:text-gray-300 cursor-pointer select-none min-w-0"
+            :title="t('explorer.ner.localMlHint')"
+          >
+            <input
+              type="checkbox"
+              :checked="mlState.enabled"
+              @change="$emit('toggle-local-ml', ($event.target as HTMLInputElement).checked)"
+              class="rounded border-gray-300 dark:border-gray-600 text-teal-600 focus:ring-teal-500/30 cursor-pointer shrink-0"
+            />
+            <span class="truncate">{{ t('explorer.ner.localMlLabel') }}</span>
+          </label>
+
+          <div class="flex items-center gap-1.5 text-[10px] text-gray-400 dark:text-gray-500 font-mono tabular-nums shrink-0">
+            <template v-if="mlState.status === 'downloading'">
+              <span class="text-teal-600 dark:text-teal-400">
+                {{ t('explorer.ner.localMlDownloading', { percent: mlState.downloadPercent }) }}
+              </span>
+              <span v-if="mlState.totalBytes > 0" aria-hidden="true">·</span>
+              <span v-if="mlState.totalBytes > 0">
+                {{ Math.round(mlState.loadedBytes / 1048576) }}/{{ Math.max(1, Math.round(mlState.totalBytes / 1048576)) }} MB
+              </span>
+              <button
+                type="button"
+                @click="$emit('abort-local-ml')"
+                class="text-rose-600 dark:text-rose-400 hover:underline cursor-pointer whitespace-nowrap ml-0.5"
+              >
+                {{ t('explorer.ner.cancel') }}
+              </button>
+            </template>
+            <template v-else-if="mlState.status === 'checking'">
+              <span>{{ t('explorer.ner.localMlChecking') }}</span>
+            </template>
+            <template v-else-if="mlState.status === 'loading_cache'">
+              <span>{{ t('explorer.ner.localMlLoadingCache') }}</span>
+            </template>
+            <template v-else-if="mlState.status === 'initializing'">
+              <span class="text-teal-600 dark:text-teal-400">
+                {{ t('explorer.ner.localMlInitializing', { provider: (mlState.executionProvider || 'WASM').toUpperCase() }) }}
+              </span>
+            </template>
+            <template v-else-if="mlState.status === 'inferring'">
+              <span class="text-teal-600 dark:text-teal-400">
+                {{ mlState.executionProvider === 'webgpu' ? 'WebGPU' : 'WASM' }} · {{ t('explorer.ner.localMlInferring') }}
+              </span>
+            </template>
+            <template v-else-if="mlState.status === 'error'">
+              <button
+                type="button"
+                @click="$emit('warmup-local-ml')"
+                class="text-rose-600 dark:text-rose-400 hover:underline font-semibold cursor-pointer whitespace-nowrap"
+              >
+                {{ t('explorer.ner.retry') }}
+              </button>
+            </template>
+            <template v-else-if="mlState.isModelCached">
+              <span v-if="mlState.executionProvider">
+                {{ mlState.executionProvider === 'webgpu' ? 'WebGPU' : 'WASM' }}
+              </span>
+              <span v-if="mlState.executionProvider" aria-hidden="true">·</span>
+              <span>{{ t('explorer.ner.localMlCached') }}</span>
+              <button
+                v-if="!isExtracting"
+                type="button"
+                @click="$emit('clear-local-ml')"
+                class="hover:text-rose-600 dark:hover:text-rose-400 transition-colors cursor-pointer whitespace-nowrap ml-0.5"
+                :title="t('explorer.ner.localMlClearModelHint')"
+              >
+                {{ t('explorer.ner.localMlClearModel') }}
+              </button>
+            </template>
+            <template v-else>
+              <span>{{ t('explorer.ner.localMlDownloadSize') }}</span>
+            </template>
+          </div>
+        </div>
+
+        <!-- Model Download / Initialization Progress Bar -->
+        <div
+          v-if="mlState.status === 'downloading' || mlState.status === 'initializing' || mlState.status === 'loading_cache'"
+          class="w-full h-1 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden"
         >
-          {{ t('explorer.ner.clear') }}
-        </button>
+          <div
+            :class="[
+              'h-full transition-all duration-200',
+              mlState.status === 'initializing' || mlState.status === 'loading_cache'
+                ? 'bg-teal-500/80 animate-pulse w-full'
+                : 'bg-teal-600 dark:bg-teal-400',
+            ]"
+            :style="mlState.status === 'downloading' ? { width: `${mlState.downloadPercent}%` } : undefined"
+          ></div>
+        </div>
+
+        <p
+          v-if="mlState.status === 'error' && mlState.error"
+          class="text-[10px] text-rose-600 dark:text-rose-400 truncate"
+          :title="mlState.error"
+        >
+          {{ mlState.error }}
+        </p>
       </div>
     </div>
 
@@ -398,6 +511,7 @@ import {
   type NerClassId,
   type RelationClassId,
 } from "../../utils/explorerNer";
+import type { NerMlState } from "../../utils/nerMlClient";
 
 const props = defineProps<{
   index: AggregatedNerIndex;
@@ -405,6 +519,7 @@ const props = defineProps<{
   uncachedCount: number;
   isExtracting: boolean;
   autoExtract: boolean;
+  mlState: NerMlState;
   progress: NerBatchProgress | null;
   errorMessage: string | null;
   activeFilter: ActiveNerFeedFilter | null;
@@ -414,6 +529,10 @@ const emit = defineEmits<{
   (e: "extract", forceReextract: boolean): void;
   (e: "cancel"): void;
   (e: "toggle-auto", val: boolean): void;
+  (e: "toggle-local-ml", val: boolean): void;
+  (e: "warmup-local-ml"): void;
+  (e: "abort-local-ml"): void;
+  (e: "clear-local-ml"): void;
   (e: "clear-cache"): void;
   (e: "expand"): void;
   (e: "select-filter", filter: ActiveNerFeedFilter): void;
