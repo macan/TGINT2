@@ -11,15 +11,17 @@ import {
   inspectModelCacheState,
 } from "./nerModelCache";
 import type {
+  WorkerExecutorPreference,
   WorkerInMessage,
   WorkerMlSpan,
   WorkerOutMessage,
   WorkerPostInput,
 } from "../workers/nerInference.worker";
 
-export type { WorkerMlSpan };
+export type { WorkerExecutorPreference, WorkerMlSpan };
 
 export const EXPLORER_NER_LOCAL_ML_KEY = "gingko_explorer_ner_local_ml";
+export const EXPLORER_NER_LOCAL_ML_EXECUTOR_KEY = "gingko_explorer_ner_local_ml_executor";
 
 export type NerMlStatus =
   | "disabled"
@@ -35,6 +37,7 @@ export type NerMlStatus =
 
 export interface NerMlState {
   enabled: boolean;
+  executorPreference: WorkerExecutorPreference;
   status: NerMlStatus;
   isModelCached: boolean;
   executionProvider: "webgpu" | "wasm" | null;
@@ -57,8 +60,22 @@ function readInitialEnabled(): boolean {
   }
 }
 
+function readInitialExecutorPreference(): WorkerExecutorPreference {
+  try {
+    const raw =
+      typeof localStorage !== "undefined"
+        ? localStorage.getItem(EXPLORER_NER_LOCAL_ML_EXECUTOR_KEY)
+        : null;
+    if (raw === "wasm" || raw === "webgpu" || raw === "auto") return raw;
+  } catch {
+    // ignore storage errors
+  }
+  return "auto";
+}
+
 let state: NerMlState = {
   enabled: readInitialEnabled(),
+  executorPreference: readInitialExecutorPreference(),
   status: readInitialEnabled() ? "idle" : "disabled",
   isModelCached: false,
   executionProvider: null,
@@ -127,6 +144,31 @@ export function setLocalMlEnabled(enabled: boolean): void {
     status: state.executionProvider ? "ready" : "idle",
     error: null,
   });
+}
+
+export function setLocalMlExecutorPreference(pref: WorkerExecutorPreference): void {
+  if (state.executorPreference === pref) return;
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(EXPLORER_NER_LOCAL_ML_EXECUTOR_KEY, pref);
+    }
+  } catch {
+    // ignore storage errors
+  }
+
+  const mismatch =
+    (pref === "wasm" && state.executionProvider !== "wasm") ||
+    (pref === "webgpu" && state.executionProvider !== "webgpu");
+
+  patchState({
+    executorPreference: pref,
+    ...(mismatch ? { executionProvider: null, status: state.enabled ? "idle" : "disabled" } : {}),
+    error: null,
+  });
+
+  if (state.enabled && state.isModelCached && mismatch && !activeWarmupPromise) {
+    warmupLocalMlModel().catch(() => {});
+  }
 }
 
 export async function checkLocalMlModelCached(): Promise<boolean> {
@@ -262,8 +304,13 @@ let warmupAbortController: AbortController | null = null;
 export async function warmupLocalMlModel(
   externalSignal?: AbortSignal
 ): Promise<{ provider: "webgpu" | "wasm" }> {
-  if (state.executionProvider && state.status === "ready") {
-    return { provider: state.executionProvider };
+  const pref = state.executorPreference;
+  const providerMatchesPref =
+    state.executionProvider !== null &&
+    (pref === "auto" || pref === state.executionProvider);
+
+  if (providerMatchesPref && state.status === "ready") {
+    return { provider: state.executionProvider! };
   }
   if (activeWarmupPromise) {
     return activeWarmupPromise;
@@ -275,7 +322,7 @@ export async function warmupLocalMlModel(
 
   activeWarmupPromise = (async () => {
     try {
-      const msg = await callWorker({ type: "warmup" }, signal);
+      const msg = await callWorker({ type: "warmup", executor: state.executorPreference }, signal);
       if (msg.type === "warmup-done") {
         patchState({
           status: state.enabled ? "ready" : "disabled",
@@ -387,7 +434,10 @@ export async function inferEntitiesWithMlWorker(
   });
 
   try {
-    const msg = await callWorker({ type: "infer-batch", posts }, signal);
+    const msg = await callWorker(
+      { type: "infer-batch", posts, executor: state.executorPreference },
+      signal
+    );
     if (msg.type === "infer-done") {
       const resultsMap = new Map<string, WorkerMlSpan[]>();
       for (const item of msg.results) {

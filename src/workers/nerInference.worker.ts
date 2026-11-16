@@ -54,9 +54,11 @@ export interface WorkerPostInput {
   text: string;
 }
 
+export type WorkerExecutorPreference = "auto" | "wasm" | "webgpu";
+
 export type WorkerInMessage =
-  | { id: number; type: "warmup" }
-  | { id: number; type: "infer-batch"; posts: WorkerPostInput[] }
+  | { id: number; type: "warmup"; executor?: WorkerExecutorPreference }
+  | { id: number; type: "infer-batch"; posts: WorkerPostInput[]; executor?: WorkerExecutorPreference }
   | { id: number; type: "clear-cache" }
   | { id: number; type: "abort" };
 
@@ -729,10 +731,23 @@ async function createGlinerSession(
   throw lastErr instanceof Error ? lastErr : new Error("Failed initializing GLiNER session");
 }
 
-async function ensureInitialized(signal: AbortSignal): Promise<{
+async function ensureInitialized(
+  signal: AbortSignal,
+  preference: WorkerExecutorPreference = "auto"
+): Promise<{
   provider: "webgpu" | "wasm";
   cached: boolean;
 }> {
+  const needsSwitch =
+    Boolean(glinerInstance && activeProvider) &&
+    ((preference === "wasm" && activeProvider !== "wasm") ||
+      (preference === "webgpu" && activeProvider !== "webgpu"));
+
+  if (needsSwitch) {
+    glinerInstance = null;
+    activeProvider = null;
+  }
+
   if (glinerInstance && activeProvider) {
     return { provider: activeProvider, cached: true };
   }
@@ -751,8 +766,19 @@ async function ensureInitialized(signal: AbortSignal): Promise<{
       throw new DOMException("Aborted", "AbortError");
     }
 
-    const canWebGpu = await detectWebGpuSupport();
-    const preferred: "webgpu" | "wasm" = canWebGpu ? "webgpu" : "wasm";
+    let preferred: "webgpu" | "wasm";
+    if (preference === "wasm") {
+      preferred = "wasm";
+    } else if (preference === "webgpu") {
+      const canWebGpu = await detectWebGpuSupport();
+      if (!canWebGpu) {
+        throw new Error("WebGPU adapter unavailable in this browser; switch executor to WASM or Auto.");
+      }
+      preferred = "webgpu";
+    } else {
+      const canWebGpu = await detectWebGpuSupport();
+      preferred = canWebGpu ? "webgpu" : "wasm";
+    }
 
     emit({
       type: "progress",
@@ -770,6 +796,9 @@ async function ensureInitialized(signal: AbortSignal): Promise<{
         activeProvider = "webgpu";
       } catch (err) {
         if (signal.aborted || (err as { name?: string })?.name === "AbortError") {
+          throw err;
+        }
+        if (preference === "webgpu") {
           throw err;
         }
         emit({
@@ -906,10 +935,11 @@ function splitIntoGlinerChunks(text: string): TextChunk[] {
 
 async function runInferenceWithAutoFallback(
   texts: string[],
-  signal: AbortSignal
+  signal: AbortSignal,
+  preference: WorkerExecutorPreference = "auto"
 ): ReturnType<Gliner["inference"]> {
   if (!glinerInstance) {
-    await ensureInitialized(signal);
+    await ensureInitialized(signal, preference);
   }
   try {
     return await glinerInstance!.inference({
@@ -921,7 +951,7 @@ async function runInferenceWithAutoFallback(
     });
   } catch (err) {
     // Some WebGPU drivers fail on int8 DeBERTa ops during first inference rather than session create
-    if (activeProvider === "webgpu") {
+    if (activeProvider === "webgpu" && preference !== "webgpu") {
       glinerInstance = null;
       activeProvider = null;
       const { bytes, fromCache } = await loadOrDownloadModelBytes(signal);
@@ -957,8 +987,12 @@ async function runInferenceWithAutoFallback(
   }
 }
 
-async function handleInferBatch(posts: WorkerPostInput[], signal: AbortSignal) {
-  const { provider } = await ensureInitialized(signal);
+async function handleInferBatch(
+  posts: WorkerPostInput[],
+  signal: AbortSignal,
+  preference: WorkerExecutorPreference = "auto"
+) {
+  const { provider } = await ensureInitialized(signal, preference);
   let resolvedProvider = provider;
 
   interface ChunkJob {
@@ -981,6 +1015,9 @@ async function handleInferBatch(posts: WorkerPostInput[], signal: AbortSignal) {
     }
   });
 
+  // Sort chunks by character length so sub-batches have uniform padding & minimal WebGPU shape churn
+  allJobs.sort((a, b) => a.chunkText.length - b.chunkText.length);
+
   for (let i = 0; i < allJobs.length; i += INFER_SUBBATCH_SIZE) {
     if (abortRequested || signal.aborted) {
       throw new DOMException("Inference aborted", "AbortError");
@@ -989,7 +1026,8 @@ async function handleInferBatch(posts: WorkerPostInput[], signal: AbortSignal) {
     const batchJobs = allJobs.slice(i, i + INFER_SUBBATCH_SIZE);
     const batchResults = await runInferenceWithAutoFallback(
       batchJobs.map((j) => j.chunkText),
-      signal
+      signal,
+      preference
     );
     if (activeProvider) {
       resolvedProvider = activeProvider;
@@ -1066,13 +1104,13 @@ self.addEventListener("message", (ev: MessageEvent<WorkerInMessage>) => {
       }
 
       if (msg.type === "warmup") {
-        const { provider, cached } = await ensureInitialized(signal);
+        const { provider, cached } = await ensureInitialized(signal, msg.executor || "auto");
         emit({ id: msg.id, type: "warmup-done", provider, cached });
         return;
       }
 
       if (msg.type === "infer-batch") {
-        const { provider, results } = await handleInferBatch(msg.posts, signal);
+        const { provider, results } = await handleInferBatch(msg.posts, signal, msg.executor || "auto");
         emit({ id: msg.id, type: "infer-done", provider, results });
       }
     } catch (err: unknown) {

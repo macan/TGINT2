@@ -268,6 +268,70 @@
         >
           {{ mlState.error }}
         </p>
+
+        <!-- Executor Selector (Auto / WASM / WebGPU) & Execution Notices -->
+        <div
+          v-if="mlState.enabled"
+          class="pt-1 flex items-center justify-between gap-2 text-[10px]"
+        >
+          <div class="flex items-center gap-1.5 min-w-0">
+            <span class="text-gray-400 dark:text-gray-500 shrink-0">
+              {{ t('explorer.ner.localMlExecutorLabel') }}
+            </span>
+            <div class="inline-flex items-center p-0.5 bg-gray-100 dark:bg-gray-900/60 rounded-lg">
+              <button
+                v-for="opt in executorOptions"
+                :key="opt.id"
+                type="button"
+                :disabled="isMlBusy"
+                @click="$emit('set-executor-ml', opt.id)"
+                :class="[
+                  'px-1.5 py-0.5 rounded-md text-[10px] font-mono font-semibold transition-colors whitespace-nowrap cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed',
+                  mlState.executorPreference === opt.id
+                    ? 'bg-white dark:bg-gray-800 text-teal-700 dark:text-teal-300 shadow-xs'
+                    : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200',
+                ]"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            @click="showExecutorNotices = !showExecutorNotices"
+            :class="[
+              'inline-flex items-center gap-1 text-[10px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0',
+              showExecutorNotices
+                ? 'text-teal-600 dark:text-teal-400'
+                : 'text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-300',
+            ]"
+          >
+            <Info class="w-3 h-3 shrink-0" />
+            <span>{{ t('explorer.ner.localMlExecutorNoticeToggle') }}</span>
+          </button>
+        </div>
+
+        <div
+          v-if="mlState.enabled && showExecutorNotices"
+          class="p-2.5 rounded-xl border border-gray-200/70 dark:border-gray-700/70 bg-gray-50/80 dark:bg-gray-900/50 text-[10px] leading-relaxed text-gray-600 dark:text-gray-300 space-y-1.5"
+        >
+          <div>
+            <span class="font-semibold text-teal-700 dark:text-teal-300">
+              {{ t('explorer.ner.localMlNoticeWasmTitle') }}:
+            </span>
+            <span>{{ t('explorer.ner.localMlNoticeWasmBody') }}</span>
+          </div>
+          <div>
+            <span class="font-semibold text-amber-700 dark:text-amber-300">
+              {{ t('explorer.ner.localMlNoticeWebGpuTitle') }}:
+            </span>
+            <span>{{ t('explorer.ner.localMlNoticeWebGpuBody') }}</span>
+          </div>
+          <div class="text-gray-400 dark:text-gray-500">
+            {{ t('explorer.ner.localMlNoticeSwitching') }}
+          </div>
+        </div>
       </div>
     </div>
 
@@ -549,6 +613,7 @@
 import { ref, computed } from "vue";
 import { useI18n } from "../../i18n";
 import {
+  Info,
   Loader2,
   Maximize2,
   RefreshCw,
@@ -570,7 +635,7 @@ import {
   type NerClassId,
   type RelationClassId,
 } from "../../utils/explorerNer";
-import type { NerMlState } from "../../utils/nerMlClient";
+import type { NerMlState, WorkerExecutorPreference } from "../../utils/nerMlClient";
 
 const props = defineProps<{
   index: AggregatedNerIndex;
@@ -589,6 +654,7 @@ const emit = defineEmits<{
   (e: "cancel"): void;
   (e: "toggle-auto", val: boolean): void;
   (e: "toggle-local-ml", val: boolean): void;
+  (e: "set-executor-ml", pref: WorkerExecutorPreference): void;
   (e: "warmup-local-ml"): void;
   (e: "abort-local-ml"): void;
   (e: "clear-local-ml"): void;
@@ -599,6 +665,24 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+
+const showExecutorNotices = ref(false);
+
+const executorOptions = computed<Array<{ id: WorkerExecutorPreference; label: string }>>(() => [
+  { id: "auto", label: t("explorer.ner.localMlExecutorAuto") },
+  { id: "wasm", label: "WASM" },
+  { id: "webgpu", label: "WebGPU" },
+]);
+
+const isMlBusy = computed(
+  () =>
+    props.isExtracting ||
+    props.mlState.status === "downloading" ||
+    props.mlState.status === "retrying" ||
+    props.mlState.status === "loading_cache" ||
+    props.mlState.status === "initializing" ||
+    props.mlState.status === "inferring"
+);
 
 const compactSubTab = ref<"entities" | "relations">("entities");
 const selectedNerClass = ref<"all" | NerClassId>("all");

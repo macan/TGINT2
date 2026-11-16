@@ -184,6 +184,7 @@ import {
   clearLocalMlModelCache,
   getNerMlState,
   setLocalMlEnabled,
+  setLocalMlExecutorPreference,
   subscribeNerMlState,
   warmupLocalMlModel,
   type NerMlState,
@@ -21094,6 +21095,7 @@ onUnmounted(() => {
               @cancel="cancelExplorerNerExtraction"
               @toggle-auto="toggleExplorerNerAuto"
               @toggle-local-ml="toggleExplorerNerLocalMl"
+              @set-executor-ml="setLocalMlExecutorPreference"
               @warmup-local-ml="warmupExplorerNerLocalMl"
               @abort-local-ml="abortLocalMlModel"
               @clear-local-ml="clearExplorerNerLocalMlModel"
