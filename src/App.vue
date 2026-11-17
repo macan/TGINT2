@@ -31228,6 +31228,7 @@ onUnmounted(() => {
       <!-- Types Tab -->
       <div v-show="activeTab === 'types'" class="w-full max-w-full mx-auto px-0 pt-1 pb-16 space-y-6">
         <TypesTab
+          :listen-directory="listenDirectory"
           @explore-channel="jumpToExplorerFromTypes"
         />
       </div>

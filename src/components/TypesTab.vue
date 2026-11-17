@@ -78,11 +78,66 @@ import {
 } from "../utils/typesCompactIndex";
 import TypesTileTreemapFilter from "./types/TypesTileTreemapFilter.vue";
 
+import type { ListenItem } from "../types";
+
 const { t } = useI18n();
+
+const props = withDefaults(
+  defineProps<{
+    listenDirectory?: ListenItem[];
+  }>(),
+  {
+    listenDirectory: () => [],
+  }
+);
 
 const emit = defineEmits<{
   (e: "explore-channel", channel: string): void;
 }>();
+
+const normalizeListenHandle = (raw?: string | null): string => {
+  if (!raw) return "";
+  return String(raw)
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\/(?:t\.me|telegram\.me)\//i, "")
+    .replace(/^@/, "")
+    .replace(/\/+$/, "")
+    .trim();
+};
+
+const listenChannelMap = computed(() => {
+  const map = new Map<string, ListenItem>();
+  const traverse = (nodes: ListenItem[] | undefined) => {
+    if (!Array.isArray(nodes)) return;
+    for (const node of nodes) {
+      if (node.isFolder) {
+        traverse(node.children);
+        continue;
+      }
+      if (node.type !== "keyword") {
+        const key = normalizeListenHandle(node.argument || node.name);
+        if (key && !map.has(key)) {
+          map.set(key, node);
+        }
+      }
+      if (Array.isArray(node.children) && node.children.length > 0) {
+        traverse(node.children);
+      }
+    }
+  };
+  traverse(props.listenDirectory);
+  return map;
+});
+
+const getListenDirectoryItem = (channel?: string | null): ListenItem | null => {
+  const key = normalizeListenHandle(channel);
+  if (!key) return null;
+  return listenChannelMap.value.get(key) || null;
+};
+
+const isInListenDirectory = (channel?: string | null): boolean =>
+  getListenDirectoryItem(channel) !== null;
 
 // Ingestion and Streaming State
 const compactItems = ref<CompactChannelRecord[]>([]);
@@ -3002,7 +3057,13 @@ const copyProfileChannelName = async (channel: string) => {
         :key="item.channel"
         :id="`types-channel-${item.channel.replace(/^@/, '')}`"
         :data-types-channel="item.channel.replace(/^@/, '')"
-        class="bg-white dark:bg-gray-800/90 rounded-2xl border border-gray-200/80 dark:border-gray-700/80 p-4.5 shadow-sm hover:shadow-md transition-all duration-200 flex flex-col justify-between space-y-3 group relative"
+        :data-in-listen-directory="isInListenDirectory(item.channel) ? 'true' : undefined"
+        :class="[
+          'bg-white dark:bg-gray-800/90 rounded-2xl border p-4.5 shadow-sm hover:shadow-md transition-all duration-200 flex flex-col justify-between space-y-3 group relative',
+          isInListenDirectory(item.channel)
+            ? 'border-teal-500 ring-1 ring-teal-500/35 hover:border-teal-600 shadow-teal-500/10 dark:border-teal-400/90 dark:ring-teal-400/30 dark:hover:border-teal-300 dark:shadow-teal-400/10'
+            : 'border-gray-200/80 dark:border-gray-700/80'
+        ]"
       >
         <!-- Card Header: Avatar, Name & Actions -->
         <div class="flex items-start justify-between gap-2.5">
@@ -3037,6 +3098,14 @@ const copyProfileChannelName = async (channel: string) => {
                 >
                   @{{ item.channel }}
                 </h4>
+
+                <span
+                  v-if="isInListenDirectory(item.channel)"
+                  class="inline-flex items-center text-teal-600 dark:text-teal-400 shrink-0"
+                  :title="`${t('listen.listenDirectory')} · ${t('explorer.listenDirectoryLinked')}`"
+                >
+                  <BookmarkCheck class="w-3.5 h-3.5 shrink-0" />
+                </span>
 
                 <!-- Language Easy View Badge -->
                 <div
