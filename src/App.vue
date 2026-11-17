@@ -170,21 +170,27 @@ import {
   aggregateNerIndex,
   applyManualEntityCreate,
   applyManualEntityDelete,
+  applyManualEntityMerge,
   applyManualEntityUpdate,
   applyManualRelationCreate,
   applyManualRelationDelete,
   applyManualRelationUpdate,
+  applyMergeRulesToRecords,
   clearChannelNerExtractions,
   extractExplorerPostTimestampMs,
   extractPostPlainText,
   highlightNerTextInHtml,
   isNerRecordCurrent,
   isRecordUpgradeableToCurrentMl,
+  loadChannelMergeRules,
   loadChannelNerExtractions,
   normalizeNerChannelKey,
   runChannelNerExtractionBatch,
+  saveChannelMergeRules,
   saveChannelNerExtractions,
+  upsertChannelEntityMergeRules,
   type ActiveNerFeedFilter,
+  type ChannelEntityMergeRule,
   type NerBackgroundUpgradeState,
   type NerBatchProgress,
   type NerClassId,
@@ -11851,6 +11857,7 @@ const fetchChannelProfile = async (channel?: string) => {
 // Explorer NER & Relations State
 const EXPLORER_NER_AUTO_KEY = "gingko_explorer_ner_auto_extract";
 const explorerNerRecords = shallowRef<PostNerExtractionRecord[]>([]);
+const explorerNerMergeRules = shallowRef<ChannelEntityMergeRule[]>([]);
 const explorerNerAutoExtract = ref<boolean>(
   typeof localStorage !== "undefined" && localStorage.getItem(EXPLORER_NER_AUTO_KEY) === "1"
 );
@@ -12028,6 +12035,8 @@ const runExplorerNerBackgroundUpgrade = async () => {
       useLocalMl: true,
       onlyUpgradeRuleRecords: true,
       signal,
+      getLiveRecords: () => explorerNerRecords.value,
+      getEntityMergeRules: () => explorerNerMergeRules.value,
       onProgress: (prog) => {
         if (myToken !== nerBgUpgradeToken || channelTokenSnapshot !== nerActiveChannelRequestToken) {
           return;
@@ -12182,6 +12191,7 @@ const clearExplorerNerCache = async () => {
   if (!ch) return;
   await clearChannelNerExtractions(ch);
   explorerNerRecords.value = [];
+  explorerNerMergeRules.value = [];
   explorerNerProgress.value = null;
   explorerNerError.value = null;
   activeNerFeedFilter.value = null;
@@ -12214,6 +12224,8 @@ const runExplorerNerExtraction = async (forceReextract = false) => {
       forceReextract,
       useLocalMl: useActiveMlNow,
       signal,
+      getLiveRecords: () => explorerNerRecords.value,
+      getEntityMergeRules: () => explorerNerMergeRules.value,
       onProgress: (prog) => {
         if (reqToken === nerActiveChannelRequestToken) {
           explorerNerProgress.value = prog;
@@ -12324,6 +12336,75 @@ const handleNerUpdateEntity = async (payload: {
   if (res.changedRecords.length > 0) {
     await saveChannelNerExtractions(res.changedRecords);
   }
+  const channelId = currentChannelName.value || "";
+  if (channelId && res.nextEntityId && res.nextEntityId !== payload.targetEntityId) {
+    const ruleRes = upsertChannelEntityMergeRules(explorerNerMergeRules.value, {
+      channelId,
+      sourceEntityIds: [payload.targetEntityId],
+      targetCanonicalName: payload.newCanonicalName,
+      targetNerClass: payload.newNerClass,
+      preserveAliases: payload.preserveAliases,
+    });
+    explorerNerMergeRules.value = ruleRes.nextRules;
+    if (ruleRes.changedRules.length > 0 || ruleRes.deletedRuleIds.length > 0) {
+      await saveChannelMergeRules(ruleRes.changedRules, ruleRes.deletedRuleIds);
+    }
+  }
+};
+
+const handleNerMergeEntity = async (payload: {
+  sourceEntityIds: string[];
+  targetCanonicalName: string;
+  targetNerClass: NerClassId;
+  preserveAliases: boolean;
+}) => {
+  const res = applyManualEntityMerge(explorerNerRecords.value, payload);
+  explorerNerRecords.value = res.nextRecords;
+
+  if (activeNerFeedFilter.value?.type === "entity") {
+    const activeId = activeNerFeedFilter.value.id;
+    if (payload.sourceEntityIds.includes(activeId) || res.nextEntityId === activeId) {
+      const survivor = res.nextEntityId
+        ? explorerNerIndex.value.entityById.get(res.nextEntityId)
+        : undefined;
+      if (survivor) {
+        activeNerFeedFilter.value = {
+          type: "entity",
+          id: survivor.id,
+          label: survivor.canonicalName,
+          sublabel: activeNerFeedFilter.value.sublabel,
+          postKeys: survivor.postKeys,
+          quotes: survivor.sampleQuotes,
+          surfaceTerms: Array.from(new Set([survivor.canonicalName, ...survivor.aliases])),
+        };
+      } else {
+        clearExplorerNerFeedFilter();
+      }
+    }
+  } else if (
+    activeNerFeedFilter.value?.type === "relation" &&
+    !explorerNerIndex.value.relationById.has(activeNerFeedFilter.value.id)
+  ) {
+    clearExplorerNerFeedFilter();
+  }
+
+  if (res.changedRecords.length > 0) {
+    await saveChannelNerExtractions(res.changedRecords);
+  }
+  const channelId = currentChannelName.value || "";
+  if (channelId && payload.sourceEntityIds.length > 0) {
+    const ruleRes = upsertChannelEntityMergeRules(explorerNerMergeRules.value, {
+      channelId,
+      sourceEntityIds: payload.sourceEntityIds,
+      targetCanonicalName: payload.targetCanonicalName,
+      targetNerClass: payload.targetNerClass,
+      preserveAliases: payload.preserveAliases,
+    });
+    explorerNerMergeRules.value = ruleRes.nextRules;
+    if (ruleRes.changedRules.length > 0 || ruleRes.deletedRuleIds.length > 0) {
+      await saveChannelMergeRules(ruleRes.changedRules, ruleRes.deletedRuleIds);
+    }
+  }
 };
 
 const handleNerDeleteEntity = async (targetEntityId: string) => {
@@ -12432,13 +12513,18 @@ watch(currentChannelName, async (newChannel) => {
       nerActiveChannelRequestToken += 1;
       const myToken = nerActiveChannelRequestToken;
       explorerNerRecords.value = [];
+      explorerNerMergeRules.value = [];
       explorerNerProgress.value = null;
       explorerNerError.value = null;
       activeNerFeedFilter.value = null;
       activeNerQuoteIndex.value = 0;
-      const cached = await loadChannelNerExtractions(newChannel);
+      const [cached, rules] = await Promise.all([
+        loadChannelNerExtractions(newChannel),
+        loadChannelMergeRules(newChannel),
+      ]);
       if (myToken === nerActiveChannelRequestToken) {
-        explorerNerRecords.value = cached;
+        explorerNerRecords.value = applyMergeRulesToRecords(cached, rules);
+        explorerNerMergeRules.value = rules;
       }
     }
 });
@@ -24501,11 +24587,13 @@ onUnmounted(() => {
         :uncached-count="explorerNerUncachedCount"
         :is-extracting="isExtractingNer"
         :post-summaries="explorerNerPostSummaries"
+        :raw-records="explorerNerRecords"
         @close="isNerModalOpen = false"
         @extract="runExplorerNerExtraction"
         @cancel="cancelExplorerNerExtraction"
         @select-filter="applyExplorerNerFeedFilter"
         @update-entity="handleNerUpdateEntity"
+        @merge-entity="handleNerMergeEntity"
         @delete-entity="handleNerDeleteEntity"
         @create-entity="handleNerCreateEntity"
         @update-relation="handleNerUpdateRelation"

@@ -92,12 +92,25 @@
         <!-- Shared Mode Switcher + Filter Toolbar -->
         <div class="px-5 py-2.5 bg-gray-50/70 dark:bg-gray-900/40 border-b border-gray-200/70 dark:border-gray-700/70 flex flex-wrap items-center justify-between gap-2.5 shrink-0">
           <!-- Mode Tabs -->
-          <div class="flex items-center gap-1 p-1 bg-gray-200/70 dark:bg-gray-800 rounded-xl shrink-0">
+          <div class="flex items-center gap-1 p-1 bg-gray-200/70 dark:bg-gray-800 rounded-xl shrink-0 overflow-x-auto scrollbar-none">
+            <button
+              type="button"
+              @click="modalMode = 'summary'"
+              :class="[
+                'px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5',
+                modalMode === 'summary'
+                  ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-xs'
+                  : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200',
+              ]"
+            >
+              <BarChart3 class="w-3.5 h-3.5" />
+              <span>{{ t('explorer.ner.modeSummary') }}</span>
+            </button>
             <button
               type="button"
               @click="modalMode = 'directory'"
               :class="[
-                'px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer flex items-center gap-1.5',
+                'px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5',
                 modalMode === 'directory'
                   ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-xs'
                   : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200',
@@ -207,8 +220,32 @@
 
         <!-- Main Modal Body -->
         <div class="flex-1 min-h-0 flex overflow-hidden">
+          <!-- MODE 0: SUMMARY DASHBOARD -->
+          <ExplorerNerSummaryDashboard
+            v-if="modalMode === 'summary'"
+            :index="index"
+            :filtered-entities="filteredDirectoryEntities"
+            :filtered-relations="filteredRelations"
+            :raw-records="rawRecords"
+            :total-posts-count="totalPostsCount"
+            :is-extracting="isExtracting"
+            :active-ner-class-filter="nerClassFilter"
+            :active-rel-class-filter="relClassFilter"
+            :selected-entity-id="selectedInspectorEntityId"
+            :has-active-filters="hasActiveModalFilters"
+            :date-from-ms="dateRangeMs.start"
+            :date-to-ms="dateRangeMs.end"
+            :has-date-from="Boolean(dateFrom)"
+            :has-date-to="Boolean(dateTo)"
+            @select-entity="selectInspectorEntity"
+            @toggle-class-filter="toggleSummaryClassFilter"
+            @toggle-relation-filter="toggleSummaryRelationFilter"
+            @clear-filters="clearModalFilters"
+            @extract="$emit('extract', false)"
+          />
+
           <!-- MODE 1: ENTITY DIRECTORY -->
-          <template v-if="modalMode === 'directory'">
+          <template v-else-if="modalMode === 'directory'">
             <div class="flex-1 min-w-0 overflow-auto custom-scrollbar">
               <table class="w-full text-left border-collapse">
                 <thead class="sticky top-0 z-10 bg-gray-50 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 text-[11px] font-bold text-gray-500 dark:text-gray-400">
@@ -563,6 +600,19 @@
                 <div class="flex items-center gap-1 shrink-0">
                   <button
                     type="button"
+                    @click="startMergeEntity(inspectedEntity)"
+                    :class="[
+                      'p-1.5 rounded-lg transition-colors cursor-pointer',
+                      isMergingEntity
+                        ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-700 dark:text-teal-300'
+                        : 'text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 hover:bg-white dark:hover:bg-gray-800',
+                    ]"
+                    :title="t('explorer.ner.mergeEntity')"
+                  >
+                    <GitMerge class="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
                     @click="startEditEntity(inspectedEntity)"
                     :class="[
                       'p-1.5 rounded-lg transition-colors cursor-pointer',
@@ -687,6 +737,216 @@
                     {{ t('explorer.ner.cancel') }}
                   </button>
                 </div>
+              </div>
+
+              <!-- Inline Merge Entity Panel + Relation Impact Preview -->
+              <div
+                v-if="isMergingEntity"
+                class="p-3 rounded-xl border border-gray-200/80 dark:border-gray-700/80 bg-white dark:bg-gray-800 space-y-2.5"
+              >
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-[11px] font-bold text-gray-700 dark:text-gray-200 inline-flex items-center gap-1.5">
+                    <GitMerge class="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
+                    <span>{{ t('explorer.ner.mergeEntity') }}</span>
+                  </span>
+                  <button
+                    type="button"
+                    @click="isMergingEntity = false"
+                    class="p-0.5 text-gray-400 hover:text-gray-600 cursor-pointer"
+                  >
+                    <X class="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <!-- Partner Search Input -->
+                <div class="relative flex items-center">
+                  <Search class="w-3.5 h-3.5 text-gray-400 absolute left-2.5 pointer-events-none" />
+                  <input
+                    v-model="mergeSearchQuery"
+                    type="text"
+                    :placeholder="t('explorer.ner.mergeSearchPlaceholder')"
+                    class="w-full pl-8 pr-7 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                  />
+                  <button
+                    v-if="mergeSearchQuery"
+                    type="button"
+                    @click="mergeSearchQuery = ''"
+                    class="absolute right-2 text-gray-400 hover:text-gray-600 cursor-pointer"
+                  >
+                    <X class="w-3 h-3" />
+                  </button>
+                </div>
+
+                <!-- Ranked Candidate Picker -->
+                <div class="max-h-40 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-700/60 border border-gray-200/70 dark:border-gray-700/70 rounded-lg custom-scrollbar">
+                  <button
+                    v-for="cand in mergeCandidateEntities"
+                    :key="cand.id"
+                    type="button"
+                    @click="selectMergePartner(inspectedEntity, cand)"
+                    :class="[
+                      'w-full px-2.5 py-1.5 text-left flex items-center justify-between gap-2 transition-colors cursor-pointer',
+                      mergePartnerId === cand.id
+                        ? 'bg-teal-50 dark:bg-teal-950/40'
+                        : 'hover:bg-gray-50 dark:hover:bg-gray-900/50',
+                    ]"
+                  >
+                    <div class="min-w-0 flex-1">
+                      <div class="text-xs font-semibold text-gray-900 dark:text-gray-100 truncate">
+                        {{ cand.canonicalName }}
+                      </div>
+                      <div :class="['text-[10px] font-medium truncate', getNerMeta(cand.nerClass)?.textClass]">
+                        {{ t(`explorer.ner.classes.${cand.nerClass}`) }}
+                      </div>
+                    </div>
+                    <span class="text-[10px] font-mono tabular-nums text-gray-400 shrink-0">
+                      {{ cand.mentionCount }}
+                    </span>
+                  </button>
+                  <div
+                    v-if="mergeCandidateEntities.length === 0"
+                    class="py-3 px-2.5 text-center text-[11px] text-gray-400 dark:text-gray-500"
+                  >
+                    {{ t('explorer.ner.mergeNoMatches') }}
+                  </div>
+                </div>
+
+                <!-- Selected Merge Direction + Relation Impact Preview -->
+                <template v-if="mergePartnerEntity && mergeSourceEntity && mergeSurvivorEntity">
+                  <div class="p-2.5 rounded-lg bg-gray-50 dark:bg-gray-900/60 border border-gray-200/70 dark:border-gray-700/70 space-y-2">
+                    <div class="flex items-start justify-between gap-2">
+                      <div class="min-w-0 space-y-1 flex-1">
+                        <div class="text-[10px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400">
+                          {{ t('explorer.ner.mergeRemovedLabel') }}
+                        </div>
+                        <div class="text-xs font-semibold text-gray-700 dark:text-gray-300 truncate">
+                          {{ mergeSourceEntity.canonicalName }}
+                          <span :class="['text-[10px] font-normal ml-1', getNerMeta(mergeSourceEntity.nerClass)?.textClass]">
+                            ({{ t(`explorer.ner.classes.${mergeSourceEntity.nerClass}`) }})
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        @click="mergeIntoPartner = !mergeIntoPartner"
+                        class="p-1.5 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-teal-600 dark:hover:text-teal-400 cursor-pointer shrink-0"
+                        :title="t('explorer.ner.mergeDirectionSwap')"
+                      >
+                        <ArrowLeftRight class="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div class="space-y-0.5 pt-1 border-t border-gray-200/60 dark:border-gray-700/60">
+                      <div class="text-[10px] font-bold uppercase tracking-wider text-teal-600 dark:text-teal-400">
+                        {{ t('explorer.ner.mergeSurvivorLabel') }}
+                      </div>
+                      <div class="text-xs font-bold text-gray-900 dark:text-white truncate">
+                        {{ mergeSurvivorEntity.canonicalName }}
+                        <span :class="['text-[10px] font-normal ml-1', getNerMeta(mergeSurvivorEntity.nerClass)?.textClass]">
+                          ({{ t(`explorer.ner.classes.${mergeSurvivorEntity.nerClass}`) }})
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <label class="inline-flex items-center gap-1.5 text-[11px] text-gray-600 dark:text-gray-300 cursor-pointer select-none">
+                    <input
+                      v-model="mergePreserveAliases"
+                      type="checkbox"
+                      class="rounded border-gray-300 dark:border-gray-600 text-teal-600 focus:ring-teal-500/30 cursor-pointer"
+                    />
+                    <span>{{ t('explorer.ner.preserveAliasLabel') }}</span>
+                  </label>
+
+                  <!-- Relation Impact Summary & List -->
+                  <div
+                    v-if="mergePreview"
+                    class="p-2.5 rounded-lg border border-gray-200/70 dark:border-gray-700/70 bg-gray-50/70 dark:bg-gray-900/40 space-y-1.5"
+                  >
+                    <div class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                      {{ t('explorer.ner.mergeImpactTitle') }}
+                    </div>
+                    <div
+                      v-if="mergePreview.impacts.length > 0"
+                      class="text-[11px] font-mono tabular-nums text-gray-700 dark:text-gray-200"
+                    >
+                      {{
+                        t('explorer.ner.mergeImpactSummary', {
+                          relinked: mergePreview.relinkedCount,
+                          consolidated: mergePreview.consolidatedCount,
+                          removed: mergePreview.removedSelfLoopCount,
+                        })
+                      }}
+                    </div>
+                    <div
+                      v-else
+                      class="text-[11px] text-gray-500 dark:text-gray-400"
+                    >
+                      {{ t('explorer.ner.mergeImpactNone', { posts: mergePreview.affectedPostsCount }) }}
+                    </div>
+
+                    <div
+                      v-if="mergePreview.impacts.length > 0"
+                      class="divide-y divide-gray-200/50 dark:divide-gray-700/50 pt-1"
+                    >
+                      <div
+                        v-for="imp in mergePreview.impacts.slice(0, 5)"
+                        :key="imp.relationId"
+                        class="py-1.5 space-y-0.5"
+                      >
+                        <div class="text-[11px] text-gray-800 dark:text-gray-200 break-words">
+                          {{ imp.subjectName }} → {{ t(`explorer.ner.relations.${imp.relationClass}`) }} → {{ imp.objectName }}
+                        </div>
+                        <div class="flex items-center justify-between gap-2 text-[10px]">
+                          <span
+                            :class="[
+                              'font-semibold',
+                              imp.action === 'remove_self_loop'
+                                ? 'text-rose-600 dark:text-rose-400'
+                                : imp.action === 'consolidate'
+                                  ? 'text-amber-600 dark:text-amber-400'
+                                  : 'text-teal-600 dark:text-teal-400',
+                            ]"
+                          >
+                            {{
+                              imp.action === 'remove_self_loop'
+                                ? t('explorer.ner.mergeActionSelfLoop')
+                                : imp.action === 'consolidate'
+                                  ? t('explorer.ner.mergeActionConsolidate')
+                                  : t('explorer.ner.mergeActionRelink')
+                            }}
+                          </span>
+                          <span class="font-mono tabular-nums text-gray-400">
+                            {{ imp.occurrencesCount }}×
+                          </span>
+                        </div>
+                      </div>
+                      <div
+                        v-if="mergePreview.impacts.length > 5"
+                        class="pt-1 text-[10px] font-mono text-gray-400"
+                      >
+                        {{ t('explorer.ner.mergeMoreImpacts', { count: mergePreview.impacts.length - 5 }) }}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="flex items-center gap-2 pt-0.5">
+                    <button
+                      type="button"
+                      @click="submitMergeEntity"
+                      class="flex-1 py-1.5 px-2.5 rounded-lg bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      {{ t('explorer.ner.mergeConfirm') }}
+                    </button>
+                    <button
+                      type="button"
+                      @click="isMergingEntity = false"
+                      class="py-1.5 px-2.5 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-xs font-semibold cursor-pointer whitespace-nowrap"
+                    >
+                      {{ t('explorer.ner.cancel') }}
+                    </button>
+                  </div>
+                </template>
               </div>
 
               <button
@@ -1193,8 +1453,10 @@ import { ref, computed, watch, nextTick, onBeforeUnmount } from "vue";
 import { useI18n } from "../../i18n";
 import {
   ArrowLeftRight,
+  BarChart3,
   Check,
   Clock,
+  GitMerge,
   Loader2,
   Network,
   Pencil,
@@ -1209,6 +1471,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-vue-next";
+import ExplorerNerSummaryDashboard from "./ExplorerNerSummaryDashboard.vue";
 import type cytoscape from "cytoscape";
 import type {
   NerGraphLayoutRequest,
@@ -1225,12 +1488,15 @@ import {
   formatNerDateDay,
   formatNerTimestamp,
   normalizeEntityKey,
+  previewEntityMerge,
   type ActiveNerFeedFilter,
   type AggregatedNerEntity,
   type AggregatedNerIndex,
   type AggregatedNerRelation,
   type EntityEngineSource,
+  type EntityMergePreview,
   type NerClassId,
+  type PostNerExtractionRecord,
   type RelationClassId,
   type RelationOccurrence,
 } from "../../utils/explorerNer";
@@ -1249,6 +1515,7 @@ const props = defineProps<{
   uncachedCount: number;
   isExtracting: boolean;
   postSummaries?: NerPostSummary[];
+  rawRecords?: PostNerExtractionRecord[];
 }>();
 
 const emit = defineEmits<{
@@ -1262,6 +1529,15 @@ const emit = defineEmits<{
       targetEntityId: string;
       newCanonicalName: string;
       newNerClass: NerClassId;
+      preserveAliases: boolean;
+    }
+  ): void;
+  (
+    e: "merge-entity",
+    payload: {
+      sourceEntityIds: string[];
+      targetCanonicalName: string;
+      targetNerClass: NerClassId;
       preserveAliases: boolean;
     }
   ): void;
@@ -1315,13 +1591,39 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 
-const modalMode = ref<"directory" | "graph" | "timeline">("directory");
+const modalMode = ref<"summary" | "directory" | "graph" | "timeline">("summary");
 const query = ref("");
 const nerClassFilter = ref<"all" | NerClassId>("all");
 const relClassFilter = ref<"all" | RelationClassId>("all");
 const dateFrom = ref("");
 const dateTo = ref("");
 const timelineDesc = ref(true);
+
+const hasActiveModalFilters = computed(() =>
+  Boolean(
+    query.value.trim() ||
+      nerClassFilter.value !== "all" ||
+      relClassFilter.value !== "all" ||
+      dateFrom.value ||
+      dateTo.value
+  )
+);
+
+const toggleSummaryClassFilter = (classId: NerClassId) => {
+  nerClassFilter.value = nerClassFilter.value === classId ? "all" : classId;
+};
+
+const toggleSummaryRelationFilter = (relClassId: RelationClassId) => {
+  relClassFilter.value = relClassFilter.value === relClassId ? "all" : relClassId;
+};
+
+const clearModalFilters = () => {
+  query.value = "";
+  nerClassFilter.value = "all";
+  relClassFilter.value = "all";
+  dateFrom.value = "";
+  dateTo.value = "";
+};
 
 const dirSortField = ref<"name" | "mentions" | "firstSeen" | "lastSeen">("mentions");
 const dirSortAsc = ref(false);
@@ -1341,6 +1643,12 @@ const editEntityName = ref("");
 const editEntityClass = ref<NerClassId>("person");
 const editEntityKeepAlias = ref(true);
 const confirmDeleteEntity = ref(false);
+
+const isMergingEntity = ref(false);
+const mergeSearchQuery = ref("");
+const mergePartnerId = ref<string | null>(null);
+const mergeIntoPartner = ref(true);
+const mergePreserveAliases = ref(true);
 
 const isAddingEntityRelation = ref(false);
 const addRelOutgoing = ref(true);
@@ -1548,9 +1856,84 @@ const availableEntityPostOptions = computed<NerPostSummary[]>(() => {
   return [...preferred, ...rest].slice(0, 120);
 });
 
+const mergePartnerEntity = computed<AggregatedNerEntity | null>(() => {
+  if (!isMergingEntity.value || !mergePartnerId.value) return null;
+  return props.index.entityById.get(mergePartnerId.value) || null;
+});
+
+const mergeSourceEntity = computed<AggregatedNerEntity | null>(() => {
+  if (!inspectedEntity.value || !mergePartnerEntity.value) return null;
+  return mergeIntoPartner.value ? inspectedEntity.value : mergePartnerEntity.value;
+});
+
+const mergeSurvivorEntity = computed<AggregatedNerEntity | null>(() => {
+  if (!inspectedEntity.value || !mergePartnerEntity.value) return null;
+  return mergeIntoPartner.value ? mergePartnerEntity.value : inspectedEntity.value;
+});
+
+const mergeCandidateEntities = computed<AggregatedNerEntity[]>(() => {
+  if (!isMergingEntity.value || !inspectedEntity.value) return [];
+  const current = inspectedEntity.value;
+  const currentNameLower = current.canonicalName.toLowerCase();
+  const q = mergeSearchQuery.value.trim().toLowerCase();
+  const cooccurSet = new Set(current.cooccurringIds || []);
+  const currentTokens = currentNameLower.split(/[\s\-_·.,/()（）]+/).filter((t) => t.length >= 2);
+
+  const scored: Array<{ ent: AggregatedNerEntity; score: number }> = [];
+  for (const cand of props.index.entities) {
+    if (cand.id === current.id) continue;
+    const candNameLower = cand.canonicalName.toLowerCase();
+    const hay = `${cand.canonicalName} ${cand.aliases.join(" ")}`.toLowerCase();
+    if (q && !hay.includes(q)) continue;
+
+    let score = 0;
+    if (candNameLower.includes(currentNameLower) || currentNameLower.includes(candNameLower)) {
+      score += 100;
+    }
+    if (
+      current.aliases.some((a) => hay.includes(a.toLowerCase())) ||
+      cand.aliases.some((a) => currentNameLower.includes(a.toLowerCase()))
+    ) {
+      score += 60;
+    }
+    if (currentTokens.some((tok) => hay.includes(tok))) {
+      score += 40;
+    }
+    if (cooccurSet.has(cand.id)) {
+      score += 20;
+    }
+    if (cand.nerClass === current.nerClass) {
+      score += 10;
+    }
+    scored.push({ ent: cand, score });
+  }
+
+  scored.sort(
+    (a, b) =>
+      b.score - a.score ||
+      b.ent.mentionCount - a.ent.mentionCount ||
+      a.ent.canonicalName.localeCompare(b.ent.canonicalName)
+  );
+  return scored.slice(0, 40).map((s) => s.ent);
+});
+
+const mergePreview = computed<EntityMergePreview | null>(() => {
+  if (!isMergingEntity.value || !mergeSourceEntity.value || !mergeSurvivorEntity.value) {
+    return null;
+  }
+  return previewEntityMerge(props.rawRecords || [], {
+    sourceEntityIds: [mergeSourceEntity.value.id],
+    targetCanonicalName: mergeSurvivorEntity.value.canonicalName,
+    targetNerClass: mergeSurvivorEntity.value.nerClass,
+  });
+});
+
 const resetAllEditorStates = () => {
   isCreatingEntity.value = false;
   isEditingEntity.value = false;
+  isMergingEntity.value = false;
+  mergeSearchQuery.value = "";
+  mergePartnerId.value = null;
   confirmDeleteEntity.value = false;
   isAddingEntityRelation.value = false;
   confirmDeleteLinkedRelId.value = null;
@@ -1609,10 +1992,47 @@ const startEditEntity = (ent: AggregatedNerEntity) => {
   }
   confirmDeleteEntity.value = false;
   isAddingEntityRelation.value = false;
+  isMergingEntity.value = false;
   editEntityName.value = ent.canonicalName;
   editEntityClass.value = ent.nerClass;
   editEntityKeepAlias.value = true;
   isEditingEntity.value = true;
+};
+
+const startMergeEntity = (_ent: AggregatedNerEntity) => {
+  if (isMergingEntity.value) {
+    isMergingEntity.value = false;
+    return;
+  }
+  confirmDeleteEntity.value = false;
+  isAddingEntityRelation.value = false;
+  isEditingEntity.value = false;
+  mergeSearchQuery.value = "";
+  mergePartnerId.value = null;
+  mergeIntoPartner.value = true;
+  mergePreserveAliases.value = true;
+  isMergingEntity.value = true;
+};
+
+const selectMergePartner = (current: AggregatedNerEntity, cand: AggregatedNerEntity) => {
+  mergePartnerId.value = cand.id;
+  mergeIntoPartner.value = cand.mentionCount >= current.mentionCount;
+};
+
+const submitMergeEntity = () => {
+  if (!mergeSourceEntity.value || !mergeSurvivorEntity.value) return;
+  const survivorId = mergeSurvivorEntity.value.id;
+  emit("merge-entity", {
+    sourceEntityIds: [mergeSourceEntity.value.id],
+    targetCanonicalName: mergeSurvivorEntity.value.canonicalName,
+    targetNerClass: mergeSurvivorEntity.value.nerClass,
+    preserveAliases: mergePreserveAliases.value,
+  });
+  isMergingEntity.value = false;
+  mergePartnerId.value = null;
+  mergeSearchQuery.value = "";
+  selectedInspectorEntityId.value = survivorId;
+  selectedInspectorRelId.value = null;
 };
 
 const saveEditEntity = (ent: AggregatedNerEntity) => {

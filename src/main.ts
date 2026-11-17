@@ -91,21 +91,61 @@ const isResizeObserverError = (msg?: string | null) => {
   )
 }
 
+// Ignore errors injected purely by third-party browser extensions (e.g., MetaMask inpage.js)
+const isBrowserExtensionError = (
+  msg?: unknown,
+  source?: string | null,
+  stack?: string | null
+) => {
+  const combined = `${typeof source === 'string' ? source : ''} ${typeof stack === 'string' ? stack : ''} ${typeof msg === 'string' ? msg : ''}`
+  if (
+    combined.includes('chrome-extension://') ||
+    combined.includes('moz-extension://') ||
+    combined.includes('safari-extension://')
+  ) {
+    return true
+  }
+  if (combined.includes('Failed to connect to MetaMask')) {
+    return true
+  }
+  return false
+}
+
 const prevOnError = window.onerror
 window.onerror = (message, source, lineno, colno, error) => {
   if (typeof message === 'string' && isResizeObserverError(message)) {
     return true // Suppress benign notification
+  }
+  if (isBrowserExtensionError(message, source, error?.stack)) {
+    return true
   }
   if (prevOnError) {
     return prevOnError(message, source, lineno, colno, error)
   }
 }
 
+window.addEventListener(
+  'unhandledrejection',
+  (event) => {
+    const reason = event?.reason
+    const msg = typeof reason === 'string' ? reason : reason?.message
+    const stack = typeof reason?.stack === 'string' ? reason.stack : ''
+    if (isBrowserExtensionError(msg, '', stack)) {
+      event.stopImmediatePropagation()
+      event.preventDefault()
+    }
+  },
+  true
+)
+
 // Global image load error interceptor for '/telegram-photo/' and '/telegram-doc/' resources
 window.addEventListener(
   'error',
   (event) => {
-    if (isResizeObserverError(event?.message)) {
+    if (
+      isResizeObserverError(event?.message) ||
+      isBrowserExtensionError(event?.message, event?.filename, event?.error?.stack)
+    ) {
       event.stopImmediatePropagation()
       event.preventDefault()
       return

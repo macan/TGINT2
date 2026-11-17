@@ -212,6 +212,7 @@ export interface ExtractedPostEntity {
   canonical: string;
   nerClass: NerClassId;
   quote: string;
+  aliases?: string[];
 }
 
 export interface ExtractedPostRelation {
@@ -492,8 +493,20 @@ export function formatNerDateDay(ms: number): string {
 // ---------------------------------------------------------------------------
 
 const NER_DB_NAME = "GingkoExplorerNerDB";
-const NER_DB_VERSION = 1;
+const NER_DB_VERSION = 2;
 const NER_STORE_NAME = "post_extractions";
+const NER_MERGE_RULES_STORE = "entity_merge_rules";
+
+export interface ChannelEntityMergeRule {
+  id: string; // `${channelId}::${sourceEntityId}`
+  channelId: string;
+  sourceEntityId: string;
+  targetEntityId: string;
+  targetCanonicalName: string;
+  targetNerClass: NerClassId;
+  preserveAliases: boolean;
+  updatedAt: number;
+}
 
 let nerDbPromise: Promise<IDBDatabase> | null = null;
 
@@ -510,6 +523,10 @@ function openNerDatabase(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(NER_STORE_NAME)) {
         const store = db.createObjectStore(NER_STORE_NAME, { keyPath: "id" });
         store.createIndex("channelId", "channelId", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(NER_MERGE_RULES_STORE)) {
+        const mergeStore = db.createObjectStore(NER_MERGE_RULES_STORE, { keyPath: "id" });
+        mergeStore.createIndex("channelId", "channelId", { unique: false });
       }
     };
     req.onsuccess = () => {
@@ -576,22 +593,77 @@ export async function clearChannelNerExtractions(channel: string): Promise<void>
   if (!channelId) return;
   try {
     const db = await openNerDatabase();
+    const storeNames = db.objectStoreNames.contains(NER_MERGE_RULES_STORE)
+      ? [NER_STORE_NAME, NER_MERGE_RULES_STORE]
+      : [NER_STORE_NAME];
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(NER_STORE_NAME, "readwrite");
-      const store = tx.objectStore(NER_STORE_NAME);
-      const index = store.index("channelId");
-      const req = index.getAllKeys(IDBKeyRange.only(channelId));
-      req.onsuccess = () => {
-        const keys = Array.isArray(req.result) ? req.result : [];
-        for (const k of keys) {
-          store.delete(k);
-        }
-      };
+      const tx = db.transaction(storeNames, "readwrite");
+      for (const sName of storeNames) {
+        const store = tx.objectStore(sName);
+        const index = store.index("channelId");
+        const req = index.getAllKeys(IDBKeyRange.only(channelId));
+        req.onsuccess = () => {
+          const keys = Array.isArray(req.result) ? req.result : [];
+          for (const k of keys) {
+            store.delete(k);
+          }
+        };
+      }
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
   } catch (err) {
     console.warn("clearChannelNerExtractions error:", err);
+  }
+}
+
+export async function loadChannelMergeRules(
+  channel: string
+): Promise<ChannelEntityMergeRule[]> {
+  const channelId = normalizeNerChannelKey(channel);
+  if (!channelId) return [];
+  try {
+    const db = await openNerDatabase();
+    if (!db.objectStoreNames.contains(NER_MERGE_RULES_STORE)) return [];
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(NER_MERGE_RULES_STORE, "readonly");
+      const store = tx.objectStore(NER_MERGE_RULES_STORE);
+      const index = store.index("channelId");
+      const req = index.getAll(IDBKeyRange.only(channelId));
+      req.onsuccess = () => {
+        const rows = Array.isArray(req.result) ? req.result : [];
+        resolve(rows);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  } catch (err) {
+    console.warn("loadChannelMergeRules error:", err);
+    return [];
+  }
+}
+
+export async function saveChannelMergeRules(
+  rulesToPut: ChannelEntityMergeRule[],
+  ruleIdsToDelete: string[] = []
+): Promise<void> {
+  if (!rulesToPut.length && !ruleIdsToDelete.length) return;
+  try {
+    const db = await openNerDatabase();
+    if (!db.objectStoreNames.contains(NER_MERGE_RULES_STORE)) return;
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(NER_MERGE_RULES_STORE, "readwrite");
+      const store = tx.objectStore(NER_MERGE_RULES_STORE);
+      for (const id of ruleIdsToDelete) {
+        store.delete(id);
+      }
+      for (const rule of rulesToPut) {
+        store.put(rule);
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (err) {
+    console.warn("saveChannelMergeRules error:", err);
   }
 }
 
@@ -1941,8 +2013,44 @@ export interface RunNerBatchOptions {
   useLocalMl?: boolean;
   onlyUpgradeRuleRecords?: boolean;
   signal?: AbortSignal;
+  getLiveRecords?: () => PostNerExtractionRecord[];
+  entityMergeRules?: ChannelEntityMergeRule[];
+  getEntityMergeRules?: () => ChannelEntityMergeRule[];
   onProgress?: (progress: NerBatchProgress) => void;
   onRecordsUpdated?: (allRecords: PostNerExtractionRecord[]) => void;
+}
+
+export function mergeNerRecordBatch(
+  liveRecords: PostNerExtractionRecord[],
+  incomingBatch: PostNerExtractionRecord[],
+  options?: { respectManualEdited?: boolean; protectedAfterMs?: number }
+): { mergedRecords: PostNerExtractionRecord[]; acceptedBatch: PostNerExtractionRecord[] } {
+  const byPostKey = new Map<string, PostNerExtractionRecord>();
+  for (const rec of liveRecords) {
+    if (rec && rec.postKey) byPostKey.set(rec.postKey, rec);
+  }
+
+  const respectManual = options?.respectManualEdited !== false;
+  const protectedAfterMs = options?.protectedAfterMs ?? Infinity;
+  const acceptedBatch: PostNerExtractionRecord[] = [];
+
+  for (const rec of incomingBatch) {
+    if (!rec || !rec.postKey) continue;
+    const current = byPostKey.get(rec.postKey);
+    if (
+      current?.manualEdited &&
+      (respectManual || (current.manualEditedAt || 0) >= protectedAfterMs)
+    ) {
+      continue;
+    }
+    byPostKey.set(rec.postKey, rec);
+    acceptedBatch.push(rec);
+  }
+
+  return {
+    mergedRecords: Array.from(byPostKey.values()),
+    acceptedBatch,
+  };
 }
 
 export async function runChannelNerExtractionBatch(
@@ -1952,6 +2060,7 @@ export async function runChannelNerExtractionBatch(
   progress: NerBatchProgress;
   aborted: boolean;
 }> {
+  const batchStartedAt = Date.now();
   const channelId = normalizeNerChannelKey(options.channelName);
   const existingMap = new Map<string, PostNerExtractionRecord>();
   if (!options.forceReextract || options.onlyUpgradeRuleRecords) {
@@ -2030,7 +2139,9 @@ export async function runChannelNerExtractionBatch(
   if (totalToProcess === 0) {
     options.onProgress?.({ ...progress });
     return {
-      records: Array.from(existingMap.values()),
+      records: options.getLiveRecords
+        ? options.getLiveRecords()
+        : Array.from(existingMap.values()),
       progress,
       aborted: false,
     };
@@ -2202,7 +2313,9 @@ Rules:
   while (cursor < candidatePosts.length) {
     if (options.signal?.aborted) {
       return {
-        records: Array.from(existingMap.values()),
+        records: options.getLiveRecords
+          ? options.getLiveRecords()
+          : Array.from(existingMap.values()),
         progress,
         aborted: true,
       };
@@ -2300,7 +2413,9 @@ Rules:
       } catch (err: any) {
         if (err?.name === "AbortError") {
           return {
-            records: Array.from(existingMap.values()),
+            records: options.getLiveRecords
+              ? options.getLiveRecords()
+              : Array.from(existingMap.values()),
             progress,
             aborted: true,
           };
@@ -2353,7 +2468,9 @@ Rules:
         } catch (mlErr: any) {
           if (mlErr?.name === "AbortError") {
             return {
-              records: Array.from(existingMap.values()),
+              records: options.getLiveRecords
+                ? options.getLiveRecords()
+                : Array.from(existingMap.values()),
               progress,
               aborted: true,
             };
@@ -2377,19 +2494,33 @@ Rules:
       }
     }
 
-    for (const rec of batchRecords) {
+    const activeRules = options.getEntityMergeRules?.() || options.entityMergeRules || [];
+    if (activeRules.length > 0) {
+      batchRecords = batchRecords.map((rec) => applyMergeRulesToRecord(rec, activeRules));
+    }
+
+    const liveSnapshot = options.getLiveRecords
+      ? options.getLiveRecords()
+      : Array.from(existingMap.values());
+    const { mergedRecords, acceptedBatch } = mergeNerRecordBatch(liveSnapshot, batchRecords, {
+      respectManualEdited: !options.forceReextract,
+      protectedAfterMs: batchStartedAt,
+    });
+
+    for (const rec of acceptedBatch) {
       existingMap.set(rec.postKey, rec);
     }
 
-    await saveChannelNerExtractions(batchRecords);
+    if (acceptedBatch.length > 0) {
+      await saveChannelNerExtractions(acceptedBatch);
+    }
 
     progress.done += chunk.length;
     progress.engine =
       usedGemini && usedLocal ? "mixed" : usedGemini ? "gemini" : "local";
     progress.localTier = usedLocalMl ? "ml" : usedLocal ? "rules" : null;
 
-    const merged = Array.from(existingMap.values());
-    options.onRecordsUpdated?.(merged);
+    options.onRecordsUpdated?.(mergedRecords);
     options.onProgress?.({ ...progress });
 
     // Yield briefly between local chunks so large batches keep UI responsive
@@ -2399,7 +2530,9 @@ Rules:
   }
 
   return {
-    records: Array.from(existingMap.values()),
+    records: options.getLiveRecords
+      ? options.getLiveRecords()
+      : Array.from(existingMap.values()),
     progress,
     aborted: false,
   };
@@ -2470,7 +2603,8 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
     timestampMs: number,
     quote: string,
     engineSource: EntityEngineSource,
-    isManualEdited = false
+    isManualEdited = false,
+    extraAliases?: string[]
   ): AggregatedNerEntity => {
     const id = normalizeEntityKey(nerClass, canonicalName);
     let ent = entityMap.get(id);
@@ -2497,6 +2631,12 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
     const aliases = aliasSetMap.get(id)!;
     if (surfaceName && surfaceName.trim() && surfaceName.trim() !== ent.canonicalName) {
       aliases.add(surfaceName.trim());
+    }
+    if (extraAliases && extraAliases.length > 0) {
+      for (const a of extraAliases) {
+        const cleanAlias = a?.trim();
+        if (cleanAlias) aliases.add(cleanAlias);
+      }
     }
     aliases.add(ent.canonicalName);
 
@@ -2544,7 +2684,8 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
         rec.timestampMs,
         ent.quote,
         recEngineSource,
-        isManualEdited
+        isManualEdited,
+        ent.aliases
       );
       if (!postEntityIds.includes(agg.id)) {
         postEntityIds.push(agg.id);
@@ -2736,11 +2877,25 @@ export interface ManualNerMutationResult {
 
 function dedupeRecordEntities(entities: ExtractedPostEntity[]): ExtractedPostEntity[] {
   const byKey = new Map<string, ExtractedPostEntity>();
+  const aliasSets = new Map<string, Set<string>>();
+
   for (const ent of entities) {
     const canonical = (ent.canonical || ent.name || "").trim();
     const name = (ent.name || canonical).trim();
     if (!canonical || !name) continue;
     const key = normalizeEntityKey(ent.nerClass, canonical);
+
+    let aset = aliasSets.get(key);
+    if (!aset) {
+      aset = new Set<string>();
+      aliasSets.set(key, aset);
+    }
+    if (name !== canonical) aset.add(name);
+    for (const extra of ent.aliases || []) {
+      const t = extra?.trim();
+      if (t && t !== canonical) aset.add(t);
+    }
+
     const existing = byKey.get(key);
     if (!existing) {
       byKey.set(key, {
@@ -2749,16 +2904,32 @@ function dedupeRecordEntities(entities: ExtractedPostEntity[]): ExtractedPostEnt
         nerClass: ent.nerClass,
         quote: ent.quote || "",
       });
-    } else if (!existing.quote && ent.quote) {
-      existing.quote = ent.quote;
+    } else {
+      if (existing.name !== canonical && name === canonical) {
+        existing.name = name;
+      }
+      if (!existing.quote && ent.quote) {
+        existing.quote = ent.quote;
+      }
     }
   }
-  return Array.from(byKey.values());
+
+  const out: ExtractedPostEntity[] = [];
+  for (const [key, ent] of byKey.entries()) {
+    const extras = Array.from(aliasSets.get(key) || []);
+    if (extras.length > 0) {
+      ent.aliases = extras;
+    }
+    out.push(ent);
+  }
+  return out;
 }
 
-function dedupeRecordRelations(relations: ExtractedPostRelation[]): ExtractedPostRelation[] {
-  const seen = new Set<string>();
-  const out: ExtractedPostRelation[] = [];
+function dedupeRecordRelations(
+  relations: ExtractedPostRelation[],
+  dedupeByTriple = false
+): ExtractedPostRelation[] {
+  const byKey = new Map<string, ExtractedPostRelation>();
   for (const rel of relations) {
     const subj = rel.subject.trim();
     const obj = rel.object.trim();
@@ -2766,10 +2937,11 @@ function dedupeRecordRelations(relations: ExtractedPostRelation[]): ExtractedPos
     const subjId = normalizeEntityKey(rel.subjectClass, subj);
     const objId = normalizeEntityKey(rel.objectClass, obj);
     if (subjId === objId) continue;
-    const exactKey = `${subjId}|${rel.relationClass}|${objId}|${(rel.quote || "").trim()}`;
-    if (seen.has(exactKey)) continue;
-    seen.add(exactKey);
-    out.push({
+    const tripleKey = buildNerRelationKey(subjId, rel.relationClass, objId);
+    const exactKey = dedupeByTriple
+      ? tripleKey
+      : `${tripleKey}|${(rel.quote || "").trim()}`;
+    const candidate: ExtractedPostRelation = {
       subject: subj,
       subjectClass: rel.subjectClass,
       relationClass: rel.relationClass,
@@ -2777,9 +2949,250 @@ function dedupeRecordRelations(relations: ExtractedPostRelation[]): ExtractedPos
       objectClass: rel.objectClass,
       quote: rel.quote || "",
       confidence: typeof rel.confidence === "number" ? rel.confidence : 1,
+    };
+    const existing = byKey.get(exactKey);
+    if (!existing) {
+      byKey.set(exactKey, candidate);
+    } else {
+      if (!existing.quote && candidate.quote) {
+        existing.quote = candidate.quote;
+      }
+      if (candidate.confidence > existing.confidence) {
+        existing.confidence = candidate.confidence;
+      }
+    }
+  }
+  return Array.from(byKey.values());
+}
+
+export interface EntityMergeRelationImpactItem {
+  relationId: string;
+  subjectName: string;
+  subjectClass: NerClassId;
+  relationClass: RelationClassId;
+  objectName: string;
+  objectClass: NerClassId;
+  targetSubjectName: string;
+  targetObjectName: string;
+  action: "relink" | "consolidate" | "remove_self_loop";
+  occurrencesCount: number;
+  postsCount: number;
+}
+
+export interface EntityMergePreview {
+  targetEntityId: string;
+  sourceEntityIds: string[];
+  affectedPostsCount: number;
+  relinkedCount: number;
+  consolidatedCount: number;
+  removedSelfLoopCount: number;
+  impacts: EntityMergeRelationImpactItem[];
+}
+
+export function previewEntityMerge(
+  records: PostNerExtractionRecord[],
+  params: {
+    sourceEntityIds: string[];
+    targetCanonicalName: string;
+    targetNerClass: NerClassId;
+  }
+): EntityMergePreview {
+  const cleanTargetName = params.targetCanonicalName.trim();
+  const targetEntityId = cleanTargetName
+    ? normalizeEntityKey(params.targetNerClass, cleanTargetName)
+    : "";
+  const sourceSet = new Set(
+    params.sourceEntityIds.filter((id) => Boolean(id) && id !== targetEntityId)
+  );
+
+  if (!cleanTargetName || sourceSet.size === 0) {
+    return {
+      targetEntityId,
+      sourceEntityIds: [],
+      affectedPostsCount: 0,
+      relinkedCount: 0,
+      consolidatedCount: 0,
+      removedSelfLoopCount: 0,
+      impacts: [],
+    };
+  }
+
+  let affectedPostsCount = 0;
+  for (const rec of records) {
+    const hasSrcEnt = (rec.entities || []).some((e) =>
+      sourceSet.has(normalizeEntityKey(e.nerClass, e.canonical || e.name))
+    );
+    const hasSrcRel = (rec.relations || []).some(
+      (r) =>
+        sourceSet.has(normalizeEntityKey(r.subjectClass, r.subject)) ||
+        sourceSet.has(normalizeEntityKey(r.objectClass, r.object))
+    );
+    if (hasSrcEnt || hasSrcRel) affectedPostsCount += 1;
+  }
+
+  const index = aggregateNerIndex(records);
+  const existingNonMovedRelIds = new Set<string>();
+  const movedCandidates: AggregatedNerRelation[] = [];
+
+  for (const rel of index.relations) {
+    const touchesSource =
+      sourceSet.has(rel.subjectId) || sourceSet.has(rel.objectId);
+    if (touchesSource) {
+      movedCandidates.push(rel);
+    } else {
+      existingNonMovedRelIds.add(rel.id);
+    }
+  }
+
+  const seenMovedTargetRelIds = new Set<string>();
+  const impacts: EntityMergeRelationImpactItem[] = [];
+  let relinkedCount = 0;
+  let consolidatedCount = 0;
+  let removedSelfLoopCount = 0;
+
+  for (const rel of movedCandidates) {
+    const subjReplaced = sourceSet.has(rel.subjectId);
+    const objReplaced = sourceSet.has(rel.objectId);
+    const nextSubjId = subjReplaced ? targetEntityId : rel.subjectId;
+    const nextObjId = objReplaced ? targetEntityId : rel.objectId;
+    const targetSubjectName = subjReplaced ? cleanTargetName : rel.subjectName;
+    const targetObjectName = objReplaced ? cleanTargetName : rel.objectName;
+
+    let action: "relink" | "consolidate" | "remove_self_loop";
+    if (nextSubjId === nextObjId) {
+      action = "remove_self_loop";
+      removedSelfLoopCount += 1;
+    } else {
+      const nextRelId = buildNerRelationKey(
+        nextSubjId,
+        rel.relationClass,
+        nextObjId
+      );
+      if (
+        existingNonMovedRelIds.has(nextRelId) ||
+        seenMovedTargetRelIds.has(nextRelId)
+      ) {
+        action = "consolidate";
+        consolidatedCount += 1;
+      } else {
+        action = "relink";
+        relinkedCount += 1;
+      }
+      seenMovedTargetRelIds.add(nextRelId);
+    }
+
+    impacts.push({
+      relationId: rel.id,
+      subjectName: rel.subjectName,
+      subjectClass: rel.subjectClass,
+      relationClass: rel.relationClass,
+      objectName: rel.objectName,
+      objectClass: rel.objectClass,
+      targetSubjectName,
+      targetObjectName,
+      action,
+      occurrencesCount: rel.occurrences.length,
+      postsCount: rel.postKeys.length,
     });
   }
-  return out;
+
+  return {
+    targetEntityId,
+    sourceEntityIds: Array.from(sourceSet),
+    affectedPostsCount,
+    relinkedCount,
+    consolidatedCount,
+    removedSelfLoopCount,
+    impacts,
+  };
+}
+
+export function applyManualEntityMerge(
+  records: PostNerExtractionRecord[],
+  params: {
+    sourceEntityIds: string[];
+    targetCanonicalName: string;
+    targetNerClass: NerClassId;
+    preserveAliases?: boolean;
+  }
+): ManualNerMutationResult {
+  const cleanTargetName = params.targetCanonicalName.trim();
+  if (!cleanTargetName || !params.sourceEntityIds.length) {
+    return { nextRecords: records, changedRecords: [] };
+  }
+
+  const targetEntityId = normalizeEntityKey(params.targetNerClass, cleanTargetName);
+  const sourceSet = new Set(
+    params.sourceEntityIds.filter((id) => Boolean(id) && id !== targetEntityId)
+  );
+  if (sourceSet.size === 0) {
+    return {
+      nextRecords: records,
+      changedRecords: [],
+      nextEntityId: targetEntityId,
+    };
+  }
+
+  const preserveAliases = params.preserveAliases !== false;
+  const now = Date.now();
+  const changedRecords: PostNerExtractionRecord[] = [];
+
+  const nextRecords = records.map((rec) => {
+    let touched = false;
+
+    const mappedEntities = (rec.entities || []).map((ent) => {
+      const entId = normalizeEntityKey(ent.nerClass, ent.canonical || ent.name);
+      if (!sourceSet.has(entId)) return ent;
+      touched = true;
+      const mergedAliases = preserveAliases
+        ? Array.from(
+            new Set(
+              [ent.name, ent.canonical, ...(ent.aliases || [])]
+                .map((s) => s?.trim())
+                .filter((s): s is string => Boolean(s) && s !== cleanTargetName)
+            )
+          )
+        : undefined;
+      return {
+        name: preserveAliases && ent.name.trim() ? ent.name.trim() : cleanTargetName,
+        canonical: cleanTargetName,
+        nerClass: params.targetNerClass,
+        quote: ent.quote,
+        aliases: mergedAliases && mergedAliases.length > 0 ? mergedAliases : undefined,
+      };
+    });
+
+    const mappedRelations = (rec.relations || []).map((rel) => {
+      const subjId = normalizeEntityKey(rel.subjectClass, rel.subject);
+      const objId = normalizeEntityKey(rel.objectClass, rel.object);
+      const subjHit = sourceSet.has(subjId);
+      const objHit = sourceSet.has(objId);
+      if (!subjHit && !objHit) return rel;
+      touched = true;
+      return {
+        ...rel,
+        subject: subjHit ? cleanTargetName : rel.subject,
+        subjectClass: subjHit ? params.targetNerClass : rel.subjectClass,
+        object: objHit ? cleanTargetName : rel.object,
+        objectClass: objHit ? params.targetNerClass : rel.objectClass,
+      };
+    });
+
+    if (!touched) return rec;
+
+    const updated: PostNerExtractionRecord = {
+      ...rec,
+      entities: dedupeRecordEntities(mappedEntities),
+      relations: dedupeRecordRelations(mappedRelations, true),
+      manualEdited: true,
+      manualEditedAt: now,
+      updatedAt: now,
+    };
+    changedRecords.push(updated);
+    return updated;
+  });
+
+  return { nextRecords, changedRecords, nextEntityId: targetEntityId };
 }
 
 export function applyManualEntityUpdate(
@@ -2808,11 +3221,21 @@ export function applyManualEntityUpdate(
       const entId = normalizeEntityKey(ent.nerClass, ent.canonical || ent.name);
       if (entId !== params.targetEntityId) return ent;
       touched = true;
+      const mergedAliases = preserveAliases
+        ? Array.from(
+            new Set(
+              [ent.name, ent.canonical, ...(ent.aliases || [])]
+                .map((s) => s?.trim())
+                .filter((s): s is string => Boolean(s) && s !== cleanName)
+            )
+          )
+        : undefined;
       return {
         name: preserveAliases && ent.name.trim() ? ent.name.trim() : cleanName,
         canonical: cleanName,
         nerClass: params.newNerClass,
         quote: ent.quote,
+        aliases: mergedAliases && mergedAliases.length > 0 ? mergedAliases : undefined,
       };
     });
 
@@ -2837,7 +3260,7 @@ export function applyManualEntityUpdate(
     const updated: PostNerExtractionRecord = {
       ...rec,
       entities: dedupeRecordEntities(mappedEntities),
-      relations: dedupeRecordRelations(mappedRelations),
+      relations: dedupeRecordRelations(mappedRelations, true),
       manualEdited: true,
       manualEditedAt: now,
       updatedAt: now,
@@ -3215,4 +3638,184 @@ export function applyManualRelationCreate(
   }
 
   return { nextRecords, changedRecords, nextRelationId };
+}
+
+// ---------------------------------------------------------------------------
+// Channel Entity Merge Rules (Applied Automatically to Future/Re-extracted Posts)
+// ---------------------------------------------------------------------------
+
+export function upsertChannelEntityMergeRules(
+  existingRules: ChannelEntityMergeRule[],
+  params: {
+    channelId: string;
+    sourceEntityIds: string[];
+    targetCanonicalName: string;
+    targetNerClass: NerClassId;
+    preserveAliases?: boolean;
+  }
+): {
+  nextRules: ChannelEntityMergeRule[];
+  changedRules: ChannelEntityMergeRule[];
+  deletedRuleIds: string[];
+} {
+  const channelId = normalizeNerChannelKey(params.channelId);
+  const cleanTargetName = params.targetCanonicalName.trim();
+  if (!channelId || !cleanTargetName || !params.sourceEntityIds.length) {
+    return { nextRules: existingRules, changedRules: [], deletedRuleIds: [] };
+  }
+
+  const targetEntityId = normalizeEntityKey(params.targetNerClass, cleanTargetName);
+  const sourceSet = new Set(
+    params.sourceEntityIds.filter((id) => Boolean(id) && id !== targetEntityId)
+  );
+  if (sourceSet.size === 0) {
+    return { nextRules: existingRules, changedRules: [], deletedRuleIds: [] };
+  }
+
+  const preserveAliases = params.preserveAliases !== false;
+  const now = Date.now();
+  const byId = new Map<string, ChannelEntityMergeRule>();
+  for (const r of existingRules) {
+    if (r && r.id) byId.set(r.id, { ...r });
+  }
+
+  const changedRules: ChannelEntityMergeRule[] = [];
+  const deletedRuleIds: string[] = [];
+
+  // Re-point any existing transitive rules whose target was one of the merged sources
+  for (const rule of byId.values()) {
+    if (rule.channelId !== channelId) continue;
+    if (sourceSet.has(rule.targetEntityId)) {
+      if (rule.sourceEntityId === targetEntityId) {
+        byId.delete(rule.id);
+        deletedRuleIds.push(rule.id);
+      } else {
+        rule.targetEntityId = targetEntityId;
+        rule.targetCanonicalName = cleanTargetName;
+        rule.targetNerClass = params.targetNerClass;
+        rule.preserveAliases = rule.preserveAliases || preserveAliases;
+        rule.updatedAt = now;
+        changedRules.push(rule);
+      }
+    }
+  }
+
+  // Upsert direct rules for each merged source entity (removing any inverse self-cycle)
+  const targetRuleId = `${channelId}::${targetEntityId}`;
+  if (byId.has(targetRuleId)) {
+    byId.delete(targetRuleId);
+    deletedRuleIds.push(targetRuleId);
+  }
+
+  for (const srcId of sourceSet) {
+    const id = `${channelId}::${srcId}`;
+    const rule: ChannelEntityMergeRule = {
+      id,
+      channelId,
+      sourceEntityId: srcId,
+      targetEntityId,
+      targetCanonicalName: cleanTargetName,
+      targetNerClass: params.targetNerClass,
+      preserveAliases,
+      updatedAt: now,
+    };
+    byId.set(id, rule);
+    changedRules.push(rule);
+  }
+
+  return {
+    nextRules: Array.from(byId.values()),
+    changedRules,
+    deletedRuleIds,
+  };
+}
+
+export function applyMergeRulesToRecord(
+  rec: PostNerExtractionRecord,
+  rules: ChannelEntityMergeRule[]
+): PostNerExtractionRecord {
+  if (!rec || !rules.length) return rec;
+  const ruleMap = new Map<string, ChannelEntityMergeRule>();
+  for (const r of rules) {
+    if (r.channelId === rec.channelId && r.sourceEntityId !== r.targetEntityId) {
+      ruleMap.set(r.sourceEntityId, r);
+    }
+  }
+  if (ruleMap.size === 0) return rec;
+
+  const resolveRule = (entityId: string): ChannelEntityMergeRule | null => {
+    let curId = entityId;
+    let resolved: ChannelEntityMergeRule | null = null;
+    const visited = new Set<string>();
+    for (let hop = 0; hop < 8; hop++) {
+      if (visited.has(curId)) break;
+      visited.add(curId);
+      const next = ruleMap.get(curId);
+      if (!next) break;
+      resolved = next;
+      curId = next.targetEntityId;
+    }
+    return resolved;
+  };
+
+  let touched = false;
+
+  const mappedEntities = (rec.entities || []).map((ent) => {
+    const entId = normalizeEntityKey(ent.nerClass, ent.canonical || ent.name);
+    const rule = resolveRule(entId);
+    if (!rule) return ent;
+    touched = true;
+    const mergedAliases = rule.preserveAliases
+      ? Array.from(
+          new Set(
+            [ent.name, ent.canonical, ...(ent.aliases || [])]
+              .map((s) => s?.trim())
+              .filter((s): s is string => Boolean(s) && s !== rule.targetCanonicalName)
+          )
+        )
+      : undefined;
+    return {
+      name:
+        rule.preserveAliases && ent.name.trim()
+          ? ent.name.trim()
+          : rule.targetCanonicalName,
+      canonical: rule.targetCanonicalName,
+      nerClass: rule.targetNerClass,
+      quote: ent.quote,
+      aliases:
+        mergedAliases && mergedAliases.length > 0 ? mergedAliases : undefined,
+    };
+  });
+
+  const mappedRelations = (rec.relations || []).map((rel) => {
+    const subjId = normalizeEntityKey(rel.subjectClass, rel.subject);
+    const objId = normalizeEntityKey(rel.objectClass, rel.object);
+    const subjRule = resolveRule(subjId);
+    const objRule = resolveRule(objId);
+    if (!subjRule && !objRule) return rel;
+    touched = true;
+    return {
+      ...rel,
+      subject: subjRule ? subjRule.targetCanonicalName : rel.subject,
+      subjectClass: subjRule ? subjRule.targetNerClass : rel.subjectClass,
+      object: objRule ? objRule.targetCanonicalName : rel.object,
+      objectClass: objRule ? objRule.targetNerClass : rel.objectClass,
+    };
+  });
+
+  if (!touched) return rec;
+
+  return {
+    ...rec,
+    entities: dedupeRecordEntities(mappedEntities),
+    relations: dedupeRecordRelations(mappedRelations, true),
+  };
+}
+
+export function applyMergeRulesToRecords(
+  records: PostNerExtractionRecord[],
+  rules: ChannelEntityMergeRule[]
+): PostNerExtractionRecord[] {
+  if (!rules.length) return records;
+  return records.map((rec) => applyMergeRulesToRecord(rec, rules));
 }
