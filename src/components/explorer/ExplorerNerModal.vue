@@ -186,8 +186,24 @@
               class="px-2 py-1.5 text-xs font-mono bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-gray-700 dark:text-gray-200"
               :title="t('explorer.ner.dateTo')"
             />
+
+            <button
+              v-if="modalMode === 'directory' && (postSummaries?.length || 0) > 0"
+              type="button"
+              @click="openCreateEntityDrawer"
+              class="px-2.5 py-1.5 rounded-xl bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 hover:border-teal-500 text-xs font-semibold text-gray-700 dark:text-gray-200 hover:text-teal-700 dark:hover:text-teal-300 transition-colors cursor-pointer whitespace-nowrap shrink-0 flex items-center gap-1"
+            >
+              <Plus class="w-3.5 h-3.5" />
+              <span>{{ t('explorer.ner.addEntity') }}</span>
+            </button>
           </div>
         </div>
+
+        <datalist id="ner-entity-autocomplete">
+          <option v-for="ent in index.entities" :key="ent.id" :value="ent.canonicalName">
+            {{ t(`explorer.ner.classes.${ent.nerClass}`) }}
+          </option>
+        </datalist>
 
         <!-- Main Modal Body -->
         <div class="flex-1 min-h-0 flex overflow-hidden">
@@ -217,7 +233,7 @@
                   <tr
                     v-for="ent in filteredDirectoryEntities"
                     :key="ent.id"
-                    @click="selectedInspectorEntityId = ent.id; selectedInspectorRelId = null"
+                    @click="selectInspectorEntity(ent.id)"
                     :class="[
                       'h-10 transition-colors cursor-pointer',
                       selectedInspectorEntityId === ent.id
@@ -388,25 +404,150 @@
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      @click="jumpToTimelineClaim(item)"
-                      class="px-3 py-1.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer self-start"
-                    >
-                      {{ t('explorer.ner.jumpToPost') }}
-                    </button>
+                    <div class="flex items-center gap-1.5 shrink-0 self-start">
+                      <button
+                        type="button"
+                        @click="inspectAndEditTimelineClaim(item)"
+                        class="p-1.5 rounded-lg text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 hover:bg-gray-100 dark:hover:bg-gray-700/70 transition-colors cursor-pointer"
+                        :title="t('explorer.ner.inspectRelation')"
+                      >
+                        <Pencil class="w-3.5 h-3.5" />
+                      </button>
+                      <template v-if="confirmDeleteTimelineUid === item.uid">
+                        <button
+                          type="button"
+                          @click="confirmRemoveTimelineClaim(item)"
+                          class="px-2 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold transition-colors cursor-pointer whitespace-nowrap"
+                        >
+                          {{ t('explorer.ner.confirm') }}
+                        </button>
+                        <button
+                          type="button"
+                          @click="confirmDeleteTimelineUid = null"
+                          class="px-1.5 py-1 rounded-lg text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 text-[10px] cursor-pointer"
+                        >
+                          {{ t('explorer.ner.cancel') }}
+                        </button>
+                      </template>
+                      <button
+                        v-else
+                        type="button"
+                        @click="confirmDeleteTimelineUid = item.uid"
+                        class="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-gray-100 dark:hover:bg-gray-700/70 transition-colors cursor-pointer"
+                        :title="t('explorer.ner.deleteRelation')"
+                      >
+                        <Trash2 class="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        @click="jumpToTimelineClaim(item)"
+                        class="px-3 py-1.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        {{ t('explorer.ner.jumpToPost') }}
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
             </div>
           </template>
 
-          <!-- Right Inspector Drawer (Visible in Directory & Graph when an entity/relation is selected) -->
+          <!-- Right Inspector Drawer (Visible in Directory & Graph when an entity, relation, or creator is active) -->
           <div
-            v-if="modalMode !== 'timeline' && (inspectedEntity || inspectedRelation)"
+            v-if="modalMode !== 'timeline' && (isCreatingEntity || inspectedEntity || inspectedRelation)"
             class="w-80 lg:w-96 border-l border-gray-200/70 dark:border-gray-700/70 bg-gray-50/60 dark:bg-gray-900/40 p-5 overflow-y-auto shrink-0 space-y-5 custom-scrollbar"
           >
-            <div v-if="inspectedEntity" class="space-y-4">
+            <!-- CREATE MANUAL ENTITY -->
+            <div v-if="isCreatingEntity" class="space-y-4">
+              <div class="flex items-start justify-between gap-2">
+                <h3 class="text-sm font-bold text-gray-900 dark:text-white">
+                  {{ t('explorer.ner.createEntityTitle') }}
+                </h3>
+                <button
+                  type="button"
+                  @click="isCreatingEntity = false"
+                  class="p-1 text-gray-400 hover:text-gray-600 cursor-pointer"
+                >
+                  <X class="w-4 h-4" />
+                </button>
+              </div>
+
+              <div class="space-y-3">
+                <label class="block space-y-1">
+                  <span class="text-[11px] font-bold text-gray-500 dark:text-gray-400">
+                    {{ t('explorer.ner.entityNameLabel') }}
+                  </span>
+                  <input
+                    v-model="createEntityName"
+                    type="text"
+                    maxlength="90"
+                    class="w-full px-2.5 py-1.5 text-xs bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                  />
+                </label>
+
+                <label class="block space-y-1">
+                  <span class="text-[11px] font-bold text-gray-500 dark:text-gray-400">
+                    {{ t('explorer.ner.colClass') }}
+                  </span>
+                  <select
+                    v-model="createEntityClass"
+                    class="w-full px-2.5 py-1.5 text-xs bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-gray-900 dark:text-gray-100 cursor-pointer"
+                  >
+                    <option v-for="cls in NER_CLASSES" :key="cls.id" :value="cls.id">
+                      {{ t(`explorer.ner.classes.${cls.id}`) }}
+                    </option>
+                  </select>
+                </label>
+
+                <label v-if="(postSummaries?.length || 0) > 0" class="block space-y-1">
+                  <span class="text-[11px] font-bold text-gray-500 dark:text-gray-400">
+                    {{ t('explorer.ner.sourcePostLabel') }}
+                  </span>
+                  <select
+                    v-model="createEntityPostKey"
+                    class="w-full px-2.5 py-1.5 text-xs font-mono bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-gray-900 dark:text-gray-100 cursor-pointer"
+                  >
+                    <option v-for="ps in postSummaries" :key="ps.postKey" :value="ps.postKey">
+                      {{ formatNerTimestamp(ps.timestampMs) }} · {{ ps.snippet }}
+                    </option>
+                  </select>
+                </label>
+
+                <label class="block space-y-1">
+                  <span class="text-[11px] font-bold text-gray-500 dark:text-gray-400">
+                    {{ t('explorer.ner.quoteLabel') }}
+                  </span>
+                  <input
+                    v-model="createEntityQuote"
+                    type="text"
+                    maxlength="220"
+                    :placeholder="t('explorer.ner.quotePlaceholder')"
+                    class="w-full px-2.5 py-1.5 text-xs bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl text-gray-900 dark:text-gray-100"
+                  />
+                </label>
+
+                <div class="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    @click="submitCreateEntity"
+                    :disabled="!createEntityName.trim() || !createEntityPostKey"
+                    class="flex-1 py-1.5 px-3 rounded-xl bg-teal-600 hover:bg-teal-700 disabled:opacity-45 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {{ t('explorer.ner.save') }}
+                  </button>
+                  <button
+                    type="button"
+                    @click="isCreatingEntity = false"
+                    class="py-1.5 px-3 rounded-xl bg-gray-200/70 dark:bg-gray-800 text-gray-700 dark:text-gray-300 text-xs font-semibold hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {{ t('explorer.ner.cancel') }}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- INSPECT & EDIT ENTITY -->
+            <div v-else-if="inspectedEntity" class="space-y-4">
               <div class="flex items-start justify-between gap-2">
                 <div class="min-w-0">
                   <div :class="['text-[11px] font-bold uppercase tracking-wider', getNerMeta(inspectedEntity.nerClass)?.textClass]">
@@ -419,13 +560,133 @@
                     {{ inspectedEntity.mentionCount }} {{ t('explorer.ner.mentionsUnit') }} · {{ inspectedEntity.postKeys.length }} {{ t('explorer.ner.postsShort') }}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  @click="selectedInspectorEntityId = null"
-                  class="p-1 text-gray-400 hover:text-gray-600 cursor-pointer"
+                <div class="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    @click="startEditEntity(inspectedEntity)"
+                    :class="[
+                      'p-1.5 rounded-lg transition-colors cursor-pointer',
+                      isEditingEntity
+                        ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-700 dark:text-teal-300'
+                        : 'text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 hover:bg-white dark:hover:bg-gray-800',
+                    ]"
+                    :title="t('explorer.ner.editEntity')"
+                  >
+                    <Pencil class="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    @click="confirmDeleteEntity = !confirmDeleteEntity"
+                    :class="[
+                      'p-1.5 rounded-lg transition-colors cursor-pointer',
+                      confirmDeleteEntity
+                        ? 'bg-rose-100 dark:bg-rose-900/50 text-rose-600 dark:text-rose-400'
+                        : 'text-gray-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-white dark:hover:bg-gray-800',
+                    ]"
+                    :title="t('explorer.ner.deleteEntity')"
+                  >
+                    <Trash2 class="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    @click="closeInspectorDrawer"
+                    class="p-1 text-gray-400 hover:text-gray-600 cursor-pointer"
+                  >
+                    <X class="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <!-- Inline Delete Confirmation -->
+              <div
+                v-if="confirmDeleteEntity"
+                class="p-2.5 rounded-xl border border-rose-200 dark:border-rose-800/70 bg-rose-50/70 dark:bg-rose-950/30 space-y-2"
+              >
+                <p class="text-[11px] font-medium text-rose-700 dark:text-rose-300">
+                  {{ t('explorer.ner.confirmDeleteEntity') }}
+                </p>
+                <div class="flex items-center gap-2">
+                  <button
+                    type="button"
+                    @click="confirmRemoveEntity(inspectedEntity)"
+                    class="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {{ t('explorer.ner.delete') }}
+                  </button>
+                  <button
+                    type="button"
+                    @click="confirmDeleteEntity = false"
+                    class="px-2.5 py-1 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 text-[11px] font-semibold cursor-pointer whitespace-nowrap"
+                  >
+                    {{ t('explorer.ner.cancel') }}
+                  </button>
+                </div>
+              </div>
+
+              <!-- Inline Entity Editor Form -->
+              <div
+                v-if="isEditingEntity"
+                class="p-3 rounded-xl border border-gray-200/80 dark:border-gray-700/80 bg-white dark:bg-gray-800 space-y-2.5"
+              >
+                <label class="block space-y-1">
+                  <span class="text-[11px] font-bold text-gray-500 dark:text-gray-400">
+                    {{ t('explorer.ner.entityNameLabel') }}
+                  </span>
+                  <input
+                    v-model="editEntityName"
+                    type="text"
+                    maxlength="90"
+                    class="w-full px-2.5 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500"
+                  />
+                </label>
+
+                <label class="block space-y-1">
+                  <span class="text-[11px] font-bold text-gray-500 dark:text-gray-400">
+                    {{ t('explorer.ner.colClass') }}
+                  </span>
+                  <select
+                    v-model="editEntityClass"
+                    class="w-full px-2.5 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 cursor-pointer"
+                  >
+                    <option v-for="cls in NER_CLASSES" :key="cls.id" :value="cls.id">
+                      {{ t(`explorer.ner.classes.${cls.id}`) }}
+                    </option>
+                  </select>
+                </label>
+
+                <label class="inline-flex items-center gap-1.5 text-[11px] text-gray-600 dark:text-gray-300 cursor-pointer select-none">
+                  <input
+                    v-model="editEntityKeepAlias"
+                    type="checkbox"
+                    class="rounded border-gray-300 dark:border-gray-600 text-teal-600 focus:ring-teal-500/30 cursor-pointer"
+                  />
+                  <span>{{ t('explorer.ner.preserveAliasLabel') }}</span>
+                </label>
+
+                <p
+                  v-if="editEntityMergeTarget"
+                  class="text-[11px] font-medium text-amber-700 dark:text-amber-300"
                 >
-                  <X class="w-4 h-4" />
-                </button>
+                  {{ t('explorer.ner.mergeHint') }} ({{ editEntityMergeTarget.canonicalName }})
+                </p>
+
+                <div class="flex items-center gap-2 pt-0.5">
+                  <button
+                    type="button"
+                    @click="saveEditEntity(inspectedEntity)"
+                    :disabled="!editEntityName.trim()"
+                    class="flex-1 py-1.5 px-2.5 rounded-lg bg-teal-600 hover:bg-teal-700 disabled:opacity-45 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {{ t('explorer.ner.save') }}
+                  </button>
+                  <button
+                    type="button"
+                    @click="isEditingEntity = false"
+                    class="py-1.5 px-2.5 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-xs font-semibold cursor-pointer whitespace-nowrap"
+                  >
+                    {{ t('explorer.ner.cancel') }}
+                  </button>
+                </div>
               </div>
 
               <button
@@ -435,6 +696,16 @@
               >
                 {{ t('explorer.ner.filterAndJump') }}
               </button>
+
+              <!-- Extraction Engine(s) -->
+              <div v-if="inspectedEntity.engines?.length > 0" class="space-y-1">
+                <div class="text-[11px] font-bold text-gray-500 dark:text-gray-400">
+                  {{ t('explorer.ner.extractionEngineLabel') }}
+                </div>
+                <p class="text-xs font-mono text-gray-700 dark:text-gray-300">
+                  {{ formatEntityEngines(inspectedEntity.engines).join(' · ') }}
+                </p>
+              </div>
 
               <!-- Aliases -->
               <div v-if="inspectedEntity.aliases.length > 0" class="space-y-1">
@@ -446,26 +717,195 @@
                 </p>
               </div>
 
-              <!-- Related Timestamped Claims -->
-              <div v-if="inspectedEntityRelations.length > 0" class="space-y-2">
-                <div class="text-[11px] font-bold text-gray-500 dark:text-gray-400">
-                  {{ t('explorer.ner.linkedRelations') }} ({{ inspectedEntityRelations.length }})
-                </div>
-                <div class="divide-y divide-gray-200/60 dark:divide-gray-700/60">
+              <!-- Related Timestamped Claims + Add/Edit/Delete -->
+              <div class="space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <div class="text-[11px] font-bold text-gray-500 dark:text-gray-400">
+                    {{ t('explorer.ner.linkedRelations') }} ({{ inspectedEntityRelations.length }})
+                  </div>
                   <button
+                    v-if="availableEntityPostOptions.length > 0"
+                    type="button"
+                    @click="toggleAddEntityRelation(inspectedEntity)"
+                    class="text-[11px] font-semibold text-teal-600 dark:text-teal-400 hover:underline cursor-pointer inline-flex items-center gap-0.5 whitespace-nowrap"
+                  >
+                    <Plus class="w-3 h-3" />
+                    <span>{{ t('explorer.ner.addRelation') }}</span>
+                  </button>
+                </div>
+
+                <!-- Inline Add Relation Composer for Inspected Entity -->
+                <div
+                  v-if="isAddingEntityRelation"
+                  class="p-3 rounded-xl border border-gray-200/80 dark:border-gray-700/80 bg-white dark:bg-gray-800 space-y-2.5"
+                >
+                  <div class="flex items-center justify-between gap-2 text-[11px] font-semibold text-gray-700 dark:text-gray-200">
+                    <span class="truncate">
+                      {{
+                        addRelOutgoing
+                          ? `${inspectedEntity.canonicalName} → ${addRelTargetName.trim() || '...'}`
+                          : `${addRelTargetName.trim() || '...'} → ${inspectedEntity.canonicalName}`
+                      }}
+                    </span>
+                    <button
+                      type="button"
+                      @click="addRelOutgoing = !addRelOutgoing"
+                      class="p-1 rounded-md text-gray-500 hover:text-teal-600 dark:hover:text-teal-400 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer shrink-0"
+                      :title="t('explorer.ner.swapDirection')"
+                    >
+                      <ArrowLeftRight class="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <label class="block space-y-1">
+                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                      {{ t('explorer.ner.relationLabel') }}
+                    </span>
+                    <select
+                      v-model="addRelClass"
+                      class="w-full px-2 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 cursor-pointer"
+                    >
+                      <option v-for="relCls in RELATION_CLASSES" :key="relCls.id" :value="relCls.id">
+                        {{ t(`explorer.ner.relations.${relCls.id}`) }}
+                      </option>
+                    </select>
+                  </label>
+
+                  <div class="grid grid-cols-5 gap-1.5">
+                    <label class="col-span-3 block space-y-1">
+                      <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                        {{ t('explorer.ner.counterpartyLabel') }}
+                      </span>
+                      <input
+                        v-model="addRelTargetName"
+                        @input="syncTargetClassFromExisting(addRelTargetName, (c) => (addRelTargetClass = c))"
+                        list="ner-entity-autocomplete"
+                        type="text"
+                        maxlength="90"
+                        class="w-full px-2 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100"
+                      />
+                    </label>
+                    <label class="col-span-2 block space-y-1">
+                      <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                        {{ t('explorer.ner.colClass') }}
+                      </span>
+                      <select
+                        v-model="addRelTargetClass"
+                        class="w-full px-1.5 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 cursor-pointer"
+                      >
+                        <option v-for="cls in NER_CLASSES" :key="cls.id" :value="cls.id">
+                          {{ t(`explorer.ner.classes.${cls.id}`) }}
+                        </option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <label class="block space-y-1">
+                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                      {{ t('explorer.ner.sourcePostLabel') }}
+                    </span>
+                    <select
+                      v-model="addRelPostKey"
+                      class="w-full px-2 py-1.5 text-[11px] font-mono bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 cursor-pointer"
+                    >
+                      <option v-for="opt in availableEntityPostOptions" :key="opt.postKey" :value="opt.postKey">
+                        {{ formatNerTimestamp(opt.timestampMs) }} · {{ opt.snippet }}
+                      </option>
+                    </select>
+                  </label>
+
+                  <label class="block space-y-1">
+                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                      {{ t('explorer.ner.quoteLabel') }}
+                    </span>
+                    <input
+                      v-model="addRelQuote"
+                      type="text"
+                      maxlength="220"
+                      :placeholder="t('explorer.ner.quotePlaceholder')"
+                      class="w-full px-2 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100"
+                    />
+                  </label>
+
+                  <div class="flex items-center gap-2 pt-0.5">
+                    <button
+                      type="button"
+                      @click="submitAddEntityRelation(inspectedEntity)"
+                      :disabled="!addRelTargetName.trim() || !addRelPostKey"
+                      class="flex-1 py-1.5 px-2.5 rounded-lg bg-teal-600 hover:bg-teal-700 disabled:opacity-45 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      {{ t('explorer.ner.save') }}
+                    </button>
+                    <button
+                      type="button"
+                      @click="isAddingEntityRelation = false"
+                      class="py-1.5 px-2.5 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-xs font-semibold cursor-pointer whitespace-nowrap"
+                    >
+                      {{ t('explorer.ner.cancel') }}
+                    </button>
+                  </div>
+                </div>
+
+                <div
+                  v-if="inspectedEntityRelations.length > 0"
+                  class="divide-y divide-gray-200/60 dark:divide-gray-700/60"
+                >
+                  <div
                     v-for="rel in inspectedEntityRelations"
                     :key="rel.id"
-                    type="button"
-                    @click="jumpToRelation(rel)"
-                    class="w-full text-left py-2 hover:bg-white/80 dark:hover:bg-gray-800/70 px-1.5 rounded-lg transition-colors cursor-pointer space-y-0.5"
+                    class="py-2 px-1.5 rounded-lg hover:bg-white/80 dark:hover:bg-gray-800/70 transition-colors flex items-start justify-between gap-2"
                   >
-                    <div class="text-xs font-semibold text-gray-900 dark:text-gray-100">
-                      {{ rel.subjectName }} → {{ t(`explorer.ner.relations.${rel.relationClass}`) }} → {{ rel.objectName }}
+                    <button
+                      type="button"
+                      @click="jumpToRelation(rel)"
+                      class="flex-1 min-w-0 text-left cursor-pointer space-y-0.5"
+                    >
+                      <div class="text-xs font-semibold text-gray-900 dark:text-gray-100 break-words">
+                        {{ rel.subjectName }} → {{ t(`explorer.ner.relations.${rel.relationClass}`) }} → {{ rel.objectName }}
+                      </div>
+                      <div class="text-[10px] font-mono tabular-nums text-gray-500 dark:text-gray-400">
+                        {{ formatNerTimestamp(rel.latestTimestampMs) }} · {{ rel.occurrences.length }}×
+                      </div>
+                    </button>
+
+                    <div class="flex items-center gap-0.5 shrink-0">
+                      <button
+                        type="button"
+                        @click="openRelationInspector(rel, true)"
+                        class="p-1 rounded-md text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 hover:bg-gray-100 dark:hover:bg-gray-700/70 transition-colors cursor-pointer"
+                        :title="t('explorer.ner.inspectRelation')"
+                      >
+                        <Pencil class="w-3 h-3" />
+                      </button>
+                      <template v-if="confirmDeleteLinkedRelId === rel.id">
+                        <button
+                          type="button"
+                          @click="confirmRemoveLinkedRelation(rel.id)"
+                          class="p-1 rounded-md text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
+                          :title="t('explorer.ner.confirm')"
+                        >
+                          <Check class="w-3 h-3" />
+                        </button>
+                        <button
+                          type="button"
+                          @click="confirmDeleteLinkedRelId = null"
+                          class="p-1 rounded-md text-gray-400 hover:text-gray-600 cursor-pointer"
+                          :title="t('explorer.ner.cancel')"
+                        >
+                          <X class="w-3 h-3" />
+                        </button>
+                      </template>
+                      <button
+                        v-else
+                        type="button"
+                        @click="confirmDeleteLinkedRelId = rel.id"
+                        class="p-1 rounded-md text-gray-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-gray-100 dark:hover:bg-gray-700/70 transition-colors cursor-pointer"
+                        :title="t('explorer.ner.deleteRelation')"
+                      >
+                        <Trash2 class="w-3 h-3" />
+                      </button>
                     </div>
-                    <div class="text-[10px] font-mono tabular-nums text-gray-500 dark:text-gray-400">
-                      {{ formatNerTimestamp(rel.latestTimestampMs) }} · {{ rel.occurrences.length }}×
-                    </div>
-                  </button>
+                  </div>
                 </div>
               </div>
 
@@ -498,6 +938,7 @@
               </div>
             </div>
 
+            <!-- INSPECT & EDIT RELATION -->
             <div v-else-if="inspectedRelation" class="space-y-4">
               <div class="flex items-start justify-between gap-2">
                 <div class="min-w-0">
@@ -511,13 +952,185 @@
                     {{ inspectedRelation.occurrences.length }} {{ t('explorer.ner.timestampedClaims') }}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  @click="selectedInspectorRelId = null"
-                  class="p-1 text-gray-400 hover:text-gray-600 cursor-pointer"
-                >
-                  <X class="w-4 h-4" />
-                </button>
+                <div class="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    @click="startEditRelation(inspectedRelation)"
+                    :class="[
+                      'p-1.5 rounded-lg transition-colors cursor-pointer',
+                      isEditingRelation
+                        ? 'bg-teal-100 dark:bg-teal-900/50 text-teal-700 dark:text-teal-300'
+                        : 'text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 hover:bg-white dark:hover:bg-gray-800',
+                    ]"
+                    :title="t('explorer.ner.editRelation')"
+                  >
+                    <Pencil class="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    @click="confirmDeleteRelation = !confirmDeleteRelation"
+                    :class="[
+                      'p-1.5 rounded-lg transition-colors cursor-pointer',
+                      confirmDeleteRelation
+                        ? 'bg-rose-100 dark:bg-rose-900/50 text-rose-600 dark:text-rose-400'
+                        : 'text-gray-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-white dark:hover:bg-gray-800',
+                    ]"
+                    :title="t('explorer.ner.deleteRelation')"
+                  >
+                    <Trash2 class="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    @click="closeInspectorDrawer"
+                    class="p-1 text-gray-400 hover:text-gray-600 cursor-pointer"
+                  >
+                    <X class="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <!-- Inline Delete Relation Confirmation -->
+              <div
+                v-if="confirmDeleteRelation"
+                class="p-2.5 rounded-xl border border-rose-200 dark:border-rose-800/70 bg-rose-50/70 dark:bg-rose-950/30 space-y-2"
+              >
+                <p class="text-[11px] font-medium text-rose-700 dark:text-rose-300">
+                  {{ t('explorer.ner.confirmDeleteRelation') }}
+                </p>
+                <div class="flex items-center gap-2">
+                  <button
+                    type="button"
+                    @click="confirmRemoveRelation(inspectedRelation)"
+                    class="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {{ t('explorer.ner.delete') }}
+                  </button>
+                  <button
+                    type="button"
+                    @click="confirmDeleteRelation = false"
+                    class="px-2.5 py-1 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 text-[11px] font-semibold cursor-pointer whitespace-nowrap"
+                  >
+                    {{ t('explorer.ner.cancel') }}
+                  </button>
+                </div>
+              </div>
+
+              <!-- Inline Relation Editor Form -->
+              <div
+                v-if="isEditingRelation"
+                class="p-3 rounded-xl border border-gray-200/80 dark:border-gray-700/80 bg-white dark:bg-gray-800 space-y-2.5"
+              >
+                <div class="grid grid-cols-5 gap-1.5">
+                  <label class="col-span-3 block space-y-1">
+                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                      {{ t('explorer.ner.subjectLabel') }}
+                    </span>
+                    <input
+                      v-model="editRelSubjName"
+                      @input="syncTargetClassFromExisting(editRelSubjName, (c) => (editRelSubjClass = c))"
+                      list="ner-entity-autocomplete"
+                      type="text"
+                      maxlength="90"
+                      class="w-full px-2 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100"
+                    />
+                  </label>
+                  <label class="col-span-2 block space-y-1">
+                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                      {{ t('explorer.ner.colClass') }}
+                    </span>
+                    <select
+                      v-model="editRelSubjClass"
+                      class="w-full px-1.5 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 cursor-pointer"
+                    >
+                      <option v-for="cls in NER_CLASSES" :key="cls.id" :value="cls.id">
+                        {{ t(`explorer.ner.classes.${cls.id}`) }}
+                      </option>
+                    </select>
+                  </label>
+                </div>
+
+                <div class="flex items-end gap-1.5">
+                  <label class="flex-1 block space-y-1">
+                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                      {{ t('explorer.ner.relationLabel') }}
+                    </span>
+                    <select
+                      v-model="editRelClass"
+                      class="w-full px-2 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 cursor-pointer"
+                    >
+                      <option v-for="relCls in RELATION_CLASSES" :key="relCls.id" :value="relCls.id">
+                        {{ t(`explorer.ner.relations.${relCls.id}`) }}
+                      </option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    @click="swapEditRelationEndpoints"
+                    class="p-1.5 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-teal-600 dark:hover:text-teal-400 hover:bg-gray-50 dark:hover:bg-gray-900 cursor-pointer shrink-0"
+                    :title="t('explorer.ner.swapDirection')"
+                  >
+                    <ArrowLeftRight class="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div class="grid grid-cols-5 gap-1.5">
+                  <label class="col-span-3 block space-y-1">
+                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                      {{ t('explorer.ner.objectLabel') }}
+                    </span>
+                    <input
+                      v-model="editRelObjName"
+                      @input="syncTargetClassFromExisting(editRelObjName, (c) => (editRelObjClass = c))"
+                      list="ner-entity-autocomplete"
+                      type="text"
+                      maxlength="90"
+                      class="w-full px-2 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100"
+                    />
+                  </label>
+                  <label class="col-span-2 block space-y-1">
+                    <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                      {{ t('explorer.ner.colClass') }}
+                    </span>
+                    <select
+                      v-model="editRelObjClass"
+                      class="w-full px-1.5 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 cursor-pointer"
+                    >
+                      <option v-for="cls in NER_CLASSES" :key="cls.id" :value="cls.id">
+                        {{ t(`explorer.ner.classes.${cls.id}`) }}
+                      </option>
+                    </select>
+                  </label>
+                </div>
+
+                <label v-if="editRelOnlyPostKey" class="block space-y-1">
+                  <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400">
+                    {{ t('explorer.ner.quoteLabel') }}
+                  </span>
+                  <input
+                    v-model="editRelQuote"
+                    type="text"
+                    maxlength="220"
+                    class="w-full px-2 py-1.5 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100"
+                  />
+                </label>
+
+                <div class="flex items-center gap-2 pt-0.5">
+                  <button
+                    type="button"
+                    @click="saveEditRelation(inspectedRelation)"
+                    :disabled="!editRelSubjName.trim() || !editRelObjName.trim()"
+                    class="flex-1 py-1.5 px-2.5 rounded-lg bg-teal-600 hover:bg-teal-700 disabled:opacity-45 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {{ t('explorer.ner.save') }}
+                  </button>
+                  <button
+                    type="button"
+                    @click="cancelEditRelation"
+                    class="py-1.5 px-2.5 rounded-lg bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 text-xs font-semibold cursor-pointer whitespace-nowrap"
+                  >
+                    {{ t('explorer.ner.cancel') }}
+                  </button>
+                </div>
               </div>
 
               <button
@@ -534,15 +1147,33 @@
                   :key="idx"
                   class="p-2.5 rounded-xl bg-white dark:bg-gray-800 border border-gray-200/70 dark:border-gray-700/70 space-y-1.5"
                 >
-                  <div class="flex items-center justify-between text-[10px] font-mono tabular-nums text-gray-500 dark:text-gray-400">
+                  <div class="flex items-center justify-between gap-2 text-[10px] font-mono tabular-nums text-gray-500 dark:text-gray-400">
                     <span>{{ formatNerTimestamp(occ.timestampMs) }}</span>
-                    <button
-                      type="button"
-                      @click="jumpToSingleRelationOccurrence(inspectedRelation, occ)"
-                      class="text-teal-600 dark:text-teal-400 font-sans font-bold hover:underline cursor-pointer"
-                    >
-                      {{ t('explorer.ner.jumpToPost') }}
-                    </button>
+                    <div class="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        @click="startEditSingleOccurrence(inspectedRelation, occ)"
+                        class="text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 cursor-pointer"
+                        :title="t('explorer.ner.editRelation')"
+                      >
+                        <Pencil class="w-3 h-3" />
+                      </button>
+                      <button
+                        type="button"
+                        @click="removeSingleOccurrence(inspectedRelation, occ)"
+                        class="text-gray-400 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer"
+                        :title="t('explorer.ner.delete')"
+                      >
+                        <Trash2 class="w-3 h-3" />
+                      </button>
+                      <button
+                        type="button"
+                        @click="jumpToSingleRelationOccurrence(inspectedRelation, occ)"
+                        class="text-teal-600 dark:text-teal-400 font-sans font-bold hover:underline cursor-pointer"
+                      >
+                        {{ t('explorer.ner.jumpToPost') }}
+                      </button>
+                    </div>
                   </div>
                   <p class="text-xs text-gray-700 dark:text-gray-300 leading-relaxed">
                     “{{ occ.evidenceQuote }}”
@@ -561,14 +1192,19 @@
 import { ref, computed, watch, nextTick, onBeforeUnmount } from "vue";
 import { useI18n } from "../../i18n";
 import {
+  ArrowLeftRight,
+  Check,
   Clock,
   Loader2,
   Network,
+  Pencil,
+  Plus,
   RotateCcw,
   ScanSearch,
   Search,
   Square,
   Table2,
+  Trash2,
   X,
   ZoomIn,
   ZoomOut,
@@ -585,16 +1221,25 @@ import {
   NER_CLASS_MAP,
   RELATION_CLASSES,
   RELATION_CLASS_MAP,
+  buildNerRelationKey,
   formatNerDateDay,
   formatNerTimestamp,
+  normalizeEntityKey,
   type ActiveNerFeedFilter,
   type AggregatedNerEntity,
   type AggregatedNerIndex,
   type AggregatedNerRelation,
+  type EntityEngineSource,
   type NerClassId,
   type RelationClassId,
   type RelationOccurrence,
 } from "../../utils/explorerNer";
+
+export interface NerPostSummary {
+  postKey: string;
+  timestampMs: number;
+  snippet: string;
+}
 
 const props = defineProps<{
   open: boolean;
@@ -603,6 +1248,7 @@ const props = defineProps<{
   totalPostsCount: number;
   uncachedCount: number;
   isExtracting: boolean;
+  postSummaries?: NerPostSummary[];
 }>();
 
 const emit = defineEmits<{
@@ -610,6 +1256,61 @@ const emit = defineEmits<{
   (e: "extract", forceReextract: boolean): void;
   (e: "cancel"): void;
   (e: "select-filter", filter: ActiveNerFeedFilter, targetPostKey?: string): void;
+  (
+    e: "update-entity",
+    payload: {
+      targetEntityId: string;
+      newCanonicalName: string;
+      newNerClass: NerClassId;
+      preserveAliases: boolean;
+    }
+  ): void;
+  (e: "delete-entity", targetEntityId: string): void;
+  (
+    e: "create-entity",
+    payload: {
+      postKey: string;
+      timestampMs: number;
+      name: string;
+      nerClass: NerClassId;
+      quote?: string;
+    }
+  ): void;
+  (
+    e: "update-relation",
+    payload: {
+      targetRelationId: string;
+      newSubjectName: string;
+      newSubjectClass: NerClassId;
+      newRelationClass: RelationClassId;
+      newObjectName: string;
+      newObjectClass: NerClassId;
+      newQuote?: string;
+      onlyPostKey?: string;
+      targetOccurrenceQuote?: string;
+    }
+  ): void;
+  (
+    e: "delete-relation",
+    payload: {
+      targetRelationId: string;
+      onlyPostKey?: string;
+      targetOccurrenceQuote?: string;
+    }
+  ): void;
+  (
+    e: "create-relation",
+    payload: {
+      postKey: string;
+      timestampMs: number;
+      subjectName: string;
+      subjectClass: NerClassId;
+      relationClass: RelationClassId;
+      objectName: string;
+      objectClass: NerClassId;
+      evidenceQuote?: string;
+    }
+  ): void;
 }>();
 
 const { t } = useI18n();
@@ -628,6 +1329,41 @@ const dirSortAsc = ref(false);
 const selectedInspectorEntityId = ref<string | null>(null);
 const selectedInspectorRelId = ref<string | null>(null);
 
+// Manual Entity & Relation Editor State
+const isCreatingEntity = ref(false);
+const createEntityName = ref("");
+const createEntityClass = ref<NerClassId>("person");
+const createEntityPostKey = ref("");
+const createEntityQuote = ref("");
+
+const isEditingEntity = ref(false);
+const editEntityName = ref("");
+const editEntityClass = ref<NerClassId>("person");
+const editEntityKeepAlias = ref(true);
+const confirmDeleteEntity = ref(false);
+
+const isAddingEntityRelation = ref(false);
+const addRelOutgoing = ref(true);
+const addRelClass = ref<RelationClassId>("affiliated_with");
+const addRelTargetName = ref("");
+const addRelTargetClass = ref<NerClassId>("organization");
+const addRelPostKey = ref("");
+const addRelQuote = ref("");
+const confirmDeleteLinkedRelId = ref<string | null>(null);
+
+const isEditingRelation = ref(false);
+const editRelSubjName = ref("");
+const editRelSubjClass = ref<NerClassId>("person");
+const editRelClass = ref<RelationClassId>("affiliated_with");
+const editRelObjName = ref("");
+const editRelObjClass = ref<NerClassId>("organization");
+const editRelOnlyPostKey = ref<string | undefined>(undefined);
+const editRelTargetQuote = ref<string | undefined>(undefined);
+const editRelQuote = ref("");
+const confirmDeleteRelation = ref(false);
+
+const confirmDeleteTimelineUid = ref<string | null>(null);
+
 const dateRangeMs = computed(() => {
   const start = dateFrom.value ? new Date(`${dateFrom.value}T00:00:00`).getTime() : 0;
   const end = dateTo.value ? new Date(`${dateTo.value}T23:59:59.999`).getTime() : Infinity;
@@ -639,6 +1375,34 @@ const totalRelationOccurrences = computed(() =>
 );
 
 const getNerMeta = (id: NerClassId) => NER_CLASS_MAP.get(id);
+
+const formatEntityEngines = (engines: EntityEngineSource[]): string[] => {
+  const labels: string[] = [];
+  for (const src of engines) {
+    if (src.engine === "manual") {
+      labels.push(t("explorer.ner.engineManual"));
+    } else if (src.engine === "gemini") {
+      labels.push(t("explorer.ner.engineAi"));
+    } else if (src.localTier === "ml") {
+      const base =
+        src.mlModel === "cjk-bert"
+          ? "CJK BERT"
+          : src.mlModel === "gliner"
+            ? "GLiNER"
+            : t("explorer.ner.engineNeuralLocalShort");
+      const prov =
+        src.mlProvider === "webgpu"
+          ? "WebGPU"
+          : src.mlProvider === "wasm"
+            ? "WASM"
+            : "";
+      labels.push(prov ? `${base} (${prov})` : base);
+    } else {
+      labels.push(t("explorer.ner.engineStructured"));
+    }
+  }
+  return Array.from(new Set(labels));
+};
 
 const filteredDirectoryEntities = computed(() => {
   const q = query.value.trim().toLowerCase();
@@ -748,6 +1512,291 @@ const inspectedEntityRelations = computed(() => {
   const eid = inspectedEntity.value.id;
   return props.index.relations.filter((r) => r.subjectId === eid || r.objectId === eid);
 });
+
+const editEntityMergeTarget = computed<AggregatedNerEntity | null>(() => {
+  if (!isEditingEntity.value || !inspectedEntity.value) return null;
+  const cleanName = editEntityName.value.trim();
+  if (!cleanName) return null;
+  const candidateId = normalizeEntityKey(editEntityClass.value, cleanName);
+  if (candidateId === inspectedEntity.value.id) return null;
+  return props.index.entityById.get(candidateId) || null;
+});
+
+const availableEntityPostOptions = computed<NerPostSummary[]>(() => {
+  const summaries = props.postSummaries || [];
+  if (!inspectedEntity.value) return summaries;
+  const entityPostSet = new Set(inspectedEntity.value.postKeys);
+  const byKey = new Map<string, NerPostSummary>();
+  for (const s of summaries) {
+    byKey.set(s.postKey, s);
+  }
+  const preferred: NerPostSummary[] = [];
+  for (const pk of inspectedEntity.value.postKeys) {
+    const found = byKey.get(pk);
+    if (found) preferred.push(found);
+  }
+  if (preferred.length === 0 && inspectedEntity.value.sampleQuotes.length > 0) {
+    for (const q of inspectedEntity.value.sampleQuotes) {
+      preferred.push({
+        postKey: q.postKey,
+        timestampMs: q.timestampMs,
+        snippet: q.quote.slice(0, 48),
+      });
+    }
+  }
+  const rest = summaries.filter((s) => !entityPostSet.has(s.postKey));
+  return [...preferred, ...rest].slice(0, 120);
+});
+
+const resetAllEditorStates = () => {
+  isCreatingEntity.value = false;
+  isEditingEntity.value = false;
+  confirmDeleteEntity.value = false;
+  isAddingEntityRelation.value = false;
+  confirmDeleteLinkedRelId.value = null;
+  isEditingRelation.value = false;
+  editRelOnlyPostKey.value = undefined;
+  editRelTargetQuote.value = undefined;
+  confirmDeleteRelation.value = false;
+  confirmDeleteTimelineUid.value = null;
+};
+
+const selectInspectorEntity = (entityId: string) => {
+  resetAllEditorStates();
+  selectedInspectorEntityId.value = entityId;
+  selectedInspectorRelId.value = null;
+};
+
+const closeInspectorDrawer = () => {
+  resetAllEditorStates();
+  selectedInspectorEntityId.value = null;
+  selectedInspectorRelId.value = null;
+};
+
+const openCreateEntityDrawer = () => {
+  resetAllEditorStates();
+  selectedInspectorEntityId.value = null;
+  selectedInspectorRelId.value = null;
+  isCreatingEntity.value = true;
+  createEntityName.value = "";
+  createEntityClass.value = nerClassFilter.value !== "all" ? nerClassFilter.value : "person";
+  createEntityPostKey.value = props.postSummaries?.[0]?.postKey || "";
+  createEntityQuote.value = "";
+};
+
+const submitCreateEntity = () => {
+  const cleanName = createEntityName.value.trim();
+  const postKey = createEntityPostKey.value;
+  if (!cleanName || !postKey) return;
+  const postSummary = props.postSummaries?.find((p) => p.postKey === postKey);
+  const nextEntityId = normalizeEntityKey(createEntityClass.value, cleanName);
+  emit("create-entity", {
+    postKey,
+    timestampMs: postSummary?.timestampMs || 0,
+    name: cleanName,
+    nerClass: createEntityClass.value,
+    quote: createEntityQuote.value.trim() || undefined,
+  });
+  isCreatingEntity.value = false;
+  selectedInspectorEntityId.value = nextEntityId;
+  selectedInspectorRelId.value = null;
+};
+
+const startEditEntity = (ent: AggregatedNerEntity) => {
+  if (isEditingEntity.value) {
+    isEditingEntity.value = false;
+    return;
+  }
+  confirmDeleteEntity.value = false;
+  isAddingEntityRelation.value = false;
+  editEntityName.value = ent.canonicalName;
+  editEntityClass.value = ent.nerClass;
+  editEntityKeepAlias.value = true;
+  isEditingEntity.value = true;
+};
+
+const saveEditEntity = (ent: AggregatedNerEntity) => {
+  const cleanName = editEntityName.value.trim();
+  if (!cleanName) return;
+  const nextEntityId = normalizeEntityKey(editEntityClass.value, cleanName);
+  emit("update-entity", {
+    targetEntityId: ent.id,
+    newCanonicalName: cleanName,
+    newNerClass: editEntityClass.value,
+    preserveAliases: editEntityKeepAlias.value,
+  });
+  isEditingEntity.value = false;
+  selectedInspectorEntityId.value = nextEntityId;
+  selectedInspectorRelId.value = null;
+};
+
+const confirmRemoveEntity = (ent: AggregatedNerEntity) => {
+  emit("delete-entity", ent.id);
+  closeInspectorDrawer();
+};
+
+const syncTargetClassFromExisting = (name: string, setter: (cls: NerClassId) => void) => {
+  const cleanLower = name.trim().toLowerCase();
+  if (!cleanLower) return;
+  const match = props.index.entities.find(
+    (e) =>
+      e.canonicalName.toLowerCase() === cleanLower ||
+      e.aliases.some((a) => a.toLowerCase() === cleanLower)
+  );
+  if (match) setter(match.nerClass);
+};
+
+const toggleAddEntityRelation = (_ent: AggregatedNerEntity) => {
+  if (isAddingEntityRelation.value) {
+    isAddingEntityRelation.value = false;
+    return;
+  }
+  confirmDeleteEntity.value = false;
+  isEditingEntity.value = false;
+  addRelOutgoing.value = true;
+  addRelClass.value = "affiliated_with";
+  addRelTargetName.value = "";
+  addRelTargetClass.value = "organization";
+  addRelPostKey.value = availableEntityPostOptions.value[0]?.postKey || "";
+  addRelQuote.value = "";
+  isAddingEntityRelation.value = true;
+};
+
+const submitAddEntityRelation = (ent: AggregatedNerEntity) => {
+  const targetClean = addRelTargetName.value.trim();
+  const postKey = addRelPostKey.value;
+  if (!targetClean || !postKey) return;
+  const entKey = normalizeEntityKey(ent.nerClass, ent.canonicalName);
+  const targetKey = normalizeEntityKey(addRelTargetClass.value, targetClean);
+  if (entKey === targetKey) return;
+
+  const postOpt = availableEntityPostOptions.value.find((p) => p.postKey === postKey);
+  const subjectName = addRelOutgoing.value ? ent.canonicalName : targetClean;
+  const subjectClass = addRelOutgoing.value ? ent.nerClass : addRelTargetClass.value;
+  const objectName = addRelOutgoing.value ? targetClean : ent.canonicalName;
+  const objectClass = addRelOutgoing.value ? addRelTargetClass.value : ent.nerClass;
+
+  emit("create-relation", {
+    postKey,
+    timestampMs: postOpt?.timestampMs || 0,
+    subjectName,
+    subjectClass,
+    relationClass: addRelClass.value,
+    objectName,
+    objectClass,
+    evidenceQuote: addRelQuote.value.trim() || undefined,
+  });
+  isAddingEntityRelation.value = false;
+  addRelTargetName.value = "";
+  addRelQuote.value = "";
+};
+
+const openRelationInspector = (rel: AggregatedNerRelation, openEditor = false) => {
+  resetAllEditorStates();
+  selectedInspectorEntityId.value = null;
+  selectedInspectorRelId.value = rel.id;
+  if (openEditor) {
+    startEditRelation(rel);
+  }
+};
+
+const confirmRemoveLinkedRelation = (relId: string) => {
+  emit("delete-relation", { targetRelationId: relId });
+  confirmDeleteLinkedRelId.value = null;
+};
+
+const startEditRelation = (rel: AggregatedNerRelation, occ?: RelationOccurrence) => {
+  if (!occ && isEditingRelation.value && !editRelOnlyPostKey.value) {
+    cancelEditRelation();
+    return;
+  }
+  confirmDeleteRelation.value = false;
+  editRelSubjName.value = rel.subjectName;
+  editRelSubjClass.value = rel.subjectClass;
+  editRelClass.value = rel.relationClass;
+  editRelObjName.value = rel.objectName;
+  editRelObjClass.value = rel.objectClass;
+  editRelOnlyPostKey.value = occ?.postKey;
+  editRelTargetQuote.value = occ ? occ.evidenceQuote : undefined;
+  editRelQuote.value = occ?.evidenceQuote || "";
+  isEditingRelation.value = true;
+};
+
+const swapEditRelationEndpoints = () => {
+  const prevName = editRelSubjName.value;
+  const prevClass = editRelSubjClass.value;
+  editRelSubjName.value = editRelObjName.value;
+  editRelSubjClass.value = editRelObjClass.value;
+  editRelObjName.value = prevName;
+  editRelObjClass.value = prevClass;
+};
+
+const saveEditRelation = (rel: AggregatedNerRelation) => {
+  const subjClean = editRelSubjName.value.trim();
+  const objClean = editRelObjName.value.trim();
+  if (!subjClean || !objClean) return;
+  const subjId = normalizeEntityKey(editRelSubjClass.value, subjClean);
+  const objId = normalizeEntityKey(editRelObjClass.value, objClean);
+  if (subjId === objId) return;
+
+  const nextRelId = buildNerRelationKey(subjId, editRelClass.value, objId);
+  emit("update-relation", {
+    targetRelationId: rel.id,
+    newSubjectName: subjClean,
+    newSubjectClass: editRelSubjClass.value,
+    newRelationClass: editRelClass.value,
+    newObjectName: objClean,
+    newObjectClass: editRelObjClass.value,
+    newQuote: editRelOnlyPostKey.value ? editRelQuote.value : undefined,
+    onlyPostKey: editRelOnlyPostKey.value,
+    targetOccurrenceQuote: editRelTargetQuote.value,
+  });
+
+  selectedInspectorRelId.value = nextRelId;
+  selectedInspectorEntityId.value = null;
+  cancelEditRelation();
+};
+
+const cancelEditRelation = () => {
+  isEditingRelation.value = false;
+  editRelOnlyPostKey.value = undefined;
+  editRelTargetQuote.value = undefined;
+};
+
+const confirmRemoveRelation = (rel: AggregatedNerRelation) => {
+  emit("delete-relation", { targetRelationId: rel.id });
+  closeInspectorDrawer();
+};
+
+const startEditSingleOccurrence = (rel: AggregatedNerRelation, occ: RelationOccurrence) => {
+  startEditRelation(rel, occ);
+};
+
+const removeSingleOccurrence = (rel: AggregatedNerRelation, occ: RelationOccurrence) => {
+  emit("delete-relation", {
+    targetRelationId: rel.id,
+    onlyPostKey: occ.postKey,
+    targetOccurrenceQuote: occ.evidenceQuote,
+  });
+  if (rel.occurrences.length <= 1) {
+    closeInspectorDrawer();
+  }
+};
+
+const inspectAndEditTimelineClaim = (item: TimelineClaimItem) => {
+  modalMode.value = "directory";
+  openRelationInspector(item.relation, false);
+  startEditRelation(item.relation, item.occurrence);
+};
+
+const confirmRemoveTimelineClaim = (item: TimelineClaimItem) => {
+  emit("delete-relation", {
+    targetRelationId: item.relation.id,
+    onlyPostKey: item.occurrence.postKey,
+    targetOccurrenceQuote: item.occurrence.evidenceQuote,
+  });
+  confirmDeleteTimelineUid.value = null;
+};
 
 const toggleDirSort = (field: "name" | "mentions" | "firstSeen" | "lastSeen") => {
   if (dirSortField.value === field) {
@@ -1260,6 +2309,7 @@ const buildGraphData = async () => {
 
   cyInstance.on("tap", "node", (ev) => {
     const id = ev.target.id();
+    resetAllEditorStates();
     selectedInspectorEntityId.value = id;
     selectedInspectorRelId.value = null;
     syncGraphHighlights(true);
@@ -1268,6 +2318,7 @@ const buildGraphData = async () => {
   cyInstance.on("tap", "edge", (ev) => {
     const relId = ev.target.data("relId") as string | undefined;
     if (relId) {
+      resetAllEditorStates();
       selectedInspectorRelId.value = relId;
       selectedInspectorEntityId.value = null;
       syncGraphHighlights(true);
@@ -1276,8 +2327,7 @@ const buildGraphData = async () => {
 
   cyInstance.on("tap", (ev) => {
     if (ev.target === cyInstance) {
-      selectedInspectorEntityId.value = null;
-      selectedInspectorRelId.value = null;
+      closeInspectorDrawer();
       syncGraphHighlights(true);
     }
   });
@@ -1347,6 +2397,9 @@ const resetGraphLayout = () => {
 watch(
   [() => props.open, modalMode, filteredRelations, filteredDirectoryEntities],
   () => {
+    if (!props.open) {
+      resetAllEditorStates();
+    }
     if (props.open && modalMode.value === "graph") {
       nextTick(() => {
         if (graphWrapperRef.value && !resizeObserver && typeof ResizeObserver !== "undefined") {

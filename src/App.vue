@@ -164,10 +164,18 @@ const TileTreemapView = defineAsyncComponent(() => import("./components/listen/T
 const StorageMonitorWidget = defineAsyncComponent(() => import("./components/listen/StorageMonitorWidget.vue"));
 import DateRangePicker from "./components/listen/DateRangePicker.vue";
 import ExplorerNerWidget from "./components/explorer/ExplorerNerWidget.vue";
+import type { NerPostSummary } from "./components/explorer/ExplorerNerModal.vue";
 const ExplorerNerModal = defineAsyncComponent(() => import("./components/explorer/ExplorerNerModal.vue"));
 import {
   aggregateNerIndex,
+  applyManualEntityCreate,
+  applyManualEntityDelete,
+  applyManualEntityUpdate,
+  applyManualRelationCreate,
+  applyManualRelationDelete,
+  applyManualRelationUpdate,
   clearChannelNerExtractions,
+  extractExplorerPostTimestampMs,
   extractPostPlainText,
   highlightNerTextInHtml,
   isNerRecordCurrent,
@@ -175,10 +183,13 @@ import {
   loadChannelNerExtractions,
   normalizeNerChannelKey,
   runChannelNerExtractionBatch,
+  saveChannelNerExtractions,
   type ActiveNerFeedFilter,
   type NerBackgroundUpgradeState,
   type NerBatchProgress,
+  type NerClassId,
   type PostNerExtractionRecord,
+  type RelationClassId,
 } from "./utils/explorerNer";
 import { detectBatchModelHint } from "./utils/nerCjkUtils";
 import {
@@ -12266,6 +12277,152 @@ const clearExplorerNerFeedFilter = () => {
   activeNerQuoteIndex.value = 0;
 };
 
+const explorerNerPostSummaries = computed<NerPostSummary[]>(() => {
+  if (!isNerModalOpen.value || posts.value.length === 0) return [];
+  const out: NerPostSummary[] = [];
+  for (const p of posts.value) {
+    const pk = String(p?.key || p?.id || "").trim();
+    if (!pk) continue;
+    const snippet = extractPostPlainText(p).replace(/\s+/g, " ").trim().slice(0, 54);
+    out.push({
+      postKey: pk,
+      timestampMs: extractExplorerPostTimestampMs(p),
+      snippet: snippet || pk,
+    });
+  }
+  out.sort((a, b) => b.timestampMs - a.timestampMs);
+  return out;
+});
+
+const handleNerUpdateEntity = async (payload: {
+  targetEntityId: string;
+  newCanonicalName: string;
+  newNerClass: NerClassId;
+  preserveAliases: boolean;
+}) => {
+  const res = applyManualEntityUpdate(explorerNerRecords.value, payload);
+  explorerNerRecords.value = res.nextRecords;
+  if (
+    activeNerFeedFilter.value?.type === "entity" &&
+    activeNerFeedFilter.value.id === payload.targetEntityId
+  ) {
+    const nextEnt = res.nextEntityId ? explorerNerIndex.value.entityById.get(res.nextEntityId) : undefined;
+    if (nextEnt) {
+      activeNerFeedFilter.value = {
+        type: "entity",
+        id: nextEnt.id,
+        label: nextEnt.canonicalName,
+        sublabel: activeNerFeedFilter.value.sublabel,
+        postKeys: nextEnt.postKeys,
+        quotes: nextEnt.sampleQuotes,
+        surfaceTerms: Array.from(new Set([nextEnt.canonicalName, ...nextEnt.aliases])),
+      };
+    } else {
+      clearExplorerNerFeedFilter();
+    }
+  }
+  if (res.changedRecords.length > 0) {
+    await saveChannelNerExtractions(res.changedRecords);
+  }
+};
+
+const handleNerDeleteEntity = async (targetEntityId: string) => {
+  const res = applyManualEntityDelete(explorerNerRecords.value, targetEntityId);
+  explorerNerRecords.value = res.nextRecords;
+  if (
+    activeNerFeedFilter.value?.type === "entity" &&
+    activeNerFeedFilter.value.id === targetEntityId
+  ) {
+    clearExplorerNerFeedFilter();
+  }
+  if (res.changedRecords.length > 0) {
+    await saveChannelNerExtractions(res.changedRecords);
+  }
+};
+
+const handleNerCreateEntity = async (payload: {
+  postKey: string;
+  timestampMs: number;
+  name: string;
+  nerClass: NerClassId;
+  quote?: string;
+}) => {
+  const channelId = currentChannelName.value || "";
+  if (!channelId) return;
+  const res = applyManualEntityCreate(explorerNerRecords.value, {
+    channelId,
+    ...payload,
+  });
+  explorerNerRecords.value = res.nextRecords;
+  if (res.changedRecords.length > 0) {
+    await saveChannelNerExtractions(res.changedRecords);
+  }
+};
+
+const handleNerUpdateRelation = async (payload: {
+  targetRelationId: string;
+  newSubjectName: string;
+  newSubjectClass: NerClassId;
+  newRelationClass: RelationClassId;
+  newObjectName: string;
+  newObjectClass: NerClassId;
+  newQuote?: string;
+  onlyPostKey?: string;
+  targetOccurrenceQuote?: string;
+}) => {
+  const res = applyManualRelationUpdate(explorerNerRecords.value, payload);
+  explorerNerRecords.value = res.nextRecords;
+  if (
+    activeNerFeedFilter.value?.type === "relation" &&
+    activeNerFeedFilter.value.id === payload.targetRelationId
+  ) {
+    clearExplorerNerFeedFilter();
+  }
+  if (res.changedRecords.length > 0) {
+    await saveChannelNerExtractions(res.changedRecords);
+  }
+};
+
+const handleNerDeleteRelation = async (payload: {
+  targetRelationId: string;
+  onlyPostKey?: string;
+  targetOccurrenceQuote?: string;
+}) => {
+  const res = applyManualRelationDelete(explorerNerRecords.value, payload);
+  explorerNerRecords.value = res.nextRecords;
+  if (
+    activeNerFeedFilter.value?.type === "relation" &&
+    activeNerFeedFilter.value.id === payload.targetRelationId
+  ) {
+    clearExplorerNerFeedFilter();
+  }
+  if (res.changedRecords.length > 0) {
+    await saveChannelNerExtractions(res.changedRecords);
+  }
+};
+
+const handleNerCreateRelation = async (payload: {
+  postKey: string;
+  timestampMs: number;
+  subjectName: string;
+  subjectClass: NerClassId;
+  relationClass: RelationClassId;
+  objectName: string;
+  objectClass: NerClassId;
+  evidenceQuote?: string;
+}) => {
+  const channelId = currentChannelName.value || "";
+  if (!channelId) return;
+  const res = applyManualRelationCreate(explorerNerRecords.value, {
+    channelId,
+    ...payload,
+  });
+  explorerNerRecords.value = res.nextRecords;
+  if (res.changedRecords.length > 0) {
+    await saveChannelNerExtractions(res.changedRecords);
+  }
+};
+
 watch(currentChannelName, async (newChannel) => {
     if (newChannel) {
       fetchChannelProfile(newChannel);
@@ -24343,10 +24500,17 @@ onUnmounted(() => {
         :total-posts-count="posts.length"
         :uncached-count="explorerNerUncachedCount"
         :is-extracting="isExtractingNer"
+        :post-summaries="explorerNerPostSummaries"
         @close="isNerModalOpen = false"
         @extract="runExplorerNerExtraction"
         @cancel="cancelExplorerNerExtraction"
         @select-filter="applyExplorerNerFeedFilter"
+        @update-entity="handleNerUpdateEntity"
+        @delete-entity="handleNerDeleteEntity"
+        @create-entity="handleNerCreateEntity"
+        @update-relation="handleNerUpdateRelation"
+        @delete-relation="handleNerDeleteRelation"
+        @create-relation="handleNerCreateRelation"
       />
 
       <!-- Photo Lightbox -->

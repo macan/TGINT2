@@ -168,7 +168,9 @@ export function isRecordUpgradeableToCurrentMl(
   channelId: string,
   postText?: string
 ): boolean {
-  if (!rec || rec.channelId !== channelId || rec.engine !== "local") return false;
+  if (!rec || rec.channelId !== channelId || rec.engine !== "local" || rec.manualEdited) {
+    return false;
+  }
   if (rec.localTier !== "ml") return true;
   if (
     postText &&
@@ -187,6 +189,7 @@ export function isNerRecordCurrent(
   postText?: string
 ): boolean {
   if (!rec || rec.channelId !== channelId) return false;
+  if (rec.manualEdited) return true;
   if (rec.engine === "gemini") {
     return rec.extractorVersion >= 1;
   }
@@ -232,9 +235,19 @@ export interface PostNerExtractionRecord {
   mlProvider?: "webgpu" | "wasm";
   mlModel?: WorkerMlModelFlavor;
   mlPipelineVersion?: number;
+  manualEdited?: boolean;
+  manualEditedAt?: number;
   entities: ExtractedPostEntity[];
   relations: ExtractedPostRelation[];
   updatedAt: number;
+}
+
+export interface EntityEngineSource {
+  key: string;
+  engine: "gemini" | "local" | "manual";
+  localTier?: "rules" | "ml";
+  mlModel?: WorkerMlModelFlavor;
+  mlProvider?: "webgpu" | "wasm";
 }
 
 export interface AggregatedNerEntity {
@@ -248,6 +261,7 @@ export interface AggregatedNerEntity {
   postKeys: string[];
   sampleQuotes: Array<{ postKey: string; timestampMs: number; quote: string }>;
   cooccurringIds: string[];
+  engines: EntityEngineSource[];
 }
 
 export interface RelationOccurrence {
@@ -424,7 +438,7 @@ export function coerceRelationClass(val: string | undefined): RelationClassId {
   return "affiliated_with";
 }
 
-function normalizeEntityKey(nerClass: NerClassId, canonical: string): string {
+export function normalizeEntityKey(nerClass: NerClassId, canonical: string): string {
   const cleaned = canonical
     .trim()
     .toLowerCase()
@@ -432,6 +446,18 @@ function normalizeEntityKey(nerClass: NerClassId, canonical: string): string {
     .replace(/[.,;:!?'"()[\]{}]/g, "")
     .replace(/\s+/g, " ");
   return `${nerClass}::${cleaned}`;
+}
+
+export function buildNerRelationKey(
+  subjectId: string,
+  relationClass: RelationClassId,
+  objectId: string
+): string {
+  const relMeta = RELATION_CLASS_MAP.get(relationClass);
+  const isDirected = relMeta?.directed !== false;
+  return isDirected
+    ? `${subjectId}=>${relationClass}=>${objectId}`
+    : [subjectId, objectId].sort().join(`<=${relationClass}=>`);
 }
 
 export function formatNerTimestamp(ms: number): string {
@@ -2383,10 +2409,44 @@ Rules:
 // Canonical Entity & Timestamped Relation Aggregation
 // ---------------------------------------------------------------------------
 
+function resolveRecordEngineSource(rec: PostNerExtractionRecord): EntityEngineSource {
+  if (rec.engine === "gemini") {
+    return { key: "gemini", engine: "gemini" };
+  }
+  if (rec.localTier === "ml") {
+    const modelPart = rec.mlModel || "ml";
+    const providerPart = rec.mlProvider || "";
+    return {
+      key: `local:ml:${modelPart}:${providerPart}`,
+      engine: "local",
+      localTier: "ml",
+      mlModel: rec.mlModel,
+      mlProvider: rec.mlProvider,
+    };
+  }
+  return {
+    key: "local:rules",
+    engine: "local",
+    localTier: "rules",
+  };
+}
+
+function entityEngineSortRank(src: EntityEngineSource): number {
+  if (src.engine === "manual") return 200;
+  if (src.engine === "gemini") return 0;
+  if (src.localTier === "ml") {
+    const modelRank = src.mlModel === "cjk-bert" ? 10 : src.mlModel === "gliner" ? 20 : 30;
+    const provRank = src.mlProvider === "webgpu" ? 1 : src.mlProvider === "wasm" ? 2 : 3;
+    return modelRank + provRank;
+  }
+  return 100;
+}
+
 export function aggregateNerIndex(records: PostNerExtractionRecord[]): AggregatedNerIndex {
   const entityMap = new Map<string, AggregatedNerEntity>();
   const aliasSetMap = new Map<string, Set<string>>();
   const postKeySetMap = new Map<string, Set<string>>();
+  const engineMapMap = new Map<string, Map<string, EntityEngineSource>>();
   const cooccurMap = new Map<string, Map<string, number>>();
   const relationMap = new Map<string, AggregatedNerRelation>();
   const relPostKeySetMap = new Map<string, Set<string>>();
@@ -2408,7 +2468,9 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
     nerClass: NerClassId,
     postKey: string,
     timestampMs: number,
-    quote: string
+    quote: string,
+    engineSource: EntityEngineSource,
+    isManualEdited = false
   ): AggregatedNerEntity => {
     const id = normalizeEntityKey(nerClass, canonicalName);
     let ent = entityMap.get(id);
@@ -2424,10 +2486,12 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
         postKeys: [],
         sampleQuotes: [],
         cooccurringIds: [],
+        engines: [],
       };
       entityMap.set(id, ent);
       aliasSetMap.set(id, new Set());
       postKeySetMap.set(id, new Set());
+      engineMapMap.set(id, new Map());
     }
 
     const aliases = aliasSetMap.get(id)!;
@@ -2439,6 +2503,12 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
     const pkeys = postKeySetMap.get(id)!;
     const isNewPost = !pkeys.has(postKey);
     pkeys.add(postKey);
+
+    const entEngineMap = engineMapMap.get(id)!;
+    entEngineMap.set(engineSource.key, engineSource);
+    if (isManualEdited) {
+      entEngineMap.set("manual", { key: "manual", engine: "manual" });
+    }
 
     ent.mentionCount += 1;
     totalMentions += 1;
@@ -2461,6 +2531,8 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
     if (rec.engine === "local") {
       localTiersUsed.add(rec.localTier === "ml" ? "ml" : "rules");
     }
+    const recEngineSource = resolveRecordEngineSource(rec);
+    const isManualEdited = Boolean(rec.manualEdited);
     const postEntityIds: string[] = [];
 
     for (const ent of rec.entities || []) {
@@ -2470,7 +2542,9 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
         ent.nerClass,
         rec.postKey,
         rec.timestampMs,
-        ent.quote
+        ent.quote,
+        recEngineSource,
+        isManualEdited
       );
       if (!postEntityIds.includes(agg.id)) {
         postEntityIds.push(agg.id);
@@ -2496,7 +2570,9 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
         rel.subjectClass,
         rec.postKey,
         rec.timestampMs,
-        rel.quote
+        rel.quote,
+        recEngineSource,
+        isManualEdited
       );
       const objEnt = ensureEntity(
         rel.object,
@@ -2504,14 +2580,12 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
         rel.objectClass,
         rec.postKey,
         rec.timestampMs,
-        rel.quote
+        rel.quote,
+        recEngineSource,
+        isManualEdited
       );
 
-      const relMeta = RELATION_CLASS_MAP.get(rel.relationClass);
-      const isDirected = relMeta?.directed !== false;
-      const pairKey = isDirected
-        ? `${subjEnt.id}=>${rel.relationClass}=>${objEnt.id}`
-        : [subjEnt.id, objEnt.id].sort().join(`<=${rel.relationClass}=>`);
+      const pairKey = buildNerRelationKey(subjEnt.id, rel.relationClass, objEnt.id);
 
       let aggRel = relationMap.get(pairKey);
       if (!aggRel) {
@@ -2561,6 +2635,9 @@ export function aggregateNerIndex(records: PostNerExtractionRecord[]): Aggregate
   const entities: AggregatedNerEntity[] = Array.from(entityMap.values()).map((ent) => {
     ent.aliases = Array.from(aliasSetMap.get(ent.id) || []);
     ent.postKeys = Array.from(postKeySetMap.get(ent.id) || []);
+    ent.engines = Array.from(engineMapMap.get(ent.id)?.values() || []).sort(
+      (a, b) => entityEngineSortRank(a) - entityEngineSortRank(b)
+    );
     ent.sampleQuotes.sort((a, b) => b.timestampMs - a.timestampMs);
     const coMap = cooccurMap.get(ent.id);
     if (coMap) {
@@ -2644,4 +2721,498 @@ export function highlightNerTextInHtml(
       );
     })
     .join("");
+}
+
+// ---------------------------------------------------------------------------
+// Manual Curation Mutations (Persistent Overrides on PostNerExtractionRecord)
+// ---------------------------------------------------------------------------
+
+export interface ManualNerMutationResult {
+  nextRecords: PostNerExtractionRecord[];
+  changedRecords: PostNerExtractionRecord[];
+  nextEntityId?: string;
+  nextRelationId?: string;
+}
+
+function dedupeRecordEntities(entities: ExtractedPostEntity[]): ExtractedPostEntity[] {
+  const byKey = new Map<string, ExtractedPostEntity>();
+  for (const ent of entities) {
+    const canonical = (ent.canonical || ent.name || "").trim();
+    const name = (ent.name || canonical).trim();
+    if (!canonical || !name) continue;
+    const key = normalizeEntityKey(ent.nerClass, canonical);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, {
+        name,
+        canonical,
+        nerClass: ent.nerClass,
+        quote: ent.quote || "",
+      });
+    } else if (!existing.quote && ent.quote) {
+      existing.quote = ent.quote;
+    }
+  }
+  return Array.from(byKey.values());
+}
+
+function dedupeRecordRelations(relations: ExtractedPostRelation[]): ExtractedPostRelation[] {
+  const seen = new Set<string>();
+  const out: ExtractedPostRelation[] = [];
+  for (const rel of relations) {
+    const subj = rel.subject.trim();
+    const obj = rel.object.trim();
+    if (!subj || !obj) continue;
+    const subjId = normalizeEntityKey(rel.subjectClass, subj);
+    const objId = normalizeEntityKey(rel.objectClass, obj);
+    if (subjId === objId) continue;
+    const exactKey = `${subjId}|${rel.relationClass}|${objId}|${(rel.quote || "").trim()}`;
+    if (seen.has(exactKey)) continue;
+    seen.add(exactKey);
+    out.push({
+      subject: subj,
+      subjectClass: rel.subjectClass,
+      relationClass: rel.relationClass,
+      object: obj,
+      objectClass: rel.objectClass,
+      quote: rel.quote || "",
+      confidence: typeof rel.confidence === "number" ? rel.confidence : 1,
+    });
+  }
+  return out;
+}
+
+export function applyManualEntityUpdate(
+  records: PostNerExtractionRecord[],
+  params: {
+    targetEntityId: string;
+    newCanonicalName: string;
+    newNerClass: NerClassId;
+    preserveAliases?: boolean;
+  }
+): ManualNerMutationResult {
+  const cleanName = params.newCanonicalName.trim();
+  if (!cleanName || !params.targetEntityId) {
+    return { nextRecords: records, changedRecords: [], nextEntityId: params.targetEntityId };
+  }
+
+  const nextEntityId = normalizeEntityKey(params.newNerClass, cleanName);
+  const preserveAliases = params.preserveAliases !== false;
+  const now = Date.now();
+  const changedRecords: PostNerExtractionRecord[] = [];
+
+  const nextRecords = records.map((rec) => {
+    let touched = false;
+
+    const mappedEntities = (rec.entities || []).map((ent) => {
+      const entId = normalizeEntityKey(ent.nerClass, ent.canonical || ent.name);
+      if (entId !== params.targetEntityId) return ent;
+      touched = true;
+      return {
+        name: preserveAliases && ent.name.trim() ? ent.name.trim() : cleanName,
+        canonical: cleanName,
+        nerClass: params.newNerClass,
+        quote: ent.quote,
+      };
+    });
+
+    const mappedRelations = (rec.relations || []).map((rel) => {
+      const subjId = normalizeEntityKey(rel.subjectClass, rel.subject);
+      const objId = normalizeEntityKey(rel.objectClass, rel.object);
+      if (subjId !== params.targetEntityId && objId !== params.targetEntityId) {
+        return rel;
+      }
+      touched = true;
+      return {
+        ...rel,
+        subject: subjId === params.targetEntityId ? cleanName : rel.subject,
+        subjectClass: subjId === params.targetEntityId ? params.newNerClass : rel.subjectClass,
+        object: objId === params.targetEntityId ? cleanName : rel.object,
+        objectClass: objId === params.targetEntityId ? params.newNerClass : rel.objectClass,
+      };
+    });
+
+    if (!touched) return rec;
+
+    const updated: PostNerExtractionRecord = {
+      ...rec,
+      entities: dedupeRecordEntities(mappedEntities),
+      relations: dedupeRecordRelations(mappedRelations),
+      manualEdited: true,
+      manualEditedAt: now,
+      updatedAt: now,
+    };
+    changedRecords.push(updated);
+    return updated;
+  });
+
+  return { nextRecords, changedRecords, nextEntityId };
+}
+
+export function applyManualEntityDelete(
+  records: PostNerExtractionRecord[],
+  targetEntityId: string
+): ManualNerMutationResult {
+  if (!targetEntityId) {
+    return { nextRecords: records, changedRecords: [] };
+  }
+  const now = Date.now();
+  const changedRecords: PostNerExtractionRecord[] = [];
+
+  const nextRecords = records.map((rec) => {
+    const filteredEntities = (rec.entities || []).filter(
+      (ent) => normalizeEntityKey(ent.nerClass, ent.canonical || ent.name) !== targetEntityId
+    );
+    const filteredRelations = (rec.relations || []).filter((rel) => {
+      const subjId = normalizeEntityKey(rel.subjectClass, rel.subject);
+      const objId = normalizeEntityKey(rel.objectClass, rel.object);
+      return subjId !== targetEntityId && objId !== targetEntityId;
+    });
+
+    if (
+      filteredEntities.length === (rec.entities || []).length &&
+      filteredRelations.length === (rec.relations || []).length
+    ) {
+      return rec;
+    }
+
+    const updated: PostNerExtractionRecord = {
+      ...rec,
+      entities: filteredEntities,
+      relations: filteredRelations,
+      manualEdited: true,
+      manualEditedAt: now,
+      updatedAt: now,
+    };
+    changedRecords.push(updated);
+    return updated;
+  });
+
+  return { nextRecords, changedRecords };
+}
+
+export function applyManualEntityCreate(
+  records: PostNerExtractionRecord[],
+  params: {
+    channelId: string;
+    postKey: string;
+    timestampMs: number;
+    name: string;
+    nerClass: NerClassId;
+    quote?: string;
+  }
+): ManualNerMutationResult {
+  const cleanName = params.name.trim();
+  const cleanChannelId = normalizeNerChannelKey(params.channelId);
+  if (!cleanName || !cleanChannelId || !params.postKey) {
+    return { nextRecords: records, changedRecords: [] };
+  }
+
+  const now = Date.now();
+  const nextEntityId = normalizeEntityKey(params.nerClass, cleanName);
+  const quote = (params.quote || cleanName).trim().slice(0, 220);
+  let foundRecord = false;
+  const changedRecords: PostNerExtractionRecord[] = [];
+
+  const nextRecords = records.map((rec) => {
+    if (rec.channelId !== cleanChannelId || rec.postKey !== params.postKey) {
+      return rec;
+    }
+    foundRecord = true;
+    const updated: PostNerExtractionRecord = {
+      ...rec,
+      entities: dedupeRecordEntities([
+        ...(rec.entities || []),
+        {
+          name: cleanName,
+          canonical: cleanName,
+          nerClass: params.nerClass,
+          quote,
+        },
+      ]),
+      manualEdited: true,
+      manualEditedAt: now,
+      updatedAt: now,
+    };
+    changedRecords.push(updated);
+    return updated;
+  });
+
+  if (!foundRecord) {
+    const created: PostNerExtractionRecord = {
+      id: `${cleanChannelId}::${params.postKey}`,
+      channelId: cleanChannelId,
+      postKey: params.postKey,
+      timestampMs: params.timestampMs || 0,
+      extractorVersion: EXPLORER_NER_EXTRACTOR_VERSION,
+      engine: "local",
+      localTier: "rules",
+      manualEdited: true,
+      manualEditedAt: now,
+      entities: [
+        {
+          name: cleanName,
+          canonical: cleanName,
+          nerClass: params.nerClass,
+          quote,
+        },
+      ],
+      relations: [],
+      updatedAt: now,
+    };
+    nextRecords.push(created);
+    changedRecords.push(created);
+  }
+
+  return { nextRecords, changedRecords, nextEntityId };
+}
+
+export function applyManualRelationUpdate(
+  records: PostNerExtractionRecord[],
+  params: {
+    targetRelationId: string;
+    newSubjectName: string;
+    newSubjectClass: NerClassId;
+    newRelationClass: RelationClassId;
+    newObjectName: string;
+    newObjectClass: NerClassId;
+    newQuote?: string;
+    onlyPostKey?: string;
+    targetOccurrenceQuote?: string;
+  }
+): ManualNerMutationResult {
+  const subjClean = params.newSubjectName.trim();
+  const objClean = params.newObjectName.trim();
+  if (!subjClean || !objClean || !params.targetRelationId) {
+    return { nextRecords: records, changedRecords: [], nextRelationId: params.targetRelationId };
+  }
+
+  const newSubjId = normalizeEntityKey(params.newSubjectClass, subjClean);
+  const newObjId = normalizeEntityKey(params.newObjectClass, objClean);
+  if (newSubjId === newObjId) {
+    return { nextRecords: records, changedRecords: [], nextRelationId: params.targetRelationId };
+  }
+
+  const nextRelationId = buildNerRelationKey(newSubjId, params.newRelationClass, newObjId);
+  const now = Date.now();
+  const changedRecords: PostNerExtractionRecord[] = [];
+
+  const nextRecords = records.map((rec) => {
+    if (params.onlyPostKey && rec.postKey !== params.onlyPostKey) {
+      return rec;
+    }
+
+    let touched = false;
+    const mappedRelations = (rec.relations || []).map((rel) => {
+      const subjId = normalizeEntityKey(rel.subjectClass, rel.subject);
+      const objId = normalizeEntityKey(rel.objectClass, rel.object);
+      const pairKey = buildNerRelationKey(subjId, rel.relationClass, objId);
+      if (pairKey !== params.targetRelationId) return rel;
+      if (
+        params.onlyPostKey &&
+        params.targetOccurrenceQuote !== undefined &&
+        rel.quote !== params.targetOccurrenceQuote
+      ) {
+        return rel;
+      }
+      touched = true;
+      return {
+        subject: subjClean,
+        subjectClass: params.newSubjectClass,
+        relationClass: params.newRelationClass,
+        object: objClean,
+        objectClass: params.newObjectClass,
+        quote: params.newQuote !== undefined ? params.newQuote.trim() : rel.quote,
+        confidence: 1,
+      };
+    });
+
+    if (!touched) return rec;
+
+    const firstMatchedQuote =
+      mappedRelations.find((r) => {
+        const sId = normalizeEntityKey(r.subjectClass, r.subject);
+        const oId = normalizeEntityKey(r.objectClass, r.object);
+        return buildNerRelationKey(sId, r.relationClass, oId) === nextRelationId;
+      })?.quote || "";
+
+    const updated: PostNerExtractionRecord = {
+      ...rec,
+      entities: dedupeRecordEntities([
+        ...(rec.entities || []),
+        {
+          name: subjClean,
+          canonical: subjClean,
+          nerClass: params.newSubjectClass,
+          quote: firstMatchedQuote || subjClean,
+        },
+        {
+          name: objClean,
+          canonical: objClean,
+          nerClass: params.newObjectClass,
+          quote: firstMatchedQuote || objClean,
+        },
+      ]),
+      relations: dedupeRecordRelations(mappedRelations),
+      manualEdited: true,
+      manualEditedAt: now,
+      updatedAt: now,
+    };
+    changedRecords.push(updated);
+    return updated;
+  });
+
+  return { nextRecords, changedRecords, nextRelationId };
+}
+
+export function applyManualRelationDelete(
+  records: PostNerExtractionRecord[],
+  params: {
+    targetRelationId: string;
+    onlyPostKey?: string;
+    targetOccurrenceQuote?: string;
+  }
+): ManualNerMutationResult {
+  if (!params.targetRelationId) {
+    return { nextRecords: records, changedRecords: [] };
+  }
+  const now = Date.now();
+  const changedRecords: PostNerExtractionRecord[] = [];
+
+  const nextRecords = records.map((rec) => {
+    if (params.onlyPostKey && rec.postKey !== params.onlyPostKey) {
+      return rec;
+    }
+
+    const filteredRelations = (rec.relations || []).filter((rel) => {
+      const subjId = normalizeEntityKey(rel.subjectClass, rel.subject);
+      const objId = normalizeEntityKey(rel.objectClass, rel.object);
+      const pairKey = buildNerRelationKey(subjId, rel.relationClass, objId);
+      if (pairKey !== params.targetRelationId) return true;
+      if (
+        params.onlyPostKey &&
+        params.targetOccurrenceQuote !== undefined &&
+        rel.quote !== params.targetOccurrenceQuote
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    if (filteredRelations.length === (rec.relations || []).length) {
+      return rec;
+    }
+
+    const updated: PostNerExtractionRecord = {
+      ...rec,
+      relations: filteredRelations,
+      manualEdited: true,
+      manualEditedAt: now,
+      updatedAt: now,
+    };
+    changedRecords.push(updated);
+    return updated;
+  });
+
+  return { nextRecords, changedRecords };
+}
+
+export function applyManualRelationCreate(
+  records: PostNerExtractionRecord[],
+  params: {
+    channelId: string;
+    postKey: string;
+    timestampMs: number;
+    subjectName: string;
+    subjectClass: NerClassId;
+    relationClass: RelationClassId;
+    objectName: string;
+    objectClass: NerClassId;
+    evidenceQuote?: string;
+  }
+): ManualNerMutationResult {
+  const subjClean = params.subjectName.trim();
+  const objClean = params.objectName.trim();
+  const cleanChannelId = normalizeNerChannelKey(params.channelId);
+  if (!subjClean || !objClean || !cleanChannelId || !params.postKey) {
+    return { nextRecords: records, changedRecords: [] };
+  }
+
+  const subjId = normalizeEntityKey(params.subjectClass, subjClean);
+  const objId = normalizeEntityKey(params.objectClass, objClean);
+  if (subjId === objId) {
+    return { nextRecords: records, changedRecords: [] };
+  }
+
+  const nextRelationId = buildNerRelationKey(subjId, params.relationClass, objId);
+  const quote = (params.evidenceQuote || `${subjClean} — ${objClean}`).trim().slice(0, 220);
+  const now = Date.now();
+  let foundRecord = false;
+  const changedRecords: PostNerExtractionRecord[] = [];
+
+  const nextRecords = records.map((rec) => {
+    if (rec.channelId !== cleanChannelId || rec.postKey !== params.postKey) {
+      return rec;
+    }
+    foundRecord = true;
+    const updated: PostNerExtractionRecord = {
+      ...rec,
+      entities: dedupeRecordEntities([
+        ...(rec.entities || []),
+        { name: subjClean, canonical: subjClean, nerClass: params.subjectClass, quote },
+        { name: objClean, canonical: objClean, nerClass: params.objectClass, quote },
+      ]),
+      relations: dedupeRecordRelations([
+        ...(rec.relations || []),
+        {
+          subject: subjClean,
+          subjectClass: params.subjectClass,
+          relationClass: params.relationClass,
+          object: objClean,
+          objectClass: params.objectClass,
+          quote,
+          confidence: 1,
+        },
+      ]),
+      manualEdited: true,
+      manualEditedAt: now,
+      updatedAt: now,
+    };
+    changedRecords.push(updated);
+    return updated;
+  });
+
+  if (!foundRecord) {
+    const created: PostNerExtractionRecord = {
+      id: `${cleanChannelId}::${params.postKey}`,
+      channelId: cleanChannelId,
+      postKey: params.postKey,
+      timestampMs: params.timestampMs || 0,
+      extractorVersion: EXPLORER_NER_EXTRACTOR_VERSION,
+      engine: "local",
+      localTier: "rules",
+      manualEdited: true,
+      manualEditedAt: now,
+      entities: [
+        { name: subjClean, canonical: subjClean, nerClass: params.subjectClass, quote },
+        { name: objClean, canonical: objClean, nerClass: params.objectClass, quote },
+      ],
+      relations: [
+        {
+          subject: subjClean,
+          subjectClass: params.subjectClass,
+          relationClass: params.relationClass,
+          object: objClean,
+          objectClass: params.objectClass,
+          quote,
+          confidence: 1,
+        },
+      ],
+      updatedAt: now,
+    };
+    nextRecords.push(created);
+    changedRecords.push(created);
+  }
+
+  return { nextRecords, changedRecords, nextRelationId };
 }
