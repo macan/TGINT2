@@ -218,6 +218,36 @@ import {
   getListenDateRangeBounds,
   isTimestampInListenDateRange,
 } from "./utils/listenDateRange";
+import ListenLabelManagerModal from "./components/listen/ListenLabelManagerModal.vue";
+import ListenQuickOrganizePopover, { type PopoverAnchorRect } from "./components/listen/ListenQuickOrganizePopover.vue";
+import ListenBatchOrganizeBar from "./components/listen/ListenBatchOrganizeBar.vue";
+import {
+  cleanLabelName,
+  normalizeLabelKey,
+  getLabelColorConfig,
+  deduplicateLabelNames,
+  loadLabelDefinitionsFromLocalStorage,
+  saveLabelDefinitionsToLocalStorage,
+  loadLabelDefinitionsFromIndexedDB,
+  saveLabelDefinitionsToIndexedDB,
+  mergeLabelDefinitionMaps,
+  parseImportedLabels,
+  collectLabelSummariesFromTree,
+  itemMatchesLabelFilter,
+  renameLabelInTree,
+  removeLabelFromTree,
+  setItemLabelsInTree,
+  batchUpdateLabelsInTree,
+  collectFolderOptions,
+  collectFolderLeafIds,
+  batchMoveItemsInTree,
+  createFolderAndMoveItemsInTree,
+  type ListenLabelColorKey,
+  type ListenLabelDefinition,
+  type ListenLabelMatchMode,
+  type ListenLabelSummary,
+  type FolderSelectOption
+} from "./utils/listenLabels";
 
 const preloadSecondaryViews = () => {
   if (typeof window === "undefined") return;
@@ -3112,65 +3142,452 @@ const cancelEditTag = () => {
   editingTagValue.value = "";
 };
 
-// Aggregate all unique tags used across non-folder items in Listen Directory
-const allDirectoryTags = computed<{ tag: string; count: number }[]>(() => {
-  const tagCounts: Record<string, number> = {};
-  const collect = (nodes: ListenItem[]) => {
-    for (const node of nodes) {
-      if (!node.isFolder && Array.isArray(node.tags)) {
-        for (const t of node.tags) {
-          if (t && typeof t === "string") {
-            const clean = t.trim();
-            if (clean) {
-              tagCounts[clean] = (tagCounts[clean] || 0) + 1;
-            }
-          }
-        }
-      }
-      if (node.isFolder && node.children) {
-        collect(node.children);
-      }
+// Custom label definitions (synchronized across LocalStorage + IndexedDB)
+const listenLabelDefinitions = ref<Record<string, ListenLabelDefinition>>(
+  loadLabelDefinitionsFromLocalStorage()
+);
+
+const persistListenLabelDefinitions = (defs: Record<string, ListenLabelDefinition>) => {
+  listenLabelDefinitions.value = defs;
+  saveLabelDefinitionsToLocalStorage(defs);
+  saveLabelDefinitionsToIndexedDB(defs);
+};
+
+const syncListenLabelsWithIndexedDB = async () => {
+  const idbDefs = await loadLabelDefinitionsFromIndexedDB();
+  const lsDefs = loadLabelDefinitionsFromLocalStorage();
+  const merged = mergeLabelDefinitionMaps(lsDefs, idbDefs);
+  if (Object.keys(merged).length > 0) {
+    listenLabelDefinitions.value = merged;
+    saveLabelDefinitionsToLocalStorage(merged);
+    if (Object.keys(merged).length > Object.keys(idbDefs).length) {
+      await saveLabelDefinitionsToIndexedDB(merged);
+    }
+  }
+};
+
+const upsertListenLabelDefinition = (name: string, color?: ListenLabelColorKey) => {
+  const clean = cleanLabelName(name);
+  if (!clean) return;
+  const key = normalizeLabelKey(clean);
+  const existing = listenLabelDefinitions.value[key];
+  const nextColor = color || existing?.color || getLabelColorConfig(clean).key;
+  const nextDefs: Record<string, ListenLabelDefinition> = {
+    ...listenLabelDefinitions.value,
+    [key]: {
+      key,
+      name: clean,
+      color: nextColor,
+      description: existing?.description,
+      updatedAt: Date.now()
     }
   };
-  collect(listenDirectory.value);
-  return Object.entries(tagCounts)
-    .map(([tag, count]) => ({ tag, count }))
-    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
-});
+  persistListenLabelDefinitions(nextDefs);
+};
 
-// Color palettes for tags with excellent light/dark contrast
-const tagColorPalettes = [
-  "bg-teal-50 dark:bg-teal-950/40 text-teal-700 dark:text-teal-300 border-teal-200/70 dark:border-teal-800/50 hover:border-teal-400",
-  "bg-sky-50 dark:bg-sky-950/40 text-sky-700 dark:text-sky-300 border-sky-200/70 dark:border-sky-800/50 hover:border-sky-400",
-  "bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border-indigo-200/70 dark:border-indigo-800/50 hover:border-indigo-400",
-  "bg-violet-50 dark:bg-violet-950/40 text-violet-700 dark:text-violet-300 border-violet-200/70 dark:border-violet-800/50 hover:border-violet-400",
-  "bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200/70 dark:border-amber-800/50 hover:border-amber-400",
-  "bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border-rose-200/70 dark:border-rose-800/50 hover:border-rose-400",
-  "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200/70 dark:border-emerald-800/50 hover:border-emerald-400",
-  "bg-orange-50 dark:bg-orange-950/40 text-orange-700 dark:text-orange-300 border-orange-200/70 dark:border-orange-800/50 hover:border-orange-400"
-];
+// Aggregate all labels/tags across directory items + custom label definitions
+const allListenLabelSummaries = computed<ListenLabelSummary[]>(() =>
+  collectLabelSummariesFromTree(listenDirectory.value, listenLabelDefinitions.value)
+);
+
+const allDirectoryTags = computed<Array<{ tag: string; count: number; key: string; color: ListenLabelColorKey; isCustom: boolean }>>(() =>
+  allListenLabelSummaries.value.map((s) => ({
+    tag: s.name,
+    count: s.count,
+    key: s.key,
+    color: s.color,
+    isCustom: s.isCustom
+  }))
+);
 
 const getTagBadgeStyle = (tag: string): string => {
-  let hash = 0;
-  for (let i = 0; i < tag.length; i++) {
-    hash = (hash << 5) - hash + tag.charCodeAt(i);
-    hash |= 0;
-  }
-  const idx = Math.abs(hash) % tagColorPalettes.length;
-  return tagColorPalettes[idx];
+  return getLabelColorConfig(tag, listenLabelDefinitions.value).chipClass;
 };
 
-// Tag filter for search
-const selectedListenTagFilter = ref<string | null>(null);
+const getTagActiveBadgeStyle = (tag: string): string => {
+  return getLabelColorConfig(tag, listenLabelDefinitions.value).activeChipClass;
+};
+
+const getTagDotStyle = (tag: string): string => {
+  return getLabelColorConfig(tag, listenLabelDefinitions.value).dotClass;
+};
+
+// Multi-select label filters for Listen Directory search
+const selectedListenTagFilters = ref<string[]>([]);
+const listenLabelMatchMode = ref<ListenLabelMatchMode>("any");
+
+const isListenTagSelected = (tag: string): boolean => {
+  const key = normalizeLabelKey(tag);
+  return selectedListenTagFilters.value.some((t) => normalizeLabelKey(t) === key);
+};
+
 const toggleListenTagFilter = (tag: string) => {
-  if (selectedListenTagFilter.value === tag) {
-    selectedListenTagFilter.value = null;
+  const clean = cleanLabelName(tag);
+  const key = normalizeLabelKey(clean);
+  if (!key) return;
+  const idx = selectedListenTagFilters.value.findIndex((t) => normalizeLabelKey(t) === key);
+  if (idx >= 0) {
+    selectedListenTagFilters.value = selectedListenTagFilters.value.filter((_, i) => i !== idx);
   } else {
-    selectedListenTagFilter.value = tag;
+    selectedListenTagFilters.value = [...selectedListenTagFilters.value, clean];
   }
 };
+
 const clearListenTagFilter = () => {
-  selectedListenTagFilter.value = null;
+  selectedListenTagFilters.value = [];
+};
+
+const resetAllListenDirectoryFilters = () => {
+  listenSearchQuery.value = "";
+  selectedListenTagFilters.value = [];
+  listenDateRange.value = { ...DEFAULT_LISTEN_DATE_RANGE };
+};
+
+const refreshSelectedListenNodeRef = () => {
+  if (!selectedListenNode.value) return;
+  const targetId = selectedListenNode.value.id;
+  findNodeAndPerform(listenDirectory.value, targetId, (nodes, idx) => {
+    selectedListenNode.value = nodes[idx];
+  });
+};
+
+// Label Manager Modal State & Handlers
+const isLabelManagerOpen = ref(false);
+
+const handleCreateOrUpdateCustomLabel = (payload: { name: string; color: ListenLabelColorKey }) => {
+  upsertListenLabelDefinition(payload.name, payload.color);
+  toastMessage.value = t("listen.labels.toastSaved", { name: cleanLabelName(payload.name) });
+  toastType.value = "success";
+  setTimeout(() => { toastMessage.value = ""; }, 2500);
+};
+
+const handleUpdateCustomLabelColor = (payload: { name: string; color: ListenLabelColorKey }) => {
+  upsertListenLabelDefinition(payload.name, payload.color);
+};
+
+const handleRenameCustomLabel = (payload: { oldName: string; newName: string }) => {
+  const oldKey = normalizeLabelKey(payload.oldName);
+  const cleanNext = cleanLabelName(payload.newName);
+  const nextKey = normalizeLabelKey(cleanNext);
+  if (!oldKey || !nextKey) return;
+
+  const prevDef = listenLabelDefinitions.value[oldKey];
+  const color = prevDef?.color || getLabelColorConfig(payload.oldName).key;
+  const nextDefs = { ...listenLabelDefinitions.value };
+  delete nextDefs[oldKey];
+  nextDefs[nextKey] = {
+    key: nextKey,
+    name: cleanNext,
+    color: nextDefs[nextKey]?.color || color,
+    description: prevDef?.description,
+    updatedAt: Date.now()
+  };
+  persistListenLabelDefinitions(nextDefs);
+
+  const renamed = renameLabelInTree(listenDirectory.value, payload.oldName, cleanNext);
+  if (renamed.updatedItems > 0) {
+    listenDirectory.value = renamed.tree;
+    saveListenDirectory();
+    refreshSelectedListenNodeRef();
+  }
+
+  selectedListenTagFilters.value = deduplicateLabelNames(
+    selectedListenTagFilters.value.map((f) => (normalizeLabelKey(f) === oldKey ? cleanNext : f))
+  );
+
+  toastMessage.value = t("listen.labels.toastRenamed", { name: cleanNext });
+  toastType.value = "success";
+  setTimeout(() => { toastMessage.value = ""; }, 2500);
+};
+
+const handleDeleteCustomLabel = (name: string) => {
+  const key = normalizeLabelKey(name);
+  if (!key) return;
+
+  if (listenLabelDefinitions.value[key]) {
+    const nextDefs = { ...listenLabelDefinitions.value };
+    delete nextDefs[key];
+    persistListenLabelDefinitions(nextDefs);
+  }
+
+  const removed = removeLabelFromTree(listenDirectory.value, name);
+  if (removed.updatedItems > 0) {
+    listenDirectory.value = removed.tree;
+    saveListenDirectory();
+    refreshSelectedListenNodeRef();
+  }
+
+  selectedListenTagFilters.value = selectedListenTagFilters.value.filter(
+    (f) => normalizeLabelKey(f) !== key
+  );
+
+  toastMessage.value = t("listen.labels.toastDeleted", { name: cleanLabelName(name) });
+  toastType.value = "info";
+  setTimeout(() => { toastMessage.value = ""; }, 2500);
+};
+
+// Folder options for Quick Organize Popover & Batch Organize Bar
+const listenFolderSelectOptions = computed<FolderSelectOption[]>(() =>
+  collectFolderOptions(listenDirectory.value, t("listen.rootDirectory"))
+);
+
+// Quick Label & Folder Popover State & Handlers
+const quickOrganizeState = ref<{
+  isOpen: boolean;
+  itemId: string | null;
+  anchorRect: PopoverAnchorRect | null;
+}>({
+  isOpen: false,
+  itemId: null,
+  anchorRect: null
+});
+
+const findListenNodeById = (nodes: ListenItem[], targetId: string | null): ListenItem | null => {
+  if (!targetId) return null;
+  for (const node of nodes) {
+    if (node.id === targetId) return node;
+    if (node.isFolder && Array.isArray(node.children)) {
+      const found = findListenNodeById(node.children, targetId);
+      if (found) return found;
+    }
+  }
+  return null;
+};
+
+const quickOrganizeItem = computed<ListenItem | null>(() =>
+  findListenNodeById(listenDirectory.value, quickOrganizeState.value.itemId)
+);
+
+const quickOrganizeParentFolderId = computed<string | null>(() => {
+  if (!quickOrganizeState.value.itemId) return null;
+  return getParentFolderId(listenDirectory.value, quickOrganizeState.value.itemId).parentId;
+});
+
+const openQuickOrganizePopover = (item: ListenItem, event?: MouseEvent) => {
+  if (!item) return;
+  let rect: PopoverAnchorRect | null = null;
+  const targetEl = (event?.currentTarget as HTMLElement | null) || document.getElementById(`listen-node-${item.id}`);
+  if (targetEl) {
+    const r = targetEl.getBoundingClientRect();
+    rect = {
+      top: r.top,
+      left: r.left,
+      right: r.right,
+      bottom: r.bottom,
+      width: r.width,
+      height: r.height
+    };
+  }
+  quickOrganizeState.value = {
+    isOpen: true,
+    itemId: item.id,
+    anchorRect: rect
+  };
+};
+
+const closeQuickOrganizePopover = () => {
+  quickOrganizeState.value = {
+    isOpen: false,
+    itemId: null,
+    anchorRect: null
+  };
+};
+
+const handleQuickToggleLabel = (payload: { itemId: string; labelName: string }) => {
+  const item = findListenNodeById(listenDirectory.value, payload.itemId);
+  if (!item || item.isFolder) return;
+  const clean = cleanLabelName(payload.labelName);
+  const key = normalizeLabelKey(clean);
+  if (!key) return;
+  const current = Array.isArray(item.tags) ? [...item.tags] : [];
+  const exists = current.some((t) => normalizeLabelKey(t) === key);
+  const nextTags = exists
+    ? current.filter((t) => normalizeLabelKey(t) !== key)
+    : deduplicateLabelNames([...current, clean]);
+
+  listenDirectory.value = setItemLabelsInTree(listenDirectory.value, item.id, nextTags);
+  saveListenDirectory();
+  refreshSelectedListenNodeRef();
+};
+
+const handleQuickCreateAndApplyLabel = (payload: {
+  itemId: string;
+  name: string;
+  color: ListenLabelColorKey;
+}) => {
+  upsertListenLabelDefinition(payload.name, payload.color);
+  const item = findListenNodeById(listenDirectory.value, payload.itemId);
+  if (!item || item.isFolder) return;
+  const current = Array.isArray(item.tags) ? [...item.tags] : [];
+  const nextTags = deduplicateLabelNames([...current, payload.name]);
+  listenDirectory.value = setItemLabelsInTree(listenDirectory.value, item.id, nextTags);
+  saveListenDirectory();
+  refreshSelectedListenNodeRef();
+};
+
+const handleQuickMoveToFolder = (payload: { itemId: string; targetFolderId: string | null }) => {
+  const res = batchMoveItemsInTree(
+    listenDirectory.value,
+    new Set([payload.itemId]),
+    payload.targetFolderId
+  );
+  if (res.movedCount > 0) {
+    listenDirectory.value = res.tree;
+    if (payload.targetFolderId) {
+      expandedFolders.value[payload.targetFolderId] = true;
+      expandParentFoldersForNode(payload.targetFolderId);
+    }
+    saveListenDirectory();
+    refreshSelectedListenNodeRef();
+  }
+};
+
+const handleQuickCreateFolderAndMove = (payload: { itemId: string; folderName: string }) => {
+  const res = createFolderAndMoveItemsInTree(
+    listenDirectory.value,
+    payload.folderName,
+    null,
+    new Set([payload.itemId])
+  );
+  if (res.newFolder) {
+    listenDirectory.value = res.tree;
+    expandedFolders.value[res.newFolder.id] = true;
+    saveListenDirectory();
+    refreshSelectedListenNodeRef();
+  }
+};
+
+// Batch Multi-Select Organization State & Handlers
+const isBatchSelectMode = ref(false);
+const selectedBatchItemIds = ref<Set<string>>(new Set());
+
+const toggleBatchSelectMode = () => {
+  isBatchSelectMode.value = !isBatchSelectMode.value;
+  if (!isBatchSelectMode.value) {
+    selectedBatchItemIds.value = new Set();
+  }
+};
+
+const exitBatchSelectMode = () => {
+  isBatchSelectMode.value = false;
+  selectedBatchItemIds.value = new Set();
+};
+
+const toggleBatchItemSelection = (itemId: string) => {
+  const next = new Set(selectedBatchItemIds.value);
+  if (next.has(itemId)) {
+    next.delete(itemId);
+  } else {
+    next.add(itemId);
+  }
+  selectedBatchItemIds.value = next;
+};
+
+const isFolderFullySelectedInBatch = (folder: ListenItem): boolean => {
+  const leafIds = collectFolderLeafIds(folder);
+  if (leafIds.length === 0) return false;
+  return leafIds.every((id) => selectedBatchItemIds.value.has(id));
+};
+
+const toggleBatchFolderSelection = (folder: ListenItem) => {
+  const leafIds = collectFolderLeafIds(folder);
+  if (leafIds.length === 0) return;
+  const allSelected = leafIds.every((id) => selectedBatchItemIds.value.has(id));
+  const next = new Set(selectedBatchItemIds.value);
+  if (allSelected) {
+    for (const id of leafIds) next.delete(id);
+  } else {
+    for (const id of leafIds) next.add(id);
+  }
+  selectedBatchItemIds.value = next;
+};
+
+const selectAllVisibleInBatch = () => {
+  const next = new Set(selectedBatchItemIds.value);
+  for (const node of visibleDirectoryNodes.value) {
+    if (!node.item.isFolder) {
+      next.add(node.item.id);
+    }
+  }
+  selectedBatchItemIds.value = next;
+};
+
+const clearBatchSelection = () => {
+  selectedBatchItemIds.value = new Set();
+};
+
+const handleBatchApplyLabels = (payload: { add: string[]; remove: string[] }) => {
+  if (selectedBatchItemIds.value.size === 0) return;
+  const res = batchUpdateLabelsInTree(
+    listenDirectory.value,
+    selectedBatchItemIds.value,
+    payload.add,
+    payload.remove
+  );
+  if (res.updatedItems > 0) {
+    listenDirectory.value = res.tree;
+    saveListenDirectory();
+    refreshSelectedListenNodeRef();
+    toastMessage.value = t("listen.batch.toastLabelsUpdated", { count: res.updatedItems });
+    toastType.value = "success";
+    setTimeout(() => { toastMessage.value = ""; }, 2500);
+  }
+};
+
+const handleBatchCreateAndApplyLabel = (payload: { name: string; color: ListenLabelColorKey }) => {
+  if (selectedBatchItemIds.value.size === 0) return;
+  upsertListenLabelDefinition(payload.name, payload.color);
+  handleBatchApplyLabels({ add: [payload.name], remove: [] });
+};
+
+const handleBatchMoveToFolder = (targetFolderId: string | null) => {
+  if (selectedBatchItemIds.value.size === 0) return;
+  const res = batchMoveItemsInTree(
+    listenDirectory.value,
+    selectedBatchItemIds.value,
+    targetFolderId
+  );
+  if (res.movedCount > 0) {
+    listenDirectory.value = res.tree;
+    if (targetFolderId) {
+      expandedFolders.value[targetFolderId] = true;
+      expandParentFoldersForNode(targetFolderId);
+    }
+    saveListenDirectory();
+    refreshSelectedListenNodeRef();
+    toastMessage.value = t("listen.batch.toastMovedCount", { count: res.movedCount });
+    toastType.value = "success";
+    setTimeout(() => { toastMessage.value = ""; }, 2500);
+  }
+};
+
+const handleBatchCreateFolderAndMove = (payload: {
+  folderName: string;
+  parentFolderId: string | null;
+}) => {
+  if (selectedBatchItemIds.value.size === 0) return;
+  const res = createFolderAndMoveItemsInTree(
+    listenDirectory.value,
+    payload.folderName,
+    payload.parentFolderId,
+    selectedBatchItemIds.value
+  );
+  if (res.newFolder) {
+    listenDirectory.value = res.tree;
+    expandedFolders.value[res.newFolder.id] = true;
+    if (payload.parentFolderId) {
+      expandedFolders.value[payload.parentFolderId] = true;
+      expandParentFoldersForNode(payload.parentFolderId);
+    }
+    saveListenDirectory();
+    refreshSelectedListenNodeRef();
+    toastMessage.value = t("listen.batch.toastGroupedNewFolder", {
+      count: res.movedCount,
+      folder: res.newFolder.name
+    });
+    toastType.value = "success";
+    setTimeout(() => { toastMessage.value = ""; }, 3000);
+  }
 };
 
 const toggleFolderExpanded = (id: string) => {
@@ -3262,7 +3679,8 @@ const copyListenDirectoryToClipboard = async () => {
   try {
     const data = {
       tree: listenDirectory.value,
-      timestamp: listenDirectoryTimestamp.value
+      timestamp: listenDirectoryTimestamp.value,
+      labels: Object.values(listenLabelDefinitions.value)
     };
     const dataStr = JSON.stringify(data, null, 2);
     let success = false;
@@ -3313,7 +3731,8 @@ const exportListenDirectoryToFile = async () => {
   try {
     const data = {
       tree: listenDirectory.value,
-      timestamp: listenDirectoryTimestamp.value
+      timestamp: listenDirectoryTimestamp.value,
+      labels: Object.values(listenLabelDefinitions.value)
     };
     const dataStr = JSON.stringify(data, null, 2);
     const dateStr = new Date().toISOString().slice(0, 10);
@@ -3653,6 +4072,17 @@ const confirmListenDirectoryImport = () => {
 
     if (Array.isArray(treeData)) {
       listenDirectory.value = treeData;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.labels) {
+        const importedLabels = parseImportedLabels(parsed.labels);
+        if (importedLabels.length > 0) {
+          const importedMap: Record<string, ListenLabelDefinition> = {};
+          for (const lbl of importedLabels) {
+            importedMap[lbl.key] = lbl;
+          }
+          const merged = mergeLabelDefinitionMaps(listenLabelDefinitions.value, importedMap);
+          persistListenLabelDefinitions(merged);
+        }
+      }
       saveListenDirectory(tStamp);
       loadAllListenPostsFreshnessFromIndexedDB();
       toastMessage.value = t("listen.toastImportSuccess");
@@ -3696,7 +4126,8 @@ const syncListenDirectory = async () => {
     if (response.status === 404) {
       await saveProfileRemotely(`LDT-${username}`, loginToken.value, {
         tree: listenDirectory.value,
-        timestamp: listenDirectoryTimestamp.value
+        timestamp: listenDirectoryTimestamp.value,
+        labels: Object.values(listenLabelDefinitions.value)
       });
       toastMessage.value = t("listen.toastSyncLocalToRemote");
       toastType.value = "success";
@@ -3735,7 +4166,8 @@ const syncListenDirectory = async () => {
     if (remoteTimestamp < listenDirectoryTimestamp.value) {
       await saveProfileRemotely(`LDT-${username}`, loginToken.value, {
         tree: listenDirectory.value,
-        timestamp: listenDirectoryTimestamp.value
+        timestamp: listenDirectoryTimestamp.value,
+        labels: Object.values(listenLabelDefinitions.value)
       });
       toastMessage.value = t("listen.toastSyncLocalToRemote");
       toastType.value = "success";
@@ -3744,6 +4176,16 @@ const syncListenDirectory = async () => {
       toastType.value = "info";
     } else {
       listenDirectory.value = remoteTree;
+      if (parsedRemote && typeof parsedRemote === "object" && !Array.isArray(parsedRemote) && parsedRemote.labels) {
+        const importedLabels = parseImportedLabels(parsedRemote.labels);
+        if (importedLabels.length > 0) {
+          const importedMap: Record<string, ListenLabelDefinition> = {};
+          for (const lbl of importedLabels) {
+            importedMap[lbl.key] = lbl;
+          }
+          persistListenLabelDefinitions(mergeLabelDefinitionMaps(listenLabelDefinitions.value, importedMap));
+        }
+      }
       saveListenDirectory(remoteTimestamp);
       toastMessage.value = t("listen.toastSyncRemoteToLocal");
       toastType.value = "success";
@@ -4137,13 +4579,15 @@ const resetListenDateRange = () => {
 const getMatchingNodeIds = (
   nodes: ListenItem[],
   term: string,
-  tagFilter: string | null,
+  tagFilters: string[] = [],
   dateRange: ListenDateRangeValue | null = null,
-  freshnessMap: Record<string, ListenItemFreshness> | null = null
+  freshnessMap: Record<string, ListenItemFreshness> | null = null,
+  matchMode: ListenLabelMatchMode = "any"
 ): Set<string> => {
   const matched = new Set<string>();
+  const hasTagFilter = Array.isArray(tagFilters) && tagFilters.length > 0;
   const dateActive = isListenDateRangeActive(dateRange);
-  if (!term && !tagFilter && !dateActive) return matched;
+  if (!term && !hasTagFilter && !dateActive) return matched;
 
   const lowerTerm = term ? term.toLowerCase() : "";
   const cleanTerm = lowerTerm.replace(/^[#@]/, "").trim();
@@ -4154,10 +4598,9 @@ const getMatchingNodeIds = (
     let selfMatch = false;
 
     if (!node.isFolder) {
-      let passesTag = true;
-      if (tagFilter) {
-        passesTag = Array.isArray(node.tags) && node.tags.includes(tagFilter);
-      }
+      const passesTag = hasTagFilter
+        ? itemMatchesLabelFilter(node.tags, tagFilters, matchMode)
+        : true;
 
       let passesTerm = true;
       if (term) {
@@ -4191,7 +4634,7 @@ const getMatchingNodeIds = (
       }
 
       selfMatch = passesTag && passesTerm && passesDate;
-    } else if (term && !tagFilter && !dateActive) {
+    } else if (term && !hasTagFilter && !dateActive) {
       selfMatch = !!(
         (node.name && node.name.toLowerCase().includes(lowerTerm)) ||
         (node.argument && node.argument.toLowerCase().includes(lowerTerm))
@@ -4303,7 +4746,7 @@ const getFilteredVisibleNodes = (
   dateFilterActive = false
 ): any[] => {
   const list: any[] = [];
-  const isFiltering = !!(term || selectedListenTagFilter.value || dateFilterActive);
+  const isFiltering = !!(term || selectedListenTagFilters.value.length > 0 || dateFilterActive);
   if (!nodes || !Array.isArray(nodes)) return list;
 
   // Use sorted copy for display without altering the original low-level JSON data order
@@ -4392,12 +4835,13 @@ const getFolderItemsCount = (item: ListenItem): number => {
 
 const visibleDirectoryNodes = computed(() => {
   const term = listenSearchQuery.value.trim();
-  const tagFilter = selectedListenTagFilter.value;
+  const tagFilters = selectedListenTagFilters.value;
+  const matchMode = listenLabelMatchMode.value;
   const dateFilterActive = isDateFilterActive.value;
-  const isFiltering = !!(term || tagFilter || dateFilterActive);
+  const isFiltering = !!(term || tagFilters.length > 0 || dateFilterActive);
   const freshnessMap = listenItemsFreshnessMap.value;
   const matchingIds = isFiltering
-    ? getMatchingNodeIds(listenDirectory.value, term, tagFilter, listenDateRange.value, freshnessMap)
+    ? getMatchingNodeIds(listenDirectory.value, term, tagFilters, listenDateRange.value, freshnessMap, matchMode)
     : null;
   const folderStats = folderStatsMap.value;
   const newPostsMap = newlyFetchedPostsCountMap.value;
@@ -11039,6 +11483,7 @@ onMounted(() => {
     loadSavedProfiles();
     loadLogin();
     loadListenDirectory();
+    syncListenLabelsWithIndexedDB();
     document.addEventListener("click", handleDocumentClickForSortMenu);
 
     // Proactively load freshness from metadata store on mount (<2ms)
@@ -12847,7 +13292,7 @@ const openListenItemFromExplorer = (item: ListenItem) => {
 
   // Clear search and tag filters so that the target node is always visible in the directory tree
   listenSearchQuery.value = "";
-  selectedListenTagFilter.value = null;
+  selectedListenTagFilters.value = [];
 
   // Expand all parent folders so node is visible in visibleDirectoryNodes
   expandParentFoldersForNode(item.id);
@@ -12899,7 +13344,7 @@ const openListenFolderFromExplorer = (folderId: string) => {
   lastListenPostKey.value = "";
   lastRearrangePostsScrollTop.value = 0;
   listenSearchQuery.value = "";
-  selectedListenTagFilter.value = null;
+  selectedListenTagFilters.value = [];
   activeTab.value = "listen";
   expandedFolders.value[folderId] = true;
   expandParentFoldersForNode(folderId);
@@ -12916,7 +13361,7 @@ const filterListenByTagFromExplorer = (tag: string) => {
   lastListenPostKey.value = "";
   lastRearrangePostsScrollTop.value = 0;
   activeTab.value = "listen";
-  selectedListenTagFilter.value = tag;
+  selectedListenTagFilters.value = [cleanLabelName(tag)].filter(Boolean);
   listenSearchQuery.value = "";
   window.scrollTo({ top: 0, behavior: 'smooth' });
 };
@@ -26849,6 +27294,16 @@ onUnmounted(() => {
                         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin text-teal-500': getWidgetState(node.id).isSyncing }" />
                       </button>
 
+                      <!-- Quick Labels & Folder Organize Button -->
+                      <button
+                        type="button"
+                        @click.stop="openQuickOrganizePopover(node, $event)"
+                        class="p-1.5 text-gray-400 hover:text-teal-600 dark:text-gray-400 dark:hover:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40 rounded-lg transition-colors cursor-pointer"
+                        :title="t('listen.labels.quickOrganizeTip')"
+                      >
+                        <Tag class="h-3.5 w-3.5" />
+                      </button>
+
                       <!-- Open in Reader View Mode -->
                       <button
                         @click="openWidgetInViewMode(node)"
@@ -26936,13 +27391,24 @@ onUnmounted(() => {
                       </span>
                     </div>
 
-                    <div v-if="node.tags && node.tags.length > 0" class="flex items-center gap-1">
-                      <span
-                        v-for="tag in node.tags.slice(0, 2)"
+                    <div v-if="node.tags && node.tags.length > 0" class="flex items-center gap-1 flex-wrap">
+                      <button
+                        v-for="tag in node.tags.slice(0, 3)"
                         :key="tag"
-                        class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-700/80 text-gray-600 dark:text-gray-300 rounded text-[9px] font-mono"
+                        type="button"
+                        @click.stop="openQuickOrganizePopover(node, $event)"
+                        class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9.5px] font-semibold border transition-colors cursor-pointer whitespace-nowrap"
+                        :class="getTagBadgeStyle(tag)"
+                        :title="t('listen.labels.quickOrganizeTip')"
                       >
-                        #{{ tag }}
+                        <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="getTagDotStyle(tag)"></span>
+                        <span>{{ tag }}</span>
+                      </button>
+                      <span
+                        v-if="node.tags.length > 3"
+                        class="px-1 py-0.5 text-[9px] font-mono tabular-nums text-gray-400 dark:text-gray-500"
+                      >
+                        +{{ node.tags.length - 3 }}
                       </span>
                     </div>
                   </div>
@@ -27223,8 +27689,10 @@ onUnmounted(() => {
               :active-sync-item-ids="activeBackgroundSyncItemIds"
               :active-sync-item-id="activeBackgroundSyncItemId"
               :total-newly-fetched-count="totalNewlyFetchedPostsCount"
+              :label-definitions="listenLabelDefinitions"
               @select-item="selectListenItem"
               @clear-all-new-badges="clearAllNewlyFetchedBadges"
+              @quick-organize="openQuickOrganizePopover"
             />
 
             <!-- Posts Feed Area Below Treemap Rectangle -->
@@ -27923,15 +28391,15 @@ onUnmounted(() => {
                   <span
                     class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold transition-all tabular-nums shadow-2xs select-none shrink-0"
                     :class="[
-                      listenSearchQuery.trim()
+                      (listenSearchQuery.trim() || selectedListenTagFilters.length > 0 || isDateFilterActive)
                         ? 'bg-amber-50 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 border border-amber-200/70 dark:border-amber-800/50'
                         : 'bg-teal-50 dark:bg-teal-950/40 text-teal-600 dark:text-teal-400 border border-teal-200/60 dark:border-teal-800/40'
                     ]"
-                    :title="listenSearchQuery.trim()
+                    :title="(listenSearchQuery.trim() || selectedListenTagFilters.length > 0 || isDateFilterActive)
                       ? t('listen.totalItemsFilteredTooltip', { visible: visibleListenItemsCount, total: totalListenItemsCount })
                       : t('listen.totalItemsTooltip', { count: totalListenItemsCount })"
                   >
-                    <template v-if="listenSearchQuery.trim()">
+                    <template v-if="listenSearchQuery.trim() || selectedListenTagFilters.length > 0 || isDateFilterActive">
                       {{ visibleListenItemsCount }} / {{ totalListenItemsCount }} {{ totalListenItemsCount === 1 ? t('listen.folderItemSingular') : t('listen.folderItemPlural') }}
                     </template>
                     <template v-else>
@@ -28103,7 +28571,30 @@ onUnmounted(() => {
                   />
                 </div>
                 <div class="h-4 w-px bg-gray-200 dark:bg-gray-700 mx-0.5 hidden sm:block"></div>
-                <div class="flex items-center gap-1.5 shrink-0">
+                <div class="flex items-center gap-1.5 shrink-0 flex-wrap">
+                  <button
+                    type="button"
+                    @click="isLabelManagerOpen = true"
+                    class="px-2 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 rounded-lg text-xs font-bold text-gray-600 dark:text-gray-300 flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
+                    :title="t('listen.labels.manageLabels')"
+                  >
+                    <Tag class="h-3 w-3 text-teal-500 shrink-0" />
+                    <span>{{ t('listen.labels.manageBtn') }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    @click="toggleBatchSelectMode"
+                    class="px-2 py-1 rounded-lg text-xs font-bold flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap border"
+                    :class="
+                      isBatchSelectMode
+                        ? 'bg-teal-600 text-white border-teal-700'
+                        : 'bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 border-transparent'
+                    "
+                    :title="t('listen.batch.toggleSelectModeTip')"
+                  >
+                    <Check class="h-3 w-3 shrink-0" />
+                    <span>{{ t('listen.batch.selectBtn') }}</span>
+                  </button>
                   <button
                     @click="openAddModal('', true)"
                     class="px-2 py-1 bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 rounded-lg text-xs font-bold text-gray-600 dark:text-gray-300 flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
@@ -28252,18 +28743,24 @@ onUnmounted(() => {
                 </button>
               </div>
 
-              <!-- Quick Tag Filter Chips Row -->
-              <div v-if="allDirectoryTags.length > 0" class="flex items-center gap-1.5 overflow-x-auto scrollbar-none py-0.5 select-none text-[10px]">
-                <div class="flex items-center gap-1 font-bold text-gray-400 dark:text-gray-500 shrink-0 mr-0.5">
+              <!-- Quick Multi-Select Label Filter Chips Row -->
+              <div v-if="allDirectoryTags.length > 0 || selectedListenTagFilters.length > 0" class="flex items-center gap-1.5 overflow-x-auto scrollbar-none py-0.5 select-none text-[10px]">
+                <button
+                  type="button"
+                  @click="isLabelManagerOpen = true"
+                  class="flex items-center gap-1 font-bold text-gray-400 dark:text-gray-500 hover:text-teal-600 dark:hover:text-teal-400 shrink-0 mr-0.5 cursor-pointer"
+                  :title="t('listen.labels.manageLabels')"
+                >
                   <Tag class="h-3 w-3 text-teal-500" />
-                </div>
+                </button>
                 
                 <!-- All / Clear Filter -->
                 <button
+                  type="button"
                   @click="clearListenTagFilter"
-                  class="px-2 py-0.5 rounded-lg font-semibold transition-all shrink-0 cursor-pointer border"
+                  class="px-2 py-0.5 rounded-lg font-semibold transition-all shrink-0 cursor-pointer border whitespace-nowrap"
                   :class="[
-                    !selectedListenTagFilter
+                    selectedListenTagFilters.length === 0
                       ? 'bg-teal-50 dark:bg-teal-950/60 text-teal-600 dark:text-teal-400 border-teal-200 dark:border-teal-800 font-bold'
                       : 'bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700 hover:text-gray-900 dark:hover:text-white'
                   ]"
@@ -28271,33 +28768,76 @@ onUnmounted(() => {
                   {{ t('listen.allTagsFilter') }}
                 </button>
 
-                <!-- Individual Tag Chips -->
+                <!-- Multi-Select Label Chips -->
                 <button
                   v-for="item in allDirectoryTags"
-                  :key="item.tag"
+                  :key="item.key"
+                  type="button"
                   @click="toggleListenTagFilter(item.tag)"
-                  class="px-2 py-0.5 rounded-lg font-semibold transition-all shrink-0 cursor-pointer flex items-center gap-1 border"
+                  class="px-2 py-0.5 rounded-lg font-semibold transition-all shrink-0 cursor-pointer flex items-center gap-1 border whitespace-nowrap"
                   :class="[
-                    selectedListenTagFilter === item.tag
-                      ? 'bg-teal-500 text-white border-teal-600 shadow-2xs font-bold'
+                    isListenTagSelected(item.tag)
+                      ? getTagActiveBadgeStyle(item.tag)
                       : getTagBadgeStyle(item.tag)
                   ]"
-                  :title="t('listen.filterByTagTooltip', { tag: item.tag })"
+                  :title="t('listen.labels.multiFilterChipTip', { tag: item.tag })"
                 >
-                  <span>#{{ item.tag }}</span>
+                  <span
+                    class="w-1.5 h-1.5 rounded-full shrink-0"
+                    :class="isListenTagSelected(item.tag) ? 'bg-white' : getTagDotStyle(item.tag)"
+                  ></span>
+                  <span>{{ item.tag }}</span>
                   <span class="opacity-75 text-[9px] font-mono tabular-nums">({{ item.count }})</span>
                 </button>
+
+                <!-- Match Mode Segmented Toggle (visible when 2+ labels selected) -->
+                <div
+                  v-if="selectedListenTagFilters.length >= 2"
+                  class="inline-flex items-center rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-0.5 shrink-0 ml-1"
+                  :title="t('listen.labels.matchModeTip')"
+                >
+                  <button
+                    type="button"
+                    @click="listenLabelMatchMode = 'any'"
+                    class="px-1.5 py-0.5 rounded-md text-[9.5px] font-bold transition-colors cursor-pointer"
+                    :class="listenLabelMatchMode === 'any' ? 'bg-teal-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'"
+                  >
+                    {{ t('listen.labels.matchAny') }}
+                  </button>
+                  <button
+                    type="button"
+                    @click="listenLabelMatchMode = 'all'"
+                    class="px-1.5 py-0.5 rounded-md text-[9.5px] font-bold transition-colors cursor-pointer"
+                    :class="listenLabelMatchMode === 'all' ? 'bg-teal-600 text-white' : 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200'"
+                  >
+                    {{ t('listen.labels.matchAll') }}
+                  </button>
+                </div>
               </div>
 
-              <!-- Active Tag Filter Badge with Clear Action -->
-              <div v-if="selectedListenTagFilter" class="flex items-center justify-between text-[10px] text-teal-800 dark:text-teal-200 bg-teal-50 dark:bg-teal-950/60 px-2.5 py-1 rounded-lg border border-teal-200 dark:border-teal-800/80">
-                <span class="font-medium flex items-center gap-1 truncate">
+              <!-- Active Multi-Select Label Filter Summary Banner -->
+              <div v-if="selectedListenTagFilters.length > 0" class="flex items-center justify-between gap-2 text-[10px] text-teal-800 dark:text-teal-200 bg-teal-50/90 dark:bg-teal-950/50 px-2.5 py-1.5 rounded-lg border border-teal-200 dark:border-teal-800/80 flex-wrap">
+                <div class="flex items-center gap-1.5 flex-wrap min-w-0">
                   <Tag class="h-3 w-3 text-teal-600 dark:text-teal-400 shrink-0" />
-                  <span>{{ t('listen.tagFilterActive', { tag: selectedListenTagFilter }) }}</span>
-                </span>
+                  <span class="font-semibold">
+                    {{ selectedListenTagFilters.length === 1 ? t('listen.tagFilterActive', { tag: selectedListenTagFilters[0] }) : t('listen.labels.multiFilterActive', { count: selectedListenTagFilters.length, mode: listenLabelMatchMode === 'all' ? t('listen.labels.matchAll') : t('listen.labels.matchAny') }) }}
+                  </span>
+                  <button
+                    v-for="activeTag in selectedListenTagFilters"
+                    :key="activeTag"
+                    type="button"
+                    @click="toggleListenTagFilter(activeTag)"
+                    class="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-md border font-semibold cursor-pointer"
+                    :class="getTagBadgeStyle(activeTag)"
+                  >
+                    <span>#{{ activeTag }}</span>
+                    <X class="h-2.5 w-2.5" />
+                  </button>
+                </div>
                 <button
+                  type="button"
                   @click="clearListenTagFilter"
-                  class="text-teal-600 dark:text-teal-400 hover:text-teal-900 dark:hover:text-teal-100 font-bold cursor-pointer hover:underline shrink-0 ml-2"
+                  class="text-teal-600 dark:text-teal-400 hover:text-teal-900 dark:hover:text-teal-100 font-bold cursor-pointer hover:underline shrink-0"
                 >
                   {{ t('common.reset') }}
                 </button>
@@ -28318,6 +28858,22 @@ onUnmounted(() => {
                 </button>
               </div>
             </div>
+
+            <!-- Batch Multi-Select Sticky Toolbar -->
+            <ListenBatchOrganizeBar
+              v-if="isBatchSelectMode"
+              :selected-count="selectedBatchItemIds.size"
+              :visible-leaf-count="visibleListenItemsCount"
+              :labels="allListenLabelSummaries"
+              :folder-options="listenFolderSelectOptions"
+              @select-all-visible="selectAllVisibleInBatch"
+              @clear-selection="clearBatchSelection"
+              @done="exitBatchSelectMode"
+              @batch-apply-labels="handleBatchApplyLabels"
+              @batch-create-apply-label="handleBatchCreateAndApplyLabel"
+              @batch-move-folder="handleBatchMoveToFolder"
+              @batch-create-folder-move="handleBatchCreateFolderAndMove"
+            />
 
             <!-- Freshness Activity Legend Guide -->
             <div 
@@ -28427,8 +28983,21 @@ onUnmounted(() => {
             >
               <div v-if="visibleDirectoryNodes.length === 0" class="flex flex-col items-center justify-center py-16 text-center text-gray-400 dark:text-gray-500">
                 <Inbox class="h-10 w-10 mb-2 opacity-50" />
-                <p class="text-xs">{{ t('listen.noWatchlists') }}</p>
-                <p class="text-[10px] opacity-75 mt-1">{{ t('listen.clickActionsToStart') }}</p>
+                <template v-if="listenSearchQuery.trim() || selectedListenTagFilters.length > 0 || isDateFilterActive">
+                  <p class="text-xs font-semibold text-gray-600 dark:text-gray-300">{{ t('listen.labels.noFilterMatchesTitle') }}</p>
+                  <p class="text-[11px] opacity-80 mt-1">{{ t('listen.labels.noFilterMatchesDesc') }}</p>
+                  <button
+                    type="button"
+                    @click="resetAllListenDirectoryFilters"
+                    class="mt-3 px-3 py-1.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-bold cursor-pointer transition-colors"
+                  >
+                    {{ t('listen.labels.resetAllFilters') }}
+                  </button>
+                </template>
+                <template v-else>
+                  <p class="text-xs">{{ t('listen.noWatchlists') }}</p>
+                  <p class="text-[10px] opacity-75 mt-1">{{ t('listen.clickActionsToStart') }}</p>
+                </template>
               </div>
 
               <!-- Virtual Windowing Wrapper for High Performance at 500+ Items -->
@@ -28482,9 +29051,39 @@ onUnmounted(() => {
                   :class="getFreshnessAccentColor(node.freshness.level)"
                 ></span>
 
+                <!-- Batch Multi-Select Checkbox -->
+                <button
+                  v-if="isBatchSelectMode && !node.item.isFolder"
+                  type="button"
+                  @click.stop="toggleBatchItemSelection(node.item.id)"
+                  class="w-4 h-4 rounded border flex items-center justify-center shrink-0 mr-1.5 relative z-30 transition-colors cursor-pointer"
+                  :class="
+                    selectedBatchItemIds.has(node.item.id)
+                      ? 'bg-teal-600 border-teal-600 text-white'
+                      : 'border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 hover:border-teal-400'
+                  "
+                  :title="t('listen.batch.toggleItemTip')"
+                >
+                  <Check v-if="selectedBatchItemIds.has(node.item.id)" class="h-2.5 w-2.5" />
+                </button>
+                <button
+                  v-else-if="isBatchSelectMode && node.item.isFolder && node.folderItemsCount > 0"
+                  type="button"
+                  @click.stop="toggleBatchFolderSelection(node.item)"
+                  class="w-4 h-4 rounded border flex items-center justify-center shrink-0 mr-1.5 relative z-30 transition-colors cursor-pointer"
+                  :class="
+                    isFolderFullySelectedInBatch(node.item)
+                      ? 'bg-teal-600 border-teal-600 text-white'
+                      : 'border-amber-300 dark:border-amber-700 bg-amber-50/70 dark:bg-amber-950/40 hover:border-teal-400 text-amber-600'
+                  "
+                  :title="t('listen.batch.selectFolderAllTip')"
+                >
+                  <Check v-if="isFolderFullySelectedInBatch(node.item)" class="h-2.5 w-2.5" />
+                </button>
+
                 <!-- Interaction click targets -->
                 <div 
-                  @click="selectListenItem(node.item)"
+                  @click="isBatchSelectMode && !node.item.isFolder ? toggleBatchItemSelection(node.item.id) : selectListenItem(node.item)"
                   class="flex items-center gap-2 min-w-0 flex-1 cursor-pointer relative z-10"
                 >
                   <!-- Arrow indicators for directories/folders -->
@@ -28526,7 +29125,7 @@ onUnmounted(() => {
 
                   <span 
                     v-if="node.item.isFolder"
-                    class="ml-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-extrabold tracking-normal bg-gray-100 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400 border border-gray-200/50 dark:border-gray-700/40 flex items-center justify-center shrink-0"
+                    class="ml-1.5 px-1.5 py-0.5 rounded-md text-[9px] font-extrabold tracking-normal bg-gray-100 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400 border border-gray-200/50 dark:border-gray-700/40 flex items-center justify-center shrink-0 font-mono tabular-nums"
                     :title="t('listen.totalItemsFolder')"
                   >
                     {{ node.folderItemsCount }}
@@ -28561,34 +29160,46 @@ onUnmounted(() => {
                     <span class="hidden xl:inline text-[8px] uppercase tracking-wider font-semibold">{{ t('listen.excludedFromHots') || 'No Hots' }}</span>
                   </span>
 
-                  <!-- Item Tags in Rearrange Mode (Proper style) -->
+                  <!-- Color-coded Item Labels (compact in View mode, full wrap in Rearrange mode) -->
                   <div 
-                    v-if="listenLayoutMode === 'rearrange' && !node.item.isFolder && node.item.tags && node.item.tags.length > 0"
-                    class="flex items-center gap-1 shrink-0 ml-1.5 flex-wrap max-w-[260px]"
+                    v-if="!node.item.isFolder && node.item.tags && node.item.tags.length > 0"
+                    class="flex items-center gap-1 shrink-0 ml-1.5"
+                    :class="listenLayoutMode === 'rearrange' ? 'flex-wrap max-w-[260px]' : 'hidden sm:flex max-w-[170px] overflow-hidden'"
                   >
-                    <span
-                      v-for="tag in node.item.tags"
+                    <button
+                      v-for="tag in (listenLayoutMode === 'rearrange' ? node.item.tags : node.item.tags.slice(0, 2))"
                       :key="tag"
+                      type="button"
                       @click.stop="toggleListenTagFilter(tag)"
-                      class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-semibold tracking-tight transition-all cursor-pointer select-none border"
+                      class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold tracking-tight transition-all cursor-pointer select-none border whitespace-nowrap"
                       :class="[
-                        selectedListenTagFilter === tag
-                          ? 'bg-teal-500 text-white border-teal-600 shadow-2xs font-bold ring-1 ring-teal-400/50'
+                        isListenTagSelected(tag)
+                          ? getTagActiveBadgeStyle(tag)
                           : getTagBadgeStyle(tag)
                       ]"
                       :title="t('listen.filterByTagTooltip', { tag })"
                     >
-                      <span class="opacity-60 text-[9px] font-mono">#</span>
-                      <span class="truncate max-w-[80px]">{{ tag }}</span>
+                      <span
+                        class="w-1.5 h-1.5 rounded-full shrink-0"
+                        :class="isListenTagSelected(tag) ? 'bg-white' : getTagDotStyle(tag)"
+                      ></span>
+                      <span class="truncate max-w-[75px]">{{ tag }}</span>
+                    </button>
+                    <span
+                      v-if="listenLayoutMode !== 'rearrange' && node.item.tags.length > 2"
+                      class="px-1 py-0.5 rounded text-[9px] font-mono tabular-nums text-gray-400 dark:text-gray-500 shrink-0"
+                    >
+                      +{{ node.item.tags.length - 2 }}
                     </span>
                   </div>
 
-                  <!-- Quick Add Tag trigger in Rearrange Mode on hover if no tags yet -->
+                  <!-- Quick Organize Label trigger in Rearrange Mode on hover if no labels yet -->
                   <button
                     v-if="listenLayoutMode === 'rearrange' && !node.item.isFolder && (!node.item.tags || node.item.tags.length === 0)"
-                    @click.stop="openEditModal(node.item)"
+                    type="button"
+                    @click.stop="openQuickOrganizePopover(node.item, $event)"
                     class="opacity-0 group-hover:opacity-100 transition-opacity ml-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-medium text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950/40 border border-dashed border-gray-300 dark:border-gray-600 hover:border-teal-400 flex items-center gap-0.5 cursor-pointer shrink-0"
-                    :title="t('listen.tagAdd')"
+                    :title="t('listen.labels.quickOrganizeTip')"
                   >
                     <Plus class="h-2.5 w-2.5" />
                     <span>{{ t('listen.itemTags') }}</span>
@@ -28669,6 +29280,16 @@ onUnmounted(() => {
                     :title="t('listen.addSubfolderHere')"
                   >
                     <FolderPlus class="h-3 w-3" />
+                  </button>
+
+                  <!-- Quick Labels & Folder Popover Trigger -->
+                  <button
+                    type="button"
+                    @click.stop="openQuickOrganizePopover(node.item, $event)"
+                    class="p-1 hover:bg-teal-50 dark:hover:bg-teal-950/40 rounded-md text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors cursor-pointer"
+                    :title="t('listen.labels.quickOrganizeTip')"
+                  >
+                    <Tag class="h-3 w-3" />
                   </button>
 
                   <!-- Move item/folder to another destination -->
@@ -28927,6 +29548,17 @@ onUnmounted(() => {
                       </nav>
                     </div>
 
+                    <!-- Quick Labels & Folder Popover shortcut button in View Mode -->
+                    <button
+                      type="button"
+                      @click="openQuickOrganizePopover(selectedListenNode, $event)"
+                      class="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold text-gray-600 hover:text-teal-600 dark:text-gray-300 dark:hover:text-teal-400 hover:bg-teal-50/70 dark:hover:bg-teal-950/40 border border-gray-200/70 dark:border-gray-700/70 transition-all cursor-pointer"
+                      :title="t('listen.labels.quickOrganizeTip')"
+                    >
+                      <Tag class="h-3 w-3 text-teal-500" />
+                      <span>{{ t('listen.labels.labelsAction') }}</span>
+                    </button>
+
                     <!-- Quick Move to Folder shortcut button in View Mode -->
                     <button
                       type="button"
@@ -29017,6 +29649,20 @@ onUnmounted(() => {
                   <p v-if="selectedListenNode.description" class="text-xs text-gray-550 dark:text-gray-400 italic max-w-xl">
                     {{ selectedListenNode.description }}
                   </p>
+                  <div v-if="!selectedListenNode.isFolder && selectedListenNode.tags && selectedListenNode.tags.length > 0" class="flex items-center gap-1.5 flex-wrap pt-0.5">
+                    <button
+                      v-for="tag in selectedListenNode.tags"
+                      :key="tag"
+                      type="button"
+                      @click="toggleListenTagFilter(tag)"
+                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-semibold border transition-colors cursor-pointer"
+                      :class="isListenTagSelected(tag) ? getTagActiveBadgeStyle(tag) : getTagBadgeStyle(tag)"
+                      :title="t('listen.labels.multiFilterChipTip', { tag })"
+                    >
+                      <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="isListenTagSelected(tag) ? 'bg-white' : getTagDotStyle(tag)"></span>
+                      <span>{{ tag }}</span>
+                    </button>
+                  </div>
                 </div>
 
                 <!-- Listen Control Bar -->
@@ -33750,6 +34396,34 @@ onUnmounted(() => {
         </div>
       </div>
     </Teleport>
+    <!-- Listen Custom Label Manager Modal -->
+    <ListenLabelManagerModal
+      :is-open="isLabelManagerOpen"
+      :labels="allListenLabelSummaries"
+      :active-filter-labels="selectedListenTagFilters"
+      @close="isLabelManagerOpen = false"
+      @create-label="handleCreateOrUpdateCustomLabel"
+      @update-label-color="handleUpdateCustomLabelColor"
+      @rename-label="handleRenameCustomLabel"
+      @delete-label="handleDeleteCustomLabel"
+      @toggle-filter="toggleListenTagFilter"
+    />
+
+    <!-- Listen Quick Label & Folder Popover -->
+    <ListenQuickOrganizePopover
+      :is-open="quickOrganizeState.isOpen"
+      :item="quickOrganizeItem"
+      :anchor-rect="quickOrganizeState.anchorRect"
+      :labels="allListenLabelSummaries"
+      :folder-options="listenFolderSelectOptions"
+      :current-parent-folder-id="quickOrganizeParentFolderId"
+      @close="closeQuickOrganizePopover"
+      @toggle-label="handleQuickToggleLabel"
+      @create-and-apply-label="handleQuickCreateAndApplyLabel"
+      @move-to-folder="handleQuickMoveToFolder"
+      @create-folder-and-move="handleQuickCreateFolderAndMove"
+      @open-label-manager="isLabelManagerOpen = true"
+    />
   </div>
 </template>
 

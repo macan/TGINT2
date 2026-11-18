@@ -29,10 +29,16 @@ import {
   Building2,
   BarChart2,
   Scale,
-  Hash
+  Hash,
+  Cpu,
+  Database,
+  Download,
+  Trash2,
+  Zap
 } from "lucide-vue-next";
 import {
   HotsDateRange,
+  HotsClusterMode,
   HotPostItem,
   HotTopicCluster,
   HotChannelItem,
@@ -43,8 +49,14 @@ import {
 import {
   computeListenHotsInBackground,
   getCachedHotsAnalysis,
-  setCachedHotsAnalysis
+  warmupHotsEmbedModel,
+  abortHotsEmbedWorker,
+  getHotsEmbedCacheStatus,
+  clearHotsEmbedAndVectorCache,
+  type HotsEmbedExecutorPreference,
+  type HotsNeuralCacheStatus
 } from "../../utils/hotsWorkerClient";
+import { HOTS_EMBED_MODEL_ID } from "../../utils/hotsVectorStore";
 import { getAllCachedPostsIndexedDB } from "../../utils/indexedDbPosts";
 import PostItemView from "./PostItemView.vue";
 import VirtualPostList from "./VirtualPostList.vue";
@@ -99,19 +111,59 @@ const effectiveChartDateRange = computed<HotsDateRange>(() => {
   return analysisResult.value?.dateRange || selectedDateRange.value;
 });
 
-// AI Mode & Gemini Token State
+// Cluster Mode, Gemini Token & Local Neural Cache State
+function resolveInitialClusterMode(): HotsClusterMode {
+  const saved = localStorage.getItem("listen_hots_cluster_mode");
+  if (saved === "rule" || saved === "neural" || saved === "ai") return saved;
+  if (localStorage.getItem("listen_hots_ai_mode") === "true") return "ai";
+  return "neural";
+}
+
 const geminiApiKey = ref<string>(localStorage.getItem("gemini_api_key") || "");
 const serverHasGemini = ref(false);
-const isAiModeEnabled = ref<boolean>(localStorage.getItem("listen_hots_ai_mode") === "true");
+const selectedClusterMode = ref<HotsClusterMode>(resolveInitialClusterMode());
+const executorPreference = ref<HotsEmbedExecutorPreference>(
+  (localStorage.getItem("listen_hots_embed_executor") as HotsEmbedExecutorPreference) || "auto"
+);
 const isApiKeyModalOpen = ref(false);
 const apiKeyInput = ref(geminiApiKey.value);
 const apiKeyFeedback = ref("");
 
+const isEmbedCacheModalOpen = ref(false);
+const neuralCacheStatus = ref<HotsNeuralCacheStatus | null>(null);
+const needsNeuralModelDownload = ref<{
+  approxBytes: number;
+  partialBytes: number;
+  totalBytes: number;
+} | null>(null);
+const isWarmingUpModel = ref(false);
+const isClearingEmbedCache = ref(false);
+const embedActionFeedback = ref("");
+
+const effectiveClusterMode = computed<HotsClusterMode>(() => {
+  if (selectedClusterMode.value === "ai" && !serverHasGemini.value && !geminiApiKey.value) {
+    return "rule";
+  }
+  return selectedClusterMode.value;
+});
+
+const refreshNeuralCacheStatus = async () => {
+  try {
+    neuralCacheStatus.value = await getHotsEmbedCacheStatus();
+  } catch {
+    // ignore storage probe failures
+  }
+};
+
 const checkServerGeminiStatus = async () => {
   const cap = await probeApiBackend();
   serverHasGemini.value = cap.serverHasGeminiKey;
-  if (cap.serverHasGeminiKey && !localStorage.getItem("listen_hots_ai_mode")) {
-    isAiModeEnabled.value = true;
+  if (
+    cap.serverHasGeminiKey &&
+    !localStorage.getItem("listen_hots_cluster_mode") &&
+    !localStorage.getItem("listen_hots_ai_mode")
+  ) {
+    selectedClusterMode.value = "ai";
   }
 };
 
@@ -209,18 +261,23 @@ const filteredDrillDownChannels = computed(() => {
 // Computing Engine Execution
 // ---------------------------------------------------------------------------
 
-async function runAnalysis(force: boolean = false) {
+async function runAnalysis(force: boolean = false, allowModelDownload: boolean = false) {
   if (isComputing.value && !force) return;
 
-  const isAi = isAiModeEnabled.value && (serverHasGemini.value || !!geminiApiKey.value);
-  const cached = getCachedHotsAnalysis(selectedDateRange.value, isAi);
+  const activeMode = effectiveClusterMode.value;
+  const cached = getCachedHotsAnalysis(selectedDateRange.value, activeMode);
   if (cached && !force) {
     analysisResult.value = cached;
-  } else {
-    // Clear stale analysisResult so previous range metrics do not conflict with the newly selected range
+  } else if (!force) {
+    // Also restore Stage-1 rule cache immediately if switching into neural for instant preview
+    const ruleFallback =
+      activeMode === "neural" ? getCachedHotsAnalysis(selectedDateRange.value, "rule") : undefined;
+    analysisResult.value = ruleFallback || null;
+  } else if (!analysisResult.value || analysisResult.value.dateRange !== selectedDateRange.value) {
     analysisResult.value = null;
   }
 
+  needsNeuralModelDownload.value = null;
   isComputing.value = true;
   isTopicsComputing.value = true;
   computeProgress.value = {
@@ -260,17 +317,29 @@ async function runAnalysis(force: boolean = false) {
       cachedChannels,
       dateRange: selectedDateRange.value,
       geminiApiKey: geminiApiKey.value,
-      useAiMode: isAi,
+      useAiMode: activeMode === "ai",
+      clusterMode: activeMode,
+      allowModelDownload,
+      executorPreference: executorPreference.value,
       listenItems: props.listenItems,
       channelMetadataCache: props.channelMetadataCache,
       onProgress: p => {
         computeProgress.value = p;
-        if (p.step === 'clustering' || p.step === 'ai_clustering') {
+        if (
+          p.step === "clustering" ||
+          p.step === "ai_clustering" ||
+          p.step === "embedding_download" ||
+          p.step === "embedding"
+        ) {
           isTopicsComputing.value = true;
         }
       },
+      onNeedsModelDownload: info => {
+        needsNeuralModelDownload.value = info;
+      },
       onPartialResult: partial => {
-        // Progressive UI: Immediately show Hot Posts & Hot Channels without waiting for topic clustering
+        // Progressive UI: Show Hot Posts, Hot Channels, and instant Stage-1 topics cleanly
+        const keepComputingTopics = activeMode === "neural" || activeMode === "ai";
         if (!analysisResult.value) {
           analysisResult.value = {
             dateRange: selectedDateRange.value,
@@ -281,11 +350,11 @@ async function runAnalysis(force: boolean = false) {
             substantivePostsCount: partial.substantivePostsCount || 0,
             totalChannelsScanned: partial.totalChannelsScanned,
             activeChannelsCount: partial.activeChannelsCount,
-            hotTopics: [],
+            hotTopics: partial.hotTopics || [],
             hotPosts: partial.hotPosts,
             hotChannels: partial.hotChannels,
             computedAt: Date.now(),
-            isTopicsComputing: true
+            isTopicsComputing: keepComputingTopics
           };
         } else {
           analysisResult.value = {
@@ -296,15 +365,31 @@ async function runAnalysis(force: boolean = false) {
             substantivePostsCount: partial.substantivePostsCount ?? analysisResult.value.substantivePostsCount ?? 0,
             totalChannelsScanned: partial.totalChannelsScanned,
             activeChannelsCount: partial.activeChannelsCount,
+            hotTopics: partial.hotTopics && partial.hotTopics.length > 0 ? partial.hotTopics : analysisResult.value.hotTopics,
             hotPosts: partial.hotPosts,
             hotChannels: partial.hotChannels,
-            isTopicsComputing: true
+            isTopicsComputing: keepComputingTopics
           };
         }
       }
     });
 
     analysisResult.value = res;
+
+    // Keep open inspectedTopic in sync when Stage-2 refinement replaces Stage-1 clusters
+    if (inspectedTopic.value && res.hotTopics.length > 0) {
+      const prevRepKey = inspectedTopic.value.representativePost?.key || inspectedTopic.value.posts[0]?.key;
+      const matched =
+        res.hotTopics.find(tp => tp.id === inspectedTopic.value?.id) ||
+        (prevRepKey ? res.hotTopics.find(tp => tp.posts.some(p => p.key === prevRepKey)) : undefined);
+      if (matched) {
+        inspectedTopic.value = matched;
+      }
+    }
+
+    if (res.clusterModeUsed === "neural") {
+      refreshNeuralCacheStatus();
+    }
   } catch (err) {
     console.error("Failed to run listen hots analysis in background:", err);
   } finally {
@@ -363,15 +448,81 @@ function handleDateRangeChange(range: HotsDateRange) {
   runAnalysis();
 }
 
-function toggleAiMode() {
-  if (!serverHasGemini.value && !geminiApiKey.value) {
+function selectClusterMode(mode: HotsClusterMode) {
+  if (mode === "ai" && !serverHasGemini.value && !geminiApiKey.value) {
     apiKeyInput.value = "";
     isApiKeyModalOpen.value = true;
     return;
   }
-  isAiModeEnabled.value = !isAiModeEnabled.value;
-  localStorage.setItem("listen_hots_ai_mode", String(isAiModeEnabled.value));
+  if (selectedClusterMode.value === mode) return;
+  selectedClusterMode.value = mode;
+  localStorage.setItem("listen_hots_cluster_mode", mode);
+  localStorage.setItem("listen_hots_ai_mode", mode === "ai" ? "true" : "false");
+  needsNeuralModelDownload.value = null;
   runAnalysis();
+}
+
+function downloadAndRefineNeural() {
+  needsNeuralModelDownload.value = null;
+  runAnalysis(true, true);
+}
+
+function abortNeuralTask() {
+  abortHotsEmbedWorker();
+  isWarmingUpModel.value = false;
+  isTopicsComputing.value = false;
+  isComputing.value = false;
+}
+
+async function openEmbedCacheModal() {
+  embedActionFeedback.value = "";
+  isEmbedCacheModalOpen.value = true;
+  await refreshNeuralCacheStatus();
+}
+
+function handleExecutorChange(pref: HotsEmbedExecutorPreference) {
+  executorPreference.value = pref;
+  localStorage.setItem("listen_hots_embed_executor", pref);
+}
+
+async function handleWarmupEmbedModel() {
+  if (isWarmingUpModel.value) return;
+  isWarmingUpModel.value = true;
+  embedActionFeedback.value = "";
+  try {
+    const res = await warmupHotsEmbedModel(executorPreference.value, p => {
+      computeProgress.value = p;
+    });
+    await refreshNeuralCacheStatus();
+    needsNeuralModelDownload.value = null;
+    embedActionFeedback.value = `Model ready via ${res.provider.toUpperCase()}.`;
+    if (selectedClusterMode.value === "neural") {
+      runAnalysis(true, true);
+    }
+  } catch (err: any) {
+    embedActionFeedback.value = err?.message || "Model download failed.";
+  } finally {
+    isWarmingUpModel.value = false;
+  }
+}
+
+async function handleClearEmbedCache() {
+  if (isClearingEmbedCache.value) return;
+  isClearingEmbedCache.value = true;
+  embedActionFeedback.value = "";
+  try {
+    await clearHotsEmbedAndVectorCache();
+    await refreshNeuralCacheStatus();
+    needsNeuralModelDownload.value = null;
+    embedActionFeedback.value = t("listen.hots.embedCacheCleared") || "Local model & vector caches cleared.";
+    if (selectedClusterMode.value === "neural") {
+      runAnalysis(true, false);
+    }
+  } catch (err: any) {
+    embedActionFeedback.value = err?.message || "Failed clearing cache.";
+  } finally {
+    isClearingEmbedCache.value = false;
+  }
 }
 
 function saveApiKey() {
@@ -379,9 +530,10 @@ function saveApiKey() {
   if (!trimmed) {
     geminiApiKey.value = "";
     localStorage.removeItem("gemini_api_key");
-    isAiModeEnabled.value = false;
+    selectedClusterMode.value = "neural";
+    localStorage.setItem("listen_hots_cluster_mode", "neural");
     localStorage.setItem("listen_hots_ai_mode", "false");
-    apiKeyFeedback.value = "Gemini key removed. Reverting to local semantic clustering.";
+    apiKeyFeedback.value = "Gemini key removed. Reverting to local neural clustering.";
     setTimeout(() => {
       isApiKeyModalOpen.value = false;
       apiKeyFeedback.value = "";
@@ -392,7 +544,8 @@ function saveApiKey() {
 
   geminiApiKey.value = trimmed;
   localStorage.setItem("gemini_api_key", trimmed);
-  isAiModeEnabled.value = true;
+  selectedClusterMode.value = "ai";
+  localStorage.setItem("listen_hots_cluster_mode", "ai");
   localStorage.setItem("listen_hots_ai_mode", "true");
   apiKeyFeedback.value = "Key saved! AI-powered clustering enabled with Gemini 3.1 Flash Lite.";
   setTimeout(() => {
@@ -451,6 +604,13 @@ function formatNumber(num: number): string {
     return (num / 1_000).toFixed(1) + "K";
   }
   return num.toLocaleString();
+}
+
+function formatBytes(bytes?: number): string {
+  if (!bytes || bytes <= 0) return "0 MB";
+  const mb = bytes / (1024 * 1024);
+  if (mb < 0.1) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${mb.toFixed(1)} MB`;
 }
 
 function formatRelativeTime(timestamp: number): string {
@@ -588,9 +748,9 @@ watch(
 
 onMounted(() => {
   checkServerGeminiStatus();
+  refreshNeuralCacheStatus();
   // Instant restore from in-memory cache if available (0ms render time)
-  const isAi = isAiModeEnabled.value && (serverHasGemini.value || !!geminiApiKey.value);
-  const cached = getCachedHotsAnalysis(selectedDateRange.value, isAi);
+  const cached = getCachedHotsAnalysis(selectedDateRange.value, effectiveClusterMode.value);
   if (cached) {
     analysisResult.value = cached;
   }
@@ -720,29 +880,80 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- Right: AI Mode Toggle & Refresh Button -->
+      <!-- Right: 3-Mode Clustering Selector, Cache Settings & Refresh Button -->
       <div class="flex items-center gap-2 self-end sm:self-auto shrink-0 flex-wrap">
-        <!-- AI Clustering Toggle -->
+        <!-- 3-Mode Clustering Segmented Control -->
+        <div
+          class="flex items-center gap-0.5 bg-gray-100/90 dark:bg-gray-900/70 p-1 rounded-2xl border border-gray-200/70 dark:border-gray-700/70"
+          role="group"
+        >
+          <button
+            type="button"
+            @click="selectClusterMode('rule')"
+            class="flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
+            :class="[
+              selectedClusterMode === 'rule'
+                ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
+                : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+            ]"
+            :title="t('listen.hots.modeRuleTooltip') || 'Instant multilingual TF-IDF + SimHash statistical clustering'"
+          >
+            <Zap class="h-3 w-3" />
+            <span>{{ t('listen.hots.modeRule') || 'Fast Rule' }}</span>
+          </button>
+
+          <button
+            type="button"
+            @click="selectClusterMode('neural')"
+            class="flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
+            :class="[
+              selectedClusterMode === 'neural'
+                ? 'bg-white dark:bg-gray-800 text-cyan-600 dark:text-cyan-400 shadow-xs'
+                : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+            ]"
+            :title="t('listen.hots.modeNeuralTooltip') || 'Instant preview refined locally with MiniLM multilingual ONNX sentence embeddings'"
+          >
+            <Cpu class="h-3 w-3" />
+            <span>{{ t('listen.hots.modeNeural') || 'Neural Local' }}</span>
+          </button>
+
+          <button
+            type="button"
+            @click="selectClusterMode('ai')"
+            class="flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
+            :class="[
+              selectedClusterMode === 'ai' && (serverHasGemini || geminiApiKey)
+                ? 'bg-white dark:bg-gray-800 text-indigo-600 dark:text-indigo-400 shadow-xs'
+                : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+            ]"
+            :title="serverHasGemini || geminiApiKey ? t('listen.hots.aiClusteringActive') : t('listen.hots.aiClusteringTooltip')"
+          >
+            <Sparkles class="h-3 w-3" />
+            <span>{{ t('listen.hots.modeAi') || 'Gemini AI' }}</span>
+          </button>
+
+          <button
+            type="button"
+            @click.stop="isApiKeyModalOpen = true"
+            class="ml-0.5 px-1.5 py-1 rounded-xl text-[11px] font-semibold text-gray-500 hover:text-indigo-600 dark:text-gray-400 dark:hover:text-indigo-400 cursor-pointer whitespace-nowrap shrink-0"
+            :title="t('listen.hots.geminiTokenModalTitle') || 'Configure Gemini Key'"
+          >
+            <Key class="h-3 w-3" />
+          </button>
+        </div>
+
+        <!-- Local Embedding Cache Modal Trigger -->
         <button
           type="button"
-          @click="toggleAiMode"
-          class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-bold transition-all cursor-pointer select-none border shadow-2xs"
-          :class="[
-            isAiModeEnabled && (serverHasGemini || geminiApiKey)
-              ? 'bg-gradient-to-r from-violet-50 to-indigo-50 dark:from-violet-950/60 dark:to-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800/80 ring-1 ring-indigo-500/20'
-              : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700/60'
-          ]"
-          :title="serverHasGemini || geminiApiKey ? t('listen.hots.aiClusteringActive') : t('listen.hots.aiClusteringTooltip')"
+          @click="openEmbedCacheModal"
+          class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-2xl text-xs font-bold bg-white hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700/70 text-gray-700 dark:text-gray-200 border border-gray-200/80 dark:border-gray-700/80 transition-all cursor-pointer select-none shadow-2xs whitespace-nowrap shrink-0"
+          :title="t('listen.hots.embedCacheTitle') || 'Local Embedding Model & Vector Cache'"
         >
-          <Sparkles class="h-3.5 w-3.5" :class="isAiModeEnabled && (serverHasGemini || geminiApiKey) ? 'text-indigo-600 dark:text-indigo-400' : 'text-gray-400'" />
-          <span>{{ isAiModeEnabled && (serverHasGemini || geminiApiKey) ? 'Gemini 3.1 Flash Lite' : (t('listen.hots.aiClustering') || 'AI Mode') }}</span>
-          <span
-            @click.stop="isApiKeyModalOpen = true"
-            class="ml-1 text-[10px] text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 underline cursor-pointer"
-            title="Configure Gemini Token"
-          >
-            {{ geminiApiKey ? 'Key' : 'Key' }}
-          </span>
+          <Database
+            class="h-3.5 w-3.5"
+            :class="neuralCacheStatus?.isCached ? 'text-cyan-600 dark:text-cyan-400' : 'text-gray-400 dark:text-gray-500'"
+          />
+          <span class="hidden xl:inline">{{ t('listen.hots.embedCacheBtn') || 'Model Cache' }}</span>
         </button>
 
         <!-- Pending Recalculation Notification Chip & Instant Update Trigger -->
@@ -750,17 +961,14 @@ onUnmounted(() => {
           v-if="isRecalculationPending && !isComputing"
           class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200/80 dark:border-amber-800/80 text-amber-800 dark:text-amber-200 text-xs font-semibold shadow-2xs"
         >
-          <span class="relative flex h-2 w-2">
-            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-            <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
-          </span>
+          <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
           <span class="whitespace-nowrap">
             New posts synced · Updating in {{ pendingCountdownSeconds }}s
           </span>
           <button
             type="button"
             @click="triggerImmediateRecalculation"
-            class="ml-1 px-2 py-0.5 rounded-xl bg-amber-200/80 hover:bg-amber-300 dark:bg-amber-900/80 dark:hover:bg-amber-800 text-amber-900 dark:text-amber-100 text-[11px] font-bold cursor-pointer transition-colors whitespace-nowrap active:scale-95"
+            class="ml-1 px-2 py-0.5 rounded-xl bg-amber-200/80 hover:bg-amber-300 dark:bg-amber-900/80 dark:hover:bg-amber-800 text-amber-900 dark:text-amber-100 text-[11px] font-bold cursor-pointer transition-colors whitespace-nowrap active:scale-95 shrink-0"
             title="Update hot topics immediately"
           >
             Update now
@@ -772,7 +980,7 @@ onUnmounted(() => {
           type="button"
           @click="triggerImmediateRecalculation"
           :disabled="isComputing"
-          class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-bold bg-white hover:bg-teal-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-teal-700 dark:text-teal-300 border border-teal-200/80 dark:border-teal-800/60 transition-all cursor-pointer select-none shadow-2xs active:scale-95 disabled:opacity-50"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-bold bg-white hover:bg-teal-50 dark:bg-gray-800 dark:hover:bg-gray-700 text-teal-700 dark:text-teal-300 border border-teal-200/80 dark:border-teal-800/60 transition-all cursor-pointer select-none shadow-2xs active:scale-95 disabled:opacity-50 whitespace-nowrap shrink-0"
           :title="t('listen.hots.refresh') || 'Re-calculate'"
         >
           <RefreshCw class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400" :class="{ 'animate-spin': isComputing }" />
@@ -782,14 +990,24 @@ onUnmounted(() => {
     </div>
 
     <!-- Progressive Computing Progress Bar (Initial Cold Load Only) -->
-    <div v-if="isComputing && !analysisResult" class="w-full bg-teal-50 dark:bg-teal-950/40 border border-teal-200/70 dark:border-teal-800/60 rounded-2xl p-3 flex items-center justify-between gap-3 animate-pulse">
+    <div v-if="isComputing && !analysisResult" class="w-full bg-teal-50 dark:bg-teal-950/40 border border-teal-200/70 dark:border-teal-800/60 rounded-2xl p-3 flex items-center justify-between gap-3">
       <div class="flex items-center gap-2 text-xs font-bold text-teal-900 dark:text-teal-200 truncate">
         <RefreshCw class="h-3.5 w-3.5 animate-spin text-teal-600 dark:text-teal-400 shrink-0" />
         <span class="truncate">{{ computeProgress.message }}</span>
       </div>
-      <span class="text-xs font-mono font-bold text-teal-700 dark:text-teal-300 tabular-nums shrink-0">
-        {{ computeProgress.percent }}%
-      </span>
+      <div class="flex items-center gap-2 shrink-0">
+        <span class="text-xs font-mono font-bold text-teal-700 dark:text-teal-300 tabular-nums">
+          {{ computeProgress.percent }}%
+        </span>
+        <button
+          v-if="computeProgress.step === 'embedding_download' || computeProgress.step === 'embedding'"
+          type="button"
+          @click="abortNeuralTask"
+          class="px-2 py-0.5 rounded-lg text-[11px] font-bold bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 border border-teal-200 dark:border-teal-700 hover:bg-gray-50 cursor-pointer whitespace-nowrap"
+        >
+          {{ t('listen.hots.abortDownload') || 'Abort' }}
+        </button>
+      </div>
     </div>
 
     <!-- Empty State -->
@@ -859,16 +1077,81 @@ onUnmounted(() => {
 
         <!-- Topics Cards List (Top 5) -->
         <div class="p-4 space-y-3 divide-y divide-gray-100 dark:divide-gray-700/50">
-          <!-- Background Updating Banner when previous topics exist -->
+          <!-- Stage-2 Neural Refinement Progress Banner (when Stage-1 preview is visible) -->
           <div
             v-if="isTopicsComputing && analysisResult.hotTopics.length > 0"
-            class="mb-2 p-2 rounded-xl bg-amber-50/70 dark:bg-amber-950/40 border border-amber-200/60 dark:border-amber-800/50 text-[11px] text-amber-800 dark:text-amber-300 flex items-center justify-between gap-2"
+            class="mb-2 p-2.5 rounded-xl bg-cyan-50/80 dark:bg-cyan-950/40 border border-cyan-200/70 dark:border-cyan-800/60 text-[11px] text-cyan-900 dark:text-cyan-200 space-y-1.5"
           >
-            <span class="inline-flex items-center gap-1.5 font-medium truncate">
-              <RefreshCw class="h-3 w-3 animate-spin text-amber-600 dark:text-amber-400 shrink-0" />
-              <span class="truncate">{{ computeProgress.message || 'Updating topics in background...' }}</span>
-            </span>
-            <span class="font-mono font-bold tabular-nums shrink-0">{{ computeProgress.percent }}%</span>
+            <div class="flex items-center justify-between gap-2">
+              <span class="inline-flex items-center gap-1.5 font-semibold truncate">
+                <RefreshCw class="h-3 w-3 animate-spin text-cyan-600 dark:text-cyan-400 shrink-0" />
+                <span class="truncate">{{ computeProgress.message || (t('listen.hots.neuralRefining') || 'Refining clusters with neural embeddings...') }}</span>
+              </span>
+              <div class="flex items-center gap-2 shrink-0">
+                <span
+                  v-if="computeProgress.step === 'embedding_download' && computeProgress.totalBytes"
+                  class="font-mono text-[10px] text-cyan-700 dark:text-cyan-300 tabular-nums"
+                >
+                  {{ formatBytes(computeProgress.loadedBytes) }} / {{ formatBytes(computeProgress.totalBytes) }}
+                </span>
+                <span class="font-mono font-bold tabular-nums">{{ computeProgress.percent }}%</span>
+                <button
+                  v-if="computeProgress.step === 'embedding_download' || computeProgress.step === 'embedding'"
+                  type="button"
+                  @click.stop="abortNeuralTask"
+                  class="px-1.5 py-0.5 rounded-md bg-white dark:bg-gray-800 border border-cyan-300/70 dark:border-cyan-700/70 text-[10px] font-bold text-gray-700 dark:text-gray-200 hover:bg-gray-50 cursor-pointer whitespace-nowrap"
+                >
+                  {{ t('listen.hots.abortDownload') || 'Abort' }}
+                </button>
+              </div>
+            </div>
+            <div class="h-1 w-full rounded-full bg-cyan-200/60 dark:bg-cyan-900/60 overflow-hidden">
+              <div
+                class="h-full bg-cyan-600 dark:bg-cyan-400 transition-all duration-200"
+                :style="{ width: `${Math.min(100, Math.max(4, computeProgress.percent))}%` }"
+              ></div>
+            </div>
+          </div>
+
+          <!-- Non-blocking 1-click Neural Model Download Prompt (keeps Stage-1 preview interactive) -->
+          <div
+            v-else-if="!isTopicsComputing && selectedClusterMode === 'neural' && needsNeuralModelDownload"
+            class="mb-2 p-3 rounded-2xl bg-cyan-50/80 dark:bg-cyan-950/35 border border-cyan-200/80 dark:border-cyan-800/60 flex flex-col gap-2"
+          >
+            <div class="flex items-start gap-2">
+              <Cpu class="h-4 w-4 text-cyan-600 dark:text-cyan-400 shrink-0 mt-0.5" />
+              <div class="min-w-0 flex-1">
+                <p class="text-xs font-bold text-gray-900 dark:text-white">
+                  {{ t('listen.hots.neuralDownloadPromptTitle') || 'Stage-1 preview ready · Refine locally with MiniLM embeddings' }}
+                </p>
+                <p class="text-[11px] text-gray-600 dark:text-gray-300 mt-0.5 leading-snug">
+                  {{ t('listen.hots.neuralDownloadPromptDesc') || 'One-time ~113 MB multilingual ONNX download cached offline in your browser for ZH/EN/RU/JA clustering.' }}
+                </p>
+              </div>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                @click="downloadAndRefineNeural"
+                class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-cyan-600 hover:bg-cyan-700 text-white cursor-pointer transition-colors whitespace-nowrap shrink-0"
+              >
+                <Download class="h-3.5 w-3.5" />
+                <span>
+                  {{
+                    needsNeuralModelDownload.partialBytes > 0
+                      ? (t('listen.hots.resumeDownloadRefine') || `Resume (${formatBytes(needsNeuralModelDownload.partialBytes)} saved) & Refine`)
+                      : (t('listen.hots.downloadAndRefine') || 'Download & Refine')
+                  }}
+                </span>
+              </button>
+              <button
+                type="button"
+                @click="selectClusterMode('rule')"
+                class="px-2.5 py-1.5 rounded-xl text-xs font-semibold text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                {{ t('listen.hots.stayFastRule') || 'Use Fast Rule' }}
+              </button>
+            </div>
           </div>
 
           <!-- Non-blocking Skeleton Loader when topics are computing for the first time -->
@@ -914,17 +1197,24 @@ onUnmounted(() => {
                 <div class="flex items-center flex-wrap gap-1.5 mb-1">
                   <!-- Mode Badge -->
                   <span
-                    v-if="topic.isAiGenerated"
+                    v-if="topic.isAiGenerated || topic.clusterSource === 'ai'"
                     class="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 px-1.5 py-0.5 rounded-md border border-indigo-200/60 dark:border-indigo-800/50 shrink-0"
                   >
                     <Sparkles class="h-2.5 w-2.5" />
                     AI
                   </span>
                   <span
+                    v-else-if="topic.clusterSource === 'neural'"
+                    class="inline-flex items-center gap-1 text-[10px] font-bold text-cyan-700 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-950/60 px-1.5 py-0.5 rounded-md border border-cyan-200/60 dark:border-cyan-800/50 shrink-0"
+                  >
+                    <Cpu class="h-2.5 w-2.5" />
+                    {{ t('listen.hots.badgeNeural') || 'Neural' }}
+                  </span>
+                  <span
                     v-else
                     class="inline-flex items-center gap-1 text-[10px] font-bold text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-950/60 px-1.5 py-0.5 rounded-md border border-teal-200/60 dark:border-teal-800/50 shrink-0"
                   >
-                    Rule
+                    {{ t('listen.hots.badgeRule') || 'Rule' }}
                   </span>
 
                   <!-- Category Badge -->
@@ -1198,17 +1488,24 @@ onUnmounted(() => {
                   <!-- Badges in Inspected Topic Title Header -->
                   <div class="flex items-center flex-wrap gap-1.5 mb-2">
                     <span
-                      v-if="inspectedTopic.isAiGenerated"
+                      v-if="inspectedTopic.isAiGenerated || inspectedTopic.clusterSource === 'ai'"
                       class="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 px-2 py-0.5 rounded-md border border-indigo-200/60 dark:border-indigo-800/50 shrink-0"
                     >
                       <Sparkles class="h-2.5 w-2.5" />
                       AI
                     </span>
                     <span
+                      v-else-if="inspectedTopic.clusterSource === 'neural'"
+                      class="inline-flex items-center gap-1 text-[10px] font-bold text-cyan-700 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-950/60 px-2 py-0.5 rounded-md border border-cyan-200/60 dark:border-cyan-800/50 shrink-0"
+                    >
+                      <Cpu class="h-2.5 w-2.5" />
+                      {{ t('listen.hots.badgeNeural') || 'Neural' }}
+                    </span>
+                    <span
                       v-else
                       class="inline-flex items-center gap-1 text-[10px] font-bold text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-950/60 px-2 py-0.5 rounded-md border border-teal-200/60 dark:border-teal-800/50 shrink-0"
                     >
-                      Rule
+                      {{ t('listen.hots.badgeRule') || 'Rule' }}
                     </span>
 
                     <span
@@ -1312,17 +1609,24 @@ onUnmounted(() => {
                       <!-- Badges in Modal Topic Title Header -->
                       <div class="flex items-center flex-wrap gap-1.5 mb-1.5">
                         <span
-                          v-if="topic.isAiGenerated"
+                          v-if="topic.isAiGenerated || topic.clusterSource === 'ai'"
                           class="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 px-1.5 py-0.5 rounded-md border border-indigo-200/60 dark:border-indigo-800/50 shrink-0"
                         >
                           <Sparkles class="h-2.5 w-2.5" />
                           AI
                         </span>
                         <span
+                          v-else-if="topic.clusterSource === 'neural'"
+                          class="inline-flex items-center gap-1 text-[10px] font-bold text-cyan-700 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-950/60 px-1.5 py-0.5 rounded-md border border-cyan-200/60 dark:border-cyan-800/50 shrink-0"
+                        >
+                          <Cpu class="h-2.5 w-2.5" />
+                          {{ t('listen.hots.badgeNeural') || 'Neural' }}
+                        </span>
+                        <span
                           v-else
                           class="inline-flex items-center gap-1 text-[10px] font-bold text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-950/60 px-1.5 py-0.5 rounded-md border border-teal-200/60 dark:border-teal-800/50 shrink-0"
                         >
-                          Rule
+                          {{ t('listen.hots.badgeRule') || 'Rule' }}
                         </span>
 
                         <span
@@ -1543,6 +1847,188 @@ onUnmounted(() => {
           >
             {{ t('listen.hots.saveToken') || 'Save & Enable AI' }}
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================================================================== -->
+    <!-- LOCAL SEMANTIC EMBEDDING CACHE MODAL                                  -->
+    <!-- ===================================================================== -->
+    <div
+      v-if="isEmbedCacheModalOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200"
+      @click.self="isEmbedCacheModalOpen = false"
+    >
+      <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-2xl w-full max-w-lg overflow-hidden p-6 space-y-4">
+        <div class="flex items-center justify-between gap-3">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <div class="h-9 w-9 rounded-xl bg-cyan-50 dark:bg-cyan-950/60 text-cyan-600 dark:text-cyan-400 border border-cyan-200/70 dark:border-cyan-800/60 flex items-center justify-center shrink-0">
+              <Database class="h-4 w-4" />
+            </div>
+            <div class="min-w-0">
+              <h4 class="text-sm sm:text-base font-black text-gray-900 dark:text-white truncate">
+                {{ t('listen.hots.embedCacheTitle') || 'Local Semantic Embedding Cache' }}
+              </h4>
+              <p class="text-[11px] font-mono text-gray-500 dark:text-gray-400 truncate">
+                {{ HOTS_EMBED_MODEL_ID }}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            @click="isEmbedCacheModalOpen = false"
+            class="h-8 w-8 rounded-full bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-500 dark:text-gray-300 flex items-center justify-center cursor-pointer shrink-0"
+          >
+            <X class="h-4 w-4" />
+          </button>
+        </div>
+
+        <p class="text-xs text-gray-600 dark:text-gray-300 leading-relaxed">
+          {{ t('listen.hots.embedCacheDesc') || 'Multilingual sentence embeddings run 100% locally via ONNX Runtime & Web Workers. Both model weights and computed post vectors are cached in your browser.' }}
+        </p>
+
+        <!-- Stats Summary Grid -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div class="p-3 rounded-2xl bg-gray-50 dark:bg-gray-900/60 border border-gray-200/70 dark:border-gray-700/70 space-y-1">
+            <div class="text-[11px] font-semibold text-gray-500 dark:text-gray-400">
+              {{ t('listen.hots.modelWeightsLabel') || 'ONNX Model Weights (INT8)' }}
+            </div>
+            <div class="flex items-center justify-between gap-2">
+              <span
+                class="text-xs font-bold"
+                :class="neuralCacheStatus?.isCached ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'"
+              >
+                {{
+                  neuralCacheStatus?.isCached
+                    ? (t('listen.hots.modelCached') || 'Cached offline')
+                    : (t('listen.hots.modelNotCached') || 'Not downloaded')
+                }}
+              </span>
+              <span class="text-xs font-mono tabular-nums text-gray-700 dark:text-gray-200 font-bold">
+                {{
+                  neuralCacheStatus?.isCached
+                    ? formatBytes(neuralCacheStatus.totalBytes || neuralCacheStatus.approxBytes)
+                    : neuralCacheStatus?.partialBytes
+                      ? `${formatBytes(neuralCacheStatus.partialBytes)} / ${formatBytes(neuralCacheStatus.totalBytes || neuralCacheStatus.approxBytes)}`
+                      : `~${formatBytes(neuralCacheStatus?.approxBytes || 118400000)}`
+                }}
+              </span>
+            </div>
+          </div>
+
+          <div class="p-3 rounded-2xl bg-gray-50 dark:bg-gray-900/60 border border-gray-200/70 dark:border-gray-700/70 space-y-1">
+            <div class="text-[11px] font-semibold text-gray-500 dark:text-gray-400">
+              {{ t('listen.hots.vectorStoreLabel') || 'IndexedDB Post Vectors (384-d)' }}
+            </div>
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs font-mono font-bold tabular-nums text-gray-900 dark:text-white">
+                {{ (neuralCacheStatus?.count ?? 0).toLocaleString() }} {{ t('listen.hots.vectorsUnit') || 'vectors' }}
+              </span>
+              <span class="text-xs font-mono tabular-nums text-gray-500 dark:text-gray-400">
+                {{ formatBytes(neuralCacheStatus?.vectorBytes) }}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Execution Backend Preference -->
+        <div class="space-y-1.5">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-bold text-gray-700 dark:text-gray-200">
+              {{ t('listen.hots.executorLabel') || 'Execution Backend' }}
+            </span>
+            <span v-if="neuralCacheStatus?.provider" class="text-[11px] font-mono text-cyan-600 dark:text-cyan-400 font-semibold uppercase">
+              Active: {{ neuralCacheStatus.provider }}
+            </span>
+          </div>
+          <div class="grid grid-cols-3 gap-1.5 bg-gray-100/90 dark:bg-gray-900/70 p-1 rounded-xl border border-gray-200/70 dark:border-gray-700/70">
+            <button
+              type="button"
+              @click="handleExecutorChange('auto')"
+              class="px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap"
+              :class="executorPreference === 'auto' ? 'bg-white dark:bg-gray-800 text-cyan-600 dark:text-cyan-400 shadow-xs' : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'"
+            >
+              Auto (WebGPU/WASM)
+            </button>
+            <button
+              type="button"
+              @click="handleExecutorChange('webgpu')"
+              class="px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap"
+              :class="executorPreference === 'webgpu' ? 'bg-white dark:bg-gray-800 text-cyan-600 dark:text-cyan-400 shadow-xs' : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'"
+            >
+              WebGPU
+            </button>
+            <button
+              type="button"
+              @click="handleExecutorChange('wasm')"
+              class="px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer whitespace-nowrap"
+              :class="executorPreference === 'wasm' ? 'bg-white dark:bg-gray-800 text-cyan-600 dark:text-cyan-400 shadow-xs' : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'"
+            >
+              WASM CPU
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Warmup Progress -->
+        <div
+          v-if="isWarmingUpModel"
+          class="p-3 rounded-2xl bg-cyan-50 dark:bg-cyan-950/40 border border-cyan-200/70 dark:border-cyan-800/60 space-y-1.5"
+        >
+          <div class="flex items-center justify-between gap-2 text-xs font-semibold text-cyan-900 dark:text-cyan-200">
+            <span class="truncate">{{ computeProgress.message || 'Downloading embedding model...' }}</span>
+            <span class="font-mono font-bold tabular-nums shrink-0">{{ computeProgress.percent }}%</span>
+          </div>
+          <div class="h-1.5 w-full rounded-full bg-cyan-200/60 dark:bg-cyan-900/60 overflow-hidden">
+            <div
+              class="h-full bg-cyan-600 dark:bg-cyan-400 transition-all duration-200"
+              :style="{ width: `${Math.min(100, Math.max(4, computeProgress.percent))}%` }"
+            ></div>
+          </div>
+        </div>
+
+        <p v-if="embedActionFeedback" class="text-xs font-semibold text-cyan-700 dark:text-cyan-300">
+          {{ embedActionFeedback }}
+        </p>
+
+        <!-- Actions Footer -->
+        <div class="flex items-center justify-between gap-2 pt-2 flex-wrap">
+          <button
+            type="button"
+            @click="handleClearEmbedCache"
+            :disabled="isClearingEmbedCache || isWarmingUpModel"
+            class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer disabled:opacity-50 whitespace-nowrap"
+          >
+            <Trash2 class="h-3.5 w-3.5" />
+            <span>{{ t('listen.hots.clearEmbedCache') || 'Clear Cache' }}</span>
+          </button>
+
+          <div class="flex items-center gap-2">
+            <button
+              v-if="isWarmingUpModel"
+              type="button"
+              @click="abortNeuralTask"
+              class="px-3 py-2 rounded-xl text-xs font-bold text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 cursor-pointer whitespace-nowrap"
+            >
+              {{ t('listen.hots.abortDownload') || 'Abort' }}
+            </button>
+            <button
+              v-else
+              type="button"
+              @click="handleWarmupEmbedModel"
+              :disabled="isClearingEmbedCache"
+              class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold bg-cyan-600 hover:bg-cyan-700 text-white shadow-xs cursor-pointer disabled:opacity-50 whitespace-nowrap"
+            >
+              <CheckCircle2 v-if="neuralCacheStatus?.isCached" class="h-3.5 w-3.5" />
+              <Download v-else class="h-3.5 w-3.5" />
+              <span>
+                {{
+                  neuralCacheStatus?.isCached
+                    ? (t('listen.hots.verifyWarmupModel') || 'Warmup Runtime')
+                    : (t('listen.hots.downloadWarmupModel') || 'Download Model (~113 MB)')
+                }}
+              </span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

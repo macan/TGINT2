@@ -36,6 +36,10 @@ import {
   getListenDateRangeBounds,
   isTimestampInListenDateRange,
 } from "../../utils/listenDateRange";
+import {
+  getLabelColorConfig,
+  type ListenLabelDefinition
+} from "../../utils/listenLabels";
 
 export interface ListenItem {
   id: string;
@@ -94,6 +98,7 @@ const props = defineProps<{
   itemErrorsMap?: Record<string, { title: string; message: string; category: string; httpStatus?: number }>;
   folderErrorsMap?: Record<string, number>;
   dateRange?: ListenDateRangeValue;
+  labelDefinitions?: Record<string, ListenLabelDefinition>;
 }>();
 
 const emit = defineEmits<{
@@ -101,7 +106,10 @@ const emit = defineEmits<{
   (e: "drill-down", folder: ListenItem): void;
   (e: "clear-all-new-badges"): void;
   (e: "update:date-range", value: ListenDateRangeValue): void;
+  (e: "quick-organize", item: ListenItem, event: MouseEvent): void;
 }>();
+
+const getTileLabelStyle = (tag: string) => getLabelColorConfig(tag, props.labelDefinitions);
 
 const { t } = useI18n();
 
@@ -1033,6 +1041,17 @@ const getItemFreshness = (node: TreemapNode) => {
                 <span class="whitespace-nowrap font-mono tabular-nums">+{{ getNodeNewPostsCount(node) }}</span>
               </span>
 
+              <!-- Quick Organize Button on Hover -->
+              <button
+                v-if="node.w > 95 && node.h > 65"
+                type="button"
+                @click.stop="emit('quick-organize', node.item, $event)"
+                class="opacity-0 group-hover/tile:opacity-100 p-1 rounded-md bg-white/80 dark:bg-gray-800/80 hover:bg-teal-50 dark:hover:bg-teal-950/60 text-gray-500 hover:text-teal-600 dark:text-gray-300 dark:hover:text-teal-400 border border-gray-200/70 dark:border-gray-700/70 transition-opacity cursor-pointer shrink-0"
+                :title="t('listen.labels.quickOrganizeTip')"
+              >
+                <Tag class="h-3 w-3" />
+              </button>
+
               <!-- Share Percentage Badge -->
               <span
                 v-if="node.w > 65 && node.h > 45"
@@ -1062,6 +1081,28 @@ const getItemFreshness = (node: TreemapNode) => {
             >
               {{ node.type === 'channel' ? `@${node.item.argument.replace('@', '')}` : node.item.argument }}
             </p>
+
+            <!-- Compact Custom Label Chips if space permits -->
+            <div
+              v-if="!node.isFolder && node.item.tags && node.item.tags.length > 0 && node.w > 130 && node.h > 92"
+              class="flex items-center gap-1 mt-1.5 overflow-hidden"
+            >
+              <span
+                v-for="tag in node.item.tags.slice(0, 2)"
+                :key="tag"
+                class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-semibold border whitespace-nowrap max-w-[85px]"
+                :class="getTileLabelStyle(tag).chipClass"
+              >
+                <span class="w-1.5 h-1.5 rounded-full shrink-0" :class="getTileLabelStyle(tag).dotClass"></span>
+                <span class="truncate">{{ tag }}</span>
+              </span>
+              <span
+                v-if="node.item.tags.length > 2"
+                class="text-[9px] font-mono tabular-nums text-gray-500 dark:text-gray-400 shrink-0"
+              >
+                +{{ node.item.tags.length - 2 }}
+              </span>
+            </div>
 
             <!-- Folder items count headline if space permits -->
             <p

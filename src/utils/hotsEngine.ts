@@ -4,8 +4,16 @@
  */
 
 import { probeApiBackend } from './apiCapabilities';
+import {
+  dotProductVectors,
+  fnv1aHash64,
+  l2Normalize,
+  loadCachedNerEntitiesForPosts,
+  type CachedNerPostSummary,
+} from './hotsVectorStore';
 
 export type HotsDateRange = 'today' | 'yesterday' | '3days' | 'week' | 'all';
+export type HotsClusterMode = 'rule' | 'neural' | 'ai';
 
 export interface StructuredLinkPreview {
   url?: string;
@@ -51,6 +59,8 @@ export interface HotTopicCluster {
   titleZh?: string; // Chinese translation of title when original title is not in English or Chinese
   summary: string;
   isAiGenerated?: boolean;
+  clusterSource?: 'rule' | 'neural' | 'ai';
+  cohesionScore?: number;
   category?: string;
   keywords: string[];
   domains: string[];
@@ -266,9 +276,23 @@ export const getPostDocuments = (post: any): Array<{ title: string; url: string 
 };
 
 export interface HotsEngineProgress {
-  step: 'scanning' | 'clustering' | 'ranking' | 'ai_clustering' | 'done';
+  step:
+    | 'scanning'
+    | 'clustering'
+    | 'ranking'
+    | 'embedding_download'
+    | 'embedding'
+    | 'ai_clustering'
+    | 'done';
   percent: number;
   message: string;
+  stage?: 'stage1' | 'stage2';
+  loadedBytes?: number;
+  totalBytes?: number;
+  embedDone?: number;
+  embedTotal?: number;
+  cachedHits?: number;
+  provider?: 'webgpu' | 'wasm' | null;
 }
 
 export interface HotsAnalysisResult {
@@ -283,6 +307,8 @@ export interface HotsAnalysisResult {
   hotTopics: HotTopicCluster[];
   hotPosts: HotPostItem[];
   hotChannels: HotChannelItem[];
+  substantivePosts?: HotPostItem[];
+  clusterModeUsed?: HotsClusterMode;
   computedAt: number;
   isTopicsComputing?: boolean;
 }
@@ -519,7 +545,7 @@ export function computeChannelActivityScore(stat: {
 }
 
 // ---------------------------------------------------------------------------
-// Tokenization & Stopwords for Semantic Clustering
+// Tokenization & Stopwords for Multilingual Semantic Clustering
 // ---------------------------------------------------------------------------
 
 const STOPWORDS = new Set([
@@ -530,28 +556,107 @@ const STOPWORDS = new Set([
   'know', 'take', 'people', 'into', 'year', 'your', 'good', 'some', 'could', 'them', 'see', 'other',
   'than', 'then', 'now', 'look', 'only', 'come', 'its', 'over', 'think', 'also', 'back', 'after', 'use',
   'two', 'how', 'our', 'work', 'first', 'well', 'way', 'even', 'new', 'want', 'because', 'any', 'these',
-  'give', 'day', 'most', 'us', 'is', 'are', 'was', 'were', 'been', 'has', 'had', 'http', 'https', 't.me',
-  'com', 'org', 'net', 'telegram', 'channel', 'post', 'join', 'view', 'more', 'click', 'here',
-  // Common Chinese stopwords & particles
+  'give', 'day', 'most', 'us', 'is', 'are', 'was', 'were', 'been', 'has', 'had', 'does', 'did', 'such',
+  'more', 'very', 'much', 'many', 'should', 'could', 'being', 'before', 'since', 'while', 'where',
+  'http', 'https', 't.me', 'com', 'org', 'net', 'telegram', 'channel', 'post', 'join', 'view', 'click',
+  'here', 'read', 'via', 'source', 'subscribe', 'follow', 'photo', 'video', 'update', 'breaking',
+  // Common Chinese stopwords, particles & Telegram boilerplate
   '的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很', '到', '说',
-  '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这', '那', '与', '及', '等', '之', '为', '以', '对'
+  '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这', '那', '与', '及', '等', '之', '为', '以', '对',
+  '我们', '他们', '她们', '它们', '这个', '那个', '可以', '已经', '因为', '所以', '如果', '但是', '而且', '或者',
+  '关注', '订阅', '频道', '来源', '转发', '点击', '更多', '消息', '表示', '进行', '目前', '已经', '通过',
+  // Common Russian stopwords & particles
+  'и', 'в', 'во', 'не', 'что', 'он', 'на', 'я', 'с', 'со', 'как', 'а', 'то', 'все', 'она', 'так', 'его',
+  'но', 'да', 'ты', 'к', 'у', 'же', 'вы', 'за', 'бы', 'по', 'только', 'ее', 'мне', 'было', 'вот', 'от',
+  'меня', 'еще', 'нет', 'о', 'из', 'ему', 'теперь', 'когда', 'даже', 'ну', 'вдруг', 'ли', 'если', 'уже',
+  'или', 'ни', 'быть', 'был', 'него', 'до', 'вас', 'нибудь', 'опять', 'уж', 'вам', 'ведь', 'там', 'потом',
+  'себя', 'ничего', 'ей', 'может', 'они', 'тут', 'где', 'есть', 'надо', 'ней', 'для', 'мы', 'тебя', 'их',
+  'чем', 'была', 'сам', 'чтоб', 'без', 'будто', 'чего', 'раз', 'тоже', 'себе', 'под', 'будет', 'ж', 'тогда',
+  'кто', 'этот', 'того', 'потому', 'этого', 'какой', 'совсем', 'ним', 'здесь', 'этом', 'один', 'почти', 'мой',
+  'тем', 'чтобы', 'нее', 'сейчас', 'были', 'куда', 'зачем', 'всех', 'никогда', 'можно', 'при', 'наконец',
+  'два', 'об', 'другой', 'хоть', 'после', 'над', 'больше', 'тот', 'через', 'эти', 'нас', 'про', 'всего',
+  'них', 'какая', 'много', 'разве', 'три', 'эту', 'моя', 'впрочем', 'хорошо', 'свою', 'этой', 'перед',
+  'иногда', 'лучше', 'чуть', 'том', 'нельзя', 'такой', 'им', 'более', 'всегда', 'конечно', 'всю', 'между',
+  'это', 'также', 'канал', 'подпишись', 'подписаться', 'источник', 'читать', 'далее', 'фото', 'видео'
 ]);
 
-function tokenize(text: string): string[] {
+const HAS_INTL_SEGMENTER =
+  typeof Intl !== 'undefined' && typeof (Intl as any).Segmenter === 'function';
+const segmenterZh = HAS_INTL_SEGMENTER
+  ? new (Intl as any).Segmenter('zh', { granularity: 'word' })
+  : null;
+const segmenterJa = HAS_INTL_SEGMENTER
+  ? new (Intl as any).Segmenter('ja', { granularity: 'word' })
+  : null;
+
+const CJK_CHAR_RE = /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff]/;
+
+export function tokenizeMultilingual(text: string): string[] {
   if (!text) return [];
-  // Keep hashtags intact, lowercase words of length >= 2
-  const words = text
+  const cleaned = text
     .toLowerCase()
+    .replace(/<[^>]*>?/gm, ' ')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/t\.me\/\S+/gi, ' ')
+    .replace(/@[a-z0-9_]+/gi, ' ')
+    .trim();
+  if (!cleaned) return [];
+
+  const tokens: string[] = [];
+
+  if (segmenterZh || segmenterJa) {
+    const seg = /[\u3040-\u30ff]/.test(cleaned) && segmenterJa ? segmenterJa : segmenterZh!;
+    for (const part of seg.segment(cleaned) as Iterable<{ segment: string; isWordLike?: boolean }>) {
+      const w = part.segment.trim();
+      if (!w) continue;
+      const isCjk = CJK_CHAR_RE.test(w);
+      if (isCjk) {
+        const cleanCjk = w.replace(/[^\p{L}\p{N}]/gu, '');
+        if (cleanCjk.length >= 2 && !STOPWORDS.has(cleanCjk)) {
+          tokens.push(cleanCjk);
+        } else if (cleanCjk.length === 1 && !STOPWORDS.has(cleanCjk)) {
+          // Skip isolated 1-char CJK particles cleanly
+        }
+        // Add 2-char shingles for longer CJK compounds so sub-phrase overlaps match
+        if (cleanCjk.length >= 4 && cleanCjk.length <= 12) {
+          for (let i = 0; i <= cleanCjk.length - 2; i++) {
+            const bi = cleanCjk.slice(i, i + 2);
+            if (!STOPWORDS.has(bi)) tokens.push(bi);
+          }
+        }
+      } else if (part.isWordLike) {
+        const word = w.replace(/[^\p{L}\p{N}#_]/gu, '');
+        if (word.length >= 2 && !/^\d+$/.test(word) && !STOPWORDS.has(word)) {
+          tokens.push(word);
+        }
+      }
+    }
+    return tokens;
+  }
+
+  // Regex + CJK bigram fallback when Intl.Segmenter is unavailable
+  const rawParts = cleaned
     .replace(/[^\p{L}\p{N}#_\s]/gu, ' ')
     .split(/\s+/)
-    .filter(w => w.length >= 2 && !STOPWORDS.has(w));
-  return words;
+    .filter(Boolean);
+
+  for (const w of rawParts) {
+    if (CJK_CHAR_RE.test(w)) {
+      for (let i = 0; i < w.length - 1; i++) {
+        const bg = w.slice(i, i + 2);
+        if (bg.length === 2 && !STOPWORDS.has(bg)) tokens.push(bg);
+      }
+    } else if (w.length >= 2 && !/^\d+$/.test(w) && !STOPWORDS.has(w)) {
+      tokens.push(w);
+    }
+  }
+  return tokens;
 }
 
 function extractHashtags(text: string): string[] {
   if (!text) return [];
-  const matches = text.match(/#[a-zA-Z0-9_\u4e00-\u9fa5]+/g);
-  return matches ? matches.map(h => h.toLowerCase()) : [];
+  const matches = text.match(/#[\p{L}\p{N}_]{2,32}/gu);
+  return matches ? matches.map((h) => h.toLowerCase()) : [];
 }
 
 /**
@@ -669,80 +774,248 @@ export function isSubstantivePostForTopicClustering(post: HotPostItem): boolean 
 }
 
 // ---------------------------------------------------------------------------
-// Client-Side Semantic Clustering Pipeline
+// Client-Side Semantic Clustering Pipeline (Stage 1 TF-IDF/SimHash + Stage 2 Vector)
 // ---------------------------------------------------------------------------
 
 interface PostFeatureBag {
   post: HotPostItem;
-  tokens: Set<string>;
+  tokens: string[];
+  tokenSet: Set<string>;
+  tfidf: Map<string, number>;
+  topTokens: string[];
+  simHashHi: number;
+  simHashLo: number;
   hashtags: Set<string>;
   domain?: string;
   linkUrlClean?: string;
 }
 
-function buildFeatureBag(post: HotPostItem): PostFeatureBag {
-  const text = post.text;
-  const lp = post.linkPreview;
-  const combinedText = `${text} ${lp?.title || ''} ${lp?.description || ''} ${lp?.site_name || ''}`;
-  
-  const tokens = new Set(tokenize(combinedText));
-  const hashtags = new Set(extractHashtags(text));
-  
-  let linkUrlClean: string | undefined;
-  if (lp?.url) {
-    try {
-      const parsed = new URL(lp.url.startsWith('http') ? lp.url : `https://${lp.url}`);
-      linkUrlClean = `${parsed.hostname}${parsed.pathname.replace(/\/$/, '')}`.toLowerCase();
-    } catch {}
+function computeSimHash64(weights: Map<string, number>): { hi: number; lo: number } {
+  const acc = new Float64Array(64);
+  for (const [tok, w] of weights.entries()) {
+    const h = fnv1aHash64(tok);
+    let a = 0x811c9dc5;
+    let b = 0x9e3779b9;
+    for (let i = 0; i < h.length; i++) {
+      const c = h.charCodeAt(i);
+      a = Math.imul(a ^ c, 0x01000193);
+      b = Math.imul(b ^ (c + i), 0x85ebca6b);
+    }
+    for (let bit = 0; bit < 32; bit++) {
+      acc[bit] += ((a >>> bit) & 1) === 1 ? w : -w;
+      acc[bit + 32] += ((b >>> bit) & 1) === 1 ? w : -w;
+    }
   }
-
-  return {
-    post,
-    tokens,
-    hashtags,
-    domain: lp?.domain,
-    linkUrlClean,
-  };
+  let hi = 0;
+  let lo = 0;
+  for (let bit = 0; bit < 32; bit++) {
+    if (acc[bit] >= 0) lo |= 1 << bit;
+    if (acc[bit + 32] >= 0) hi |= 1 << bit;
+  }
+  return { hi: hi >>> 0, lo: lo >>> 0 };
 }
 
-function computeSimilarity(a: PostFeatureBag, b: PostFeatureBag): number {
-  // 1. Exact clean link URL match -> strong topic match
-  if (a.linkUrlClean && b.linkUrlClean && a.linkUrlClean === b.linkUrlClean) {
-    return 0.95;
+function hammingDistance64(aHi: number, aLo: number, bHi: number, bLo: number): number {
+  let x1 = (aHi ^ bHi) >>> 0;
+  let x2 = (aLo ^ bLo) >>> 0;
+  let count = 0;
+  while (x1) {
+    x1 &= x1 - 1;
+    count++;
+  }
+  while (x2) {
+    x2 &= x2 - 1;
+    count++;
+  }
+  return count;
+}
+
+function extractCleanLinkUrl(lp?: StructuredLinkPreview): string | undefined {
+  if (!lp?.url) return undefined;
+  try {
+    const parsed = new URL(lp.url.startsWith('http') ? lp.url : `https://${lp.url}`);
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    if (host === 't.me' || host === 'telegram.me') return undefined;
+    return `${host}${parsed.pathname.replace(/\/$/, '')}`.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+function buildCorpusFeatureBags(posts: HotPostItem[]): PostFeatureBag[] {
+  const N = posts.length;
+  const rawDocs: Array<{
+    post: HotPostItem;
+    tokens: string[];
+    tf: Map<string, number>;
+    hashtags: Set<string>;
+    domain?: string;
+    linkUrlClean?: string;
+  }> = [];
+
+  const df = new Map<string, number>();
+
+  for (const post of posts) {
+    const lp = post.linkPreview;
+    const titleWeightText = lp?.title ? `${lp.title} ${lp.title}` : '';
+    const combinedText = `${titleWeightText} ${post.text || ''} ${lp?.description || ''}`;
+    const tokens = tokenizeMultilingual(combinedText);
+    const hashtags = new Set(extractHashtags(post.text || ''));
+    const tf = new Map<string, number>();
+
+    for (const t of tokens) {
+      tf.set(t, (tf.get(t) || 0) + 1);
+    }
+    for (const h of hashtags) {
+      tf.set(h, (tf.get(h) || 0) + 2.2);
+    }
+
+    for (const t of tf.keys()) {
+      df.set(t, (df.get(t) || 0) + 1);
+    }
+
+    rawDocs.push({
+      post,
+      tokens,
+      tf,
+      hashtags,
+      domain: lp?.domain,
+      linkUrlClean: extractCleanLinkUrl(lp),
+    });
   }
 
-  // 2. Shared hashtag overlap
-  let hashtagOverlap = 0;
-  if (a.hashtags.size > 0 && b.hashtags.size > 0) {
-    for (const h of a.hashtags) {
-      if (b.hashtags.has(h)) hashtagOverlap++;
+  return rawDocs.map((doc) => {
+    const tfidf = new Map<string, number>();
+    let normSq = 0;
+
+    for (const [term, count] of doc.tf.entries()) {
+      const docFreq = df.get(term) || 1;
+      const idf = Math.log(1 + (N + 1) / (docFreq + 0.5));
+      const w = (1 + Math.log(count)) * idf;
+      tfidf.set(term, w);
+      normSq += w * w;
+    }
+
+    const norm = Math.sqrt(normSq) || 1;
+    for (const [term, w] of tfidf.entries()) {
+      tfidf.set(term, w / norm);
+    }
+
+    const topTokens = Array.from(tfidf.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 7)
+      .map((e) => e[0]);
+
+    const { hi, lo } = computeSimHash64(tfidf);
+
+    return {
+      post: doc.post,
+      tokens: doc.tokens,
+      tokenSet: new Set(doc.tokens),
+      tfidf,
+      topTokens,
+      simHashHi: hi,
+      simHashLo: lo,
+      hashtags: doc.hashtags,
+      domain: doc.domain,
+      linkUrlClean: doc.linkUrlClean,
+    };
+  });
+}
+
+function computeSparseCosine(a: Map<string, number>, b: Map<string, number>): number {
+  const smaller = a.size <= b.size ? a : b;
+  const larger = a.size <= b.size ? b : a;
+  let sum = 0;
+  for (const [k, v] of smaller.entries()) {
+    const bv = larger.get(k);
+    if (bv !== undefined) {
+      sum += v * bv;
+    }
+  }
+  return sum;
+}
+
+function computeStage1BagToCentroidSim(
+  bag: PostFeatureBag,
+  centroidTfidf: Map<string, number>,
+  centroidHashtags: Set<string>,
+  centroidUrls: Set<string>,
+  centroidDomains: Set<string>
+): number {
+  if (bag.linkUrlClean && centroidUrls.has(bag.linkUrlClean)) {
+    return 0.96;
+  }
+
+  const tfidfCos = computeSparseCosine(bag.tfidf, centroidTfidf);
+
+  let hashtagBonus = 0;
+  if (bag.hashtags.size > 0 && centroidHashtags.size > 0) {
+    for (const h of bag.hashtags) {
+      if (centroidHashtags.has(h)) {
+        hashtagBonus = 0.22;
+        break;
+      }
     }
   }
 
-  // 3. Token Jaccard + Overlap coefficient
-  let intersection = 0;
-  const smaller = a.tokens.size < b.tokens.size ? a.tokens : b.tokens;
-  const larger = a.tokens.size < b.tokens.size ? b.tokens : a.tokens;
-
-  for (const t of smaller) {
-    if (larger.has(t)) intersection++;
-  }
-
-  const union = a.tokens.size + b.tokens.size - intersection;
-  const jaccard = union > 0 ? intersection / union : 0;
-  const minSize = smaller.size;
-  const overlap = minSize > 0 ? intersection / minSize : 0;
-
-  // Blended similarity: balances overall vocabulary overlap with asymmetric headline-to-article matches
-  const tokenSim = (jaccard * 0.4) + (overlap * 0.6);
-
-  // 4. Shared news/article domain bonus if title tokens overlap
   let domainBonus = 0;
-  if (a.domain && b.domain && a.domain === b.domain && a.domain !== 't.me' && a.domain !== 'telegram.org') {
-    domainBonus = 0.15;
+  if (
+    bag.domain &&
+    centroidDomains.has(bag.domain) &&
+    bag.domain !== 't.me' &&
+    bag.domain !== 'telegram.org' &&
+    tfidfCos >= 0.12
+  ) {
+    domainBonus = 0.1;
   }
 
-  return tokenSim + (hashtagOverlap > 0 ? 0.25 : 0) + domainBonus;
+  return Math.min(1, tfidfCos + hashtagBonus + domainBonus);
+}
+
+function computeCtfIdfKeywords(
+  clustersTokens: string[][],
+  topN: number = 5
+): string[][] {
+  const numClusters = clustersTokens.length;
+  if (numClusters === 0) return [];
+
+  const clusterFreq = new Map<string, number>(); // number of clusters containing token
+  const clusterTfs: Map<string, number>[] = [];
+  let totalTokens = 0;
+
+  for (const toks of clustersTokens) {
+    const tf = new Map<string, number>();
+    const seen = new Set<string>();
+    for (const raw of toks) {
+      const t = raw.trim();
+      if (!t || t.length < 2 || STOPWORDS.has(t)) continue;
+      tf.set(t, (tf.get(t) || 0) + 1);
+      totalTokens++;
+      if (!seen.has(t)) {
+        seen.add(t);
+        clusterFreq.set(t, (clusterFreq.get(t) || 0) + 1);
+      }
+    }
+    clusterTfs.push(tf);
+  }
+
+  const avgClusterLen = Math.max(1, totalTokens / numClusters);
+
+  return clusterTfs.map((tf) => {
+    const scored: Array<[string, number]> = [];
+    for (const [tok, freq] of tf.entries()) {
+      const cf = clusterFreq.get(tok) || 1;
+      // Reward cluster-distinctive keywords while still reflecting frequency within cluster
+      const idf = Math.log(1 + (avgClusterLen + numClusters) / (cf + 0.5));
+      const boost = tok.startsWith('#') ? 1.5 : 1.0;
+      scored.push([tok, freq * idf * boost]);
+    }
+    return scored
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, topN)
+      .map((e) => e[0]);
+  });
 }
 
 export interface ExtractedClusterInfo {
@@ -1170,31 +1443,55 @@ function synthesizeClusterTitle(
 }
 
 // ---------------------------------------------------------------------------
-// AI-Powered Clustering via Gemini 3.1 Flash Lite
+// AI-Powered Clustering via Gemini 3.1 Flash Lite (with Cluster Medoid Pre-Grouping)
 // ---------------------------------------------------------------------------
 
 export async function clusterWithGeminiAI(
   apiKey: string,
   posts: HotPostItem[],
-  dateRange: HotsDateRange
+  dateRange: HotsDateRange,
+  preGroupedClusters?: HotTopicCluster[]
 ): Promise<HotTopicCluster[]> {
   if (posts.length === 0) {
     return [];
   }
 
-  // Prepare a curated sample of top posts (up to 40 posts to maintain low latency)
-  const samplePosts = posts
-    .slice(0, 40)
-    .map(p => ({
-      id: String(p.id),
-      channel: p.channelName,
-      text: p.cleanSnippet.slice(0, 180),
-      linkTitle: p.linkPreview?.title,
-      linkDesc: p.linkPreview?.description?.slice(0, 120),
-      domain: p.linkPreview?.domain,
-      views: p.views,
-      forwards: p.forwards
-    }));
+  // Prefer diverse medoid representatives from Stage 1 / Stage 2 clusters so Gemini
+  // sees distinct stories instead of 40 duplicates of the same breaking post
+  let selectedForPrompt: HotPostItem[] = [];
+  if (Array.isArray(preGroupedClusters) && preGroupedClusters.length > 0) {
+    const seenKeys = new Set<string>();
+    for (const cl of preGroupedClusters) {
+      const rep = cl.representativePost || cl.posts[0];
+      if (rep && !seenKeys.has(rep.key)) {
+        seenKeys.add(rep.key);
+        selectedForPrompt.push(rep);
+        if (selectedForPrompt.length >= 42) break;
+      }
+    }
+    if (selectedForPrompt.length < 32) {
+      for (const p of posts) {
+        if (!seenKeys.has(p.key)) {
+          seenKeys.add(p.key);
+          selectedForPrompt.push(p);
+          if (selectedForPrompt.length >= 42) break;
+        }
+      }
+    }
+  } else {
+    selectedForPrompt = posts.slice(0, 40);
+  }
+
+  const samplePosts = selectedForPrompt.map((p) => ({
+    id: String(p.id),
+    channel: p.channelName,
+    text: p.cleanSnippet.slice(0, 180),
+    linkTitle: p.linkPreview?.title,
+    linkDesc: p.linkPreview?.description?.slice(0, 120),
+    domain: p.linkPreview?.domain,
+    views: p.views,
+    forwards: p.forwards,
+  }));
 
   try {
     const backendCap = await probeApiBackend();
@@ -1506,12 +1803,15 @@ export async function processListenHotsData(options: {
   dateRange: HotsDateRange;
   geminiApiKey?: string;
   useAiMode?: boolean;
+  clusterMode?: HotsClusterMode;
   listenItems?: any[];
   channelMetadataCache?: Record<string, any>;
   onProgress?: (p: HotsEngineProgress) => void;
   onPartialResult?: (partial: {
     hotPosts: HotPostItem[];
     hotChannels: HotChannelItem[];
+    hotTopics?: HotTopicCluster[];
+    substantivePosts?: HotPostItem[];
     totalPostsAnalyzed: number;
     filteredPostsCount: number;
     meaninglessPostsCount?: number;
@@ -1785,10 +2085,29 @@ export async function processListenHotsData(options: {
   const meaninglessPostsCount = Math.max(0, inRangePosts.length - substantivePosts.length);
   const substantivePostsCount = substantivePosts.length;
 
-  // Early partial result notification: allows immediate rendering of posts and channels while topic clustering proceeds in background
+  const clusterMode: HotsClusterMode =
+    options.clusterMode || (useAiMode ? 'ai' : 'rule');
+
+  // 4. Instant Stage-1 Clustering (Intl.Segmenter + TF-IDF + SimHash + Pass-2 Merge)
+  onProgress?.({
+    step: 'clustering',
+    stage: 'stage1',
+    percent: 62,
+    message: 'Running multilingual Stage-1 topic preview...',
+  });
+
+  const nerMap = await loadCachedNerEntitiesForPosts(substantivePosts);
+  const stage1Topics =
+    substantivePosts.length > 0
+      ? await clusterPostsStage1(substantivePosts, nerMap)
+      : [];
+
+  // Early partial result notification: shows Hot Posts, Hot Channels, and instant Stage-1 topics immediately
   onPartialResult?.({
     hotPosts,
     hotChannels,
+    hotTopics: stage1Topics,
+    substantivePosts,
     totalPostsAnalyzed,
     filteredPostsCount: inRangePosts.length,
     meaninglessPostsCount,
@@ -1797,189 +2116,35 @@ export async function processListenHotsData(options: {
     activeChannelsCount: channelStatsMap.size,
   });
 
-  // 4. Hot Topics Clustering (Optimized for Substantive Topic Intelligence)
-  onProgress?.({
-    step: 'clustering',
-    percent: 65,
-    message: 'Filtering noise and clustering semantic topics...'
-  });
+  let hotTopics: HotTopicCluster[] = stage1Topics;
 
-  let hotTopics: HotTopicCluster[] = [];
-
-  // Check if AI-powered clustering is requested (server handles API key or uses custom key)
-  if (useAiMode && substantivePosts.length > 0) {
+  // Optional Gemini AI mode using Stage-1 medoid representatives for maximum story breadth
+  if ((clusterMode === 'ai' || useAiMode) && substantivePosts.length > 0) {
     onProgress?.({
       step: 'ai_clustering',
-      percent: 75,
-      message: 'Running Gemini 3.1 Flash Lite topic clustering...'
+      stage: 'stage2',
+      percent: 78,
+      message: 'Running Gemini 3.1 Flash Lite topic clustering...',
     });
 
-    hotTopics = await clusterWithGeminiAI(geminiApiKey || '', substantivePosts, dateRange);
-  }
-
-  // If local mode or AI returned empty, run robust client-side semantic clustering
-  if (hotTopics.length === 0 && substantivePosts.length > 0) {
-    const featureBags: PostFeatureBag[] = [];
-    for (const p of substantivePosts) {
-      featureBags.push(buildFeatureBag(p));
+    const aiTopics = await clusterWithGeminiAI(
+      geminiApiKey || '',
+      substantivePosts,
+      dateRange,
+      stage1Topics
+    );
+    if (aiTopics.length > 0) {
+      hotTopics = aiTopics;
     }
-
-    const clustersMap: {
-      centroid: PostFeatureBag;
-      items: PostFeatureBag[];
-    }[] = [];
-
-    // Agglomerative clustering with similarity threshold
-    const SIMILARITY_THRESHOLD = 0.32;
-
-    for (let i = 0; i < featureBags.length; i++) {
-      const currentBag = featureBags[i];
-      let bestClusterIdx = -1;
-      let highestSim = 0;
-
-      for (let c = 0; c < clustersMap.length; c++) {
-        const cluster = clustersMap[c];
-        const sim = computeSimilarity(currentBag, cluster.centroid);
-        if (sim > highestSim && sim >= SIMILARITY_THRESHOLD) {
-          highestSim = sim;
-          bestClusterIdx = c;
-        }
-      }
-
-      if (bestClusterIdx >= 0) {
-        clustersMap[bestClusterIdx].items.push(currentBag);
-      } else {
-        clustersMap.push({
-          centroid: currentBag,
-          items: [currentBag]
-        });
-      }
-
-      if (i % 60 === 0 && i > 0) {
-        await yieldToMain();
-      }
-    }
-
-    // Convert candidate clusters to HotTopicCluster
-    for (let cIdx = 0; cIdx < clustersMap.length; cIdx++) {
-      const c = clustersMap[cIdx];
-      const clusterPosts = c.items.map(it => it.post);
-      if (clusterPosts.length === 0) continue;
-
-      // Quality gate: If a cluster has only 1 post, ensure it has substantial substance and is not generic
-      if (clusterPosts.length === 1) {
-        const singlePost = clusterPosts[0];
-        const cleanLen = (singlePost.text || '').replace(/<[^>]*>?/gm, '').replace(/https?:\/\/\S+/gi, '').trim().length;
-        const hasLpTitle = Boolean(singlePost.linkPreview?.title && singlePost.linkPreview.title.trim().length >= 12);
-        if (cleanLen < 35 && !hasLpTitle) {
-          continue; // Skip borderline single-post cluster
-        }
-      }
-
-      let totalViews = 0;
-      let totalForwards = 0;
-      let totalReplies = 0;
-      const channelsSet = new Set<string>();
-      const domainsSet = new Set<string>();
-      const keywordFreq = new Map<string, number>();
-      let minTime = Infinity;
-      let maxTime = 0;
-
-      for (const item of c.items) {
-        const p = item.post;
-        totalViews += p.views;
-        totalForwards += p.forwards;
-        totalReplies += p.replies;
-        channelsSet.add(p.channelName);
-        if (item.domain) domainsSet.add(item.domain);
-        if (p.date < minTime) minTime = p.date;
-        if (p.date > maxTime) maxTime = p.date;
-
-        for (const tok of item.tokens) {
-          keywordFreq.set(tok, (keywordFreq.get(tok) || 0) + 1);
-        }
-        for (const h of item.hashtags) {
-          keywordFreq.set(h, (keywordFreq.get(h) || 0) + 3);
-        }
-      }
-
-      const topKeywords = Array.from(keywordFreq.entries())
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
-        .map(e => e[0]);
-
-      // Extract persons, entities, facts, options, and structured tags
-      const extracted = extractClusterMetadata(clusterPosts);
-      for (const kw of topKeywords.slice(0, 2)) {
-        if (!extracted.tags.some(t => t.label.toLowerCase() === kw.toLowerCase())) {
-          extracted.tags.push({ type: 'keyword', label: kw });
-        }
-      }
-
-      const { title, summary } = synthesizeClusterTitle(clusterPosts, extracted);
-
-      // Verify that single-post cluster produced a real headline (not fallback or generic greeting)
-      if (clusterPosts.length === 1) {
-        if (!title || title === 'Broadcasts' || isGenericLead(title)) {
-          continue;
-        }
-      }
-
-      const sortedClusterPosts = [...clusterPosts].sort((a, b) => b.views - a.views);
-
-      const channelDiversity = channelsSet.size;
-      const hotScore = computeTopicHotScore(
-        totalViews,
-        totalForwards,
-        totalReplies,
-        clusterPosts.length,
-        channelDiversity,
-        maxTime
-      );
-
-      const category = detectTopicCategory(
-        sortedClusterPosts.map(p => p.text).join(' '),
-        Array.from(domainsSet)
-      );
-
-      hotTopics.push({
-        id: `local-topic-${cIdx}`,
-        title,
-        summary,
-        isAiGenerated: false,
-        category,
-        keywords: topKeywords,
-        domains: Array.from(domainsSet),
-        persons: extracted.persons,
-        entities: extracted.entities,
-        facts: extracted.facts,
-        options: extracted.options,
-        tags: extracted.tags,
-        posts: sortedClusterPosts,
-        postCount: clusterPosts.length,
-        totalViews,
-        totalForwards,
-        totalReplies,
-        channels: Array.from(channelsSet),
-        hotScore,
-        representativePost: sortedClusterPosts[0],
-        timeSpan: {
-          start: minTime === Infinity ? Date.now() : minTime,
-          end: maxTime === 0 ? Date.now() : maxTime
-        }
-      });
-    }
-
-    // Sort hot topics by hotScore DSC
-    hotTopics.sort((a, b) => b.hotScore - a.hotScore);
   }
 
   // 5. Translate foreign-language topic titles into Chinese if title is not in English or Chinese
   if (hotTopics.length > 0) {
     onProgress?.({
       step: 'clustering',
+      stage: clusterMode === 'ai' ? 'stage2' : 'stage1',
       percent: 94,
-      message: 'Translating foreign topic titles into Chinese...'
+      message: 'Translating foreign topic titles into Chinese...',
     });
     await attachChineseTranslationsForForeignTitles(hotTopics);
   }
@@ -1987,7 +2152,7 @@ export async function processListenHotsData(options: {
   onProgress?.({
     step: 'done',
     percent: 100,
-    message: 'Finished calculating hot intelligence.'
+    message: 'Finished calculating hot intelligence.',
   });
 
   return {
@@ -2002,6 +2167,666 @@ export async function processListenHotsData(options: {
     hotTopics,
     hotPosts,
     hotChannels,
-    computedAt: Date.now()
+    substantivePosts,
+    clusterModeUsed: hotTopics.some((t) => t.clusterSource === 'ai') ? 'ai' : 'rule',
+    computedAt: Date.now(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1: Fast Multilingual Statistical Clustering (TF-IDF + SimHash + 2-Pass Merge)
+// ---------------------------------------------------------------------------
+
+interface Stage1ClusterBucket {
+  items: PostFeatureBag[];
+  centroidTfidf: Map<string, number>;
+  hashtags: Set<string>;
+  urls: Set<string>;
+  domains: Set<string>;
+  simHashHi: number;
+  simHashLo: number;
+}
+
+function mergeTfidfIntoCentroid(
+  centroid: Map<string, number>,
+  existingCount: number,
+  nextVec: Map<string, number>
+): Map<string, number> {
+  const blended = new Map<string, number>();
+  const oldWeight = existingCount / (existingCount + 1);
+  const newWeight = 1 / (existingCount + 1);
+
+  for (const [k, v] of centroid.entries()) {
+    blended.set(k, v * oldWeight);
+  }
+  for (const [k, v] of nextVec.entries()) {
+    blended.set(k, (blended.get(k) || 0) + v * newWeight);
+  }
+
+  let normSq = 0;
+  for (const v of blended.values()) {
+    normSq += v * v;
+  }
+  const norm = Math.sqrt(normSq) || 1;
+
+  // Cap sparse centroid size at top 48 dimensions for O(1) dot products
+  if (blended.size > 48) {
+    const top = Array.from(blended.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 48);
+    const trimmed = new Map<string, number>();
+    let subNormSq = 0;
+    for (const [k, v] of top) {
+      subNormSq += v * v;
+    }
+    const subNorm = Math.sqrt(subNormSq) || 1;
+    for (const [k, v] of top) {
+      trimmed.set(k, v / subNorm);
+    }
+    return trimmed;
+  }
+
+  for (const [k, v] of blended.entries()) {
+    blended.set(k, v / norm);
+  }
+  return blended;
+}
+
+export async function clusterPostsStage1(
+  substantivePosts: HotPostItem[],
+  nerMap?: Map<string, CachedNerPostSummary>
+): Promise<HotTopicCluster[]> {
+  if (!Array.isArray(substantivePosts) || substantivePosts.length === 0) return [];
+
+  // Process highest-quality posts first so strong headlines anchor centroids cleanly
+  const orderedPosts = [...substantivePosts].sort(
+    (a, b) => b.qualityScore - a.qualityScore || b.date - a.date
+  );
+  const bags = buildCorpusFeatureBags(orderedPosts);
+
+  const clusters: Stage1ClusterBucket[] = [];
+  const tokenToClusters = new Map<string, number[]>();
+  const urlToCluster = new Map<string, number>();
+
+  const STAGE1_THRESHOLD = 0.26;
+
+  for (let i = 0; i < bags.length; i++) {
+    const bag = bags[i];
+    let bestClusterIdx = -1;
+    let highestSim = 0;
+
+    // 1. Exact URL instant match
+    if (bag.linkUrlClean && urlToCluster.has(bag.linkUrlClean)) {
+      bestClusterIdx = urlToCluster.get(bag.linkUrlClean)!;
+      highestSim = 0.96;
+    } else {
+      // 2. Inverted top-token + hashtag candidate lookup avoids O(N * K) scan
+      const candidateSet = new Set<number>();
+      for (const tok of bag.topTokens) {
+        const list = tokenToClusters.get(tok);
+        if (list) {
+          for (let k = 0; k < list.length; k++) candidateSet.add(list[k]);
+        }
+      }
+      for (const h of bag.hashtags) {
+        const list = tokenToClusters.get(h);
+        if (list) {
+          for (let k = 0; k < list.length; k++) candidateSet.add(list[k]);
+        }
+      }
+
+      // SimHash fallback for near-duplicate CJK/mixed headlines
+      if (candidateSet.size < 12) {
+        for (let c = 0; c < clusters.length; c++) {
+          if (hammingDistance64(bag.simHashHi, bag.simHashLo, clusters[c].simHashHi, clusters[c].simHashLo) <= 12) {
+            candidateSet.add(c);
+          }
+        }
+      }
+
+      for (const cIdx of candidateSet) {
+        const cl = clusters[cIdx];
+        const sim = computeStage1BagToCentroidSim(
+          bag,
+          cl.centroidTfidf,
+          cl.hashtags,
+          cl.urls,
+          cl.domains
+        );
+        if (sim > highestSim && sim >= STAGE1_THRESHOLD) {
+          highestSim = sim;
+          bestClusterIdx = cIdx;
+        }
+      }
+    }
+
+    if (bestClusterIdx >= 0) {
+      const target = clusters[bestClusterIdx];
+      target.centroidTfidf = mergeTfidfIntoCentroid(
+        target.centroidTfidf,
+        target.items.length,
+        bag.tfidf
+      );
+      target.items.push(bag);
+      bag.hashtags.forEach((h) => target.hashtags.add(h));
+      if (bag.linkUrlClean) {
+        target.urls.add(bag.linkUrlClean);
+        urlToCluster.set(bag.linkUrlClean, bestClusterIdx);
+      }
+      if (bag.domain) target.domains.add(bag.domain);
+    } else {
+      const newIdx = clusters.length;
+      const urls = new Set<string>();
+      if (bag.linkUrlClean) {
+        urls.add(bag.linkUrlClean);
+        urlToCluster.set(bag.linkUrlClean, newIdx);
+      }
+      const domains = new Set<string>();
+      if (bag.domain) domains.add(bag.domain);
+
+      clusters.push({
+        items: [bag],
+        centroidTfidf: new Map(bag.tfidf),
+        hashtags: new Set(bag.hashtags),
+        urls,
+        domains,
+        simHashHi: bag.simHashHi,
+        simHashLo: bag.simHashLo,
+      });
+
+      for (const tok of bag.topTokens) {
+        let arr = tokenToClusters.get(tok);
+        if (!arr) {
+          arr = [];
+          tokenToClusters.set(tok, arr);
+        }
+        arr.push(newIdx);
+      }
+      for (const h of bag.hashtags) {
+        let arr = tokenToClusters.get(h);
+        if (!arr) {
+          arr = [];
+          tokenToClusters.set(h, arr);
+        }
+        arr.push(newIdx);
+      }
+    }
+
+    if (i % 80 === 0 && i > 0) {
+      await yieldToMain();
+    }
+  }
+
+  // Pass 2: Consolidate split Stage-1 clusters with strong centroid overlap
+  const STAGE1_MERGE_THRESHOLD = 0.54;
+  const active = new Array<boolean>(clusters.length).fill(true);
+  for (let a = 0; a < clusters.length; a++) {
+    if (!active[a]) continue;
+    for (let b = a + 1; b < clusters.length; b++) {
+      if (!active[b]) continue;
+      const cos = computeSparseCosine(clusters[a].centroidTfidf, clusters[b].centroidTfidf);
+      if (cos >= STAGE1_MERGE_THRESHOLD) {
+        clusters[a].items.push(...clusters[b].items);
+        clusters[a].centroidTfidf = mergeTfidfIntoCentroid(
+          clusters[a].centroidTfidf,
+          clusters[a].items.length,
+          clusters[b].centroidTfidf
+        );
+        clusters[b].hashtags.forEach((h) => clusters[a].hashtags.add(h));
+        clusters[b].urls.forEach((u) => clusters[a].urls.add(u));
+        clusters[b].domains.forEach((d) => clusters[a].domains.add(d));
+        active[b] = false;
+      }
+    }
+  }
+
+  const consolidated = clusters.filter((_, idx) => active[idx]);
+  return finalizeHotTopicClusters(
+    consolidated.map((cl) => ({
+      items: cl.items,
+      medoidPost: pickStage1Medoid(cl.items, cl.centroidTfidf),
+      cohesionScore: cl.items.length > 1 ? 0.65 : 0.4,
+    })),
+    'rule',
+    nerMap
+  );
+}
+
+function pickStage1Medoid(
+  items: PostFeatureBag[],
+  centroidTfidf: Map<string, number>
+): HotPostItem {
+  if (items.length <= 1) return items[0].post;
+  let best = items[0].post;
+  let bestScore = -Infinity;
+  const maxQ = Math.max(1, ...items.map((it) => it.post.qualityScore));
+
+  for (const it of items) {
+    const sim = computeSparseCosine(it.tfidf, centroidTfidf);
+    const normQ = it.post.qualityScore / maxQ;
+    const combined = 0.65 * sim + 0.35 * normQ;
+    if (combined > bestScore) {
+      bestScore = combined;
+      best = it.post;
+    }
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: Hybrid Multilingual ONNX Embedding Clustering (Cosine + Lexical + 2-Pass Merge)
+// ---------------------------------------------------------------------------
+
+interface Stage2VectorCluster {
+  items: Array<{
+    bag: PostFeatureBag;
+    vec?: Float32Array;
+  }>;
+  sumVec: Float32Array;
+  centroidVec: Float32Array;
+  vectorCount: number;
+  centroidTfidf: Map<string, number>;
+  hashtags: Set<string>;
+  urls: Set<string>;
+  domains: Set<string>;
+  medianTime: number;
+}
+
+function computeTemporalPenalty(
+  tA: number,
+  tB: number,
+  dateRange: HotsDateRange
+): number {
+  if (dateRange === 'today' || dateRange === 'yesterday') return 0;
+  if (!tA || !tB) return 0;
+  const diffDays = Math.abs(tA - tB) / (1000 * 3600 * 24);
+  if (diffDays <= 4) return 0;
+  return Math.min(0.1, (diffDays - 4) * 0.015);
+}
+
+export async function clusterPostsWithEmbeddings(
+  substantivePosts: HotPostItem[],
+  vectorsMap: Map<string, Float32Array>,
+  dateRange: HotsDateRange,
+  externalNerMap?: Map<string, CachedNerPostSummary>
+): Promise<HotTopicCluster[]> {
+  if (!Array.isArray(substantivePosts) || substantivePosts.length === 0) return [];
+
+  const nerMap = externalNerMap || (await loadCachedNerEntitiesForPosts(substantivePosts));
+  const orderedPosts = [...substantivePosts].sort(
+    (a, b) => b.qualityScore - a.qualityScore || b.date - a.date
+  );
+  const bags = buildCorpusFeatureBags(orderedPosts);
+
+  const clusters: Stage2VectorCluster[] = [];
+  const urlToCluster = new Map<string, number>();
+
+  const TAU_PASS1 = 0.58;
+
+  for (let i = 0; i < bags.length; i++) {
+    const bag = bags[i];
+    const vec = vectorsMap.get(bag.post.key);
+
+    let bestClusterIdx = -1;
+    let highestSim = 0;
+
+    if (bag.linkUrlClean && urlToCluster.has(bag.linkUrlClean)) {
+      bestClusterIdx = urlToCluster.get(bag.linkUrlClean)!;
+      highestSim = 0.97;
+    } else {
+      for (let c = 0; c < clusters.length; c++) {
+        const cl = clusters[c];
+
+        let sim = 0;
+        if (vec && cl.vectorCount > 0) {
+          const cos = dotProductVectors(vec, cl.centroidVec);
+          const lex = computeSparseCosine(bag.tfidf, cl.centroidTfidf);
+          let hashBonus = 0;
+          if (bag.hashtags.size > 0 && cl.hashtags.size > 0) {
+            for (const h of bag.hashtags) {
+              if (cl.hashtags.has(h)) {
+                hashBonus = 0.09;
+                break;
+              }
+            }
+          }
+          const domBonus =
+            bag.domain &&
+            cl.domains.has(bag.domain) &&
+            bag.domain !== 't.me' &&
+            bag.domain !== 'telegram.org' &&
+            cos >= 0.42
+              ? 0.05
+              : 0;
+          const timePenalty = computeTemporalPenalty(bag.post.date, cl.medianTime, dateRange);
+          sim = 0.80 * cos + 0.14 * lex + hashBonus + domBonus - timePenalty;
+        } else {
+          // Graceful sparse fallback for unembedded items
+          sim = computeStage1BagToCentroidSim(
+            bag,
+            cl.centroidTfidf,
+            cl.hashtags,
+            cl.urls,
+            cl.domains
+          ) * 1.45;
+        }
+
+        if (sim > highestSim && sim >= TAU_PASS1) {
+          highestSim = sim;
+          bestClusterIdx = c;
+        }
+      }
+    }
+
+    if (bestClusterIdx >= 0) {
+      const target = clusters[bestClusterIdx];
+      if (vec) {
+        for (let d = 0; d < vec.length; d++) {
+          target.sumVec[d] += vec[d];
+        }
+        target.vectorCount++;
+        target.centroidVec = l2Normalize(target.sumVec);
+      }
+      target.centroidTfidf = mergeTfidfIntoCentroid(
+        target.centroidTfidf,
+        target.items.length,
+        bag.tfidf
+      );
+      target.items.push({ bag, vec });
+      bag.hashtags.forEach((h) => target.hashtags.add(h));
+      if (bag.linkUrlClean) {
+        target.urls.add(bag.linkUrlClean);
+        urlToCluster.set(bag.linkUrlClean, bestClusterIdx);
+      }
+      if (bag.domain) target.domains.add(bag.domain);
+    } else {
+      const dim = vec ? vec.length : 384;
+      const sumVec = vec ? new Float32Array(vec) : new Float32Array(dim);
+      const centroidVec = vec ? new Float32Array(vec) : new Float32Array(dim);
+      const newIdx = clusters.length;
+      const urls = new Set<string>();
+      if (bag.linkUrlClean) {
+        urls.add(bag.linkUrlClean);
+        urlToCluster.set(bag.linkUrlClean, newIdx);
+      }
+      const domains = new Set<string>();
+      if (bag.domain) domains.add(bag.domain);
+
+      clusters.push({
+        items: [{ bag, vec }],
+        sumVec,
+        centroidVec,
+        vectorCount: vec ? 1 : 0,
+        centroidTfidf: new Map(bag.tfidf),
+        hashtags: new Set(bag.hashtags),
+        urls,
+        domains,
+        medianTime: bag.post.date,
+      });
+    }
+
+    if (i % 80 === 0 && i > 0) {
+      await yieldToMain();
+    }
+  }
+
+  // Pass 2: Agglomerative consolidation of split neural clusters
+  const TAU_PASS2 = 0.72;
+  const active = new Array<boolean>(clusters.length).fill(true);
+
+  for (let pass = 0; pass < 2; pass++) {
+    let mergedAny = false;
+    for (let a = 0; a < clusters.length; a++) {
+      if (!active[a] || clusters[a].vectorCount === 0) continue;
+      for (let b = a + 1; b < clusters.length; b++) {
+        if (!active[b] || clusters[b].vectorCount === 0) continue;
+        // Avoid merging massive catch-all clusters recklessly
+        if (clusters[a].items.length + clusters[b].items.length > 60) continue;
+
+        const cos = dotProductVectors(clusters[a].centroidVec, clusters[b].centroidVec);
+        const timePenalty = computeTemporalPenalty(
+          clusters[a].medianTime,
+          clusters[b].medianTime,
+          dateRange
+        );
+        if (cos - timePenalty >= TAU_PASS2) {
+          for (let d = 0; d < clusters[a].sumVec.length; d++) {
+            clusters[a].sumVec[d] += clusters[b].sumVec[d];
+          }
+          clusters[a].vectorCount += clusters[b].vectorCount;
+          clusters[a].centroidVec = l2Normalize(clusters[a].sumVec);
+          clusters[a].items.push(...clusters[b].items);
+          clusters[a].centroidTfidf = mergeTfidfIntoCentroid(
+            clusters[a].centroidTfidf,
+            clusters[a].items.length,
+            clusters[b].centroidTfidf
+          );
+          clusters[b].hashtags.forEach((h) => clusters[a].hashtags.add(h));
+          clusters[b].urls.forEach((u) => clusters[a].urls.add(u));
+          clusters[b].domains.forEach((d) => clusters[a].domains.add(d));
+          active[b] = false;
+          mergedAny = true;
+        }
+      }
+    }
+    if (!mergedAny) break;
+  }
+
+  const consolidated = clusters.filter((_, idx) => active[idx]);
+
+  return finalizeHotTopicClusters(
+    consolidated.map((cl) => {
+      let medoid = cl.items[0].bag.post;
+      let cohesionSum = 0;
+      let cohesionCount = 0;
+
+      if (cl.items.length > 1 && cl.vectorCount > 0) {
+        const maxQ = Math.max(1, ...cl.items.map((it) => it.bag.post.qualityScore));
+        let bestScore = -Infinity;
+        for (const it of cl.items) {
+          const sim = it.vec ? dotProductVectors(it.vec, cl.centroidVec) : 0.4;
+          if (it.vec) {
+            cohesionSum += sim;
+            cohesionCount++;
+          }
+          const score = 0.72 * sim + 0.28 * (it.bag.post.qualityScore / maxQ);
+          if (score > bestScore) {
+            bestScore = score;
+            medoid = it.bag.post;
+          }
+        }
+      } else {
+        medoid = pickStage1Medoid(
+          cl.items.map((it) => it.bag),
+          cl.centroidTfidf
+        );
+      }
+
+      return {
+        items: cl.items.map((it) => it.bag),
+        medoidPost: medoid,
+        cohesionScore: cohesionCount > 0 ? cohesionSum / cohesionCount : 0.65,
+      };
+    }),
+    'neural',
+    nerMap
+  );
+}
+
+function finalizeHotTopicClusters(
+  rawClusters: Array<{
+    items: PostFeatureBag[];
+    medoidPost: HotPostItem;
+    cohesionScore: number;
+  }>,
+  source: 'rule' | 'neural',
+  nerMap?: Map<string, CachedNerPostSummary>
+): HotTopicCluster[] {
+  // Quality gate for singleton clusters before computing global c-TF-IDF
+  const gated = rawClusters.filter((cl) => {
+    if (cl.items.length === 0) return false;
+    if (cl.items.length === 1) {
+      const single = cl.items[0].post;
+      const cleanBody = (single.text || '')
+        .replace(/<[^>]*>?/gm, '')
+        .replace(/https?:\/\/\S+/gi, '')
+        .replace(/@[a-zA-Z0-9_]+/g, '')
+        .trim();
+      const cjkCount = (cleanBody.match(/[\u4e00-\u9fff\u3040-\u30ff]/g) || []).length;
+      const hasRichLp = Boolean(
+        single.linkPreview?.title &&
+          single.linkPreview.title.trim().length >= 16 &&
+          !isGenericLead(single.linkPreview.title)
+      );
+      if (cleanBody.length < 48 && cjkCount < 16 && !hasRichLp) {
+        return false;
+      }
+    }
+    return true;
+  });
+
+  const cTfIdfKeywords = computeCtfIdfKeywords(
+    gated.map((cl) => cl.items.flatMap((it) => [...it.tokens, ...it.hashtags])),
+    5
+  );
+
+  const hotTopics: HotTopicCluster[] = [];
+
+  for (let cIdx = 0; cIdx < gated.length; cIdx++) {
+    const cl = gated[cIdx];
+    const clusterPosts = cl.items.map((it) => it.post);
+    const topKeywords = cTfIdfKeywords[cIdx] || [];
+
+    let totalViews = 0;
+    let totalForwards = 0;
+    let totalReplies = 0;
+    const channelsSet = new Set<string>();
+    const domainsSet = new Set<string>();
+    let minTime = Infinity;
+    let maxTime = 0;
+
+    for (const item of cl.items) {
+      const p = item.post;
+      totalViews += p.views;
+      totalForwards += p.forwards;
+      totalReplies += p.replies;
+      channelsSet.add(p.channelName);
+      if (item.domain) domainsSet.add(item.domain);
+      if (p.date < minTime) minTime = p.date;
+      if (p.date > maxTime) maxTime = p.date;
+    }
+
+    // Order posts with medoid anchored for cleanest title synthesis, views descending for list display
+    const medoidKey = cl.medoidPost?.key;
+    const postsForSynthesis = [
+      cl.medoidPost,
+      ...clusterPosts.filter((p) => p.key !== medoidKey).sort((a, b) => b.qualityScore - a.qualityScore),
+    ];
+
+    const extracted = extractClusterMetadata(postsForSynthesis);
+
+    // Enrich with cached Explorer NER entities when available (zero extra inference cost)
+    if (nerMap && nerMap.size > 0) {
+      const nerPersons = new Map<string, number>();
+      const nerEntities = new Map<string, number>();
+      for (const p of clusterPosts) {
+        const hit = nerMap.get(p.key);
+        if (!hit) continue;
+        for (const per of hit.persons) nerPersons.set(per, (nerPersons.get(per) || 0) + 1);
+        for (const ent of hit.entities) nerEntities.set(ent, (nerEntities.get(ent) || 0) + 1);
+      }
+      for (const [per] of Array.from(nerPersons.entries()).sort((a, b) => b[1] - a[1])) {
+        if (extracted.persons.length >= 3) break;
+        if (!extracted.persons.some((x) => x.toLowerCase() === per.toLowerCase())) {
+          extracted.persons.push(per);
+        }
+      }
+      for (const [ent] of Array.from(nerEntities.entries()).sort((a, b) => b[1] - a[1])) {
+        if (extracted.entities.length >= 4) break;
+        if (!extracted.entities.some((x) => x.toLowerCase() === ent.toLowerCase())) {
+          extracted.entities.push(ent);
+        }
+      }
+      // Rebuild unified tags with enriched entities
+      extracted.tags = [];
+      for (const p of extracted.persons.slice(0, 2)) {
+        extracted.tags.push({ type: 'person', label: p });
+      }
+      for (const e of extracted.entities.slice(0, 2)) {
+        extracted.tags.push({ type: 'entity', label: e });
+      }
+      for (const f of extracted.facts.slice(0, 2)) {
+        extracted.tags.push({ type: 'fact', label: f });
+      }
+      for (const o of extracted.options.slice(0, 1)) {
+        extracted.tags.push({ type: 'option', label: o });
+      }
+    }
+
+    for (const kw of topKeywords.slice(0, 2)) {
+      if (
+        !extracted.tags.some((t) => t.label.toLowerCase() === kw.toLowerCase()) &&
+        !extracted.persons.some((p) => p.toLowerCase() === kw.toLowerCase()) &&
+        !extracted.entities.some((e) => e.toLowerCase() === kw.toLowerCase())
+      ) {
+        extracted.tags.push({ type: 'keyword', label: kw });
+      }
+    }
+
+    const { title, summary } = synthesizeClusterTitle(postsForSynthesis, extracted);
+
+    if (clusterPosts.length === 1) {
+      if (!title || title === 'Broadcasts' || isGenericLead(title)) {
+        continue;
+      }
+    }
+
+    const sortedClusterPosts = [...clusterPosts].sort((a, b) => b.views - a.views);
+    const channelDiversity = channelsSet.size;
+    const hotScore = computeTopicHotScore(
+      totalViews,
+      totalForwards,
+      totalReplies,
+      clusterPosts.length,
+      channelDiversity,
+      maxTime
+    );
+
+    const category = detectTopicCategory(
+      postsForSynthesis.slice(0, 5).map((p) => p.text).join(' '),
+      Array.from(domainsSet)
+    );
+
+    hotTopics.push({
+      id: `${source}-topic-${cIdx}`,
+      title,
+      summary,
+      isAiGenerated: false,
+      clusterSource: source,
+      cohesionScore: cl.cohesionScore,
+      category,
+      keywords: topKeywords,
+      domains: Array.from(domainsSet),
+      persons: extracted.persons,
+      entities: extracted.entities,
+      facts: extracted.facts,
+      options: extracted.options,
+      tags: extracted.tags,
+      posts: sortedClusterPosts,
+      postCount: clusterPosts.length,
+      totalViews,
+      totalForwards,
+      totalReplies,
+      channels: Array.from(channelsSet),
+      hotScore,
+      representativePost: cl.medoidPost || sortedClusterPosts[0],
+      timeSpan: {
+        start: minTime === Infinity ? Date.now() : minTime,
+        end: maxTime === 0 ? Date.now() : maxTime,
+      },
+    });
+  }
+
+  hotTopics.sort((a, b) => b.hotScore - a.hotScore);
+  return hotTopics;
 }
