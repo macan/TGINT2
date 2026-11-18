@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { useI18n, t } from "../../i18n";
 import { probeApiBackend } from "../../utils/apiCapabilities";
 import {
@@ -44,7 +44,9 @@ import {
   HotChannelItem,
   HotsEngineProgress,
   HotsAnalysisResult,
-  getDateRangeBounds
+  getDateRangeBounds,
+  isNonEnglishNonChinese,
+  translateTopicTitlesOnDemand
 } from "../../utils/hotsEngine";
 import {
   computeListenHotsInBackground,
@@ -566,8 +568,15 @@ function openDrillDown(tab: "topics" | "posts" | "channels") {
   isDrillDownOpen.value = true;
 }
 
-function inspectTopic(topic: HotTopicCluster) {
+function selectInspectedTopic(topic: HotTopicCluster) {
   inspectedTopic.value = topic;
+  if (isNonEnglishNonChinese(topic.title) && (!topic.titleZh || topic.titleZh === topic.title)) {
+    void translateTopicTitlesOnDemand([topic]);
+  }
+}
+
+function inspectTopic(topic: HotTopicCluster) {
+  selectInspectedTopic(topic);
   openDrillDown("topics");
 }
 
@@ -769,8 +778,110 @@ onMounted(() => {
   }
 });
 
+// Lazy on-the-fly title translation for tail topics scrolled into view in Drill-Down Modal
+const drillDownScrollRef = ref<HTMLElement | null>(null);
+let topicTranslateObserver: IntersectionObserver | null = null;
+let lazyTranslateTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingLazyTopicsMap = new Map<string, HotTopicCluster>();
+let isFlushingLazyTranslations = false;
+
+async function flushLazyTitleTranslations() {
+  if (isFlushingLazyTranslations || pendingLazyTopicsMap.size === 0) return;
+  isFlushingLazyTranslations = true;
+  try {
+    while (pendingLazyTopicsMap.size > 0) {
+      const batch = Array.from(pendingLazyTopicsMap.values()).slice(0, 10);
+      for (const item of batch) {
+        pendingLazyTopicsMap.delete(item.id);
+      }
+      await translateTopicTitlesOnDemand(batch);
+    }
+  } finally {
+    isFlushingLazyTranslations = false;
+  }
+}
+
+function enqueueLazyTopicTranslation(topic: HotTopicCluster) {
+  if (!isNonEnglishNonChinese(topic.title)) return;
+  if (topic.titleZh && topic.titleZh !== topic.title) return;
+  if (pendingLazyTopicsMap.has(topic.id)) return;
+  pendingLazyTopicsMap.set(topic.id, topic);
+
+  if (lazyTranslateTimer) clearTimeout(lazyTranslateTimer);
+  lazyTranslateTimer = setTimeout(() => {
+    lazyTranslateTimer = null;
+    void flushLazyTitleTranslations();
+  }, 150);
+}
+
+function cleanupTopicTranslateObserver() {
+  if (topicTranslateObserver) {
+    topicTranslateObserver.disconnect();
+    topicTranslateObserver = null;
+  }
+}
+
+function setupDrillDownTopicObserver() {
+  cleanupTopicTranslateObserver();
+  if (
+    !isDrillDownOpen.value ||
+    drillDownTab.value !== "topics" ||
+    inspectedTopic.value ||
+    !drillDownScrollRef.value ||
+    typeof IntersectionObserver === "undefined"
+  ) {
+    return;
+  }
+
+  const topicsById = new Map<string, HotTopicCluster>();
+  for (const tp of filteredDrillDownTopics.value) {
+    topicsById.set(tp.id, tp);
+  }
+
+  topicTranslateObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const el = entry.target as HTMLElement;
+        const topicId = el.dataset.topicId;
+        topicTranslateObserver?.unobserve(el);
+        if (!topicId) continue;
+        const topic = topicsById.get(topicId);
+        if (topic) {
+          enqueueLazyTopicTranslation(topic);
+        }
+      }
+    },
+    {
+      root: drillDownScrollRef.value,
+      rootMargin: "180px 0px",
+      threshold: 0.01
+    }
+  );
+
+  const cards = drillDownScrollRef.value.querySelectorAll<HTMLElement>("[data-topic-id]");
+  cards.forEach((card) => topicTranslateObserver?.observe(card));
+}
+
+watch(
+  [isDrillDownOpen, drillDownTab, () => inspectedTopic.value, () => filteredDrillDownTopics.value],
+  async () => {
+    if (!isDrillDownOpen.value) {
+      cleanupTopicTranslateObserver();
+      return;
+    }
+    await nextTick();
+    setupDrillDownTopicObserver();
+  }
+);
+
 onUnmounted(() => {
   clearPendingRecalculation();
+  cleanupTopicTranslateObserver();
+  if (lazyTranslateTimer) {
+    clearTimeout(lazyTranslateTimer);
+    lazyTranslateTimer = null;
+  }
 });
 </script>
 
@@ -1471,7 +1582,7 @@ onUnmounted(() => {
         </div>
 
         <!-- Modal Content Scroll Area -->
-        <div class="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
+        <div ref="drillDownScrollRef" class="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
           <!-- TOPICS TAB -->
           <template v-if="drillDownTab === 'topics'">
             <!-- If inspecting single topic cluster posts -->
@@ -1597,7 +1708,8 @@ onUnmounted(() => {
               <div
                 v-for="(topic, idx) in filteredDrillDownTopics"
                 :key="topic.id"
-                @click="inspectedTopic = topic"
+                :data-topic-id="topic.id"
+                @click="selectInspectedTopic(topic)"
                 class="p-4 rounded-2xl border border-gray-200/80 dark:border-gray-700/80 bg-white dark:bg-gray-800 hover:border-teal-500/50 hover:bg-gray-50/50 dark:hover:bg-gray-750/50 transition-all cursor-pointer group"
               >
                 <div class="flex items-start justify-between gap-3 mb-2">

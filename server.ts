@@ -461,7 +461,9 @@ app.all('/api/translate-titles', async (req, res) => {
       customKey = req.query.apiKey;
     }
 
-    const titles: string[] = Array.isArray(rawTitles) ? rawTitles : [];
+    const titles: string[] = Array.isArray(rawTitles)
+      ? Array.from(new Set(rawTitles.map((t) => (typeof t === 'string' ? t.trim() : '')).filter(Boolean)))
+      : [];
     if (titles.length === 0) {
       return res.json({ translations: {} });
     }
@@ -469,11 +471,13 @@ app.all('/api/translate-titles', async (req, res) => {
     const translations: Record<string, string> = {};
     const unhandled: string[] = [];
 
-    // 1. Try Gemini first if key available
+    // 1. Try Gemini first in safe batches of up to 25 titles if key available
     const ai = getGeminiClient(customKey);
     if (ai) {
-      try {
-        const prompt = `Translate each of the following foreign-language headlines into concise, natural Chinese (Simplified Chinese).
+      for (let i = 0; i < titles.length; i += 25) {
+        const chunk = titles.slice(i, i + 25);
+        try {
+          const prompt = `Translate each of the following foreign-language headlines into concise, natural Chinese (Simplified Chinese).
 If a headline is already in Chinese or English, you can leave it empty or return the Chinese translation.
 Output MUST be a strict JSON object mapping each original title to its Chinese translation:
 {
@@ -481,51 +485,58 @@ Output MUST be a strict JSON object mapping each original title to its Chinese t
 }
 
 Headlines:
-${JSON.stringify(titles)}`;
+${JSON.stringify(chunk)}`;
 
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.1-flash-lite',
-          contents: prompt,
-          config: {
-            responseMimeType: 'application/json',
-          },
-        });
+          const response = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite',
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+            },
+          });
 
-        const raw = response.text || '{}';
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object') {
-          for (const [k, v] of Object.entries(parsed)) {
-            if (typeof v === 'string' && v.trim()) {
-              translations[k] = v.trim();
+          const raw = response.text || '{}';
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object') {
+            for (const [k, v] of Object.entries(parsed)) {
+              if (typeof v === 'string' && v.trim()) {
+                translations[k] = v.trim();
+              }
             }
           }
+        } catch (e) {
+          console.warn('Gemini translate-titles error, using fallback:', e);
         }
-      } catch (e) {
-        console.warn('Gemini translate-titles error, using fallback:', e);
       }
     }
 
-    // 2. Fallback for any unhandled titles using MyMemory Neural MT
+    // 2. Fallback for any unhandled titles using MyMemory Neural MT with max 3 concurrent requests
     for (const title of titles) {
-      if (!translations[title] && typeof title === 'string' && title.trim()) {
-        unhandled.push(title.trim());
+      if (!translations[title]) {
+        unhandled.push(title);
       }
     }
 
     if (unhandled.length > 0) {
+      let cursor = 0;
+      const workerCount = Math.min(3, unhandled.length);
       await Promise.all(
-        unhandled.map(async (t) => {
-          try {
-            const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(t)}&langpair=autodetect|zh-CN`;
-            const r = await fetch(url);
-            if (r.ok) {
-              const data = await r.json();
-              const tr = data.responseData?.translatedText;
-              if (tr && typeof tr === 'string' && tr.trim() && !tr.includes('MYMEMORY WARNING')) {
-                translations[t] = tr.trim();
+        Array.from({ length: workerCount }, async () => {
+          while (cursor < unhandled.length) {
+            const t = unhandled[cursor++];
+            if (!t) break;
+            try {
+              const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(t)}&langpair=autodetect|zh-CN`;
+              const r = await fetch(url);
+              if (r.ok) {
+                const data = await r.json();
+                const tr = data.responseData?.translatedText;
+                if (tr && typeof tr === 'string' && tr.trim() && !tr.includes('MYMEMORY WARNING')) {
+                  translations[t] = tr.trim();
+                }
               }
-            }
-          } catch {}
+            } catch {}
+          }
         })
       );
     }

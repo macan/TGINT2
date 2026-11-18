@@ -1684,104 +1684,221 @@ export async function clusterWithGeminiAI(
     return false;
   }
 
-  export async function attachChineseTranslationsForForeignTitles(topics: HotTopicCluster[]): Promise<void> {
-    if (!Array.isArray(topics) || topics.length === 0) return;
+  export const INITIAL_TITLE_TRANSLATE_LIMIT = 15;
+  const MAX_TITLE_CACHE_SIZE = 2000;
+  const titleZhTranslationCache = new Map<string, string>();
+  const inflightTitleTranslations = new Set<string>();
 
-    const toTranslate = topics.filter(t => isNonEnglishNonChinese(t.title) && (!t.titleZh || t.titleZh === t.title));
-    if (toTranslate.length === 0) return;
+  function rememberTitleTranslation(source: string, translated: string) {
+    if (!source || !translated || source === translated) return;
+    if (titleZhTranslationCache.size >= MAX_TITLE_CACHE_SIZE) {
+      const oldestKey = titleZhTranslationCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        titleZhTranslationCache.delete(oldestKey);
+      }
+    }
+    titleZhTranslationCache.set(source, translated);
+  }
 
-    const titles = Array.from(new Set(toTranslate.map(t => t.title.trim())));
+  async function runWithConcurrency<T>(
+    items: T[],
+    concurrency: number,
+    workerFn: (item: T) => Promise<void>,
+    delayBetweenMs: number = 0
+  ): Promise<void> {
+    if (items.length === 0) return;
+    const workerCount = Math.max(1, Math.min(concurrency, items.length));
+    let cursor = 0;
+
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (cursor < items.length) {
+        const idx = cursor++;
+        if (idx >= items.length) break;
+        await workerFn(items[idx]);
+        if (delayBetweenMs > 0 && cursor < items.length) {
+          await new Promise((r) => setTimeout(r, delayBetweenMs));
+        }
+      }
+    });
+
+    await Promise.all(workers);
+  }
+
+  export async function attachChineseTranslationsForForeignTitles(
+    topics: HotTopicCluster[],
+    options?: {
+      limit?: number;
+      batchSize?: number;
+      concurrency?: number;
+    }
+  ): Promise<boolean> {
+    if (!Array.isArray(topics) || topics.length === 0) return false;
+
+    const limit = Math.max(1, options?.limit ?? INITIAL_TITLE_TRANSLATE_LIMIT);
+    const batchSize = Math.max(1, Math.min(25, options?.batchSize ?? 15));
+    const concurrency = Math.max(1, Math.min(4, options?.concurrency ?? 3));
+
+    let updatedAny = false;
+
+    // 1. Hydrate all cached translations synchronously (zero HTTP requests)
+    const remaining: HotTopicCluster[] = [];
+    for (const topic of topics) {
+      const cleanTitle = (topic.title || '').trim();
+      if (!cleanTitle || (topic.titleZh && topic.titleZh !== cleanTitle)) continue;
+      if (!isNonEnglishNonChinese(cleanTitle)) continue;
+
+      const cached = titleZhTranslationCache.get(cleanTitle);
+      if (cached) {
+        topic.titleZh = cached;
+        updatedAny = true;
+      } else if (!inflightTitleTranslations.has(cleanTitle)) {
+        remaining.push(topic);
+      }
+    }
+
+    if (remaining.length === 0) return updatedAny;
+
+    // 2. Cap upfront HTTP translations to first N topics; tail topics translate lazily on scroll/view
+    const targetTopics = remaining.slice(0, limit);
+    const titles = Array.from(new Set(targetTopics.map((t) => t.title.trim())));
+    if (titles.length === 0) return updatedAny;
+
+    for (const title of titles) {
+      inflightTitleTranslations.add(title);
+    }
+
     const translations: Record<string, string> = {};
 
-    // Tier 1: Try server endpoint via POST only when live API backend is present
-    let success = false;
-    const backendCap = await probeApiBackend();
-    if (backendCap.hasApiBackend) {
-      try {
-        const res = await fetch('/api/translate-titles', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ titles })
-        });
-
-        if (res.ok) {
-          const data = await res.json();
-          Object.assign(translations, data.translations || {});
-          success = true;
-        } else if (res.status === 405) {
-          // Cloudflare Workers or static asset handler rejected POST -> Tier 2: Try GET
+    try {
+      // Tier 1: Batch server endpoint requests sequentially in safe chunks
+      const backendCap = await probeApiBackend();
+      if (backendCap.hasApiBackend) {
+        for (let i = 0; i < titles.length; i += batchSize) {
+          const chunk = titles.slice(i, i + batchSize);
           try {
-            const getRes = await fetch(`/api/translate-titles?titles=${encodeURIComponent(JSON.stringify(titles))}`, {
-              method: 'GET'
+            const res = await fetch('/api/translate-titles', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({ titles: chunk })
             });
-            if (getRes.ok) {
-              const data = await getRes.json();
-              Object.assign(translations, data.translations || {});
-              success = true;
-            }
-          } catch {}
-        }
-      } catch {
-        // Network/abort failure on POST -> Tier 2: Try GET fallback
-        try {
-          const getRes = await fetch(`/api/translate-titles?titles=${encodeURIComponent(JSON.stringify(titles))}`, {
-            method: 'GET'
-          });
-          if (getRes.ok) {
-            const data = await getRes.json();
-            Object.assign(translations, data.translations || {});
-            success = true;
-          }
-        } catch {}
-      }
-    }
 
-    // Tier 3: Client-side direct fallback if server endpoint is blocked by Cloudflare (405) or not hosted
-    const unhandled = titles.filter(t => !translations[t]);
-    if (unhandled.length > 0) {
-      await Promise.all(
-        unhandled.map(async (title) => {
-          try {
-            // Google Translate client endpoint
-            const gUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(title)}`;
-            const gRes = await fetch(gUrl);
-            if (gRes.ok) {
-              const data = await gRes.json();
-              if (Array.isArray(data) && Array.isArray(data[0])) {
-                const translated = data[0].map((item: any) => item?.[0] || '').join('').trim();
-                if (translated && translated !== title) {
-                  translations[title] = translated;
-                  return;
+            if (res.ok) {
+              const data = await res.json();
+              Object.assign(translations, data.translations || {});
+            } else if (res.status === 405) {
+              // Cloudflare Workers or static asset handler rejected POST -> Tier 2: Bounded GET chunks
+              for (let g = 0; g < chunk.length; g += 6) {
+                const subChunk = chunk.slice(g, g + 6);
+                try {
+                  const getRes = await fetch(
+                    `/api/translate-titles?titles=${encodeURIComponent(JSON.stringify(subChunk))}`,
+                    { method: 'GET' }
+                  );
+                  if (getRes.ok) {
+                    const data = await getRes.json();
+                    Object.assign(translations, data.translations || {});
+                  }
+                } catch {}
+              }
+            }
+          } catch {
+            // Network/abort failure on POST -> Tier 2: Bounded GET chunks
+            for (let g = 0; g < chunk.length; g += 6) {
+              const subChunk = chunk.slice(g, g + 6);
+              try {
+                const getRes = await fetch(
+                  `/api/translate-titles?titles=${encodeURIComponent(JSON.stringify(subChunk))}`,
+                  { method: 'GET' }
+                );
+                if (getRes.ok) {
+                  const data = await getRes.json();
+                  Object.assign(translations, data.translations || {});
+                }
+              } catch {}
+            }
+          }
+        }
+      }
+
+      // Tier 3: Client-side direct fallback with strict bounded concurrency (max 3 concurrent)
+      const unhandled = titles.filter((t) => !translations[t]);
+      if (unhandled.length > 0) {
+        await runWithConcurrency(
+          unhandled,
+          concurrency,
+          async (title) => {
+            try {
+              const gUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(title)}`;
+              const gRes = await fetch(gUrl);
+              if (gRes.ok) {
+                const data = await gRes.json();
+                if (Array.isArray(data) && Array.isArray(data[0])) {
+                  const translated = data[0].map((item: any) => item?.[0] || '').join('').trim();
+                  if (translated && translated !== title) {
+                    translations[title] = translated;
+                    return;
+                  }
                 }
               }
-            }
-          } catch {}
+            } catch {}
 
-          // Secondary client fallback: MyMemory Neural MT
-          try {
-            const mUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(title)}&langpair=autodetect|zh-CN`;
-            const mRes = await fetch(mUrl);
-            if (mRes.ok) {
-              const data = await mRes.json();
-              const tr = data?.responseData?.translatedText;
-              if (tr && typeof tr === 'string' && tr.trim() && !tr.includes('MYMEMORY WARNING')) {
-                translations[title] = tr.trim();
+            // Secondary client fallback: MyMemory Neural MT
+            try {
+              const mUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(title)}&langpair=autodetect|zh-CN`;
+              const mRes = await fetch(mUrl);
+              if (mRes.ok) {
+                const data = await mRes.json();
+                const tr = data?.responseData?.translatedText;
+                if (tr && typeof tr === 'string' && tr.trim() && !tr.includes('MYMEMORY WARNING')) {
+                  translations[title] = tr.trim();
+                }
               }
-            }
-          } catch {}
-        })
-      );
-    }
+            } catch {}
+          },
+          75
+        );
+      }
 
-    // Apply translations to topics
-    for (const topic of toTranslate) {
-      const trans = translations[topic.title.trim()] || translations[topic.title];
-      if (trans && typeof trans === 'string' && trans.trim() && trans.trim() !== topic.title.trim()) {
-        topic.titleZh = trans.trim();
+      // Persist resolved translations in cache & apply to targetTopics (plus any duplicate title in `topics`)
+      for (const [orig, tr] of Object.entries(translations)) {
+        if (typeof tr === 'string' && tr.trim() && tr.trim() !== orig.trim()) {
+          rememberTitleTranslation(orig.trim(), tr.trim());
+        }
+      }
+
+      for (const topic of topics) {
+        const clean = (topic.title || '').trim();
+        if (!clean || (topic.titleZh && topic.titleZh !== clean)) continue;
+        const trans =
+          titleZhTranslationCache.get(clean) ||
+          translations[clean] ||
+          translations[topic.title];
+        if (trans && typeof trans === 'string' && trans.trim() && trans.trim() !== clean) {
+          topic.titleZh = trans.trim();
+          updatedAny = true;
+        }
+      }
+    } finally {
+      for (const title of titles) {
+        inflightTitleTranslations.delete(title);
       }
     }
+
+    return updatedAny;
+  }
+
+  /**
+   * Translates a small batch of visible/inspected topics on the fly when viewed by the user.
+   */
+  export async function translateTopicTitlesOnDemand(topics: HotTopicCluster[]): Promise<boolean> {
+    if (!Array.isArray(topics) || topics.length === 0) return false;
+    return attachChineseTranslationsForForeignTitles(topics, {
+      limit: topics.length,
+      batchSize: 12,
+      concurrency: 3,
+    });
   }
 
 // ---------------------------------------------------------------------------
