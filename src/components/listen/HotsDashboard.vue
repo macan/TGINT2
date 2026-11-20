@@ -1337,7 +1337,7 @@ onUnmounted(() => {
           </div>
 
           <div
-            v-for="(topic, idx) in analysisResult.hotTopics.slice(0, 5)"
+            v-for="(topic, idx) in analysisResult.hotTopics.slice(0, 10)"
             :key="topic.id"
             @click="inspectTopic(topic)"
             class="pt-3 first:pt-0 group cursor-pointer hover:bg-gray-50/80 dark:hover:bg-gray-700/30 p-2.5 -mx-1 rounded-2xl transition-all"
@@ -1527,10 +1527,10 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <!-- Channels Cards List (Top 5) -->
+        <!-- Channels Cards List (Top 10) -->
         <div class="p-4 space-y-3">
           <ChannelViewCard
-            v-for="(channel, idx) in analysisResult.hotChannels.slice(0, 5)"
+            v-for="(channel, idx) in analysisResult.hotChannels.slice(0, 10)"
             :key="channel.channelId"
             :channel="channel"
             :metadata="getChannelMeta(channel.channelUsername || channel.channelName)"
