@@ -939,7 +939,12 @@ export default {
       clearEmbedCache: "清空缓存",
       embedCacheCleared: "已清空本地模型权重与帖子向量缓存。",
       verifyWarmupModel: "预热推理引擎",
-      downloadWarmupModel: "下载模型 (~113 MB)"
+      downloadWarmupModel: "下载模型 (~113 MB)",
+      sentimentLabel: "情感倾向",
+      sentimentPositive: "积极",
+      sentimentNeutral: "中性",
+      sentimentNegative: "消极",
+      allSentiments: "全部情感"
     },
     workdesk: "多维监听工作台",
     traceItems: "追踪项",

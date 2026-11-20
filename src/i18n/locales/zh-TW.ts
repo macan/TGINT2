@@ -907,7 +907,12 @@ export default {
       clearEmbedCache: "清除快取",
       embedCacheCleared: "已清除本機模型權重與貼文向量快取。",
       verifyWarmupModel: "預熱推論引擎",
-      downloadWarmupModel: "下載模型 (~113 MB)"
+      downloadWarmupModel: "下載模型 (~113 MB)",
+      sentimentLabel: "情感傾向",
+      sentimentPositive: "正面",
+      sentimentNeutral: "中性",
+      sentimentNegative: "負面",
+      allSentiments: "全部情感"
     },
     workdesk: "多維監聽工作台",
     traceItems: "追蹤項",

@@ -97,9 +97,11 @@ Task:
 1. Cluster related posts into distinct high-impact news topics or thematic developments based on semantic meaning, news events, and link preview metadata.
 2. For each cluster, write:
    - "title": A concise, informative, human-grade editorial headline (6 to 12 words, title case). Reflect the key person, entity, action, or fact. Do NOT use generic labels like "Tech News".
-   - "titleZh": If the title is NOT in English or Chinese (e.g. Russian, Arabic, Japanese, Korean, French, German, Spanish, etc.), provide an accurate, natural Chinese translation of the title. If the title is already in English or Chinese, set this to null.
+   - "titleZh": If the title is NOT in Chinese (including English, Russian, Arabic, Japanese, Korean, French, German, Spanish, etc.), provide an accurate, natural Simplified Chinese translation of the title. Only if the title is already in Chinese, set this to null.
    - "summary": A crisp 1-2 sentence briefing of the topic.
    - "category": One of "Tech", "Business", "World", "Crypto", "Science", "Culture", "Security", or "General".
+   - "sentiment": Overall sentiment of the grouped posts — strictly one of "positive", "neutral", or "negative".
+   - "sentimentScore": Numeric polarity score from -1.0 (strongly negative) to 1.0 (strongly positive), with values near 0 for neutral.
    - "keywords": 3 to 5 key entity keywords or hashtags.
    - "persons": Up to 2 key person names mentioned.
    - "entities": Up to 3 key organizations, products, or tokens.
@@ -113,6 +115,8 @@ Output MUST be a valid JSON array of clusters:
     "titleZh": "string or null",
     "summary": "string",
     "category": "string",
+    "sentiment": "positive | neutral | negative",
+    "sentimentScore": 0.0,
     "keywords": ["string"],
     "persons": ["string"],
     "entities": ["string"],
@@ -432,7 +436,7 @@ app.all('/api/lq/:channel', async (req, res) => {
 });
 
 
-// Endpoint to translate non-English, non-Chinese topic titles into Chinese
+// Endpoint to translate all non-Chinese topic titles (including English) into Chinese
 // Supports both POST and GET to prevent 405 Method Not Allowed behind Cloudflare Workers / reverse proxies
 app.all('/api/translate-titles', async (req, res) => {
   res.header('Allow', 'GET, POST, OPTIONS');
@@ -477,8 +481,8 @@ app.all('/api/translate-titles', async (req, res) => {
       for (let i = 0; i < titles.length; i += 25) {
         const chunk = titles.slice(i, i + 25);
         try {
-          const prompt = `Translate each of the following foreign-language headlines into concise, natural Chinese (Simplified Chinese).
-If a headline is already in Chinese or English, you can leave it empty or return the Chinese translation.
+          const prompt = `Translate each of the following non-Chinese headlines (including English, Russian, Japanese, Korean, Arabic, European languages, etc.) into concise, natural Simplified Chinese.
+Only if a headline is already primarily in Chinese, leave it empty or omit it. For English and all other non-Chinese headlines, ALWAYS provide a natural Simplified Chinese translation.
 Output MUST be a strict JSON object mapping each original title to its Chinese translation:
 {
   "original title": "Chinese translation"
@@ -510,7 +514,7 @@ ${JSON.stringify(chunk)}`;
       }
     }
 
-    // 2. Fallback for any unhandled titles using MyMemory Neural MT with max 3 concurrent requests
+    // 2. Fallback for any unhandled titles using Google Translate / MyMemory with max 3 concurrent requests
     for (const title of titles) {
       if (!translations[title]) {
         unhandled.push(title);
@@ -526,12 +530,30 @@ ${JSON.stringify(chunk)}`;
             const t = unhandled[cursor++];
             if (!t) break;
             try {
-              const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(t)}&langpair=autodetect|zh-CN`;
+              const gUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encodeURIComponent(t)}`;
+              const gRes = await fetch(gUrl);
+              if (gRes.ok) {
+                const data = await gRes.json();
+                if (Array.isArray(data) && Array.isArray(data[0])) {
+                  const translated = data[0].map((item: any) => item?.[0] || '').join('').trim();
+                  if (translated && translated.toLowerCase() !== t.toLowerCase()) {
+                    translations[t] = translated;
+                    continue;
+                  }
+                }
+              }
+            } catch {}
+
+            try {
+              const langPair = /^[A-Za-z0-9\s.,:;!?'"()\[\]{}\-_/&%$#@+=*]+$/.test(t)
+                ? 'en|zh-CN'
+                : 'autodetect|zh-CN';
+              const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(t)}&langpair=${encodeURIComponent(langPair)}`;
               const r = await fetch(url);
               if (r.ok) {
                 const data = await r.json();
                 const tr = data.responseData?.translatedText;
-                if (tr && typeof tr === 'string' && tr.trim() && !tr.includes('MYMEMORY WARNING')) {
+                if (tr && typeof tr === 'string' && tr.trim() && !tr.includes('MYMEMORY WARNING') && tr.trim().toLowerCase() !== t.toLowerCase()) {
                   translations[t] = tr.trim();
                 }
               }

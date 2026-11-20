@@ -34,7 +34,10 @@ import {
   Database,
   Download,
   Trash2,
-  Zap
+  Zap,
+  Smile,
+  Meh,
+  Frown
 } from "lucide-vue-next";
 import {
   HotsDateRange,
@@ -44,8 +47,9 @@ import {
   HotChannelItem,
   HotsEngineProgress,
   HotsAnalysisResult,
+  TopicSentimentLabel,
   getDateRangeBounds,
-  isNonEnglishNonChinese,
+  isNonChineseTitle,
   translateTopicTitlesOnDemand
 } from "../../utils/hotsEngine";
 import {
@@ -174,6 +178,7 @@ const isDrillDownOpen = ref(false);
 const drillDownTab = ref<"topics" | "posts" | "channels">("topics");
 const drillDownSearch = ref("");
 const selectedDomainFilter = ref<string>("");
+const selectedSentimentFilter = ref<"" | TopicSentimentLabel>("");
 const postSortOrder = ref<"views" | "score" | "date">("views");
 const inspectedTopic = ref<HotTopicCluster | null>(null);
 const inspectedPost = ref<HotPostItem | null>(null);
@@ -217,6 +222,9 @@ const filteredDrillDownTopics = computed(() => {
   }
   if (selectedDomainFilter.value) {
     list = list.filter(top => top.domains.includes(selectedDomainFilter.value));
+  }
+  if (selectedSentimentFilter.value) {
+    list = list.filter(top => (top.sentiment || "neutral") === selectedSentimentFilter.value);
   }
   return list;
 });
@@ -565,12 +573,13 @@ function openDrillDown(tab: "topics" | "posts" | "channels") {
   drillDownTab.value = tab;
   drillDownSearch.value = "";
   selectedDomainFilter.value = "";
+  selectedSentimentFilter.value = "";
   isDrillDownOpen.value = true;
 }
 
 function selectInspectedTopic(topic: HotTopicCluster) {
   inspectedTopic.value = topic;
-  if (isNonEnglishNonChinese(topic.title) && (!topic.titleZh || topic.titleZh === topic.title)) {
+  if (isNonChineseTitle(topic.title) && (!topic.titleZh || topic.titleZh === topic.title)) {
     void translateTopicTitlesOnDemand([topic]);
   }
 }
@@ -648,6 +657,42 @@ function getTagBadgeClass(type: string): string {
     default:
       return 'bg-gray-100 dark:bg-gray-700/60 text-gray-700 dark:text-gray-300 border-gray-200/60 dark:border-gray-600/60';
   }
+}
+
+function getSentimentBadgeClass(sentiment?: TopicSentimentLabel): string {
+  switch (sentiment) {
+    case 'positive':
+      return 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border-emerald-200/80 dark:border-emerald-800/60';
+    case 'negative':
+      return 'bg-rose-50 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border-rose-200/80 dark:border-rose-800/60';
+    case 'neutral':
+    default:
+      return 'bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border-slate-200/80 dark:border-slate-700/70';
+  }
+}
+
+function getSentimentLabel(sentiment?: TopicSentimentLabel): string {
+  switch (sentiment) {
+    case 'positive':
+      return t('listen.hots.sentimentPositive') || 'Positive';
+    case 'negative':
+      return t('listen.hots.sentimentNegative') || 'Negative';
+    case 'neutral':
+    default:
+      return t('listen.hots.sentimentNeutral') || 'Neutral';
+  }
+}
+
+function getSentimentTooltip(topic: HotTopicCluster): string {
+  const label = getSentimentLabel(topic.sentiment);
+  const score = typeof topic.sentimentScore === 'number'
+    ? ` (${topic.sentimentScore > 0 ? '+' : ''}${topic.sentimentScore.toFixed(2)})`
+    : '';
+  const b = topic.sentimentBreakdown;
+  if (b) {
+    return `${t('listen.hots.sentimentLabel') || 'Sentiment'}: ${label}${score} · ${b.positive} ${t('listen.hots.sentimentPositive') || 'Positive'}, ${b.neutral} ${t('listen.hots.sentimentNeutral') || 'Neutral'}, ${b.negative} ${t('listen.hots.sentimentNegative') || 'Negative'}`;
+  }
+  return `${t('listen.hots.sentimentLabel') || 'Sentiment'}: ${label}${score}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -802,7 +847,7 @@ async function flushLazyTitleTranslations() {
 }
 
 function enqueueLazyTopicTranslation(topic: HotTopicCluster) {
-  if (!isNonEnglishNonChinese(topic.title)) return;
+  if (!isNonChineseTitle(topic.title)) return;
   if (topic.titleZh && topic.titleZh !== topic.title) return;
   if (pendingLazyTopicsMap.has(topic.id)) return;
   pendingLazyTopicsMap.set(topic.id, topic);
@@ -1336,6 +1381,18 @@ onUnmounted(() => {
                     {{ topic.category }}
                   </span>
 
+                  <!-- Sentiment Indicator -->
+                  <span
+                    class="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-md border shrink-0"
+                    :class="getSentimentBadgeClass(topic.sentiment)"
+                    :title="getSentimentTooltip(topic)"
+                  >
+                    <Smile v-if="topic.sentiment === 'positive'" class="h-2.5 w-2.5 shrink-0" />
+                    <Frown v-else-if="topic.sentiment === 'negative'" class="h-2.5 w-2.5 shrink-0" />
+                    <Meh v-else class="h-2.5 w-2.5 shrink-0" />
+                    <span>{{ getSentimentLabel(topic.sentiment) }}</span>
+                  </span>
+
                   <!-- Topic Tag Badges (Person, Entity, Fact, Option, Keyword) -->
                   <span
                     v-for="(tag, tIdx) in (topic.tags || []).slice(0, 3)"
@@ -1358,7 +1415,7 @@ onUnmounted(() => {
                   {{ topic.title }}
                 </h5>
 
-                <!-- Chinese Translation Subtitle (When original is not in English or Chinese) -->
+                <!-- Chinese Translation Subtitle (When original is not in Chinese) -->
                 <div
                   v-if="topic.titleZh && topic.titleZh !== topic.title"
                   class="flex items-start gap-1.5 text-xs font-semibold text-teal-700 dark:text-teal-300 mt-1 mb-0.5"
@@ -1558,6 +1615,18 @@ onUnmounted(() => {
           </div>
 
           <div class="flex items-center gap-2 flex-wrap">
+            <!-- Sentiment filter (topics tab) -->
+            <select
+              v-if="drillDownTab === 'topics' && !inspectedTopic"
+              v-model="selectedSentimentFilter"
+              class="px-2.5 py-1.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-xs text-gray-700 dark:text-gray-300 focus:outline-hidden"
+            >
+              <option value="">{{ t('listen.hots.allSentiments') || 'All Sentiments' }}</option>
+              <option value="positive">{{ t('listen.hots.sentimentPositive') || 'Positive' }}</option>
+              <option value="neutral">{{ t('listen.hots.sentimentNeutral') || 'Neutral' }}</option>
+              <option value="negative">{{ t('listen.hots.sentimentNegative') || 'Negative' }}</option>
+            </select>
+
             <!-- Domain filter (if any) -->
             <select
               v-if="availableDomains.length > 0"
@@ -1624,6 +1693,23 @@ onUnmounted(() => {
                       class="text-[10px] font-bold text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700/60 px-2 py-0.5 rounded-md border border-gray-200/60 dark:border-gray-600/60 shrink-0"
                     >
                       {{ inspectedTopic.category }}
+                    </span>
+
+                    <span
+                      class="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md border shrink-0"
+                      :class="getSentimentBadgeClass(inspectedTopic.sentiment)"
+                      :title="getSentimentTooltip(inspectedTopic)"
+                    >
+                      <Smile v-if="inspectedTopic.sentiment === 'positive'" class="h-3 w-3 shrink-0" />
+                      <Frown v-else-if="inspectedTopic.sentiment === 'negative'" class="h-3 w-3 shrink-0" />
+                      <Meh v-else class="h-3 w-3 shrink-0" />
+                      <span>{{ getSentimentLabel(inspectedTopic.sentiment) }}</span>
+                      <span
+                        v-if="inspectedTopic.sentimentBreakdown && inspectedTopic.postCount > 1"
+                        class="ml-1 pl-1 border-l border-current/25 font-mono text-[9px] opacity-80 tabular-nums"
+                      >
+                        +{{ inspectedTopic.sentimentBreakdown.positive }} / ={{ inspectedTopic.sentimentBreakdown.neutral }} / -{{ inspectedTopic.sentimentBreakdown.negative }}
+                      </span>
                     </span>
 
                     <span
@@ -1746,6 +1832,17 @@ onUnmounted(() => {
                           class="text-[10px] font-bold text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700/60 px-1.5 py-0.5 rounded-md border border-gray-200/60 dark:border-gray-600/60 shrink-0"
                         >
                           {{ topic.category }}
+                        </span>
+
+                        <span
+                          class="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-md border shrink-0"
+                          :class="getSentimentBadgeClass(topic.sentiment)"
+                          :title="getSentimentTooltip(topic)"
+                        >
+                          <Smile v-if="topic.sentiment === 'positive'" class="h-2.5 w-2.5 shrink-0" />
+                          <Frown v-else-if="topic.sentiment === 'negative'" class="h-2.5 w-2.5 shrink-0" />
+                          <Meh v-else class="h-2.5 w-2.5 shrink-0" />
+                          <span>{{ getSentimentLabel(topic.sentiment) }}</span>
                         </span>
 
                         <span

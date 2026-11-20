@@ -12,6 +12,14 @@ import {
   type CachedNerPostSummary,
 } from './hotsVectorStore';
 
+import {
+  analyzeClusterSentiment,
+  normalizeSentimentLabel,
+  type TopicSentimentBreakdown,
+  type TopicSentimentLabel,
+} from './hotsSentiment';
+
+export type { TopicSentimentBreakdown, TopicSentimentLabel };
 export type HotsDateRange = 'today' | 'yesterday' | '3days' | 'week' | 'all';
 export type HotsClusterMode = 'rule' | 'neural' | 'ai';
 
@@ -56,12 +64,15 @@ export interface ClusterTag {
 export interface HotTopicCluster {
   id: string;
   title: string;
-  titleZh?: string; // Chinese translation of title when original title is not in English or Chinese
+  titleZh?: string; // Chinese translation of title when original title is not in Chinese (including English)
   summary: string;
   isAiGenerated?: boolean;
   clusterSource?: 'rule' | 'neural' | 'ai';
   cohesionScore?: number;
   category?: string;
+  sentiment?: TopicSentimentLabel;
+  sentimentScore?: number;
+  sentimentBreakdown?: TopicSentimentBreakdown;
   keywords: string[];
   domains: string[];
   persons?: string[];
@@ -1596,6 +1607,13 @@ export async function clusterWithGeminiAI(
 
         const clusterCategory = item.category || detectTopicCategory(sortedPosts.map(p => p.text).join(' '), Array.from(domainsSet));
         const titleZh = (item.titleZh && typeof item.titleZh === 'string' && item.titleZh.trim() !== '' && item.titleZh.trim() !== item.title?.trim()) ? item.titleZh.trim() : undefined;
+        const localSentiment = analyzeClusterSentiment(sortedPosts);
+        const aiSentiment = normalizeSentimentLabel(item.sentiment);
+        const resolvedSentiment: TopicSentimentLabel = aiSentiment || localSentiment.label;
+        const rawAiScore = typeof item.sentimentScore === 'number' && Number.isFinite(item.sentimentScore)
+          ? Math.max(-1, Math.min(1, Number(item.sentimentScore.toFixed(2))))
+          : undefined;
+        const resolvedSentimentScore = rawAiScore ?? localSentiment.score;
 
         clusters.push({
           id: `ai-cluster-${i}-${Date.now()}`,
@@ -1603,7 +1621,11 @@ export async function clusterWithGeminiAI(
           titleZh,
           summary: item.summary || sortedPosts[0]?.cleanSnippet || '',
           isAiGenerated: true,
+          clusterSource: 'ai',
           category: clusterCategory,
+          sentiment: resolvedSentiment,
+          sentimentScore: resolvedSentimentScore,
+          sentimentBreakdown: localSentiment.counts,
           keywords: kws,
           domains: Array.from(domainsSet),
           persons,
@@ -1638,51 +1660,49 @@ export async function clusterWithGeminiAI(
   // Topic Title Language Detection & Translation Helper
   // ---------------------------------------------------------------------------
 
-  export function isNonEnglishNonChinese(text: string): boolean {
+  export function isNonChineseTitle(text: string): boolean {
     if (!text || typeof text !== 'string') return false;
     const clean = text.trim();
     if (clean.length < 2) return false;
 
-    // 1. If text contains 2 or more Chinese characters, it is already in Chinese
-    const cjkMatches = clean.match(/[\u4E00-\u9FFF]/g) || [];
-    if (cjkMatches.length >= 2) {
+    // Strip URLs so embedded web links do not distort script detection
+    const textWithoutUrls = clean
+      .replace(/https?:\/\/\S+/gi, ' ')
+      .replace(/\bwww\.\S+/gi, ' ')
+      .trim();
+    if (textWithoutUrls.length < 2) return false;
+
+    // 1. Japanese (Hiragana / Katakana) or Korean (Hangul) always need translation to Chinese,
+    //    even when Kanji / Hanja characters are also present.
+    if (/[\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]/.test(textWithoutUrls)) {
+      return true;
+    }
+
+    const hanCount = (textWithoutUrls.match(/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/g) || []).length;
+
+    // 2. Non-Latin, non-CJK scripts (Cyrillic, Arabic/Persian, Thai, Hebrew, Greek, Devanagari, etc.)
+    const otherNonLatinCount = (
+      textWithoutUrls.match(/[\u0400-\u04FF\u0600-\u06FF\u0E00-\u0E7F\u0590-\u05FF\u0370-\u03FF\u0900-\u097F\u0980-\u09FF\u1000-\u109F]/g) || []
+    ).length;
+    if (otherNonLatinCount >= 2 && hanCount < otherNonLatinCount) {
+      return true;
+    }
+
+    // 3. If the title already contains 2 or more Chinese characters (and is not Japanese/Korean/other script),
+    //    treat it as Chinese (e.g. "OpenAI 发布 GPT-5 新模型").
+    if (hanCount >= 2) {
       return false;
     }
 
-    // 2. Check for distinct non-Latin, non-CJK alphabets:
-    // Cyrillic (Russian, Ukrainian, etc.), Arabic/Persian, Japanese Kana, Korean Hangul, Thai, Hebrew, Greek, Hindi
-    if (/[\u0400-\u04FF\u0600-\u06FF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF\u0E00-\u0E7F\u0590-\u05FF\u0370-\u03FF\u0900-\u097F]/.test(clean)) {
-      return true;
-    }
-
-    // 3. Check for specific accented characters common in European languages (French, German, Spanish, Portuguese, etc.)
-    if (/[àâäéèêëîïôöùûüÿçñáíóú¿¡ßøåæœ]/i.test(clean)) {
-      return true;
-    }
-
-    // 4. Check for distinct non-English European stop words in Latin text
-    const lowerWords = clean.toLowerCase().split(/[\s,.:;!?"'()\[\]{}<>\/\\~`@#$%^&*+=|_-]+/).filter(w => w.length > 1);
-    const foreignStopwords = new Set([
-      'le', 'la', 'les', 'des', 'du', 'une', 'pour', 'dans', 'sur', 'avec', 'qui', 'que', 'ce', 'cette', 'est', 'sont',
-      'der', 'die', 'das', 'den', 'dem', 'des', 'ein', 'eine', 'und', 'oder', 'nicht', 'mit', 'auf', 'für', 'von', 'ist', 'sind',
-      'el', 'los', 'las', 'del', 'al', 'por', 'para', 'con', 'una', 'uno', 'unas', 'unos', 'que', 'este', 'esta', 'como',
-      'il', 'lo', 'gli', 'per', 'degli', 'delle', 'sono', 'della',
-      'novosti', 'skidki', 'rossii', 'moskve'
-    ]);
-
-    let foreignWordCount = 0;
-    for (const w of lowerWords) {
-      if (foreignStopwords.has(w)) {
-        foreignWordCount++;
-      }
-    }
-
-    if (foreignWordCount >= 2 || (lowerWords.length <= 4 && foreignWordCount >= 1)) {
-      return true;
-    }
-
-    return false;
+    // 4. All remaining non-Chinese languages (including English, European, Vietnamese, etc.) with >= 2 letters
+    const nonHanLetters = textWithoutUrls
+      .replace(/[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]/g, '')
+      .match(/\p{L}/gu);
+    return (nonHanLetters?.length || 0) >= 2;
   }
+
+  /** Backward-compatible alias: returns true for any non-Chinese title (including English). */
+  export const isNonEnglishNonChinese = isNonChineseTitle;
 
   export const INITIAL_TITLE_TRANSLATE_LIMIT = 15;
   const MAX_TITLE_CACHE_SIZE = 2000;
@@ -1745,7 +1765,7 @@ export async function clusterWithGeminiAI(
     for (const topic of topics) {
       const cleanTitle = (topic.title || '').trim();
       if (!cleanTitle || (topic.titleZh && topic.titleZh !== cleanTitle)) continue;
-      if (!isNonEnglishNonChinese(cleanTitle)) continue;
+      if (!isNonChineseTitle(cleanTitle)) continue;
 
       const cached = titleZhTranslationCache.get(cleanTitle);
       if (cached) {
@@ -1836,7 +1856,7 @@ export async function clusterWithGeminiAI(
                 const data = await gRes.json();
                 if (Array.isArray(data) && Array.isArray(data[0])) {
                   const translated = data[0].map((item: any) => item?.[0] || '').join('').trim();
-                  if (translated && translated !== title) {
+                  if (translated && translated.toLowerCase() !== title.toLowerCase()) {
                     translations[title] = translated;
                     return;
                   }
@@ -1846,12 +1866,15 @@ export async function clusterWithGeminiAI(
 
             // Secondary client fallback: MyMemory Neural MT
             try {
-              const mUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(title)}&langpair=autodetect|zh-CN`;
+              const langPair = /^[A-Za-z0-9\s.,:;!?'"()\[\]{}\-_/&%$#@+=*]+$/.test(title)
+                ? 'en|zh-CN'
+                : 'autodetect|zh-CN';
+              const mUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(title)}&langpair=${encodeURIComponent(langPair)}`;
               const mRes = await fetch(mUrl);
               if (mRes.ok) {
                 const data = await mRes.json();
                 const tr = data?.responseData?.translatedText;
-                if (tr && typeof tr === 'string' && tr.trim() && !tr.includes('MYMEMORY WARNING')) {
+                if (tr && typeof tr === 'string' && tr.trim() && !tr.includes('MYMEMORY WARNING') && tr.trim().toLowerCase() !== title.toLowerCase()) {
                   translations[title] = tr.trim();
                 }
               }
@@ -2255,13 +2278,13 @@ export async function processListenHotsData(options: {
     }
   }
 
-  // 5. Translate foreign-language topic titles into Chinese if title is not in English or Chinese
+  // 5. Translate all non-Chinese topic titles (including English) into Chinese
   if (hotTopics.length > 0) {
     onProgress?.({
       step: 'clustering',
       stage: clusterMode === 'ai' ? 'stage2' : 'stage1',
       percent: 94,
-      message: 'Translating foreign topic titles into Chinese...',
+      message: 'Translating non-Chinese topic titles into Chinese...',
     });
     await attachChineseTranslationsForForeignTitles(hotTopics);
   }
@@ -2913,6 +2936,7 @@ function finalizeHotTopicClusters(
       postsForSynthesis.slice(0, 5).map((p) => p.text).join(' '),
       Array.from(domainsSet)
     );
+    const sentimentSummary = analyzeClusterSentiment(sortedClusterPosts);
 
     hotTopics.push({
       id: `${source}-topic-${cIdx}`,
@@ -2922,6 +2946,9 @@ function finalizeHotTopicClusters(
       clusterSource: source,
       cohesionScore: cl.cohesionScore,
       category,
+      sentiment: sentimentSummary.label,
+      sentimentScore: sentimentSummary.score,
+      sentimentBreakdown: sentimentSummary.counts,
       keywords: topKeywords,
       domains: Array.from(domainsSet),
       persons: extracted.persons,

@@ -907,7 +907,12 @@ export default {
       clearEmbedCache: "キャッシュ削除",
       embedCacheCleared: "ローカルモデルとベクトルキャッシュを削除しました。",
       verifyWarmupModel: "ランタイムをウォームアップ",
-      downloadWarmupModel: "モデルをダウンロード (~113 MB)"
+      downloadWarmupModel: "モデルをダウンロード (~113 MB)",
+      sentimentLabel: "感情分析",
+      sentimentPositive: "ポジティブ",
+      sentimentNeutral: "ニュートラル",
+      sentimentNegative: "ネガティブ",
+      allSentiments: "すべての感情"
     },
     workdesk: "リッスン・ワークデスク",
     traceItems: "追跡項目",

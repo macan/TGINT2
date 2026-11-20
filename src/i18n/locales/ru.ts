@@ -924,7 +924,12 @@ export default {
       clearEmbedCache: "Очистить кэш",
       embedCacheCleared: "Локальный кэш модели и векторов очищен.",
       verifyWarmupModel: "Прогреть модель",
-      downloadWarmupModel: "Скачать модель (~113 МБ)"
+      downloadWarmupModel: "Скачать модель (~113 МБ)",
+      sentimentLabel: "Тональность",
+      sentimentPositive: "Позитивная",
+      sentimentNeutral: "Нейтральная",
+      sentimentNegative: "Негативная",
+      allSentiments: "Все тональности"
     },
     workdesk: "Рабочий стол отслеживания",
     traceItems: "Отслеживаемые элементы",

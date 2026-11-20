@@ -940,7 +940,12 @@ export default {
       clearEmbedCache: "Clear Cache",
       embedCacheCleared: "Local model & vector caches cleared.",
       verifyWarmupModel: "Warmup Runtime",
-      downloadWarmupModel: "Download Model (~113 MB)"
+      downloadWarmupModel: "Download Model (~113 MB)",
+      sentimentLabel: "Sentiment",
+      sentimentPositive: "Positive",
+      sentimentNeutral: "Neutral",
+      sentimentNegative: "Negative",
+      allSentiments: "All Sentiments"
     },
     workdesk: "Flexible Workdesk",
     traceItems: "Trace Items",

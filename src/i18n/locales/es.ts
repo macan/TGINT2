@@ -907,7 +907,12 @@ export default {
       clearEmbedCache: "Limpiar Caché",
       embedCacheCleared: "Caché local de modelo y vectores eliminada.",
       verifyWarmupModel: "Precargar Motor",
-      downloadWarmupModel: "Descargar Modelo (~113 MB)"
+      downloadWarmupModel: "Descargar Modelo (~113 MB)",
+      sentimentLabel: "Sentimiento",
+      sentimentPositive: "Positivo",
+      sentimentNeutral: "Neutral",
+      sentimentNegative: "Negativo",
+      allSentiments: "Todos los Sentimientos"
     },
     workdesk: "Mesa de Trabajo de Escucha",
     traceItems: "Rastrear Elementos",
