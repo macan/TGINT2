@@ -6326,6 +6326,15 @@ export interface ListenItemFetchError {
 // Tracks granular fetch/sync errors per listen item ID for UI diagnostics & inline banners
 const listenItemErrorMap = ref<Record<string, ListenItemFetchError>>({});
 const isFetchErrorsPanelOpen = ref<boolean>(false);
+const retryingListenErrorMap = ref<Record<string, boolean>>({});
+const recentlyFailedRetryMap = ref<Record<string, number>>({});
+const isRetryingAllListenErrors = ref<boolean>(false);
+const retryAllProgress = ref<{ done: number; total: number }>({ done: 0, total: 0 });
+const retryPanelFeedback = ref<{ type: 'info' | 'success' | 'error'; message: string; timestamp: number } | null>(null);
+
+const retryingListenErrorCount = computed<number>(() => {
+  return Object.values(retryingListenErrorMap.value).filter(Boolean).length;
+});
 
 const listenFetchErrorsList = computed<ListenItemFetchError[]>(() => {
   return Object.values(listenItemErrorMap.value).sort((a, b) => b.timestamp - a.timestamp);
@@ -6796,6 +6805,8 @@ const clearListenItemError = (nodeId: string) => {
 
 const clearAllListenItemErrors = () => {
   listenItemErrorMap.value = {};
+  recentlyFailedRetryMap.value = {};
+  retryPanelFeedback.value = null;
   isFetchErrorsPanelOpen.value = false;
 };
 
@@ -7037,10 +7048,281 @@ const classifyListenFetchError = (
   };
 };
 
-const jumpToAndRetryListenError = (errObj: ListenItemFetchError) => {
+let retryPanelFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
+const recentlyFailedRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+const setRetryPanelFeedback = (
+  type: 'info' | 'success' | 'error',
+  message: string,
+  autoDismissMs = 5000
+) => {
+  if (retryPanelFeedbackTimer) {
+    clearTimeout(retryPanelFeedbackTimer);
+    retryPanelFeedbackTimer = null;
+  }
+  retryPanelFeedback.value = { type, message, timestamp: Date.now() };
+  if (autoDismissMs > 0) {
+    retryPanelFeedbackTimer = setTimeout(() => {
+      retryPanelFeedback.value = null;
+      retryPanelFeedbackTimer = null;
+    }, autoDismissMs);
+  }
+};
+
+const dismissRetryPanelFeedback = () => {
+  if (retryPanelFeedbackTimer) {
+    clearTimeout(retryPanelFeedbackTimer);
+    retryPanelFeedbackTimer = null;
+  }
+  retryPanelFeedback.value = null;
+};
+
+const markRetryRecentlyFailed = (nodeId: string) => {
+  const existing = recentlyFailedRetryTimers.get(nodeId);
+  if (existing) clearTimeout(existing);
+  recentlyFailedRetryMap.value = {
+    ...recentlyFailedRetryMap.value,
+    [nodeId]: Date.now()
+  };
+  const timer = setTimeout(() => {
+    const next = { ...recentlyFailedRetryMap.value };
+    delete next[nodeId];
+    recentlyFailedRetryMap.value = next;
+    recentlyFailedRetryTimers.delete(nodeId);
+  }, 4500);
+  recentlyFailedRetryTimers.set(nodeId, timer);
+};
+
+const clearRetryRecentlyFailed = (nodeId: string) => {
+  const existing = recentlyFailedRetryTimers.get(nodeId);
+  if (existing) {
+    clearTimeout(existing);
+    recentlyFailedRetryTimers.delete(nodeId);
+  }
+  if (recentlyFailedRetryMap.value[nodeId]) {
+    const next = { ...recentlyFailedRetryMap.value };
+    delete next[nodeId];
+    recentlyFailedRetryMap.value = next;
+  }
+};
+
+const isListenNodeRetrying = (nodeId: string): boolean => {
+  if (!nodeId) return false;
+  return Boolean(
+    retryingListenErrorMap.value[nodeId] ||
+    (isFetchingListenPosts.value && selectedListenNode.value?.id === nodeId) ||
+    activeBackgroundSyncItemIds.value[nodeId]
+  );
+};
+
+const retryListenErrorItem = async (
+  errObj: ListenItemFetchError,
+  options: { silentStartToast?: boolean; silentResultToast?: boolean } = {}
+): Promise<'success' | 'failed' | 'missing'> => {
   const leaf = allListenLeafItems.value.find(i => i.id === errObj.nodeId);
-  if (leaf) {
-    selectListenItem(leaf);
+  if (!leaf) {
+    clearListenItemError(errObj.nodeId);
+    return 'missing';
+  }
+  if (retryingListenErrorMap.value[leaf.id]) {
+    return 'failed';
+  }
+
+  clearRetryRecentlyFailed(leaf.id);
+  retryingListenErrorMap.value = {
+    ...retryingListenErrorMap.value,
+    [leaf.id]: true
+  };
+  activeBackgroundSyncItemIds.value = {
+    ...activeBackgroundSyncItemIds.value,
+    [leaf.id]: true
+  };
+
+  const startMsg = t('listen.fetchErrors.retryStartedToast', { name: leaf.name });
+  if (!options.silentStartToast) {
+    setRetryPanelFeedback('info', startMsg, 0);
+    showToast(startMsg, 'info', 2800);
+  }
+
+  let succeeded = false;
+  let newPosts = 0;
+
+  try {
+    const isViewingSelectedFeed =
+      selectedListenNode.value?.id === leaf.id &&
+      listenLayoutMode.value !== 'hots' &&
+      listenLayoutMode.value !== 'flexible';
+
+    if (isViewingSelectedFeed) {
+      await fetchListenPosts(leaf, false);
+      succeeded = !listenItemErrorMap.value[leaf.id];
+    } else {
+      const res = await syncSingleListenItem(leaf);
+      succeeded = res.success && !listenItemErrorMap.value[leaf.id];
+      newPosts = res.newPosts || 0;
+      if (succeeded && isItemOnWorkdesk(leaf.id)) {
+        const state = getWidgetState(leaf.id);
+        const channelHint = leaf.type === 'channel' ? (leaf.argument?.trim() || leaf.name?.trim()) : undefined;
+        const updated = await getCachedPostsIndexedDB(leaf.id, { channelId: channelHint });
+        if (updated) {
+          state.posts = updated;
+          state.lastSync = Date.now();
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Retry failed for listen item:', leaf.name, err);
+    succeeded = false;
+  } finally {
+    const nextRetrying = { ...retryingListenErrorMap.value };
+    delete nextRetrying[leaf.id];
+    retryingListenErrorMap.value = nextRetrying;
+
+    const nextActive = { ...activeBackgroundSyncItemIds.value };
+    delete nextActive[leaf.id];
+    activeBackgroundSyncItemIds.value = nextActive;
+  }
+
+  if (succeeded) {
+    clearRetryRecentlyFailed(leaf.id);
+    const okMsg = newPosts > 0
+      ? t('listen.fetchErrors.retrySuccessNewPostsToast', { name: leaf.name, count: newPosts })
+      : t('listen.fetchErrors.retrySuccessToast', { name: leaf.name });
+    if (!options.silentResultToast) {
+      if (listenFetchErrorsList.value.length > 0) {
+        setRetryPanelFeedback('success', okMsg, 5000);
+      } else {
+        dismissRetryPanelFeedback();
+      }
+      showToast(okMsg, 'success', 3800);
+    }
+    return 'success';
+  } else {
+    markRetryRecentlyFailed(leaf.id);
+    const latestErr = listenItemErrorMap.value[leaf.id];
+    const reason = latestErr?.title || errObj.title;
+    const failMsg = t('listen.fetchErrors.retryFailedToast', { name: leaf.name, reason });
+    if (!options.silentResultToast) {
+      setRetryPanelFeedback('error', failMsg, 6000);
+      showToast(failMsg, 'error', 4500);
+    }
+    return 'failed';
+  }
+};
+
+const retryAllListenErrors = async () => {
+  if (isRetryingAllListenErrors.value) return;
+  const snapshot = listenFetchErrorsList.value.filter(err => !retryingListenErrorMap.value[err.nodeId]);
+  if (snapshot.length === 0) return;
+
+  isRetryingAllListenErrors.value = true;
+  retryAllProgress.value = { done: 0, total: snapshot.length };
+
+  const startMsg = t('listen.fetchErrors.retryingAllToast', { count: snapshot.length });
+  setRetryPanelFeedback('info', startMsg, 0);
+  showToast(startMsg, 'info', 3000);
+
+  let succeeded = 0;
+  let failed = 0;
+  let cursor = 0;
+  const CONCURRENCY = Math.min(2, snapshot.length);
+
+  const worker = async () => {
+    while (cursor < snapshot.length) {
+      const idx = cursor++;
+      const errObj = snapshot[idx];
+      const outcome = await retryListenErrorItem(errObj, {
+        silentStartToast: true,
+        silentResultToast: true
+      });
+      if (outcome === 'success') {
+        succeeded++;
+      } else if (outcome === 'failed') {
+        failed++;
+      }
+      retryAllProgress.value = {
+        done: retryAllProgress.value.done + 1,
+        total: snapshot.length
+      };
+      if (retryAllProgress.value.done < snapshot.length) {
+        setRetryPanelFeedback(
+          'info',
+          t('listen.fetchErrors.retryingAllProgress', {
+            done: retryAllProgress.value.done,
+            total: snapshot.length
+          }),
+          0
+        );
+      }
+    }
+  };
+
+  try {
+    await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+  } finally {
+    isRetryingAllListenErrors.value = false;
+  }
+
+  if (failed === 0 && succeeded > 0) {
+    const allOkMsg = t('listen.fetchErrors.retryAllSuccessToast', { count: succeeded });
+    dismissRetryPanelFeedback();
+    showToast(allOkMsg, 'success', 4200);
+  } else {
+    const summaryMsg = t('listen.fetchErrors.retryAllSummaryToast', { succeeded, failed });
+    const feedbackType = succeeded > 0 ? 'info' : 'error';
+    if (listenFetchErrorsList.value.length > 0) {
+      setRetryPanelFeedback(feedbackType, summaryMsg, 6500);
+    } else {
+      dismissRetryPanelFeedback();
+    }
+    showToast(summaryMsg, feedbackType, 4800);
+  }
+};
+
+const jumpToListenErrorItem = async (errObj: ListenItemFetchError) => {
+  const leaf = allListenLeafItems.value.find(i => i.id === errObj.nodeId);
+  if (!leaf) {
+    clearListenItemError(errObj.nodeId);
+    return;
+  }
+  if (listenLayoutMode.value === 'hots') {
+    setListenLayoutMode('view');
+  }
+  selectedListenNode.value = leaf;
+  resetRecentPostsWidgetScroll();
+  await retryListenErrorItem(errObj);
+};
+
+const jumpToAndRetryListenError = jumpToListenErrorItem;
+
+const retrySelectedListenNode = async (node: ListenItem | null) => {
+  if (!node || node.isFolder) return;
+  const existingErr = listenItemErrorMap.value[node.id];
+  if (existingErr) {
+    await retryListenErrorItem(existingErr);
+    return;
+  }
+  const startMsg = t('listen.fetchErrors.retryStartedToast', { name: node.name });
+  showToast(startMsg, 'info', 2500);
+  await fetchListenPosts(node, false);
+  const afterErr = listenItemErrorMap.value[node.id];
+  if (afterErr) {
+    showToast(t('listen.fetchErrors.retryFailedToast', { name: node.name, reason: afterErr.title }), 'error', 4200);
+  } else {
+    showToast(t('listen.fetchErrors.retrySuccessToast', { name: node.name }), 'success', 3200);
+  }
+};
+
+const retryWidgetListenNode = async (node: ListenItem) => {
+  if (!node || node.isFolder) return;
+  const startMsg = t('listen.fetchErrors.retryStartedToast', { name: node.name });
+  showToast(startMsg, 'info', 2500);
+  await syncWidgetNode(node);
+  const afterErr = listenItemErrorMap.value[node.id];
+  if (afterErr) {
+    showToast(t('listen.fetchErrors.retryFailedToast', { name: node.name, reason: afterErr.title }), 'error', 4200);
+  } else {
+    showToast(t('listen.fetchErrors.retrySuccessToast', { name: node.name }), 'success', 3200);
   }
 };
 
@@ -9214,6 +9496,34 @@ const workspaceGraph = ref<any>(null);
 const graphState = ref<any>(null);
 const toastMessage = ref("");
 const toastType = ref<'error' | 'success' | 'info'>('error');
+let toastTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+const clearToast = () => {
+  if (toastTimeoutId) {
+    clearTimeout(toastTimeoutId);
+    toastTimeoutId = null;
+  }
+  toastMessage.value = "";
+};
+
+const showToast = (
+  message: string,
+  type: 'error' | 'success' | 'info' = 'info',
+  durationMs = 3500
+) => {
+  if (toastTimeoutId) {
+    clearTimeout(toastTimeoutId);
+    toastTimeoutId = null;
+  }
+  toastType.value = type;
+  toastMessage.value = message;
+  if (durationMs > 0) {
+    toastTimeoutId = setTimeout(() => {
+      toastMessage.value = "";
+      toastTimeoutId = null;
+    }, durationMs);
+  }
+};
 const contextMenu = ref({ visible: false, x: 0, y: 0, node: null });
 const nodeSearchQuery = ref("");
 const graphNameInput = ref("");
@@ -25554,9 +25864,31 @@ onUnmounted(() => {
       </div>
 
       <!-- Toast Message -->
-      <div v-if="toastMessage" class="fixed top-5 right-5 z-[100] px-4 py-2 rounded-lg shadow-lg flex items-center gap-2 text-white" :class="toastType === 'success' ? 'bg-green-500' : (toastType === 'info' ? 'bg-blue-500' : 'bg-red-500')">
-        <AlertCircle class="w-5 h-5" />
-        {{ toastMessage }}
+      <div
+        v-if="toastMessage"
+        role="status"
+        aria-live="polite"
+        class="fixed top-5 right-5 z-[100] max-w-md px-4 py-2.5 rounded-2xl shadow-xl border flex items-center gap-2.5 text-white text-xs sm:text-sm font-semibold animate-fadeIn backdrop-blur-md"
+        :class="
+          toastType === 'success'
+            ? 'bg-emerald-600/95 border-emerald-400/50'
+            : toastType === 'info'
+              ? 'bg-teal-600/95 border-teal-400/50'
+              : 'bg-rose-600/95 border-rose-400/50'
+        "
+      >
+        <CheckCircle2 v-if="toastType === 'success'" class="w-4 h-4 shrink-0" />
+        <Info v-else-if="toastType === 'info'" class="w-4 h-4 shrink-0" />
+        <AlertCircle v-else class="w-4 h-4 shrink-0" />
+        <span class="leading-snug">{{ toastMessage }}</span>
+        <button
+          type="button"
+          @click="clearToast"
+          class="ml-1 p-0.5 rounded-lg hover:bg-white/20 transition-colors cursor-pointer shrink-0"
+          :aria-label="t('common.close')"
+        >
+          <X class="w-3.5 h-3.5" />
+        </button>
       </div>
 
       <!-- Debug Panel -->
@@ -26726,14 +27058,22 @@ onUnmounted(() => {
               @click="isFetchErrorsPanelOpen = !isFetchErrorsPanelOpen"
               class="flex items-center gap-1.5 px-3 py-1.5 rounded-2xl text-xs font-bold transition-all cursor-pointer select-none shadow-2xs border"
               :class="[
-                isFetchErrorsPanelOpen
-                  ? 'bg-rose-600 hover:bg-rose-700 text-white border-rose-700'
-                  : 'bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/60 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 border-rose-300/80 dark:border-rose-800/70'
+                retryingListenErrorCount > 0
+                  ? 'bg-teal-600 hover:bg-teal-700 text-white border-teal-700'
+                  : isFetchErrorsPanelOpen
+                    ? 'bg-rose-600 hover:bg-rose-700 text-white border-rose-700'
+                    : 'bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/60 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 border-rose-300/80 dark:border-rose-800/70'
               ]"
               :title="t('listen.fetchErrors.panelTitle', { count: listenFetchErrorsList.length })"
             >
-              <AlertCircle class="h-3.5 w-3.5 shrink-0" />
-              <span class="tabular-nums">{{ t('listen.fetchErrors.failedCountBadge', { count: listenFetchErrorsList.length }) }}</span>
+              <RefreshCw v-if="retryingListenErrorCount > 0" class="h-3.5 w-3.5 shrink-0 animate-spin" />
+              <AlertCircle v-else class="h-3.5 w-3.5 shrink-0" />
+              <span class="tabular-nums">
+                {{ t('listen.fetchErrors.failedCountBadge', { count: listenFetchErrorsList.length }) }}
+                <template v-if="retryingListenErrorCount > 0">
+                  · {{ t('listen.fetchErrors.retryingShort') }}
+                </template>
+              </span>
               <ChevronUp v-if="isFetchErrorsPanelOpen" class="h-3.5 w-3.5 shrink-0 opacity-80" />
               <ChevronDown v-else class="h-3.5 w-3.5 shrink-0 opacity-80" />
             </button>
@@ -26850,18 +27190,49 @@ onUnmounted(() => {
         >
           <div class="px-4 sm:px-5 py-3 bg-rose-50/80 dark:bg-rose-950/40 border-b border-rose-200/70 dark:border-rose-800/50 flex items-center justify-between gap-3 flex-wrap">
             <div class="flex items-center gap-2 min-w-0">
-              <div class="p-1.5 rounded-xl bg-rose-100 dark:bg-rose-900/60 text-rose-600 dark:text-rose-300 shrink-0">
-                <AlertCircle class="h-4 w-4" />
+              <div
+                class="p-1.5 rounded-xl shrink-0 transition-colors"
+                :class="
+                  retryingListenErrorCount > 0
+                    ? 'bg-teal-100 dark:bg-teal-900/60 text-teal-600 dark:text-teal-300'
+                    : 'bg-rose-100 dark:bg-rose-900/60 text-rose-600 dark:text-rose-300'
+                "
+              >
+                <RefreshCw v-if="retryingListenErrorCount > 0" class="h-4 w-4 animate-spin" />
+                <AlertCircle v-else class="h-4 w-4" />
               </div>
               <h3 class="text-xs sm:text-sm font-black text-rose-900 dark:text-rose-200 tracking-tight truncate">
                 {{ t('listen.fetchErrors.panelTitle', { count: listenFetchErrorsList.length }) }}
               </h3>
+              <span
+                v-if="retryingListenErrorCount > 0"
+                class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-teal-100 dark:bg-teal-900/60 text-teal-700 dark:text-teal-300 border border-teal-200/80 dark:border-teal-700/60 tabular-nums shrink-0"
+              >
+                <Loader2 class="h-2.5 w-2.5 animate-spin" />
+                <span>{{ t('listen.fetchErrors.retrying') }} ({{ retryingListenErrorCount }})</span>
+              </span>
             </div>
             <div class="flex items-center gap-2 shrink-0">
               <button
                 type="button"
+                @click="retryAllListenErrors"
+                :disabled="isRetryingAllListenErrors || retryingListenErrorCount >= listenFetchErrorsList.length"
+                class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-[11px] font-bold bg-teal-600 hover:bg-teal-700 text-white border border-teal-700/80 shadow-2xs transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed tabular-nums"
+              >
+                <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': isRetryingAllListenErrors }" />
+                <span>
+                  {{
+                    isRetryingAllListenErrors
+                      ? t('listen.fetchErrors.retryingAll', { done: retryAllProgress.done, total: retryAllProgress.total })
+                      : t('listen.fetchErrors.retryAll')
+                  }}
+                </span>
+              </button>
+              <button
+                type="button"
                 @click="clearAllListenItemErrors"
-                class="px-2.5 py-1 rounded-xl text-[11px] font-bold bg-white dark:bg-gray-800 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800/60 transition-colors cursor-pointer"
+                :disabled="isRetryingAllListenErrors"
+                class="px-2.5 py-1 rounded-xl text-[11px] font-bold bg-white dark:bg-gray-800 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800/60 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {{ t('listen.fetchErrors.clearAll') }}
               </button>
@@ -26876,21 +27247,73 @@ onUnmounted(() => {
             </div>
           </div>
 
+          <!-- Inline Retry Live Feedback Strip -->
+          <div
+            v-if="retryPanelFeedback"
+            role="status"
+            aria-live="polite"
+            class="px-4 sm:px-5 py-2 border-b text-xs font-semibold flex items-center justify-between gap-2 transition-colors"
+            :class="
+              retryPanelFeedback.type === 'success'
+                ? 'bg-emerald-50/90 dark:bg-emerald-950/40 border-emerald-200/70 dark:border-emerald-800/60 text-emerald-800 dark:text-emerald-200'
+                : retryPanelFeedback.type === 'info'
+                  ? 'bg-teal-50/90 dark:bg-teal-950/40 border-teal-200/70 dark:border-teal-800/60 text-teal-800 dark:text-teal-200'
+                  : 'bg-rose-50/90 dark:bg-rose-950/50 border-rose-200/70 dark:border-rose-800/60 text-rose-800 dark:text-rose-200'
+            "
+          >
+            <div class="flex items-center gap-2 min-w-0">
+              <Loader2 v-if="retryPanelFeedback.type === 'info'" class="h-3.5 w-3.5 animate-spin shrink-0" />
+              <CheckCircle2 v-else-if="retryPanelFeedback.type === 'success'" class="h-3.5 w-3.5 shrink-0" />
+              <AlertCircle v-else class="h-3.5 w-3.5 shrink-0" />
+              <span class="truncate">{{ retryPanelFeedback.message }}</span>
+            </div>
+            <button
+              type="button"
+              @click="dismissRetryPanelFeedback"
+              class="p-0.5 rounded-lg opacity-70 hover:opacity-100 transition-opacity cursor-pointer shrink-0"
+              :title="t('listen.fetchErrors.dismiss')"
+            >
+              <X class="h-3.5 w-3.5" />
+            </button>
+          </div>
+
           <div class="max-h-72 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-700/60 scrollbar-thin">
             <div
               v-for="err in listenFetchErrorsList"
               :key="err.nodeId"
-              class="px-4 sm:px-5 py-3 flex flex-col sm:flex-row sm:items-start justify-between gap-3 hover:bg-rose-50/30 dark:hover:bg-rose-950/20 transition-colors"
+              class="px-4 sm:px-5 py-3 flex flex-col sm:flex-row sm:items-start justify-between gap-3 transition-colors"
+              :class="[
+                isListenNodeRetrying(err.nodeId)
+                  ? 'bg-teal-50/60 dark:bg-teal-950/30 border-l-3 border-l-teal-500'
+                  : recentlyFailedRetryMap[err.nodeId]
+                    ? 'bg-rose-50/75 dark:bg-rose-950/35 border-l-3 border-l-rose-500'
+                    : 'hover:bg-rose-50/30 dark:hover:bg-rose-950/20'
+              ]"
             >
               <div class="min-w-0 flex-1 space-y-1">
                 <div class="flex items-center gap-2 flex-wrap">
                   <button
                     type="button"
-                    @click="jumpToAndRetryListenError(err)"
-                    class="text-xs sm:text-sm font-bold text-gray-900 dark:text-white hover:text-teal-600 dark:hover:text-teal-400 hover:underline text-left truncate max-w-[260px] cursor-pointer"
+                    @click="jumpToListenErrorItem(err)"
+                    :disabled="isListenNodeRetrying(err.nodeId)"
+                    :title="t('listen.fetchErrors.jumpToItemTooltip')"
+                    class="text-xs sm:text-sm font-bold text-gray-900 dark:text-white hover:text-teal-600 dark:hover:text-teal-400 hover:underline text-left truncate max-w-[260px] cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
                   >
                     {{ err.itemName }}
                   </button>
+                  <span
+                    v-if="isListenNodeRetrying(err.nodeId)"
+                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-teal-100 dark:bg-teal-900/70 text-teal-700 dark:text-teal-200 border border-teal-300/80 dark:border-teal-700/70"
+                  >
+                    <Loader2 class="h-2.5 w-2.5 animate-spin" />
+                    <span>{{ t('listen.fetchErrors.retrying') }}</span>
+                  </span>
+                  <span
+                    v-else-if="recentlyFailedRetryMap[err.nodeId]"
+                    class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-rose-600 text-white border border-rose-700"
+                  >
+                    <span>{{ t('listen.fetchErrors.retryFailedBadge') }}</span>
+                  </span>
                   <span
                     class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border"
                     :class="getListenErrorBadgeClass(err.category)"
@@ -26925,16 +27348,23 @@ onUnmounted(() => {
               <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
                 <button
                   type="button"
-                  @click="jumpToAndRetryListenError(err)"
-                  class="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-bold bg-teal-50 dark:bg-teal-950/50 hover:bg-teal-100 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 transition-colors cursor-pointer"
+                  @click="retryListenErrorItem(err)"
+                  :disabled="isListenNodeRetrying(err.nodeId)"
+                  class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-[11px] font-bold border transition-all cursor-pointer disabled:cursor-wait"
+                  :class="
+                    isListenNodeRetrying(err.nodeId)
+                      ? 'bg-teal-600 text-white border-teal-700 shadow-2xs'
+                      : 'bg-teal-50 dark:bg-teal-950/50 hover:bg-teal-100 dark:hover:bg-teal-900/60 text-teal-700 dark:text-teal-300 border-teal-200 dark:border-teal-800/60'
+                  "
                 >
-                  <RefreshCw class="h-3 w-3" />
-                  <span>{{ t('listen.fetchErrors.retry') }}</span>
+                  <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': isListenNodeRetrying(err.nodeId) }" />
+                  <span>{{ isListenNodeRetrying(err.nodeId) ? t('listen.fetchErrors.retrying') : t('listen.fetchErrors.retry') }}</span>
                 </button>
                 <button
                   type="button"
                   @click="clearListenItemError(err.nodeId)"
-                  class="p-1.5 rounded-xl text-gray-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 border border-transparent hover:border-rose-200 dark:hover:border-rose-800/50 transition-colors cursor-pointer"
+                  :disabled="isListenNodeRetrying(err.nodeId)"
+                  class="p-1.5 rounded-xl text-gray-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 border border-transparent hover:border-rose-200 dark:hover:border-rose-800/50 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                   :title="t('listen.fetchErrors.dismiss')"
                 >
                   <X class="h-3.5 w-3.5" />
@@ -27437,12 +27867,12 @@ onUnmounted(() => {
                       <div class="flex items-center gap-1 shrink-0">
                         <button
                           type="button"
-                          @click="syncWidgetNode(node)"
-                          :disabled="getWidgetState(node.id).isSyncing"
-                          class="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 transition-colors cursor-pointer inline-flex items-center gap-1 disabled:opacity-50"
+                          @click="retryWidgetListenNode(node)"
+                          :disabled="getWidgetState(node.id).isSyncing || isListenNodeRetrying(node.id)"
+                          class="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 transition-colors cursor-pointer inline-flex items-center gap-1 disabled:opacity-60 disabled:cursor-wait"
                         >
-                          <RefreshCw class="h-2.5 w-2.5" :class="{ 'animate-spin': getWidgetState(node.id).isSyncing }" />
-                          <span>{{ t('listen.fetchErrors.retry') }}</span>
+                          <RefreshCw class="h-2.5 w-2.5" :class="{ 'animate-spin': getWidgetState(node.id).isSyncing || isListenNodeRetrying(node.id) }" />
+                          <span>{{ (getWidgetState(node.id).isSyncing || isListenNodeRetrying(node.id)) ? t('listen.fetchErrors.retrying') : t('listen.fetchErrors.retry') }}</span>
                         </button>
                         <button
                           type="button"
@@ -27906,12 +28336,12 @@ onUnmounted(() => {
                   <div class="flex items-center gap-2 shrink-0 self-end sm:self-center">
                     <button
                       type="button"
-                      @click="fetchListenPosts(selectedListenNode, false)"
-                      :disabled="isFetchingListenPosts"
-                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                      @click="retrySelectedListenNode(selectedListenNode)"
+                      :disabled="isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id)"
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 shadow-2xs transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                     >
-                      <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts }" />
-                      <span>{{ t('listen.fetchErrors.retry') }}</span>
+                      <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id) }" />
+                      <span>{{ (isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id)) ? t('listen.fetchErrors.retrying') : t('listen.fetchErrors.retry') }}</span>
                     </button>
                     <button
                       type="button"
@@ -27983,12 +28413,12 @@ onUnmounted(() => {
                       <p class="text-xs text-gray-600 dark:text-gray-300 mt-1">{{ listenItemErrorMap[selectedListenNode.id].message }}</p>
                       <button
                         type="button"
-                        @click="fetchListenPosts(selectedListenNode, false)"
-                        :disabled="isFetchingListenPosts"
-                        class="mt-4 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white transition-colors cursor-pointer disabled:opacity-50"
+                        @click="retrySelectedListenNode(selectedListenNode)"
+                        :disabled="isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id)"
+                        class="mt-4 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                       >
-                        <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts }" />
-                        <span>{{ t('listen.fetchErrors.retry') }}</span>
+                        <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id) }" />
+                        <span>{{ (isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id)) ? t('listen.fetchErrors.retrying') : t('listen.fetchErrors.retry') }}</span>
                       </button>
                     </template>
                     <template v-else>
@@ -29754,12 +30184,12 @@ onUnmounted(() => {
                 <div class="flex items-center gap-2 shrink-0 self-end sm:self-center">
                   <button
                     type="button"
-                    @click="fetchListenPosts(selectedListenNode, false)"
-                    :disabled="isFetchingListenPosts"
-                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+                    @click="retrySelectedListenNode(selectedListenNode)"
+                    :disabled="isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id)"
+                    class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 shadow-2xs transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                   >
-                    <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts }" />
-                    <span>{{ t('listen.fetchErrors.retry') }}</span>
+                    <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id) }" />
+                    <span>{{ (isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id)) ? t('listen.fetchErrors.retrying') : t('listen.fetchErrors.retry') }}</span>
                   </button>
                   <button
                     type="button"
@@ -29876,12 +30306,12 @@ onUnmounted(() => {
                     <p class="text-xs text-gray-600 dark:text-gray-300 mt-1">{{ listenItemErrorMap[selectedListenNode.id].message }}</p>
                     <button
                       type="button"
-                      @click="fetchListenPosts(selectedListenNode, false)"
-                      :disabled="isFetchingListenPosts"
-                      class="mt-4 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white transition-colors cursor-pointer disabled:opacity-50"
+                      @click="retrySelectedListenNode(selectedListenNode)"
+                      :disabled="isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id)"
+                      class="mt-4 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold bg-teal-600 hover:bg-teal-700 text-white transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                     >
-                      <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts }" />
-                      <span>{{ t('listen.fetchErrors.retry') }}</span>
+                      <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id) }" />
+                      <span>{{ (isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id)) ? t('listen.fetchErrors.retrying') : t('listen.fetchErrors.retry') }}</span>
                     </button>
                   </template>
                   <template v-else>
@@ -30581,12 +31011,12 @@ onUnmounted(() => {
                         <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
                           <button
                             type="button"
-                            @click="fetchListenPosts(selectedListenNode, false)"
-                            :disabled="isFetchingListenPosts"
-                            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 transition-colors cursor-pointer disabled:opacity-50"
+                            @click="retrySelectedListenNode(selectedListenNode)"
+                            :disabled="isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id)"
+                            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold bg-white dark:bg-gray-800 hover:bg-teal-50 dark:hover:bg-teal-950/50 text-teal-700 dark:text-teal-300 border border-teal-200 dark:border-teal-800/60 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait"
                           >
-                            <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': isFetchingListenPosts }" />
-                            <span>{{ t('listen.fetchErrors.retry') }}</span>
+                            <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id) }" />
+                            <span>{{ (isFetchingListenPosts || isListenNodeRetrying(selectedListenNode.id)) ? t('listen.fetchErrors.retrying') : t('listen.fetchErrors.retry') }}</span>
                           </button>
                           <button
                             type="button"

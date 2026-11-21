@@ -5,9 +5,12 @@ import {
   watch,
   onMounted,
   onBeforeUnmount,
-  nextTick
+  nextTick,
+  type ComponentPublicInstance
 } from 'vue';
 import PostItemView from './PostItemView.vue';
+
+const ITEM_GAP = 16;
 
 const props = withDefaults(
   defineProps<{
@@ -42,92 +45,113 @@ const scrollTop = ref<number>(0);
 const viewportHeight = ref<number>(800);
 const isWindowScroll = ref<boolean>(false);
 
-// Cache true rendered heights measured by ResizeObserver
-const itemHeights = ref<Record<string | number, number>>({});
+// True rendered outer heights keyed by stable unique item key
+const itemHeights = ref<Record<string, number>>({});
+
+// Track mounted DOM wrappers so initial render elements are observed as soon as ResizeObserver exists
+const mountedElements = new Map<string, HTMLElement>();
+const pendingHeights = new Map<string, number>();
+
 let resizeObserver: ResizeObserver | null = null;
+let containerResizeObserver: ResizeObserver | null = null;
 let resizeRafId: number | null = null;
 let scrollListenerTarget: HTMLElement | Window | null = null;
 let rafId: number | null = null;
 
-function getPostKey(post: any, idx: number): string | number {
-  return post?.key || post?.id || idx;
-}
+// Build collision-free keys while preserving height cache across re-sorts
+const itemKeys = computed<string[]>(() => {
+  const posts = props.posts || [];
+  const seen = new Map<string, number>();
+  return posts.map((post, idx) => {
+    let base: string;
+    if (post?.key != null && String(post.key).trim() !== '') {
+      base = String(post.key);
+    } else if (post?.channelId != null && post?.id != null) {
+      base = `${String(post.channelId)}:${String(post.id)}`;
+    } else if (post?.id != null) {
+      base = String(post.id);
+    } else {
+      base = `idx_${idx}`;
+    }
+    const count = seen.get(base) || 0;
+    seen.set(base, count + 1);
+    return count === 0 ? base : `${base}__${count}`;
+  });
+});
 
-// Calculate cumulative item offsets and total height
+// Cumulative item offsets and total virtual height
 const positions = computed(() => {
   const posts = props.posts || [];
+  const keys = itemKeys.value;
   const heights = itemHeights.value;
   const defaultHeight = props.estimatedItemHeight;
   const pos: { top: number; height: number }[] = new Array(posts.length);
 
   let currentTop = 0;
   for (let i = 0; i < posts.length; i++) {
-    const key = getPostKey(posts[i], i);
+    const key = keys[i];
     const h = heights[key] || defaultHeight;
     pos[i] = { top: currentTop, height: h };
-    currentTop += h + 16; // 16px vertical gap between cards
+    currentTop += h + ITEM_GAP;
   }
 
   return {
     items: pos,
-    totalHeight: Math.max(0, currentTop)
+    totalHeight: posts.length > 0 ? Math.max(0, currentTop - ITEM_GAP) : 0
   };
 });
 
-// Binary search for visible start index based on scroll offset
+// Binary search for visible start index based on relative scroll offset
 const startIndex = computed(() => {
-  const posts = props.posts || [];
-  if (posts.length === 0) return 0;
+  const items = positions.value.items;
+  if (items.length === 0) return 0;
 
   const targetTop = Math.max(0, scrollTop.value);
-  const items = positions.value.items;
 
   let low = 0;
   let high = items.length - 1;
-  let mid = 0;
+  let result = 0;
 
   while (low <= high) {
-    mid = Math.floor((low + high) / 2);
-    const itemBottom = items[mid].top + items[mid].height;
+    const mid = Math.floor((low + high) / 2);
+    const itemBottom = items[mid].top + items[mid].height + ITEM_GAP;
 
-    if (itemBottom < targetTop) {
-      low = mid + 1;
-    } else if (items[mid].top > targetTop) {
+    if (itemBottom >= targetTop) {
+      result = mid;
       high = mid - 1;
     } else {
-      break;
+      low = mid + 1;
     }
   }
 
-  const rawStart = Math.max(0, low - 1);
-  return Math.max(0, rawStart - props.bufferCount);
+  return Math.max(0, result - props.bufferCount);
 });
 
 // Visible end index based on viewport bottom
 const endIndex = computed(() => {
-  const posts = props.posts || [];
-  if (posts.length === 0) return 0;
-
-  const targetBottom = scrollTop.value + viewportHeight.value;
   const items = positions.value.items;
+  if (items.length === 0) return 0;
+
+  const targetBottom = Math.max(0, scrollTop.value) + viewportHeight.value;
 
   let low = startIndex.value;
   let high = items.length - 1;
+  let result = items.length - 1;
 
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
-    if (items[mid].top < targetBottom) {
+    if (items[mid].top <= targetBottom) {
+      result = mid;
       low = mid + 1;
     } else {
       high = mid - 1;
     }
   }
 
-  const rawEnd = Math.min(items.length - 1, low);
-  return Math.min(items.length - 1, rawEnd + props.bufferCount);
+  return Math.min(items.length - 1, result + props.bufferCount);
 });
 
-// Slice visible items with absolute positioning offsets
+// Slice visible items with absolute Y offsets
 const visibleItems = computed(() => {
   const posts = props.posts || [];
   if (posts.length === 0) return [];
@@ -135,14 +159,15 @@ const visibleItems = computed(() => {
   const start = startIndex.value;
   const end = endIndex.value;
   const itemsPos = positions.value.items;
-  const result: { post: any; index: number; key: string | number; top: number }[] = [];
+  const keys = itemKeys.value;
+  const result: { post: any; index: number; key: string; top: number }[] = [];
 
   for (let i = start; i <= end; i++) {
     if (posts[i]) {
       result.push({
         post: posts[i],
         index: i,
-        key: getPostKey(posts[i], i),
+        key: keys[i],
         top: itemsPos[i]?.top || 0
       });
     }
@@ -151,119 +176,208 @@ const visibleItems = computed(() => {
   return result;
 });
 
-function handleScroll() {
-  if (rafId) return;
+function measureElementHeight(el: HTMLElement): number {
+  const rectHeight = el.getBoundingClientRect().height;
+  return Math.ceil(rectHeight > 0 ? rectHeight : el.offsetHeight);
+}
 
-  rafId = requestAnimationFrame(() => {
-    rafId = null;
+function flushPendingHeights() {
+  if (resizeRafId !== null) {
+    cancelAnimationFrame(resizeRafId);
+    resizeRafId = null;
+  }
+  if (pendingHeights.size === 0) return;
 
-    if (isWindowScroll.value) {
-      if (rootContainerRef.value) {
-        const rect = rootContainerRef.value.getBoundingClientRect();
-        scrollTop.value = Math.max(0, -rect.top);
-        viewportHeight.value = window.innerHeight;
-      }
-    } else if (scrollListenerTarget && 'scrollTop' in scrollListenerTarget) {
-      const el = scrollListenerTarget as HTMLElement;
-      scrollTop.value = el.scrollTop;
-      viewportHeight.value = el.clientHeight || 800;
+  const updates = new Map(pendingHeights);
+  pendingHeights.clear();
+
+  let changed = false;
+  const nextHeights = { ...itemHeights.value };
+
+  for (const [key, height] of updates.entries()) {
+    if (height > 20 && nextHeights[key] !== height) {
+      nextHeights[key] = height;
+      changed = true;
     }
+  }
+
+  if (changed) {
+    itemHeights.value = nextHeights;
+    handleScroll();
+  }
+}
+
+function scheduleHeightUpdate(key: string, height: number) {
+  if (height <= 20) return;
+  if (itemHeights.value[key] === height && !pendingHeights.has(key)) return;
+  pendingHeights.set(key, height);
+  if (resizeRafId === null) {
+    resizeRafId = window.requestAnimationFrame(flushPendingHeights);
+  }
+}
+
+function remeasureAllMounted() {
+  for (const [key, el] of mountedElements.entries()) {
+    if (el.isConnected) {
+      scheduleHeightUpdate(key, measureElementHeight(el));
+    }
+  }
+}
+
+function syncScrollPosition() {
+  if (isWindowScroll.value) {
+    if (rootContainerRef.value) {
+      const rect = rootContainerRef.value.getBoundingClientRect();
+      scrollTop.value = Math.max(0, -rect.top);
+      viewportHeight.value = window.innerHeight || 800;
+    }
+  } else if (scrollListenerTarget && 'scrollTop' in scrollListenerTarget) {
+    const container = scrollListenerTarget as HTMLElement;
+    const containerRect = container.getBoundingClientRect();
+    const listRect = rootContainerRef.value?.getBoundingClientRect();
+    // Account for any header/metadata sitting above VirtualPostList inside the scroll container
+    const relativeScrollTop = listRect
+      ? Math.max(0, containerRect.top - listRect.top)
+      : Math.max(0, container.scrollTop);
+    scrollTop.value = relativeScrollTop;
+    viewportHeight.value = container.clientHeight || 800;
+  }
+}
+
+function handleScroll() {
+  if (rafId !== null) return;
+  rafId = window.requestAnimationFrame(() => {
+    rafId = null;
+    syncScrollPosition();
   });
 }
 
-function observeRenderedItem(el: Element | null, key: string | number) {
-  if (!el || !resizeObserver) return;
-  (el as any).__virtualKey = key;
-  resizeObserver.observe(el);
-}
+function setRenderedItemRef(el: Element | ComponentPublicInstance | null, key: string) {
+  const htmlEl = el instanceof HTMLElement ? el : null;
+  const existing = mountedElements.get(key);
 
-function unobserveRenderedItem(el: Element | null) {
-  if (!el || !resizeObserver) return;
-  resizeObserver.unobserve(el);
+  if (!htmlEl) {
+    if (existing) {
+      resizeObserver?.unobserve(existing);
+      mountedElements.delete(key);
+    }
+    return;
+  }
+
+  if (existing && existing !== htmlEl) {
+    resizeObserver?.unobserve(existing);
+  }
+
+  (htmlEl as any).__virtualKey = key;
+  mountedElements.set(key, htmlEl);
+
+  if (resizeObserver) {
+    resizeObserver.observe(htmlEl);
+  }
+
+  const h = measureElementHeight(htmlEl);
+  if (h > 20) {
+    scheduleHeightUpdate(key, h);
+  }
 }
 
 function setupScrollListener() {
   cleanupScrollListener();
 
-  // If explicit container prop is supplied
+  let target: HTMLElement | Window = window;
+  let windowMode = true;
+
   if (props.scrollContainer) {
-    scrollListenerTarget = props.scrollContainer;
-    isWindowScroll.value = false;
-    scrollListenerTarget.addEventListener('scroll', handleScroll, { passive: true });
-    handleScroll();
-    return;
-  }
-
-  // Detect closest scrollable parent element
-  let parent = rootContainerRef.value?.parentElement;
-  while (parent && parent !== document.body && parent !== document.documentElement) {
-    const overflowY = window.getComputedStyle(parent).overflowY;
-    if (overflowY === 'auto' || overflowY === 'scroll') {
-      scrollListenerTarget = parent;
-      isWindowScroll.value = false;
-      scrollListenerTarget.addEventListener('scroll', handleScroll, { passive: true });
-      handleScroll();
-      return;
+    target = props.scrollContainer;
+    windowMode = false;
+  } else {
+    let parent = rootContainerRef.value?.parentElement;
+    while (parent && parent !== document.body && parent !== document.documentElement) {
+      const overflowY = window.getComputedStyle(parent).overflowY;
+      if (overflowY === 'auto' || overflowY === 'scroll') {
+        target = parent;
+        windowMode = false;
+        break;
+      }
+      parent = parent.parentElement;
     }
-    parent = parent.parentElement;
   }
 
-  // Default to window scrolling
-  scrollListenerTarget = window;
-  isWindowScroll.value = true;
-  window.addEventListener('scroll', handleScroll, { passive: true });
+  scrollListenerTarget = target;
+  isWindowScroll.value = windowMode;
+  scrollListenerTarget.addEventListener('scroll', handleScroll, { passive: true });
   window.addEventListener('resize', handleScroll, { passive: true });
-  handleScroll();
+
+  if (!windowMode && target instanceof HTMLElement && typeof ResizeObserver !== 'undefined') {
+    containerResizeObserver = new ResizeObserver(() => {
+      handleScroll();
+      remeasureAllMounted();
+    });
+    containerResizeObserver.observe(target);
+  }
+
+  syncScrollPosition();
 }
 
 function cleanupScrollListener() {
   if (scrollListenerTarget) {
     scrollListenerTarget.removeEventListener('scroll', handleScroll as any);
-    if (scrollListenerTarget === window) {
-      window.removeEventListener('resize', handleScroll as any);
-    }
     scrollListenerTarget = null;
   }
-  if (rafId) {
+  window.removeEventListener('resize', handleScroll as any);
+  if (containerResizeObserver) {
+    containerResizeObserver.disconnect();
+    containerResizeObserver = null;
+  }
+  if (rafId !== null) {
     cancelAnimationFrame(rafId);
     rafId = null;
   }
 }
 
 onMounted(() => {
-  // Initialize ResizeObserver to measure true rendered heights dynamically
   if (typeof ResizeObserver !== 'undefined') {
     resizeObserver = new ResizeObserver((entries) => {
-      // Defer measurements to next animation frame to prevent "ResizeObserver loop completed with undelivered notifications"
-      if (resizeRafId) cancelAnimationFrame(resizeRafId);
-      resizeRafId = window.requestAnimationFrame(() => {
-        resizeRafId = null;
-        let changed = false;
-        for (const entry of entries) {
-          const key = (entry.target as any)?.__virtualKey;
-          if (key != null) {
-            const height = Math.ceil(entry.contentRect.height);
-            if (height > 20 && itemHeights.value[key] !== height) {
-              itemHeights.value[key] = height;
-              changed = true;
-            }
+      // Accumulate every observed resize entry without canceling pending batches
+      for (const entry of entries) {
+        const target = entry.target as HTMLElement;
+        const key = (target as any)?.__virtualKey as string | undefined;
+        if (key != null && target.isConnected) {
+          const height = measureElementHeight(target);
+          if (height > 20) {
+            pendingHeights.set(key, height);
           }
         }
-        if (changed) {
-          handleScroll();
-        }
-      });
+      }
+      if (pendingHeights.size > 0 && resizeRafId === null) {
+        resizeRafId = window.requestAnimationFrame(flushPendingHeights);
+      }
     });
+
+    // Observe and synchronously measure all items rendered before onMounted ran
+    for (const [key, el] of mountedElements.entries()) {
+      if (el.isConnected) {
+        resizeObserver.observe(el);
+        const h = measureElementHeight(el);
+        if (h > 20) {
+          pendingHeights.set(key, h);
+        }
+      }
+    }
+    if (pendingHeights.size > 0) {
+      flushPendingHeights();
+    }
   }
 
   nextTick(() => {
     setupScrollListener();
+    remeasureAllMounted();
   });
 });
 
 onBeforeUnmount(() => {
   cleanupScrollListener();
-  if (resizeRafId) {
+  if (resizeRafId !== null) {
     cancelAnimationFrame(resizeRafId);
     resizeRafId = null;
   }
@@ -271,6 +385,8 @@ onBeforeUnmount(() => {
     resizeObserver.disconnect();
     resizeObserver = null;
   }
+  mountedElements.clear();
+  pendingHeights.clear();
 });
 
 watch(
@@ -283,10 +399,11 @@ watch(
 );
 
 watch(
-  () => props.posts.length,
+  () => props.posts,
   () => {
     nextTick(() => {
-      handleScroll();
+      syncScrollPosition();
+      remeasureAllMounted();
     });
   }
 );
@@ -306,9 +423,9 @@ watch(
       <div
         v-for="item in visibleItems"
         :key="item.key"
-        :ref="(el) => observeRenderedItem(el as any, item.key)"
-        class="absolute left-0 right-0 w-full transition-transform duration-75 ease-out"
-        :style="{ transform: `translateY(${item.top}px)` }"
+        :ref="(el) => setRenderedItemRef(el, item.key)"
+        class="absolute top-0 left-0 right-0 w-full"
+        :style="{ transform: `translate3d(0, ${item.top}px, 0)` }"
       >
         <PostItemView
           :post="item.post"

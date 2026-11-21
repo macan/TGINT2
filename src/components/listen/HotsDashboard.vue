@@ -579,6 +579,11 @@ function openDrillDown(tab: "topics" | "posts" | "channels") {
 
 function selectInspectedTopic(topic: HotTopicCluster) {
   inspectedTopic.value = topic;
+  nextTick(() => {
+    if (drillDownScrollRef.value) {
+      drillDownScrollRef.value.scrollTop = 0;
+    }
+  });
   if (isNonChineseTitle(topic.title) && (!topic.titleZh || topic.titleZh === topic.title)) {
     void translateTopicTitlesOnDemand([topic]);
   }
@@ -1755,8 +1760,10 @@ onUnmounted(() => {
               <div>
                 <VirtualPostList
                   v-if="inspectedTopic.posts.length > 5"
+                  :key="inspectedTopic.id"
                   :posts="inspectedTopic.posts"
                   :is-dark="isDark"
+                  :scroll-container="drillDownScrollRef"
                   @open-lightbox="url => emit('open-lightbox', url)"
                   @add-to-workspace="p => emit('add-to-workspace', p)"
                   @share-post="p => emit('share-post', p)"
@@ -1906,6 +1913,7 @@ onUnmounted(() => {
                 :posts="filteredDrillDownPosts"
                 :is-dark="isDark"
                 :show-rank="true"
+                :scroll-container="drillDownScrollRef"
                 @open-lightbox="url => emit('open-lightbox', url)"
                 @add-to-workspace="p => emit('add-to-workspace', p)"
                 @share-post="p => emit('share-post', p)"
