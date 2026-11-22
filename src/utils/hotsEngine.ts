@@ -1976,6 +1976,7 @@ export async function processListenHotsData(options: {
   geminiApiKey?: string;
   useAiMode?: boolean;
   clusterMode?: HotsClusterMode;
+  skipTopicClustering?: boolean;
   listenItems?: any[];
   channelMetadataCache?: Record<string, any>;
   onProgress?: (p: HotsEngineProgress) => void;
@@ -1992,7 +1993,17 @@ export async function processListenHotsData(options: {
     activeChannelsCount: number;
   }) => void;
 }): Promise<HotsAnalysisResult> {
-  const { cachedChannels, dateRange, geminiApiKey, useAiMode, listenItems, channelMetadataCache, onProgress, onPartialResult } = options;
+  const {
+    cachedChannels,
+    dateRange,
+    geminiApiKey,
+    useAiMode,
+    skipTopicClustering = false,
+    listenItems,
+    channelMetadataCache,
+    onProgress,
+    onPartialResult,
+  } = options;
   const bounds = getDateRangeBounds(dateRange);
 
   onProgress?.({
@@ -2260,12 +2271,45 @@ export async function processListenHotsData(options: {
   const clusterMode: HotsClusterMode =
     options.clusterMode || (useAiMode ? 'ai' : 'rule');
 
+  // When Neural mode owns topic clustering directly, return Hot Posts, Hot Channels,
+  // and substantivePosts immediately without running throwaway Rule clustering or translations.
+  if (skipTopicClustering) {
+    onPartialResult?.({
+      hotPosts,
+      hotChannels,
+      substantivePosts,
+      totalPostsAnalyzed,
+      filteredPostsCount: inRangePosts.length,
+      meaninglessPostsCount,
+      substantivePostsCount,
+      totalChannelsScanned: cachedChannels.length,
+      activeChannelsCount: channelStatsMap.size,
+    });
+
+    return {
+      dateRange,
+      timeWindow: bounds,
+      totalPostsAnalyzed,
+      filteredPostsCount: inRangePosts.length,
+      meaninglessPostsCount,
+      substantivePostsCount,
+      totalChannelsScanned: cachedChannels.length,
+      activeChannelsCount: channelStatsMap.size,
+      hotTopics: [],
+      hotPosts,
+      hotChannels,
+      substantivePosts,
+      clusterModeUsed: clusterMode,
+      computedAt: Date.now(),
+    };
+  }
+
   // 4. Instant Stage-1 Clustering (Intl.Segmenter + TF-IDF + SimHash + Pass-2 Merge)
   onProgress?.({
     step: 'clustering',
     stage: 'stage1',
     percent: 62,
-    message: 'Running multilingual Stage-1 topic preview...',
+    message: 'Running multilingual Stage-1 topic clustering...',
   });
 
   const nerMap = await loadCachedNerEntitiesForPosts(substantivePosts);

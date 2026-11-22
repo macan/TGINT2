@@ -58,6 +58,7 @@ export interface ComputeHotsBackgroundOptions {
     hotPosts: HotPostItem[];
     hotChannels: HotChannelItem[];
     hotTopics?: HotTopicCluster[];
+    clusterModeUsed?: HotsClusterMode;
     totalPostsAnalyzed: number;
     filteredPostsCount: number;
     meaninglessPostsCount?: number;
@@ -374,7 +375,14 @@ async function computePostEmbeddingsInWorker(
   posts: HotPostItem[],
   executor: HotsEmbedExecutorPreference,
   requestId: number,
-  onProgress?: (p: HotsEngineProgress) => void
+  onProgress?: (p: HotsEngineProgress) => void,
+  onPartialVectors?: (snap: {
+    vectors: Array<{ postKey: string; vector: Float32Array }>;
+    embedDone: number;
+    embedTotal: number;
+    cachedHits: number;
+    provider: 'webgpu' | 'wasm';
+  }) => void
 ): Promise<{
   vectors: Array<{ postKey: string; vector: Float32Array }>;
   provider: 'webgpu' | 'wasm';
@@ -457,7 +465,16 @@ async function computePostEmbeddingsInWorker(
 
       if (m.id !== rpcId) return;
 
-      if (m.type === 'embed-done') {
+      if (m.type === 'partial-vectors') {
+        lastKnownEmbedProvider = m.provider;
+        onPartialVectors?.({
+          vectors: m.vectors,
+          embedDone: m.embedDone,
+          embedTotal: m.embedTotal,
+          cachedHits: m.cachedHits,
+          provider: m.provider,
+        });
+      } else if (m.type === 'embed-done') {
         lastKnownEmbedProvider = m.provider;
         cleanup();
         resolve({
@@ -468,7 +485,11 @@ async function computePostEmbeddingsInWorker(
         });
       } else if (m.type === 'error') {
         cleanup();
-        reject(new Error(m.aborted ? 'Embedding aborted' : m.message));
+        if (m.aborted) {
+          reject(new DOMException('Embedding aborted', 'AbortError'));
+        } else {
+          reject(new Error(m.message));
+        }
       }
     };
 
@@ -484,11 +505,21 @@ async function computePostEmbeddingsInWorker(
 }
 
 // ---------------------------------------------------------------------------
-// Hots Compute Worker Lifecycle & Progressive Stage 1 -> Stage 2 Pipeline
+// Hots Compute Worker Lifecycle & Progressive Neural Embedding Pipeline
 // ---------------------------------------------------------------------------
 
 let activeHotsWorker: Worker | null = null;
+let progressiveRefineWorker: Worker | null = null;
 let currentRequestId = 0;
+
+function terminateProgressiveRefineWorker() {
+  if (progressiveRefineWorker) {
+    try {
+      progressiveRefineWorker.terminate();
+    } catch {}
+    progressiveRefineWorker = null;
+  }
+}
 
 function createHotsWorker(): Worker | null {
   try {
@@ -508,6 +539,7 @@ async function runStage1Compute(options: {
   dateRange: HotsDateRange;
   geminiApiKey?: string;
   clusterMode: HotsClusterMode;
+  skipTopicClustering?: boolean;
   listenItems: any[];
   channelMetadataCache: Record<string, any>;
   onProgress?: (p: HotsEngineProgress) => void;
@@ -519,13 +551,13 @@ async function runStage1Compute(options: {
     dateRange,
     geminiApiKey,
     clusterMode,
+    skipTopicClustering = false,
     listenItems,
     channelMetadataCache,
     onProgress,
     onPartialResult,
   } = options;
 
-  // When clusterMode === 'neural', Stage-1 runs as 'rule' first so UI updates in <50ms
   const stage1Mode: HotsClusterMode = clusterMode === 'ai' ? 'ai' : 'rule';
 
   if (activeHotsWorker) {
@@ -570,6 +602,7 @@ async function runStage1Compute(options: {
             geminiApiKey,
             useAiMode: stage1Mode === 'ai',
             clusterMode: stage1Mode,
+            skipTopicClustering,
             listenItems,
             channelMetadataCache,
             onProgress,
@@ -588,6 +621,7 @@ async function runStage1Compute(options: {
           geminiApiKey,
           useAiMode: stage1Mode === 'ai',
           clusterMode: stage1Mode,
+          skipTopicClustering,
           listenItems,
           channelMetadataCache,
           onProgress,
@@ -607,6 +641,7 @@ async function runStage1Compute(options: {
             geminiApiKey,
             useAiMode: stage1Mode === 'ai',
             clusterMode: stage1Mode,
+            skipTopicClustering,
             listenItems,
             channelMetadataCache,
           },
@@ -619,6 +654,7 @@ async function runStage1Compute(options: {
           geminiApiKey,
           useAiMode: stage1Mode === 'ai',
           clusterMode: stage1Mode,
+          skipTopicClustering,
           listenItems,
           channelMetadataCache,
           onProgress,
@@ -636,6 +672,7 @@ async function runStage1Compute(options: {
     geminiApiKey,
     useAiMode: stage1Mode === 'ai',
     clusterMode: stage1Mode,
+    skipTopicClustering,
     listenItems,
     channelMetadataCache,
     onProgress,
@@ -648,17 +685,44 @@ async function runStage2VectorClustering(options: {
   substantivePosts: HotPostItem[];
   vectors: Array<{ postKey: string; vector: Float32Array }>;
   dateRange: HotsDateRange;
+  skipTranslation?: boolean;
+  isProgressive?: boolean;
   onProgress?: (p: HotsEngineProgress) => void;
 }): Promise<HotTopicCluster[]> {
-  const { requestId, substantivePosts, vectors, dateRange, onProgress } = options;
+  const {
+    requestId,
+    substantivePosts,
+    vectors,
+    dateRange,
+    skipTranslation = true,
+    isProgressive = false,
+    onProgress,
+  } = options;
 
   const worker = createHotsWorker();
   if (worker) {
-    activeHotsWorker = worker;
+    if (isProgressive) {
+      terminateProgressiveRefineWorker();
+      progressiveRefineWorker = worker;
+    } else {
+      if (activeHotsWorker) {
+        try {
+          activeHotsWorker.terminate();
+        } catch {}
+      }
+      activeHotsWorker = worker;
+    }
+
     return new Promise<HotTopicCluster[]>((resolve, reject) => {
       const cleanup = () => {
-        if (activeHotsWorker === worker) {
+        try {
           worker.terminate();
+        } catch {}
+        if (isProgressive) {
+          if (progressiveRefineWorker === worker) {
+            progressiveRefineWorker = null;
+          }
+        } else if (activeHotsWorker === worker) {
           activeHotsWorker = null;
         }
       };
@@ -672,7 +736,7 @@ async function runStage2VectorClustering(options: {
           return;
         }
         if (msg.type === 'progress') {
-          onProgress?.(msg.data);
+          if (!isProgressive) onProgress?.(msg.data);
         } else if (msg.type === 'refine_success') {
           cleanup();
           resolve(msg.hotTopics || []);
@@ -694,6 +758,7 @@ async function runStage2VectorClustering(options: {
           substantivePosts,
           vectors,
           dateRange,
+          skipTranslation,
         },
       });
     });
@@ -703,15 +768,17 @@ async function runStage2VectorClustering(options: {
     vectors.map((v) => [v.postKey, v.vector])
   );
   const refined = await clusterPostsWithEmbeddings(substantivePosts, vectorsMap, dateRange);
-  await attachChineseTranslationsForForeignTitles(refined);
+  if (!skipTranslation) {
+    await attachChineseTranslationsForForeignTitles(refined);
+  }
   return refined;
 }
 
 /**
  * Computes Hots Intelligence progressively:
- *  - Stage 1 delivers Posts, Channels, and fast Multilingual Rule Topics immediately
- *  - Stage 2 (when `clusterMode === 'neural'` and model cached or authorized) refines topics
- *    using browser-native multilingual ONNX embeddings & persistent IndexedDB vectors
+ *  - In `rule` or `ai` mode: runs Stage-1 (and optional Gemini AI refinement).
+ *  - In `neural` mode (when model is cached or authorized): skips throwaway Rule clustering so
+ *    topic rankings stay strictly Neural and update progressively as sentence embeddings complete.
  */
 export async function computeListenHotsInBackground(
   options: ComputeHotsBackgroundOptions
@@ -736,6 +803,21 @@ export async function computeListenHotsInBackground(
   currentRequestId++;
   const requestId = currentRequestId;
   abortHotsEmbedWorker();
+  terminateProgressiveRefineWorker();
+
+  // Check whether multilingual ONNX model is already cached BEFORE running Stage 1
+  // so Neural mode can skip throwaway Rule topic clustering & translations completely.
+  let modelCacheState: Awaited<ReturnType<typeof inspectHotsEmbedModelCache>> | null = null;
+  if (clusterMode === 'neural') {
+    modelCacheState = await inspectHotsEmbedModelCache();
+    if (requestId !== currentRequestId) {
+      throw new DOMException('Superseded', 'AbortError');
+    }
+  }
+
+  const neuralReadyToRun =
+    clusterMode === 'neural' &&
+    Boolean(modelCacheState?.isCached || allowModelDownload);
 
   const cleanChannels = sanitizeCachedChannels(cachedChannels);
   const cleanListenItems = sanitizeListenItems(listenItems);
@@ -747,6 +829,7 @@ export async function computeListenHotsInBackground(
     dateRange,
     geminiApiKey,
     clusterMode,
+    skipTopicClustering: neuralReadyToRun,
     listenItems: cleanListenItems,
     channelMetadataCache: cleanMetadataCache,
     onProgress,
@@ -754,33 +837,30 @@ export async function computeListenHotsInBackground(
   });
 
   if (requestId !== currentRequestId) {
-    return stage1Result;
+    throw new DOMException('Superseded', 'AbortError');
   }
 
   const substantivePosts = stage1Result.substantivePosts || [];
 
-  // If Rule or AI mode, or zero substantive posts, Stage 1 result is complete
+  // Rule / AI mode, or zero substantive posts
   if (clusterMode !== 'neural' || substantivePosts.length === 0) {
-    setCachedHotsAnalysis(stage1Result, clusterMode);
-    return stage1Result;
+    const completedResult: HotsAnalysisResult =
+      clusterMode === 'neural'
+        ? {
+            ...stage1Result,
+            hotTopics: [],
+            clusterModeUsed: 'neural',
+            computedAt: Date.now(),
+            isTopicsComputing: false,
+          }
+        : stage1Result;
+    setCachedHotsAnalysis(completedResult, clusterMode);
+    return completedResult;
   }
 
-  // Neural Local Mode: emit Stage 1 topics immediately as interactive preview while Stage 2 runs
-  onPartialResult?.({
-    hotPosts: stage1Result.hotPosts,
-    hotChannels: stage1Result.hotChannels,
-    hotTopics: stage1Result.hotTopics,
-    totalPostsAnalyzed: stage1Result.totalPostsAnalyzed,
-    filteredPostsCount: stage1Result.filteredPostsCount,
-    meaninglessPostsCount: stage1Result.meaninglessPostsCount,
-    substantivePostsCount: stage1Result.substantivePostsCount,
-    totalChannelsScanned: stage1Result.totalChannelsScanned,
-    activeChannelsCount: stage1Result.activeChannelsCount,
-  });
-
-  // Check whether multilingual ONNX model is already cached before auto-downloading ~113 MB
-  const modelCacheState = await inspectHotsEmbedModelCache();
-  if (!modelCacheState.isCached && !allowModelDownload) {
+  // Neural mode when model is NOT downloaded yet and user hasn't authorized download:
+  // surface the download prompt while preserving Stage-1 preview until downloaded.
+  if (!neuralReadyToRun && modelCacheState) {
     onNeedsModelDownload?.({
       approxBytes: modelCacheState.approxBytes,
       partialBytes: modelCacheState.partialBytes,
@@ -794,21 +874,87 @@ export async function computeListenHotsInBackground(
     onProgress?.({
       step: 'done',
       percent: 100,
-      message: 'Stage-1 preview ready. Download semantic model to refine.',
+      message: 'Download semantic model to enable Neural topic ranking.',
     });
     return previewRes;
   }
+
+  // Neural Local Mode (model cached or authorized):
+  // Stream progressive Neural-only clusters as embeddings compute — never flash Rule topics!
+  let isProgressiveClustering = false;
+  let pendingPartialSnap: {
+    vectors: Array<{ postKey: string; vector: Float32Array }>;
+    embedDone: number;
+    embedTotal: number;
+  } | null = null;
+  let latestProgressiveTopics: HotTopicCluster[] = [];
+
+  const pumpProgressiveNeuralClustering = async () => {
+    if (isProgressiveClustering) return;
+    isProgressiveClustering = true;
+    try {
+      while (pendingPartialSnap && requestId === currentRequestId) {
+        const snap = pendingPartialSnap;
+        pendingPartialSnap = null;
+
+        const vecKeySet = new Set(snap.vectors.map((v) => v.postKey));
+        const subsetPosts = substantivePosts.filter((p) => vecKeySet.has(p.key));
+        if (subsetPosts.length === 0) continue;
+
+        const partialTopics = await runStage2VectorClustering({
+          requestId,
+          substantivePosts: subsetPosts,
+          vectors: snap.vectors,
+          dateRange,
+          skipTranslation: true,
+          isProgressive: true,
+        });
+
+        if (requestId !== currentRequestId) return;
+
+        if (partialTopics.length > 0) {
+          await attachChineseTranslationsForForeignTitles(partialTopics);
+          if (requestId !== currentRequestId) return;
+          latestProgressiveTopics = partialTopics;
+          onPartialResult?.({
+            hotPosts: stage1Result.hotPosts,
+            hotChannels: stage1Result.hotChannels,
+            hotTopics: partialTopics,
+            clusterModeUsed: 'neural',
+            totalPostsAnalyzed: stage1Result.totalPostsAnalyzed,
+            filteredPostsCount: stage1Result.filteredPostsCount,
+            meaninglessPostsCount: stage1Result.meaninglessPostsCount,
+            substantivePostsCount: stage1Result.substantivePostsCount,
+            totalChannelsScanned: stage1Result.totalChannelsScanned,
+            activeChannelsCount: stage1Result.activeChannelsCount,
+          });
+        }
+      }
+    } catch {
+      // Non-fatal: final clustering pass runs once all embeddings complete
+    } finally {
+      isProgressiveClustering = false;
+    }
+  };
 
   try {
     const embedRes = await computePostEmbeddingsInWorker(
       substantivePosts,
       executorPreference,
       requestId,
-      onProgress
+      onProgress,
+      (snap) => {
+        if (requestId !== currentRequestId) return;
+        pendingPartialSnap = snap;
+        void pumpProgressiveNeuralClustering();
+      }
     );
 
+    pendingPartialSnap = null;
+    terminateProgressiveRefineWorker();
+
     if (requestId !== currentRequestId) {
-      return stage1Result;
+      throw new DOMException('Superseded', 'AbortError');
     }
 
     const neuralTopics = await runStage2VectorClustering({
@@ -816,12 +962,32 @@ export async function computeListenHotsInBackground(
       substantivePosts,
       vectors: embedRes.vectors,
       dateRange,
+      skipTranslation: true,
+      isProgressive: false,
       onProgress,
     });
 
+    if (requestId !== currentRequestId) {
+      throw new DOMException('Superseded', 'AbortError');
+    }
+
+    if (neuralTopics.length > 0) {
+      onProgress?.({
+        step: 'clustering',
+        stage: 'stage2',
+        percent: 96,
+        message: 'Translating non-Chinese topic titles into Chinese...',
+      });
+      await attachChineseTranslationsForForeignTitles(neuralTopics);
+    }
+
+    if (requestId !== currentRequestId) {
+      throw new DOMException('Superseded', 'AbortError');
+    }
+
     const finalResult: HotsAnalysisResult = {
       ...stage1Result,
-      hotTopics: neuralTopics.length > 0 ? neuralTopics : stage1Result.hotTopics,
+      hotTopics: neuralTopics,
       clusterModeUsed: 'neural',
       computedAt: Date.now(),
       isTopicsComputing: false,
@@ -839,16 +1005,31 @@ export async function computeListenHotsInBackground(
     setCachedHotsAnalysis(finalResult, 'neural');
     return finalResult;
   } catch (err: unknown) {
-    if ((err as { name?: string })?.name === 'AbortError' || requestId !== currentRequestId) {
-      return stage1Result;
+    pendingPartialSnap = null;
+    terminateProgressiveRefineWorker();
+    const isAbort =
+      (err as { name?: string })?.name === 'AbortError' || requestId !== currentRequestId;
+    if (isAbort) {
+      throw new DOMException('Superseded', 'AbortError');
     }
-    console.warn('Stage-2 neural clustering failed, retaining Stage-1 topics:', err);
+
+    console.warn('Stage-2 neural clustering failed:', err);
+    const preservedTopics =
+      latestProgressiveTopics.length > 0
+        ? latestProgressiveTopics
+        : getCachedHotsAnalysis(dateRange, 'neural')?.hotTopics || [];
+    const fallbackResult: HotsAnalysisResult = {
+      ...stage1Result,
+      hotTopics: preservedTopics,
+      clusterModeUsed: 'neural',
+      computedAt: Date.now(),
+      isTopicsComputing: false,
+    };
     onProgress?.({
       step: 'done',
       percent: 100,
-      message: 'Using fast local topic clusters.',
+      message: 'Neural embedding interrupted.',
     });
-    setCachedHotsAnalysis(stage1Result, 'rule');
-    return stage1Result;
+    return fallbackResult;
   }
 }

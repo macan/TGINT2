@@ -23,6 +23,7 @@ export interface HotsWorkerRequestPayload {
   geminiApiKey?: string;
   useAiMode?: boolean;
   clusterMode?: HotsClusterMode;
+  skipTopicClustering?: boolean;
   listenItems?: any[];
   channelMetadataCache?: Record<string, any>;
 }
@@ -31,6 +32,7 @@ export interface HotsWorkerRefinePayload {
   substantivePosts: HotPostItem[];
   vectors: Array<{ postKey: string; vector: Float32Array }>;
   dateRange: HotsDateRange;
+  skipTranslation?: boolean;
 }
 
 export type HotsWorkerRequest =
@@ -82,7 +84,7 @@ self.onmessage = async (e: MessageEvent<HotsWorkerRequest>) => {
 
   if (action === 'refine-clusters') {
     try {
-      const { substantivePosts, vectors, dateRange } = msg.payload;
+      const { substantivePosts, vectors, dateRange, skipTranslation = false } = msg.payload;
       self.postMessage({
         type: 'progress',
         id,
@@ -109,7 +111,7 @@ self.onmessage = async (e: MessageEvent<HotsWorkerRequest>) => {
         dateRange
       );
 
-      if (refinedTopics.length > 0) {
+      if (!skipTranslation && refinedTopics.length > 0) {
         self.postMessage({
           type: 'progress',
           id,

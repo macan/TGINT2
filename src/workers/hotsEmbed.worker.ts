@@ -91,6 +91,15 @@ export type HotsEmbedWorkerOutMessage =
     }
   | {
       id: number;
+      type: "partial-vectors";
+      provider: "webgpu" | "wasm";
+      cachedHits: number;
+      embedDone: number;
+      embedTotal: number;
+      vectors: Array<{ postKey: string; vector: Float32Array }>;
+    }
+  | {
+      id: number;
       type: "embed-done";
       provider: "webgpu" | "wasm";
       modelCached: boolean;
@@ -1030,7 +1039,35 @@ self.onmessage = async (ev: MessageEvent<HotsEmbedWorkerInMessage>) => {
       let provider: "webgpu" | "wasm" = embedProvider || "wasm";
       let modelCached = Boolean(embedSession && embedTokenizer);
 
+      const collectCurrentVectors = (): Array<{ postKey: string; vector: Float32Array }> => {
+        const out: Array<{ postKey: string; vector: Float32Array }> = [];
+        for (const it of items) {
+          const v = vectorsMap.get(it.postKey);
+          if (v) {
+            out.push({ postKey: it.postKey, vector: v });
+          }
+        }
+        return out;
+      };
+
       if (missing.length > 0) {
+        // Immediately emit cached vectors so existing Neural clusters appear right away while new posts embed
+        let lastPartialEmitAt = 0;
+        let lastPartialEmbedCount = 0;
+        if (cachedHits >= 3) {
+          emit({
+            id: msg.id,
+            type: "partial-vectors",
+            provider,
+            cachedHits,
+            embedDone: cachedHits,
+            embedTotal: items.length,
+            vectors: collectCurrentVectors(),
+          });
+          lastPartialEmitAt = Date.now();
+          lastPartialEmbedCount = cachedHits;
+        }
+
         const initInfo = await ensureEmbedModelInitialized(
           controller.signal,
           msg.executor || "auto"
@@ -1081,6 +1118,7 @@ self.onmessage = async (ev: MessageEvent<HotsEmbedWorkerInMessage>) => {
           await saveCachedPostEmbeddings(chunkToSave);
 
           const doneCount = Math.min(missing.length, i + batch.length);
+          const totalEmbeddedNow = cachedHits + doneCount;
           emit({
             type: "progress",
             id: msg.id,
@@ -1090,22 +1128,41 @@ self.onmessage = async (ev: MessageEvent<HotsEmbedWorkerInMessage>) => {
             percent: Math.min(99, Math.round((doneCount / missing.length) * 100)),
             provider,
             cached: modelCached,
-            embedDone: cachedHits + doneCount,
+            embedDone: totalEmbeddedNow,
             embedTotal: items.length,
             cachedHits,
           });
+
+          // Emit throttled progressive Neural snapshots while more batches remain
+          const hasMoreBatches = i + batch.length < missing.length;
+          if (hasMoreBatches) {
+            const nowMs = Date.now();
+            const newlyAddedSincePartial = totalEmbeddedNow - lastPartialEmbedCount;
+            const isFirstColdSnapshot =
+              lastPartialEmbedCount === 0 && totalEmbeddedNow >= Math.min(32, items.length);
+            const isPeriodicSnapshot =
+              lastPartialEmbedCount > 0 &&
+              newlyAddedSincePartial >= 32 &&
+              nowMs - lastPartialEmitAt >= 2800;
+
+            if (isFirstColdSnapshot || isPeriodicSnapshot) {
+              emit({
+                id: msg.id,
+                type: "partial-vectors",
+                provider,
+                cachedHits,
+                embedDone: totalEmbeddedNow,
+                embedTotal: items.length,
+                vectors: collectCurrentVectors(),
+              });
+              lastPartialEmitAt = nowMs;
+              lastPartialEmbedCount = totalEmbeddedNow;
+            }
+          }
         }
       } else {
         // Check active provider or cache status quickly if everything was a vector cache hit
         provider = embedProvider || ((await detectWebGpuSupport()) ? "webgpu" : "wasm");
-      }
-
-      const outputVectors: Array<{ postKey: string; vector: Float32Array }> = [];
-      for (const it of items) {
-        const v = vectorsMap.get(it.postKey);
-        if (v) {
-          outputVectors.push({ postKey: it.postKey, vector: v });
-        }
       }
 
       emit({
@@ -1115,7 +1172,7 @@ self.onmessage = async (ev: MessageEvent<HotsEmbedWorkerInMessage>) => {
         modelCached,
         cachedHits,
         newlyEmbedded: missing.length,
-        vectors: outputVectors,
+        vectors: collectCurrentVectors(),
       });
     }
   } catch (err: unknown) {

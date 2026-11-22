@@ -339,8 +339,18 @@ const filteredDrillDownChannels = computed(() => {
 // Computing Engine Execution
 // ---------------------------------------------------------------------------
 
+let activeAnalysisRunId = 0;
+let activeAnalysisRunKey = "";
+
 async function runAnalysis(force: boolean = false, allowModelDownload: boolean = false) {
-  if (isComputing.value && !force) return;
+  const targetRange = selectedDateRange.value;
+  const activeMode = effectiveClusterMode.value;
+  const runKey = `${targetRange}:${activeMode}`;
+
+  if (isComputing.value && !force && activeAnalysisRunKey === runKey) return;
+
+  const runId = ++activeAnalysisRunId;
+  activeAnalysisRunKey = runKey;
 
   const currentDayKey = getLocalCalendarDayKey();
   if (currentDayKey !== activeCalendarDayKey.value) {
@@ -348,22 +358,33 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
     pruneStaleDayHotsCache(currentDayKey);
   }
 
-  const activeMode = effectiveClusterMode.value;
-  const cached = getCachedHotsAnalysis(selectedDateRange.value, activeMode);
+  const cached = getCachedHotsAnalysis(targetRange, activeMode);
+  const existingIsSameWindow = Boolean(
+    analysisResult.value &&
+    analysisResult.value.dateRange === targetRange &&
+    (!isRelativeCalendarDateRange(targetRange) ||
+      !analysisResult.value.computedAt ||
+      getLocalCalendarDayKey(new Date(analysisResult.value.computedAt)) === currentDayKey)
+  );
+  const existingMatchesMode = Boolean(
+    existingIsSameWindow &&
+    analysisResult.value?.clusterModeUsed === activeMode
+  );
+
   if (cached && !force) {
     analysisResult.value = cached;
-  } else if (!force) {
-    // Also restore Stage-1 rule cache immediately if switching into neural for instant preview
-    const ruleFallback =
-      activeMode === "neural" ? getCachedHotsAnalysis(selectedDateRange.value, "rule") : undefined;
-    analysisResult.value = ruleFallback || null;
-  } else if (
-    !analysisResult.value ||
-    analysisResult.value.dateRange !== selectedDateRange.value ||
-    (isRelativeCalendarDateRange(selectedDateRange.value) &&
-      analysisResult.value.computedAt &&
-      getLocalCalendarDayKey(new Date(analysisResult.value.computedAt)) !== currentDayKey)
-  ) {
+  } else if (existingMatchesMode) {
+    // Keep existing results for the same mode & date window on screen while refreshing progressively
+  } else if (existingIsSameWindow && analysisResult.value) {
+    // Keep Hot Posts / Hot Channels visible on mode switch, but clear mismatched-mode topics
+    // so stale Rule topics never appear while Neural embeddings compute.
+    analysisResult.value = {
+      ...analysisResult.value,
+      hotTopics: [],
+      clusterModeUsed: undefined,
+      isTopicsComputing: true
+    };
+  } else {
     analysisResult.value = null;
   }
 
@@ -377,15 +398,17 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
   };
 
   try {
-    const bounds = getDateRangeBounds(selectedDateRange.value);
+    const bounds = getDateRangeBounds(targetRange);
     const cachedChannels = await getAllCachedPostsIndexedDB({
       dateRangeStart: bounds.start,
       dateRangeEnd: bounds.end,
       lightweightProjection: true
     });
+    if (runId !== activeAnalysisRunId) return;
+
     if (cachedChannels.length === 0) {
       analysisResult.value = {
-        dateRange: selectedDateRange.value,
+        dateRange: targetRange,
         timeWindow: { start: bounds.start, end: bounds.end },
         totalPostsAnalyzed: 0,
         filteredPostsCount: 0,
@@ -397,15 +420,27 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
         hotPosts: [],
         hotChannels: [],
         computedAt: Date.now(),
+        clusterModeUsed: activeMode,
         isTopicsComputing: false
       };
       isTopicsComputing.value = false;
       return;
     }
 
+    const syncInspectedTopic = (topics: HotTopicCluster[]) => {
+      if (!inspectedTopic.value || topics.length === 0) return;
+      const prevRepKey = inspectedTopic.value.representativePost?.key || inspectedTopic.value.posts[0]?.key;
+      const matched =
+        topics.find(tp => tp.id === inspectedTopic.value?.id) ||
+        (prevRepKey ? topics.find(tp => tp.posts.some(p => p.key === prevRepKey)) : undefined);
+      if (matched) {
+        inspectedTopic.value = matched;
+      }
+    };
+
     const res = await computeListenHotsInBackground({
       cachedChannels,
-      dateRange: selectedDateRange.value,
+      dateRange: targetRange,
       geminiApiKey: geminiApiKey.value,
       useAiMode: activeMode === "ai",
       clusterMode: activeMode,
@@ -414,6 +449,7 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
       listenItems: props.listenItems,
       channelMetadataCache: props.channelMetadataCache,
       onProgress: p => {
+        if (runId !== activeAnalysisRunId) return;
         computeProgress.value = p;
         if (
           p.step === "clustering" ||
@@ -425,66 +461,97 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
         }
       },
       onNeedsModelDownload: info => {
+        if (runId !== activeAnalysisRunId) return;
         needsNeuralModelDownload.value = info;
       },
       onPartialResult: partial => {
-        // Progressive UI: Show Hot Posts, Hot Channels, and instant Stage-1 topics cleanly
+        if (runId !== activeAnalysisRunId) return;
+
+        // Progressive UI: Show Hot Posts & Hot Channels immediately; in Neural mode only accept
+        // progressive Neural topic batches (never overwrite with Rule-clustered topics).
         const keepComputingTopics = activeMode === "neural" || activeMode === "ai";
+        const hasIncomingTopics = Array.isArray(partial.hotTopics) && partial.hotTopics.length > 0;
+        const allowIncomingTopics =
+          hasIncomingTopics &&
+          (activeMode !== "neural" || partial.clusterModeUsed === "neural");
+
+        const existingCanKeepTopics = Boolean(
+          analysisResult.value &&
+          analysisResult.value.dateRange === targetRange &&
+          analysisResult.value.clusterModeUsed === activeMode
+        );
+        const nextTopics = allowIncomingTopics
+          ? partial.hotTopics!
+          : existingCanKeepTopics
+            ? analysisResult.value!.hotTopics
+            : [];
+        const nextClusterModeUsed = allowIncomingTopics
+          ? (partial.clusterModeUsed || activeMode)
+          : existingCanKeepTopics
+            ? analysisResult.value!.clusterModeUsed
+            : undefined;
+
         if (!analysisResult.value) {
           analysisResult.value = {
-            dateRange: selectedDateRange.value,
-            timeWindow: { start: 0, end: Date.now() },
+            dateRange: targetRange,
+            timeWindow: { start: bounds.start, end: bounds.end },
             totalPostsAnalyzed: partial.totalPostsAnalyzed,
             filteredPostsCount: partial.filteredPostsCount,
             meaninglessPostsCount: partial.meaninglessPostsCount || 0,
             substantivePostsCount: partial.substantivePostsCount || 0,
             totalChannelsScanned: partial.totalChannelsScanned,
             activeChannelsCount: partial.activeChannelsCount,
-            hotTopics: partial.hotTopics || [],
+            hotTopics: nextTopics,
             hotPosts: partial.hotPosts,
             hotChannels: partial.hotChannels,
             computedAt: Date.now(),
+            clusterModeUsed: nextClusterModeUsed,
             isTopicsComputing: keepComputingTopics
           };
         } else {
           analysisResult.value = {
             ...analysisResult.value,
+            dateRange: targetRange,
+            timeWindow: { start: bounds.start, end: bounds.end },
             totalPostsAnalyzed: partial.totalPostsAnalyzed,
             filteredPostsCount: partial.filteredPostsCount,
             meaninglessPostsCount: partial.meaninglessPostsCount ?? analysisResult.value.meaninglessPostsCount ?? 0,
             substantivePostsCount: partial.substantivePostsCount ?? analysisResult.value.substantivePostsCount ?? 0,
             totalChannelsScanned: partial.totalChannelsScanned,
             activeChannelsCount: partial.activeChannelsCount,
-            hotTopics: partial.hotTopics && partial.hotTopics.length > 0 ? partial.hotTopics : analysisResult.value.hotTopics,
+            hotTopics: nextTopics,
             hotPosts: partial.hotPosts,
             hotChannels: partial.hotChannels,
+            clusterModeUsed: nextClusterModeUsed,
             isTopicsComputing: keepComputingTopics
           };
+        }
+
+        if (allowIncomingTopics) {
+          syncInspectedTopic(nextTopics);
         }
       }
     });
 
-    analysisResult.value = res;
+    if (runId !== activeAnalysisRunId) return;
 
-    // Keep open inspectedTopic in sync when Stage-2 refinement replaces Stage-1 clusters
-    if (inspectedTopic.value && res.hotTopics.length > 0) {
-      const prevRepKey = inspectedTopic.value.representativePost?.key || inspectedTopic.value.posts[0]?.key;
-      const matched =
-        res.hotTopics.find(tp => tp.id === inspectedTopic.value?.id) ||
-        (prevRepKey ? res.hotTopics.find(tp => tp.posts.some(p => p.key === prevRepKey)) : undefined);
-      if (matched) {
-        inspectedTopic.value = matched;
-      }
-    }
+    analysisResult.value = res;
+    syncInspectedTopic(res.hotTopics);
 
     if (res.clusterModeUsed === "neural") {
       refreshNeuralCacheStatus();
     }
   } catch (err) {
+    if (runId !== activeAnalysisRunId || (err as { name?: string })?.name === "AbortError") {
+      return;
+    }
     console.error("Failed to run listen hots analysis in background:", err);
   } finally {
-    isComputing.value = false;
-    isTopicsComputing.value = false;
+    if (runId === activeAnalysisRunId) {
+      isComputing.value = false;
+      isTopicsComputing.value = false;
+      activeAnalysisRunKey = "";
+    }
   }
 }
 
@@ -567,6 +634,8 @@ function downloadAndRefineNeural() {
 }
 
 function abortNeuralTask() {
+  activeAnalysisRunId++;
+  activeAnalysisRunKey = "";
   abortHotsEmbedWorker();
   isWarmingUpModel.value = false;
   isTopicsComputing.value = false;
@@ -1466,9 +1535,14 @@ onUnmounted(() => {
                 {{ t('listen.hots.hotTopics') || 'Hot Topics' }}
               </h4>
               <p class="text-[11px] text-gray-400 dark:text-gray-500 font-mono tabular-nums truncate">
-                <span v-if="isTopicsComputing" class="text-amber-600 dark:text-amber-400 font-medium inline-flex items-center gap-1">
+                <span v-if="isTopicsComputing" class="text-cyan-600 dark:text-cyan-400 font-medium inline-flex items-center gap-1">
                   <RefreshCw class="h-2.5 w-2.5 animate-spin" />
-                  Clustering in background...
+                  <template v-if="computeProgress.step === 'embedding' && computeProgress.embedTotal">
+                    {{ analysisResult.hotTopics.length > 0 ? `${analysisResult.hotTopics.length} topics · ` : '' }}{{ computeProgress.embedDone || 0 }}/{{ computeProgress.embedTotal }} embedded
+                  </template>
+                  <template v-else>
+                    Clustering in background...
+                  </template>
                 </span>
                 <span v-else>
                   {{ analysisResult.hotTopics.length }} topics · {{ formatNumber(analysisResult.substantivePostsCount || (analysisResult.filteredPostsCount - (analysisResult.meaninglessPostsCount || 0))) }} posts
@@ -1486,17 +1560,17 @@ onUnmounted(() => {
           </button>
         </div>
 
-        <!-- Topics Cards List (Top 5) -->
+        <!-- Topics Cards List (Top 10) -->
         <div class="p-4 space-y-3 divide-y divide-gray-100 dark:divide-gray-700/50">
-          <!-- Stage-2 Neural Refinement Progress Banner (when Stage-1 preview is visible) -->
+          <!-- Progressive Neural Embedding Progress Banner (visible during both cold and progressive runs) -->
           <div
-            v-if="isTopicsComputing && analysisResult.hotTopics.length > 0"
+            v-if="isTopicsComputing"
             class="mb-2 p-2.5 rounded-xl bg-cyan-50/80 dark:bg-cyan-950/40 border border-cyan-200/70 dark:border-cyan-800/60 text-[11px] text-cyan-900 dark:text-cyan-200 space-y-1.5"
           >
             <div class="flex items-center justify-between gap-2">
               <span class="inline-flex items-center gap-1.5 font-semibold truncate">
                 <RefreshCw class="h-3 w-3 animate-spin text-cyan-600 dark:text-cyan-400 shrink-0" />
-                <span class="truncate">{{ computeProgress.message || (t('listen.hots.neuralRefining') || 'Refining clusters with neural embeddings...') }}</span>
+                <span class="truncate">{{ computeProgress.message || (t('listen.hots.neuralRefining') || 'Computing neural embeddings...') }}</span>
               </span>
               <div class="flex items-center gap-2 shrink-0">
                 <span
@@ -1504,6 +1578,12 @@ onUnmounted(() => {
                   class="font-mono text-[10px] text-cyan-700 dark:text-cyan-300 tabular-nums"
                 >
                   {{ formatBytes(computeProgress.loadedBytes) }} / {{ formatBytes(computeProgress.totalBytes) }}
+                </span>
+                <span
+                  v-else-if="computeProgress.step === 'embedding' && computeProgress.embedTotal"
+                  class="font-mono text-[10px] text-cyan-700 dark:text-cyan-300 tabular-nums"
+                >
+                  {{ computeProgress.embedDone || 0 }} / {{ computeProgress.embedTotal }}
                 </span>
                 <span class="font-mono font-bold tabular-nums">{{ computeProgress.percent }}%</span>
                 <button
