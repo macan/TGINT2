@@ -707,7 +707,7 @@ function extractHashtags(text: string): string[] {
  */
 export function isGenericLead(text: string): boolean {
   if (!text) return true;
-  return /^(hello|hi\b|good morning|good evening|good night|gm\b|gn\b|welcome|привет|здравствуйте|доброе утро|добрый вечер|спокойной ночи|大家好|各位|关注|subscribe|join|read more|click here|check out|photo|video|image|update|breaking|alert|attention|broadcast|daily|weekly|important|notice|announcement|админ|новости|реклама|подпишись|внимание|转发|通知|公告|欢迎|👍|🔥|🚀|😂|🙏)/i.test(text.trim());
+  return /^(hello|hi\b|good morning|good evening|good night|gm\b|gn\b|welcome|привет|здравствуйте|доброе утро|добрый вечер|спокойной ночи|大家好|各位|关注|subscribe|join|read more|click here|check out|photo|video|image|update|breaking|alert|attention|broadcast|daily|weekly|important|notice|announcement|админ|новости|реклама|подпишись|внимание|转发|通知|公告|欢迎|👍|🔥|🚀|😂|🙏)/iu.test(text.trim());
 }
 
 /**
@@ -1220,12 +1220,78 @@ export function extractClusterMetadata(clusterPosts: HotPostItem[]): ExtractedCl
 }
 
 /**
- * Sanitizes titles and text fragments by removing un-displayed UTF-8 replacement characters (),
- * corrupted emoji codes, stray unicode symbols, and normalizing spacing.
+ * Removes unpaired UTF-16 high/low surrogates while keeping valid surrogate pairs (emojis, SMP chars) intact.
+ */
+function stripUnpairedSurrogates(text: string): string {
+  if (!text) return '';
+  return text.replace(
+    /([\uD800-\uDBFF][\uDC00-\uDFFF])|[\uD800-\uDFFF]/g,
+    (_, validPair: string | undefined) => validPair || ''
+  );
+}
+
+/**
+ * Sanitizes multi-line post body text while preserving paragraph breaks for headline extraction.
+ */
+function sanitizePostText(text: string): string {
+  if (!text) return '';
+  return stripUnpairedSurrogates(String(text))
+    .replace(/\uFFFD+/g, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+const LEADING_EMOJI_AND_SYMBOLS_RE =
+  /^(?:[\s•\-–—>»|▪▫◆◇●○★☆✓✔❗❓‼⁉]+|(?:\p{Extended_Pictographic}|\p{So}|[\u{1F1E6}-\u{1F1FF}])(?:[\uFE0E\uFE0F\u200D\u20E3]|\p{Emoji_Modifier})*)+/u;
+
+const LEADING_DECORATORS_RE =
+  /^(?:[\s#*•\-–—>»|▪▫◆◇●○★☆✓✔❗❓‼⁉]+|(?:\p{Extended_Pictographic}|\p{So}|[\u{1F1E6}-\u{1F1FF}])(?:[\uFE0E\uFE0F\u200D\u20E3]|\p{Emoji_Modifier})*)+/u;
+
+function stripLeadingDecorators(text: string): string {
+  if (!text) return '';
+  return stripUnpairedSurrogates(text)
+    .replace(/^#+\s+/u, '')
+    .replace(LEADING_DECORATORS_RE, '')
+    .trim();
+}
+
+function extractHeaderLineCandidate(line: string): string {
+  const cleaned = stripUnpairedSurrogates(line)
+    .trim()
+    .replace(/^#+\s+/u, '')
+    .replace(LEADING_EMOJI_AND_SYMBOLS_RE, '')
+    .trim();
+  if (!cleaned) return '';
+
+  const boldMatch = cleaned.match(/^\*\*(.+?)\*\*(.*)$/u);
+  const raw = boldMatch
+    ? (boldMatch[1].trim().length >= 10 ? boldMatch[1] : `${boldMatch[1]} ${boldMatch[2]}`)
+    : cleaned;
+
+  return sanitizeTitle(stripLeadingDecorators(raw.replace(/[#*`_]/g, '')));
+}
+
+function safeSliceUtf16(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  let end = maxLen;
+  const lastCode = text.charCodeAt(end - 1);
+  // Avoid cutting between a high surrogate and its low surrogate
+  if (lastCode >= 0xD800 && lastCode <= 0xDBFF) {
+    end -= 1;
+  }
+  return text.slice(0, end);
+}
+
+/**
+ * Sanitizes titles and text fragments by removing unpaired UTF-16 surrogates,
+ * UTF-8 replacement characters (), control chars, and normalizing spacing.
  */
 export function sanitizeTitle(text: string): string {
   if (!text) return '';
-  return String(text)
+  return stripUnpairedSurrogates(String(text))
     .replace(/\uFFFD+/g, '') // remove all  replacement characters
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, '') // control chars
     // Remove isolated single-character artifacts left behind by broken emoji encodings
@@ -1245,14 +1311,14 @@ function cleanArticleHeadline(raw: string): string {
 
 function truncateAtWordBoundary(text: string, maxLen: number): string {
   if (!text || text.length <= maxLen) return text;
-  const cut = text.slice(0, maxLen);
+  const cut = safeSliceUtf16(text, maxLen);
   const lastSpace = cut.lastIndexOf(' ');
   const lastPunct = Math.max(cut.lastIndexOf(','), cut.lastIndexOf(';'), cut.lastIndexOf('—'));
   const cutIndex = Math.max(lastSpace, lastPunct);
   if (cutIndex > maxLen * 0.55) {
-    return cut.slice(0, cutIndex).trim() + '...';
+    return sanitizeTitle(safeSliceUtf16(cut, cutIndex)) + '...';
   }
-  return cut.trim() + '...';
+  return sanitizeTitle(cut) + '...';
 }
 
 function splitIntoSentences(text: string): string[] {
@@ -1349,16 +1415,17 @@ function summarizeSinglePost(
   const lines = fullText.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
   if (lines.length > 1) {
     const firstLine = lines[0];
-    const headerMatch = firstLine.match(/^(?:#+\s+|\*\*(.+?)\*\*|[^\s\w]\s*)(.+)$/);
-    const rawCandidate = (headerMatch ? (headerMatch[1] || headerMatch[2]) : firstLine)
-      .replace(/[#*`_]/g, '')
-      .trim();
-    const candidate = sanitizeTitle(rawCandidate);
+    const candidate = extractHeaderLineCandidate(firstLine);
 
-    if (candidate.length >= 10 && candidate.length <= 95 && !isGenericLead(candidate)) {
+    if (candidate.length >= 10 && !isGenericLead(candidate)) {
       const remaining = lines.slice(1).join(' ');
       const summary = generateCleanSummary(remaining.length > 40 ? remaining : fullText, cleanSnippet);
-      return { title: candidate, summary };
+      if (candidate.length <= 110) {
+        return { title: candidate, summary };
+      }
+      if (candidate.length <= 180) {
+        return { title: truncateAtWordBoundary(candidate, 100), summary };
+      }
     }
   }
 
@@ -1366,7 +1433,7 @@ function summarizeSinglePost(
   const sentences = splitIntoSentences(fullText);
   let bestTitle = '';
   for (const s of sentences) {
-    const clean = s.replace(/^[#\s*•\->⚡🔥🚀📢🚨]+/, '').trim();
+    const clean = sanitizeTitle(stripLeadingDecorators(s));
     if (clean.length >= 15 && !isGenericLead(clean)) {
       bestTitle = clean;
       break;
@@ -1382,14 +1449,14 @@ function summarizeSinglePost(
     const subject = persons[0] || entities[0] || post.channelName;
     const fact = facts[0];
     if (fact) {
-      bestTitle = `${subject}: ${fact}`;
+      bestTitle = sanitizeTitle(`${subject}: ${fact}`);
     } else {
-      bestTitle = `${subject}: ${truncateAtWordBoundary(cleanSnippet, 65)}`;
+      bestTitle = sanitizeTitle(`${subject}: ${truncateAtWordBoundary(sanitizeTitle(stripLeadingDecorators(cleanSnippet)), 65)}`);
     }
   }
 
   const summary = generateCleanSummary(fullText, cleanSnippet);
-  return { title: bestTitle, summary };
+  return { title: sanitizeTitle(bestTitle), summary };
 }
 
 function synthesizeClusterTitle(
@@ -1442,24 +1509,19 @@ function synthesizeClusterTitle(
     const rawLines = bestPost.text.split(/[\n\r]+/);
     for (const line of rawLines) {
       const trimmed = line.trim();
-      const headerMatch = trimmed.match(/^(?:#+\s+|\*\*(.+?)\*\*|[^\s\w]\s*)(.+)$/);
-      if (headerMatch) {
-        const rawCand = (headerMatch[1] || headerMatch[2] || '').replace(/[#*`_]/g, '').trim();
-        const cand = sanitizeTitle(rawCand);
-        if (cand.length >= 10 && cand.length <= 95 && !isGenericLead(cand)) {
-          return {
-            title: cand,
-            summary: generateCleanSummary(bestPost.text, bestPost.cleanSnippet)
-          };
-        }
+      const cand = extractHeaderLineCandidate(trimmed);
+      if (cand.length >= 10 && cand.length <= 110 && !isGenericLead(cand)) {
+        return {
+          title: cand,
+          summary: generateCleanSummary(bestPost.text, bestPost.cleanSnippet)
+        };
       }
     }
 
     // 4. Try lead sentence from best post
     const sentences = splitIntoSentences(bestPost.text);
     for (const s of sentences) {
-      const rawCleanS = s.replace(/^[#\s*•\->\p{Emoji}\p{So}]+/gu, '').trim();
-      const cleanS = sanitizeTitle(rawCleanS);
+      const cleanS = sanitizeTitle(stripLeadingDecorators(s));
       if (cleanS.length >= 12 && cleanS.length <= 85 && !isGenericLead(cleanS)) {
         return {
           title: cleanS,
@@ -2120,7 +2182,7 @@ export async function processListenHotsData(options: {
       const views = extractPostViews(rp);
       const forwards = extractPostForwards(rp);
       const replies = extractPostReplies(rp);
-      const text = sanitizeTitle(extractPostText(rp));
+      const text = sanitizePostText(extractPostText(rp));
       const linkPreview = extractPostLinkPreview(rp);
       if (linkPreview?.title) {
         linkPreview.title = sanitizeTitle(linkPreview.title);
@@ -2137,7 +2199,7 @@ export async function processListenHotsData(options: {
       const hasMedia = hasPhotos || hasVideos;
       const mediaType = hasPhotos && hasVideos ? 'mixed' : (hasVideos ? 'video' : (hasPhotos ? 'photo' : undefined));
 
-      const cleanSnippet = text.replace(/<[^>]*>?/gm, '').trim();
+      const cleanSnippet = sanitizeTitle(text.replace(/<[^>]*>?/gm, ''));
 
       const postData = rp.data || {};
       const author = postData.author || '';
