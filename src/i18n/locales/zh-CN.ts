@@ -878,6 +878,7 @@ export default {
       last3Days: "最近3天",
       lastWeek: "最近一周",
       allTime: "全部时间",
+      dateRolloverNotice: "当前日期已更新至 {date}，已自动重置日期筛选为「今天」并重新计算热门话题。",
       analyzedSummary: "共深度分析 {channels} 个频道的 {posts} 条帖子",
       scanningPosts: "正在检索本地各频道缓存帖子...",
       clusteringTopics: "正在语义聚类话题并提取网页预览...",

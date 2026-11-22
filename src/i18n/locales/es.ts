@@ -846,6 +846,7 @@ export default {
       last3Days: "Últimos 3 días",
       lastWeek: "Última semana",
       allTime: "Todo el tiempo",
+      dateRolloverNotice: "Fecha actualizada a {date}: el filtro se restableció a Hoy y se recalcularon los temas destacados.",
       analyzedSummary: "{posts} publicaciones analizadas en {channels} canales",
       scanningPosts: "Escaneando publicaciones en caché de canales...",
       clusteringTopics: "Agrupando temas semánticos y extrayendo enlaces...",

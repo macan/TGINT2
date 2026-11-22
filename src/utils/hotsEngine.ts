@@ -328,8 +328,18 @@ export interface HotsAnalysisResult {
 // Helpers: Time Range
 // ---------------------------------------------------------------------------
 
-export function getDateRangeBounds(range: HotsDateRange): { start: number; end: number } {
-  const now = new Date();
+export function getLocalCalendarDayKey(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function isRelativeCalendarDateRange(range: HotsDateRange): boolean {
+  return range === 'today' || range === 'yesterday' || range === '3days' || range === 'week';
+}
+
+export function getDateRangeBounds(range: HotsDateRange, now: Date = new Date()): { start: number; end: number } {
   const currentTimestamp = now.getTime();
 
   switch (range) {
@@ -353,6 +363,28 @@ export function getDateRangeBounds(range: HotsDateRange): { start: number; end: 
     case 'all':
     default:
       return { start: 0, end: Infinity };
+  }
+}
+
+export function formatHotsDateRangeSummary(range: HotsDateRange, now: Date = new Date()): string {
+  switch (range) {
+    case 'today':
+      return format(now, 'MMM d, yyyy');
+    case 'yesterday': {
+      const y = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+      return format(y, 'MMM d, yyyy');
+    }
+    case '3days': {
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2);
+      return `${format(start, 'MMM d')} – ${format(now, 'MMM d, yyyy')}`;
+    }
+    case 'week': {
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+      return `${format(start, 'MMM d')} – ${format(now, 'MMM d, yyyy')}`;
+    }
+    case 'all':
+    default:
+      return '';
   }
 }
 

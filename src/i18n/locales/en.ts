@@ -879,6 +879,7 @@ export default {
       last3Days: "Last 3 Days",
       lastWeek: "Last Week",
       allTime: "All Time",
+      dateRolloverNotice: "Date updated to {date} — filter reset to Today and hot topics recalculated.",
       analyzedSummary: "{posts} posts analyzed across {channels} channels",
       scanningPosts: "Scanning cached posts across channels...",
       clusteringTopics: "Clustering topics & extracting previews...",

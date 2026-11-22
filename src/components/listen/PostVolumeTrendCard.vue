@@ -26,10 +26,12 @@ const props = withDefaults(
   defineProps<{
     posts: HotPostItem[];
     dateRange: HotsDateRange;
+    dayKey?: string;
     isDark?: boolean;
     isComputing?: boolean;
   }>(),
   {
+    dayKey: '',
     isDark: false,
     isComputing: false
   }
@@ -46,8 +48,9 @@ let chartInstance: {
 let currentContainerEl: HTMLElement | null = null;
 let resizeObserver: ResizeObserver | null = null;
 
-// Compute trend data and stats
+// Compute trend data and stats (re-evaluates whenever dayKey changes across midnight)
 const processedData = computed(() => {
+  void props.dayKey;
   return generatePostTrendData(props.posts || [], props.dateRange);
 });
 
@@ -140,6 +143,7 @@ watch(
   [
     () => props.posts,
     () => props.dateRange,
+    () => props.dayKey,
     () => props.isDark,
     currentViewMode,
     () => stats.value.totalPosts

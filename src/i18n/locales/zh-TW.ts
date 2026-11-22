@@ -846,6 +846,7 @@ export default {
       last3Days: "最近3天",
       lastWeek: "最近一週",
       allTime: "全部時間",
+      dateRolloverNotice: "目前日期已更新至 {date}，已自動重設日期篩選為「今天」並重新計算熱門話題。",
       analyzedSummary: "共深度分析 {channels} 個頻道的 {posts} 則貼文",
       scanningPosts: "正在檢索本機各頻道快取貼文...",
       clusteringTopics: "正在語義聚類話題並擷取網頁預覽...",

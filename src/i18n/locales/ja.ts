@@ -846,6 +846,7 @@ export default {
       last3Days: "過去3日間",
       lastWeek: "過去1週間",
       allTime: "全期間",
+      dateRolloverNotice: "日付が {date} に更新されたため、期間フィルターを「今日」にリセットして注目トピックを再計算しました。",
       analyzedSummary: "{channels} チャンネルの {posts} 件の投稿を分析済み",
       scanningPosts: "各チャンネルのキャッシュ投稿をスキャン中...",
       clusteringTopics: "トピックをセマンティックにクラスタリング中...",

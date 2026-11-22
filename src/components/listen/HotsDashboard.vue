@@ -49,12 +49,17 @@ import {
   HotsAnalysisResult,
   TopicSentimentLabel,
   getDateRangeBounds,
+  getLocalCalendarDayKey,
+  isRelativeCalendarDateRange,
+  formatHotsDateRangeSummary,
   isNonChineseTitle,
   translateTopicTitlesOnDemand
 } from "../../utils/hotsEngine";
 import {
   computeListenHotsInBackground,
   getCachedHotsAnalysis,
+  clearHotsAnalysisCache,
+  pruneStaleDayHotsCache,
   warmupHotsEmbedModel,
   abortHotsEmbedWorker,
   getHotsEmbedCacheStatus,
@@ -99,9 +104,72 @@ const { t } = useI18n();
 // State
 // ---------------------------------------------------------------------------
 
-const selectedDateRange = ref<HotsDateRange>(
-  (localStorage.getItem("listen_hots_date_range") as HotsDateRange) || "today"
-);
+const DATE_RANGE_STORAGE_KEY = "listen_hots_date_range";
+const DATE_RANGE_DAY_STORAGE_KEY = "listen_hots_date_range_day";
+
+const activeCalendarDayKey = ref<string>(getLocalCalendarDayKey());
+const dayRolloverNotice = ref<string>("");
+let dayRolloverNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+let midnightTimer: ReturnType<typeof setTimeout> | null = null;
+let dayCheckInterval: ReturnType<typeof setInterval> | null = null;
+let initialDateRolloverReset = false;
+
+function showDayRolloverNotice(dateLabel: string) {
+  if (dayRolloverNoticeTimer) {
+    clearTimeout(dayRolloverNoticeTimer);
+    dayRolloverNoticeTimer = null;
+  }
+  dayRolloverNotice.value =
+    t("listen.hots.dateRolloverNotice", { date: dateLabel }) ||
+    `Date updated to ${dateLabel} — filter reset to Today and hot topics recalculated.`;
+  dayRolloverNoticeTimer = setTimeout(() => {
+    dayRolloverNotice.value = "";
+    dayRolloverNoticeTimer = null;
+  }, 10000);
+}
+
+function dismissDayRolloverNotice() {
+  if (dayRolloverNoticeTimer) {
+    clearTimeout(dayRolloverNoticeTimer);
+    dayRolloverNoticeTimer = null;
+  }
+  dayRolloverNotice.value = "";
+}
+
+function resolveInitialDateRange(): HotsDateRange {
+  const savedRange = (localStorage.getItem(DATE_RANGE_STORAGE_KEY) as HotsDateRange) || "today";
+  const savedDay = localStorage.getItem(DATE_RANGE_DAY_STORAGE_KEY);
+  const todayKey = activeCalendarDayKey.value;
+
+  if (savedDay && savedDay !== todayKey && isRelativeCalendarDateRange(savedRange)) {
+    initialDateRolloverReset = true;
+    localStorage.setItem(DATE_RANGE_STORAGE_KEY, "today");
+    localStorage.setItem(DATE_RANGE_DAY_STORAGE_KEY, todayKey);
+    pruneStaleDayHotsCache(todayKey);
+    return "today";
+  }
+
+  localStorage.setItem(DATE_RANGE_DAY_STORAGE_KEY, todayKey);
+  return savedRange;
+}
+
+const selectedDateRange = ref<HotsDateRange>(resolveInitialDateRange());
+
+const activeDateRangeSummary = computed<string>(() => {
+  void activeCalendarDayKey.value;
+  return formatHotsDateRangeSummary(selectedDateRange.value);
+});
+
+const dateRangeTooltips = computed<Record<'today' | 'yesterday' | '3days' | 'week', string>>(() => {
+  void activeCalendarDayKey.value;
+  const now = new Date();
+  return {
+    today: `${t("listen.hots.today") || "Today"} · ${formatHotsDateRangeSummary("today", now)}`,
+    yesterday: `${t("listen.hots.yesterday") || "Yesterday"} · ${formatHotsDateRangeSummary("yesterday", now)}`,
+    "3days": `${t("listen.hots.last3Days") || "Last 3 Days"} · ${formatHotsDateRangeSummary("3days", now)}`,
+    week: `${t("listen.hots.lastWeek") || "Last Week"} · ${formatHotsDateRangeSummary("week", now)}`
+  };
+});
 
 const isComputing = ref(false);
 const isTopicsComputing = ref(false);
@@ -274,6 +342,12 @@ const filteredDrillDownChannels = computed(() => {
 async function runAnalysis(force: boolean = false, allowModelDownload: boolean = false) {
   if (isComputing.value && !force) return;
 
+  const currentDayKey = getLocalCalendarDayKey();
+  if (currentDayKey !== activeCalendarDayKey.value) {
+    activeCalendarDayKey.value = currentDayKey;
+    pruneStaleDayHotsCache(currentDayKey);
+  }
+
   const activeMode = effectiveClusterMode.value;
   const cached = getCachedHotsAnalysis(selectedDateRange.value, activeMode);
   if (cached && !force) {
@@ -283,7 +357,13 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
     const ruleFallback =
       activeMode === "neural" ? getCachedHotsAnalysis(selectedDateRange.value, "rule") : undefined;
     analysisResult.value = ruleFallback || null;
-  } else if (!analysisResult.value || analysisResult.value.dateRange !== selectedDateRange.value) {
+  } else if (
+    !analysisResult.value ||
+    analysisResult.value.dateRange !== selectedDateRange.value ||
+    (isRelativeCalendarDateRange(selectedDateRange.value) &&
+      analysisResult.value.computedAt &&
+      getLocalCalendarDayKey(new Date(analysisResult.value.computedAt)) !== currentDayKey)
+  ) {
     analysisResult.value = null;
   }
 
@@ -306,7 +386,7 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
     if (cachedChannels.length === 0) {
       analysisResult.value = {
         dateRange: selectedDateRange.value,
-        timeWindow: { start: 0, end: Date.now() },
+        timeWindow: { start: bounds.start, end: bounds.end },
         totalPostsAnalyzed: 0,
         filteredPostsCount: 0,
         meaninglessPostsCount: 0,
@@ -453,9 +533,18 @@ async function fetchChannelMetadataAsync(cleanUsername: string) {
 
 function handleDateRangeChange(range: HotsDateRange) {
   clearPendingRecalculation();
+  dismissDayRolloverNotice();
+  const currentDayKey = getLocalCalendarDayKey();
+  const dayChanged = currentDayKey !== activeCalendarDayKey.value;
+  if (dayChanged) {
+    activeCalendarDayKey.value = currentDayKey;
+    clearHotsAnalysisCache();
+    scheduleNextMidnightCheck();
+  }
   selectedDateRange.value = range;
-  localStorage.setItem("listen_hots_date_range", range);
-  runAnalysis();
+  localStorage.setItem(DATE_RANGE_STORAGE_KEY, range);
+  localStorage.setItem(DATE_RANGE_DAY_STORAGE_KEY, currentDayKey);
+  runAnalysis(dayChanged);
 }
 
 function selectClusterMode(mode: HotsClusterMode) {
@@ -738,8 +827,84 @@ function clearPendingRecalculation() {
   pendingBatchesCount.value = 0;
 }
 
+function scheduleNextMidnightCheck() {
+  if (midnightTimer) {
+    clearTimeout(midnightTimer);
+    midnightTimer = null;
+  }
+  const now = new Date();
+  const nextMidnight = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate() + 1,
+    0,
+    0,
+    1,
+    0
+  ).getTime();
+  const delayMs = Math.max(1000, Math.min(nextMidnight - now.getTime(), 24 * 60 * 60 * 1000));
+  midnightTimer = setTimeout(() => {
+    midnightTimer = null;
+    checkAndHandleCalendarDayChange();
+    scheduleNextMidnightCheck();
+  }, delayMs);
+}
+
+/**
+ * Detects whether wall-clock local calendar date has moved forward since the page was opened
+ * or since the current relative date-range analysis was computed.
+ * When detected, resets relative filters (Today / Yesterday / Last 3 Days / Last Week) back to
+ * Today, clears stale day caches, and forces a fresh hot-topic recalculation.
+ */
+function checkAndHandleCalendarDayChange(): boolean {
+  const currentDayKey = getLocalCalendarDayKey();
+  const resultComputedDayKey =
+    analysisResult.value?.computedAt
+      ? getLocalCalendarDayKey(new Date(analysisResult.value.computedAt))
+      : null;
+
+  const isStaleRelativeResult =
+    isRelativeCalendarDateRange(selectedDateRange.value) &&
+    resultComputedDayKey !== null &&
+    resultComputedDayKey !== currentDayKey;
+
+  if (currentDayKey === activeCalendarDayKey.value && !isStaleRelativeResult) {
+    return false;
+  }
+
+  activeCalendarDayKey.value = currentDayKey;
+  clearHotsAnalysisCache();
+  clearPendingRecalculation();
+  scheduleNextMidnightCheck();
+
+  if (isRelativeCalendarDateRange(selectedDateRange.value)) {
+    selectedDateRange.value = "today";
+    localStorage.setItem(DATE_RANGE_STORAGE_KEY, "today");
+    localStorage.setItem(DATE_RANGE_DAY_STORAGE_KEY, currentDayKey);
+    inspectedTopic.value = null;
+    inspectedPost.value = null;
+    analysisResult.value = null;
+    showDayRolloverNotice(formatHotsDateRangeSummary("today"));
+    runAnalysis(true);
+    return true;
+  }
+
+  localStorage.setItem(DATE_RANGE_DAY_STORAGE_KEY, currentDayKey);
+  return false;
+}
+
+function handleWindowResumeOrFocus() {
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+    return;
+  }
+  checkAndHandleCalendarDayChange();
+}
+
 function triggerImmediateRecalculation() {
   clearPendingRecalculation();
+  if (checkAndHandleCalendarDayChange()) {
+    return;
+  }
   runAnalysis(true);
 }
 
@@ -776,6 +941,9 @@ function scheduleDeferredRecalculation() {
 
 function executePendingRecalculation() {
   clearPendingRecalculation();
+  if (checkAndHandleCalendarDayChange()) {
+    return;
+  }
   runAnalysis(false);
 }
 
@@ -784,6 +952,11 @@ watch(
   () => props.lastDbSyncEvent,
   (syncEvent) => {
     if (!syncEvent) return;
+
+    // Detect day rollover before checking date bounds so incoming posts for the new day aren't discarded
+    if (checkAndHandleCalendarDayChange()) {
+      return;
+    }
 
     // Perform check on the received posts' date to filter out unmatched posts with respect to current date range
     if (!doesSyncEventMatchDateRange(syncEvent, selectedDateRange.value)) {
@@ -801,6 +974,9 @@ watch(
   () => props.lastDbUpdate,
   (newVal) => {
     if (!newVal || props.lastDbSyncEvent) return;
+    if (checkAndHandleCalendarDayChange()) {
+      return;
+    }
     scheduleDeferredRecalculation();
   }
 );
@@ -808,22 +984,45 @@ watch(
 onMounted(() => {
   checkServerGeminiStatus();
   refreshNeuralCacheStatus();
-  // Instant restore from in-memory cache if available (0ms render time)
-  const cached = getCachedHotsAnalysis(selectedDateRange.value, effectiveClusterMode.value);
+  scheduleNextMidnightCheck();
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", handleWindowResumeOrFocus);
+  }
+  if (typeof window !== "undefined") {
+    window.addEventListener("focus", handleWindowResumeOrFocus);
+    window.addEventListener("pageshow", handleWindowResumeOrFocus);
+  }
+  // 60s wall-clock heartbeat catches OS sleep/wake and throttled timers across days
+  dayCheckInterval = setInterval(() => {
+    checkAndHandleCalendarDayChange();
+  }, 60_000);
+
+  if (initialDateRolloverReset) {
+    showDayRolloverNotice(formatHotsDateRangeSummary("today"));
+  }
+
+  // Instant restore from day-validated in-memory cache if available (0ms render time)
+  const cached = initialDateRolloverReset
+    ? undefined
+    : getCachedHotsAnalysis(selectedDateRange.value, effectiveClusterMode.value);
   if (cached) {
     analysisResult.value = cached;
   }
+
+  const shouldForceInitial = initialDateRolloverReset;
+  initialDateRolloverReset = false;
 
   // Defer background computing slightly so main UI paint completes without any frame drops
   if (typeof requestAnimationFrame === 'function') {
     requestAnimationFrame(() => {
       setTimeout(() => {
-        runAnalysis();
+        runAnalysis(shouldForceInitial);
       }, 50);
     });
   } else {
     setTimeout(() => {
-      runAnalysis();
+      runAnalysis(shouldForceInitial);
     }, 50);
   }
 });
@@ -928,6 +1127,22 @@ watch(
 onUnmounted(() => {
   clearPendingRecalculation();
   cleanupTopicTranslateObserver();
+  dismissDayRolloverNotice();
+  if (midnightTimer) {
+    clearTimeout(midnightTimer);
+    midnightTimer = null;
+  }
+  if (dayCheckInterval) {
+    clearInterval(dayCheckInterval);
+    dayCheckInterval = null;
+  }
+  if (typeof document !== "undefined") {
+    document.removeEventListener("visibilitychange", handleWindowResumeOrFocus);
+  }
+  if (typeof window !== "undefined") {
+    window.removeEventListener("focus", handleWindowResumeOrFocus);
+    window.removeEventListener("pageshow", handleWindowResumeOrFocus);
+  }
   if (lazyTranslateTimer) {
     clearTimeout(lazyTranslateTimer);
     lazyTranslateTimer = null;
@@ -977,67 +1192,80 @@ onUnmounted(() => {
         </div>
 
         <!-- 4+ Date Range Buttons Segmented Control -->
-        <div class="flex items-center gap-1 bg-gray-100/90 dark:bg-gray-900/70 p-1 rounded-2xl border border-gray-200/60 dark:border-gray-700/60 overflow-x-auto max-w-full">
-          <button
-            type="button"
-            @click="handleDateRangeChange('today')"
-            class="px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
-            :class="[
-              selectedDateRange === 'today'
-                ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
-                : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
-            ]"
+        <div class="flex items-center gap-2 flex-wrap max-w-full">
+          <div class="flex items-center gap-1 bg-gray-100/90 dark:bg-gray-900/70 p-1 rounded-2xl border border-gray-200/60 dark:border-gray-700/60 overflow-x-auto max-w-full">
+            <button
+              type="button"
+              @click="handleDateRangeChange('today')"
+              :title="dateRangeTooltips.today"
+              class="px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
+              :class="[
+                selectedDateRange === 'today'
+                  ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
+                  : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+              ]"
+            >
+              {{ t('listen.hots.today') || 'Today' }}
+            </button>
+            <button
+              type="button"
+              @click="handleDateRangeChange('yesterday')"
+              :title="dateRangeTooltips.yesterday"
+              class="px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
+              :class="[
+                selectedDateRange === 'yesterday'
+                  ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
+                  : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+              ]"
+            >
+              {{ t('listen.hots.yesterday') || 'Yesterday' }}
+            </button>
+            <button
+              type="button"
+              @click="handleDateRangeChange('3days')"
+              :title="dateRangeTooltips['3days']"
+              class="px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
+              :class="[
+                selectedDateRange === '3days'
+                  ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
+                  : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+              ]"
+            >
+              {{ t('listen.hots.last3Days') || 'Last 3 Days' }}
+            </button>
+            <button
+              type="button"
+              @click="handleDateRangeChange('week')"
+              :title="dateRangeTooltips.week"
+              class="px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
+              :class="[
+                selectedDateRange === 'week'
+                  ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
+                  : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
+              ]"
+            >
+              {{ t('listen.hots.lastWeek') || 'Last Week' }}
+            </button>
+            <button
+              type="button"
+              @click="handleDateRangeChange('all')"
+              class="px-2.5 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer whitespace-nowrap shrink-0"
+              :class="[
+                selectedDateRange === 'all'
+                  ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
+                  : 'text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300'
+              ]"
+            >
+              {{ t('listen.hots.allTime') || 'All Time' }}
+            </button>
+          </div>
+          <span
+            v-if="activeDateRangeSummary"
+            class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-[11px] font-mono font-semibold bg-gray-100/90 dark:bg-gray-900/70 text-gray-600 dark:text-gray-300 border border-gray-200/70 dark:border-gray-700/60 tabular-nums whitespace-nowrap"
           >
-            {{ t('listen.hots.today') || 'Today' }}
-          </button>
-          <button
-            type="button"
-            @click="handleDateRangeChange('yesterday')"
-            class="px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
-            :class="[
-              selectedDateRange === 'yesterday'
-                ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
-                : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
-            ]"
-          >
-            {{ t('listen.hots.yesterday') || 'Yesterday' }}
-          </button>
-          <button
-            type="button"
-            @click="handleDateRangeChange('3days')"
-            class="px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
-            :class="[
-              selectedDateRange === '3days'
-                ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
-                : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
-            ]"
-          >
-            {{ t('listen.hots.last3Days') || 'Last 3 Days' }}
-          </button>
-          <button
-            type="button"
-            @click="handleDateRangeChange('week')"
-            class="px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer whitespace-nowrap shrink-0"
-            :class="[
-              selectedDateRange === 'week'
-                ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
-                : 'text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white'
-            ]"
-          >
-            {{ t('listen.hots.lastWeek') || 'Last Week' }}
-          </button>
-          <button
-            type="button"
-            @click="handleDateRangeChange('all')"
-            class="px-2.5 py-1.5 rounded-xl text-xs font-medium transition-all cursor-pointer whitespace-nowrap shrink-0"
-            :class="[
-              selectedDateRange === 'all'
-                ? 'bg-white dark:bg-gray-800 text-teal-600 dark:text-teal-400 shadow-xs'
-                : 'text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300'
-            ]"
-          >
-            {{ t('listen.hots.allTime') || 'All Time' }}
-          </button>
+            <Calendar class="h-3 w-3 text-teal-600 dark:text-teal-400 shrink-0" />
+            <span>{{ activeDateRangeSummary }}</span>
+          </span>
         </div>
       </div>
 
@@ -1150,6 +1378,27 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- Automatic Wall-Clock Date Rollover Notice -->
+    <div
+      v-if="dayRolloverNotice"
+      role="status"
+      aria-live="polite"
+      class="w-full bg-teal-50/90 dark:bg-teal-950/40 border border-teal-200/80 dark:border-teal-800/60 rounded-2xl px-4 py-2.5 flex items-center justify-between gap-3 text-xs font-semibold text-teal-900 dark:text-teal-200"
+    >
+      <div class="flex items-center gap-2 min-w-0">
+        <Calendar class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 shrink-0" />
+        <span class="truncate">{{ dayRolloverNotice }}</span>
+      </div>
+      <button
+        type="button"
+        @click="dismissDayRolloverNotice"
+        class="p-0.5 rounded-lg text-teal-600 dark:text-teal-300 hover:bg-teal-100 dark:hover:bg-teal-900/60 transition-colors cursor-pointer shrink-0"
+        :aria-label="t('common.close') || 'Close'"
+      >
+        <X class="h-3.5 w-3.5" />
+      </button>
+    </div>
+
     <!-- Progressive Computing Progress Bar (Initial Cold Load Only) -->
     <div v-if="isComputing && !analysisResult" class="w-full bg-teal-50 dark:bg-teal-950/40 border border-teal-200/70 dark:border-teal-800/60 rounded-2xl p-3 flex items-center justify-between gap-3">
       <div class="flex items-center gap-2 text-xs font-bold text-teal-900 dark:text-teal-200 truncate">
@@ -1192,6 +1441,7 @@ onUnmounted(() => {
       v-if="analysisResult && analysisResult.hotPosts.length > 0"
       :posts="analysisResult.hotPosts"
       :date-range="effectiveChartDateRange"
+      :day-key="activeCalendarDayKey"
       :is-dark="isDark"
       :is-computing="isComputing"
     />

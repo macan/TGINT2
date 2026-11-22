@@ -10,6 +10,8 @@
 import {
   attachChineseTranslationsForForeignTitles,
   clusterPostsWithEmbeddings,
+  getLocalCalendarDayKey,
+  isRelativeCalendarDateRange,
   type HotChannelItem,
   type HotPostItem,
   type HotTopicCluster,
@@ -74,25 +76,58 @@ const hotsMemoryCache = new Map<string, HotsAnalysisResult>();
 
 export function getHotsCacheKey(
   dateRange: HotsDateRange,
-  modeOrAi: boolean | HotsClusterMode
+  modeOrAi: boolean | HotsClusterMode,
+  dayKey: string = getLocalCalendarDayKey()
 ): string {
   const mode: HotsClusterMode =
     typeof modeOrAi === 'boolean' ? (modeOrAi ? 'ai' : 'rule') : modeOrAi;
-  return `${dateRange}_${mode}`;
+  return isRelativeCalendarDateRange(dateRange)
+    ? `${dateRange}_${mode}_${dayKey}`
+    : `${dateRange}_${mode}`;
+}
+
+export function pruneStaleDayHotsCache(currentDayKey: string = getLocalCalendarDayKey()): number {
+  let removed = 0;
+  for (const [key, entry] of hotsMemoryCache.entries()) {
+    if (!isRelativeCalendarDateRange(entry.dateRange)) continue;
+    const entryDayKey = entry.computedAt ? getLocalCalendarDayKey(new Date(entry.computedAt)) : '';
+    if (entryDayKey !== currentDayKey || !key.endsWith(`_${currentDayKey}`)) {
+      hotsMemoryCache.delete(key);
+      removed++;
+    }
+  }
+  return removed;
 }
 
 export function getCachedHotsAnalysis(
   dateRange: HotsDateRange,
   modeOrAi: boolean | HotsClusterMode
 ): HotsAnalysisResult | undefined {
-  return hotsMemoryCache.get(getHotsCacheKey(dateRange, modeOrAi));
+  const todayKey = getLocalCalendarDayKey();
+  pruneStaleDayHotsCache(todayKey);
+  const key = getHotsCacheKey(dateRange, modeOrAi, todayKey);
+  const cached = hotsMemoryCache.get(key);
+  if (!cached) return undefined;
+  if (
+    isRelativeCalendarDateRange(dateRange) &&
+    cached.computedAt &&
+    getLocalCalendarDayKey(new Date(cached.computedAt)) !== todayKey
+  ) {
+    hotsMemoryCache.delete(key);
+    return undefined;
+  }
+  return cached;
 }
 
 export function setCachedHotsAnalysis(
   result: HotsAnalysisResult,
   modeOrAi: boolean | HotsClusterMode
 ): void {
-  hotsMemoryCache.set(getHotsCacheKey(result.dateRange, modeOrAi), result);
+  const dayKey = result.computedAt
+    ? getLocalCalendarDayKey(new Date(result.computedAt))
+    : getLocalCalendarDayKey();
+  pruneStaleDayHotsCache(getLocalCalendarDayKey());
+  hotsMemoryCache.set(getHotsCacheKey(result.dateRange, modeOrAi, dayKey), result);
 }
 
 export function clearHotsAnalysisCache(): void {
