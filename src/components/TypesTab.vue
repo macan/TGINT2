@@ -146,6 +146,7 @@ const channelIndexMap = new Map<string, number>();
 
 // IndexedDB Cache and Background Sync State
 const cachedChannelsCount = ref<number>(0);
+const cachedTotalBytes = ref<number | null>(null);
 const isCacheLoaded = ref<boolean>(false);
 const isCheckingCache = ref<boolean>(false);
 const isClearingCache = ref<boolean>(false);
@@ -160,8 +161,15 @@ const isBackgroundSyncing = ref(false);
 const isBackgroundSyncPaused = ref(false);
 const backgroundSyncStatus = ref<"fresh" | "checking" | "syncing" | "paused" | "uncertain" | "remote_updated" | "error" | "">("");
 const backgroundSyncMessage = ref<string>("");
+const bgSyncLoadedBytes = ref(0);
+const bgSyncTotalBytes = ref<number | null>(null);
+const bgSyncDecompressedBytes = ref(0);
+const bgSyncIsUsingLz4 = ref(false);
+const bgSyncIsProbing = ref(false);
 let backgroundSyncTimer: any = null;
 let backgroundSyncAbortController: AbortController | null = null;
+let probedStreamLastModified: string | null = null;
+let probedStreamEtag: string | null = null;
 
 const isStreaming = ref(false);
 const isPaused = ref(false);
@@ -210,6 +218,69 @@ let retryTimeoutId: any = null;
 let retryCountdownInterval: any = null;
 let profileHoverTimer: any = null;
 let profileLeaveTimer: any = null;
+
+// Unified Progress Bar Computeds (shared between initial/manual stream and background sync)
+const isBgSyncProgressActive = computed(
+  () =>
+    isBackgroundSyncing.value ||
+    (backgroundSyncStatus.value === "paused" && bgSyncLoadedBytes.value > 0)
+);
+
+const displayProgressIsUsingLz4 = computed(() =>
+  isBgSyncProgressActive.value ? bgSyncIsUsingLz4.value : isUsingLz4.value
+);
+
+const displayProgressDecompressedBytes = computed(() =>
+  isBgSyncProgressActive.value ? bgSyncDecompressedBytes.value : decompressedBytesCount.value
+);
+
+const displayProgressLoadedBytes = computed(() => {
+  if (isBgSyncProgressActive.value) return bgSyncLoadedBytes.value;
+  if (isStreaming.value || isPaused.value || loadedBytes.value > 0) return loadedBytes.value;
+  if (isCacheLoaded.value && cachedTotalBytes.value && cachedTotalBytes.value > 0) {
+    return cachedTotalBytes.value;
+  }
+  return 0;
+});
+
+const displayProgressExactTotalBytes = computed<number | null>(() => {
+  if (isBgSyncProgressActive.value) return bgSyncTotalBytes.value;
+  if (isStreaming.value || isPaused.value || loadedBytes.value > 0) {
+    return contentRangeTotalLength.value ?? serverTotalLength.value;
+  }
+  if (isCacheLoaded.value && cachedTotalBytes.value && cachedTotalBytes.value > 0) {
+    return cachedTotalBytes.value;
+  }
+  return null;
+});
+
+const displayProgressTotalBytes = computed(() => {
+  if (displayProgressExactTotalBytes.value && displayProgressExactTotalBytes.value > 0) {
+    return displayProgressExactTotalBytes.value;
+  }
+  if (isBgSyncProgressActive.value) {
+    return bgSyncIsUsingLz4.value ? 40608576 : 88906687;
+  }
+  return totalBytesEstimated.value;
+});
+
+const displayProgressPercent = computed(() => {
+  if (isBgSyncProgressActive.value && bgSyncIsProbing.value && bgSyncLoadedBytes.value === 0) {
+    return 0;
+  }
+  if (
+    !isBgSyncProgressActive.value &&
+    !isStreaming.value &&
+    !isPaused.value &&
+    isCompleted.value &&
+    displayProgressLoadedBytes.value === 0
+  ) {
+    return 100;
+  }
+  const total = displayProgressTotalBytes.value;
+  if (!total || total <= 0) return 0;
+  return Math.min(100, Math.round((displayProgressLoadedBytes.value / total) * 100));
+});
 
 // Filtering and Search State
 const searchQuery = ref("");
@@ -632,6 +703,8 @@ const startStreaming = async (resume = false) => {
     hasParsedTotalFromContentRange.value = false;
     contentRangeTotalLength.value = null;
     serverTotalLength.value = null;
+    probedStreamLastModified = null;
+    probedStreamEtag = null;
 
     // Step 1: Probe whether compressed object classify.json.lz4 is available
     isProbingLz4.value = true;
@@ -653,7 +726,10 @@ const startStreaming = async (resume = false) => {
         lz4ProbeStatus.value = "available";
         activeStreamEndpoint.value = CLASSIFY_LZ4_URL;
         lz4ProbeMessage.value = `LZ4 frame active (${CLASSIFY_LZ4_URL})`;
-        if (probe.totalBytes) {
+        probedStreamLastModified = probe.lastModified ?? null;
+        probedStreamEtag = probe.etag ?? null;
+        if (probe.totalBytes && probe.totalBytes > 0) {
+          serverTotalLength.value = probe.totalBytes;
           totalBytesEstimated.value = probe.totalBytes;
         }
         console.log(`[LZ4 Probe] Detected valid LZ4 stream at ${CLASSIFY_LZ4_URL}. Streaming in LZ4 frame mode.`);
@@ -663,6 +739,13 @@ const startStreaming = async (resume = false) => {
         activeStreamEndpoint.value = CLASSIFY_RAW_URL;
         lz4ProbeMessage.value = probe.error || "LZ4 endpoint not found, falling back to NDJSON";
         totalBytesEstimated.value = 88906687; // fallback to uncompressed size
+        const rawMeta = await fetchHeadMetadata(CLASSIFY_RAW_URL);
+        probedStreamLastModified = rawMeta.lastModified;
+        probedStreamEtag = rawMeta.etag;
+        if (rawMeta.contentLength) {
+          serverTotalLength.value = rawMeta.contentLength;
+          totalBytesEstimated.value = rawMeta.contentLength;
+        }
         console.log(`[LZ4 Probe] classify.json.lz4 not available (${probe.error || '404'}). Cleanly falling back to NDJSON stream on ${CLASSIFY_RAW_URL}.`);
       }
     } catch (probeErr: any) {
@@ -1005,8 +1088,21 @@ const startStreaming = async (resume = false) => {
       }
 
       try {
-        const etag = res.headers.get("etag") || res.headers.get("x-amz-version-id");
-        const lastModified = res.headers.get("last-modified");
+        let etag =
+          res.headers.get("etag") ||
+          res.headers.get("x-amz-version-id") ||
+          probedStreamEtag;
+        let lastModified =
+          res.headers.get("last-modified")?.trim() ||
+          probedStreamLastModified;
+        if (isFullObjectLengthConfirmed && !lastModified) {
+          const headMeta = await fetchHeadMetadata(targetUrl);
+          lastModified = headMeta.lastModified;
+          etag = etag || headMeta.etag;
+        }
+        if (isFullObjectLengthConfirmed) {
+          cachedTotalBytes.value = loadedBytes.value;
+        }
         await saveTypesCacheMeta({
           id: "classify_meta",
           etag: isFullObjectLengthConfirmed ? etag : null,
@@ -1105,6 +1201,37 @@ const parsePositiveHeaderInt = (value: string | null): number | null => {
   if (!value) return null;
   const parsed = parseInt(value.trim(), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+// GOS streaming GET responses omit Last-Modified and x-gos-content-length,
+// whereas HEAD responses expose them cleanly.
+const fetchHeadMetadata = async (
+  url: string,
+  signal?: AbortSignal
+): Promise<{
+  etag: string | null;
+  lastModified: string | null;
+  contentLength: number | null;
+}> => {
+  try {
+    const headRes = await fetch(url, {
+      method: "HEAD",
+      cache: "no-cache",
+      signal
+    });
+    if (!headRes.ok) {
+      return { etag: null, lastModified: null, contentLength: null };
+    }
+    return {
+      etag: headRes.headers.get("etag") || headRes.headers.get("x-amz-version-id") || null,
+      lastModified: headRes.headers.get("last-modified")?.trim() || null,
+      contentLength:
+        parsePositiveHeaderInt(headRes.headers.get("x-gos-content-length")) ??
+        parsePositiveHeaderInt(headRes.headers.get("content-length"))
+    };
+  } catch {
+    return { etag: null, lastModified: null, contentLength: null };
+  }
 };
 
 // Check remote dataset via HEAD request and handle non-standard GOS responses
@@ -1226,20 +1353,45 @@ const startBackgroundSync = async (isResume = false) => {
   }
 
   isBackgroundSyncing.value = true;
+  bgSyncIsProbing.value = true;
+  bgSyncLoadedBytes.value = 0;
+  bgSyncTotalBytes.value = null;
+  bgSyncDecompressedBytes.value = 0;
   backgroundSyncStatus.value = "syncing";
   backgroundSyncMessage.value = t("types.backgroundSyncActive");
   backgroundSyncAbortController = new AbortController();
 
   try {
     let isLz4 = false;
+    let headLastModified: string | null = null;
+    let headEtag: string | null = null;
+    let headTotalBytes: number | null = null;
+
     try {
       const probe = await probeLz4Endpoint(CLASSIFY_LZ4_URL, 25000);
       isLz4 = probe.available;
+      if (isLz4) {
+        headLastModified = probe.lastModified ?? null;
+        headEtag = probe.etag ?? null;
+        headTotalBytes = probe.totalBytes ?? null;
+      }
     } catch {
       isLz4 = false;
     }
 
     const targetUrl = isLz4 ? CLASSIFY_LZ4_URL : CLASSIFY_RAW_URL;
+    // GOS GET responses omit Last-Modified & x-gos-content-length; ensure we have HEAD metadata
+    if (!headLastModified || !headTotalBytes) {
+      const headMeta = await fetchHeadMetadata(targetUrl, backgroundSyncAbortController.signal);
+      headLastModified = headLastModified || headMeta.lastModified;
+      headEtag = headEtag || headMeta.etag;
+      headTotalBytes = headTotalBytes ?? headMeta.contentLength;
+    }
+
+    bgSyncIsUsingLz4.value = isLz4;
+    bgSyncTotalBytes.value = headTotalBytes;
+    bgSyncIsProbing.value = false;
+
     const res = await fetch(targetUrl, {
       signal: backgroundSyncAbortController.signal
     });
@@ -1248,19 +1400,31 @@ const startBackgroundSync = async (isResume = false) => {
       throw new Error(`Sync fetch failed with status ${res.status}`);
     }
 
-    const etag = res.headers.get("etag") || res.headers.get("x-amz-version-id");
-    const lastModified = res.headers.get("last-modified");
+    const etag =
+      res.headers.get("etag") ||
+      res.headers.get("x-amz-version-id") ||
+      headEtag;
+    const lastModified =
+      res.headers.get("last-modified")?.trim() ||
+      headLastModified;
     const expectedRemoteLength =
       parsePositiveHeaderInt(res.headers.get("x-gos-content-length")) ??
-      parsePositiveHeaderInt(res.headers.get("content-length"));
+      parsePositiveHeaderInt(res.headers.get("content-length")) ??
+      headTotalBytes;
+    if (expectedRemoteLength) {
+      bgSyncTotalBytes.value = expectedRemoteLength;
+    }
+
     const reader = res.body.getReader();
     const decoder = new TextDecoder("utf-8");
 
     const syncBatch: ClassifiedChannel[] = [];
     const lz4Chunks: Uint8Array[] = [];
     let syncLoadedBytes = 0;
+    let syncDecompressedBytes = 0;
     let syncRemainder = "";
     let streamReachedEof = false;
+    let lastProgressUpdateMs = 0;
 
     const flushSyncBatch = async () => {
       if (syncBatch.length > 0) {
@@ -1285,6 +1449,7 @@ const startBackgroundSync = async (isResume = false) => {
     let lz4Decoder: StreamingLz4FrameDecoder | null = null;
     if (isLz4) {
       lz4Decoder = new StreamingLz4FrameDecoder((decompBlock) => {
+        syncDecompressedBytes += decompBlock.byteLength;
         const chunkText = decoder.decode(decompBlock, { stream: true });
         const lines = (syncRemainder + chunkText).split("\n");
         syncRemainder = lines.pop() || "";
@@ -1319,11 +1484,20 @@ const startBackgroundSync = async (isResume = false) => {
             if (item) syncBatch.push(item);
           }
         }
+        const now = Date.now();
+        if (now - lastProgressUpdateMs >= 100) {
+          bgSyncLoadedBytes.value = syncLoadedBytes;
+          bgSyncDecompressedBytes.value = syncDecompressedBytes;
+          lastProgressUpdateMs = now;
+        }
         if (syncBatch.length >= 2500) {
           await flushSyncBatch();
         }
       }
     }
+
+    bgSyncLoadedBytes.value = syncLoadedBytes;
+    bgSyncDecompressedBytes.value = syncDecompressedBytes;
 
     const wasStoppedByUser =
       isBackgroundSyncPaused.value || Boolean(backgroundSyncAbortController?.signal.aborted);
@@ -1379,6 +1553,8 @@ const startBackgroundSync = async (isResume = false) => {
       isUsingLz4: isLz4
     });
 
+    cachedTotalBytes.value = syncLoadedBytes;
+    isUsingLz4.value = isLz4;
     cachedChannelsCount.value = compactItems.value.length;
     backgroundSyncStatus.value = "fresh";
     backgroundSyncMessage.value = t("types.syncComplete");
@@ -1392,6 +1568,7 @@ const startBackgroundSync = async (isResume = false) => {
       backgroundSyncMessage.value = t("types.syncInterrupted");
     }
   } finally {
+    bgSyncIsProbing.value = false;
     isBackgroundSyncing.value = false;
     backgroundSyncAbortController = null;
   }
@@ -1405,6 +1582,7 @@ const toggleBackgroundSync = () => {
       backgroundSyncAbortController.abort();
       backgroundSyncAbortController = null;
     }
+    bgSyncIsProbing.value = false;
     isBackgroundSyncing.value = false;
     backgroundSyncStatus.value = "paused";
     backgroundSyncMessage.value = t("types.syncPaused");
@@ -1433,6 +1611,10 @@ const handleClearCache = async () => {
     channelIndexMap.clear();
     hydratedPageMap.clear();
     cachedChannelsCount.value = 0;
+    cachedTotalBytes.value = null;
+    bgSyncLoadedBytes.value = 0;
+    bgSyncTotalBytes.value = null;
+    bgSyncDecompressedBytes.value = 0;
     isCacheLoaded.value = false;
     backgroundSyncStatus.value = "";
     backgroundSyncMessage.value = "";
@@ -1461,6 +1643,8 @@ const checkAndInitializeFromCache = async () => {
         channelIndexMap.set(records[i].channel, i);
       }
       totalParsedLines.value = records.length;
+      cachedTotalBytes.value = stats.contentLength;
+      isUsingLz4.value = stats.isUsingLz4;
       isCompleted.value = true;
       isCacheLoaded.value = true;
       console.log(`[Types Cache] Instantly restored ${records.length} channels from IndexedDB (<50ms).`);
@@ -2249,11 +2433,23 @@ const copyProfileChannelName = async (channel: string) => {
         </div>
       </div>
 
-      <!-- Ingestion Stream Progress Bar -->
+      <!-- Ingestion & Background Sync Unified Progress Bar -->
       <div class="space-y-1.5 pt-1">
         <div class="flex items-center justify-between text-[11px] font-mono text-gray-500 dark:text-gray-400">
           <div class="flex items-center gap-2 flex-wrap">
-            <span v-if="isProbingLz4" class="flex items-center gap-1.5 text-purple-600 dark:text-purple-400 font-bold">
+            <span v-if="isBackgroundSyncing && bgSyncIsProbing" class="flex items-center gap-1.5 text-sky-600 dark:text-sky-400 font-bold">
+              <RefreshCw class="w-3 h-3 animate-spin text-sky-500" />
+              {{ t('types.probingLz4') }}
+            </span>
+            <span v-else-if="isBackgroundSyncing" class="flex items-center gap-1.5 text-sky-600 dark:text-sky-400 font-bold">
+              <Zap v-if="bgSyncIsUsingLz4" class="w-3.5 h-3.5 text-sky-500 fill-sky-500/20 animate-pulse" />
+              <RefreshCw v-else class="w-3 h-3 animate-spin text-sky-500" />
+              {{ t('types.backgroundSyncActive') }}
+            </span>
+            <span v-else-if="backgroundSyncStatus === 'paused' && bgSyncLoadedBytes > 0" class="text-amber-600 dark:text-amber-400 font-bold">
+              {{ t('types.syncPaused') }}
+            </span>
+            <span v-else-if="isProbingLz4" class="flex items-center gap-1.5 text-purple-600 dark:text-purple-400 font-bold">
               <RefreshCw class="w-3 h-3 animate-spin text-purple-500" />
               {{ lz4ProbeMessage || t('types.probingLz4') }}
             </span>
@@ -2282,18 +2478,20 @@ const copyProfileChannelName = async (channel: string) => {
             <!-- Compression Mode Badge -->
             <span
               class="hidden sm:inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-mono border"
-              :class="isUsingLz4
-                ? 'bg-purple-50 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800'
+              :class="displayProgressIsUsingLz4
+                ? (isBackgroundSyncing
+                    ? 'bg-sky-50 dark:bg-sky-950/80 text-sky-700 dark:text-sky-300 border-sky-200 dark:border-sky-800'
+                    : 'bg-purple-50 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800')
                 : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700'"
-              :title="isUsingLz4 ? t('types.lz4Stream') : t('types.rawNdjson')"
+              :title="displayProgressIsUsingLz4 ? t('types.lz4Stream') : t('types.rawNdjson')"
             >
-              <Zap v-if="isUsingLz4" class="w-2.5 h-2.5 text-purple-600 dark:text-purple-400" />
-              <span>{{ isUsingLz4 ? t('types.lz4Stream') : t('types.rawNdjson') }}</span>
-              <span v-if="isUsingLz4 && decompressedBytesCount > 0" class="text-purple-600 dark:text-purple-400 opacity-90">
-                {{ t('types.decompressed', { size: (decompressedBytesCount / (1024 * 1024)).toFixed(1) }) }}
+              <Zap v-if="displayProgressIsUsingLz4" class="w-2.5 h-2.5" :class="isBackgroundSyncing ? 'text-sky-600 dark:text-sky-400' : 'text-purple-600 dark:text-purple-400'" />
+              <span>{{ displayProgressIsUsingLz4 ? t('types.lz4Stream') : t('types.rawNdjson') }}</span>
+              <span v-if="displayProgressIsUsingLz4 && displayProgressDecompressedBytes > 0" :class="isBackgroundSyncing ? 'text-sky-600 dark:text-sky-400 opacity-90' : 'text-purple-600 dark:text-purple-400 opacity-90'">
+                {{ t('types.decompressed', { size: (displayProgressDecompressedBytes / (1024 * 1024)).toFixed(1) }) }}
               </span>
               <button
-                v-if="!isUsingLz4 && !isStreaming"
+                v-if="!displayProgressIsUsingLz4 && !isStreaming && !isBackgroundSyncing"
                 @click="reprobeAndReload"
                 class="ml-1 text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer flex items-center gap-0.5 font-bold"
                 :title="t('types.probeLz4')"
@@ -2304,22 +2502,42 @@ const copyProfileChannelName = async (channel: string) => {
           </div>
           <div class="flex items-center gap-2 tabular-nums">
             <span
-              v-if="lastResumedByteOffset && lastResumedByteOffset > 0"
+              v-if="!isBgSyncProgressActive && lastResumedByteOffset && lastResumedByteOffset > 0"
               class="hidden sm:inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300 border border-indigo-200/60 dark:border-indigo-800/60 font-mono"
             >
               <span>{{ t('types.rangeOffset', { size: (lastResumedByteOffset / (1024 * 1024)).toFixed(1) }) }}</span>
             </span>
-            <div>
-              {{ (loadedBytes / (1024 * 1024)).toFixed(1) }} MB
-              <span class="text-gray-400">/ ~{{ (totalBytesEstimated / (1024 * 1024)).toFixed(1) }} MB</span>
-              ({{ Math.min(100, Math.round((loadedBytes / totalBytesEstimated) * 100)) }}%)
+            <div v-if="isBackgroundSyncing && bgSyncIsProbing && bgSyncLoadedBytes === 0" class="text-sky-600 dark:text-sky-400">
+              ...
+            </div>
+            <div v-else-if="displayProgressLoadedBytes > 0 || isStreaming || isBgSyncProgressActive">
+              {{ (displayProgressLoadedBytes / (1024 * 1024)).toFixed(1) }} MB
+              <span class="text-gray-400">
+                / {{ displayProgressExactTotalBytes ? '' : '~' }}{{ (displayProgressTotalBytes / (1024 * 1024)).toFixed(1) }} MB
+              </span>
+              <span class="font-bold" :class="isBackgroundSyncing ? 'text-sky-600 dark:text-sky-400' : ''">
+                ({{ displayProgressPercent }}%)
+              </span>
+            </div>
+            <div v-else-if="isCompleted" class="text-emerald-600 dark:text-emerald-400 font-bold">
+              100%
             </div>
           </div>
         </div>
         <div class="w-full h-1.5 bg-gray-100 dark:bg-gray-700/60 rounded-full overflow-hidden">
           <div
-            class="h-full bg-gradient-to-r from-indigo-500 via-cyan-500 to-emerald-500 transition-all duration-300"
-            :style="{ width: `${Math.min(100, Math.round((loadedBytes / totalBytesEstimated) * 100))}%` }"
+            v-if="isBackgroundSyncing && bgSyncIsProbing && bgSyncLoadedBytes === 0"
+            class="h-full w-1/3 bg-gradient-to-r from-sky-400 via-blue-500 to-indigo-500 rounded-full animate-pulse"
+          ></div>
+          <div
+            v-else
+            class="h-full transition-all duration-300 rounded-full"
+            :class="isBackgroundSyncing
+              ? 'bg-gradient-to-r from-sky-500 via-blue-500 to-indigo-500'
+              : (backgroundSyncStatus === 'paused' && bgSyncLoadedBytes > 0)
+                ? 'bg-gradient-to-r from-amber-400 to-amber-500'
+                : 'bg-gradient-to-r from-indigo-500 via-cyan-500 to-emerald-500'"
+            :style="{ width: `${displayProgressPercent}%` }"
           ></div>
         </div>
 
@@ -2414,6 +2632,12 @@ const copyProfileChannelName = async (channel: string) => {
               ></span>
               <span class="text-[11px] font-mono">
                 {{ backgroundSyncMessage || (isCacheLoaded ? t('types.loadedInstantly') : t('types.ready')) }}
+              </span>
+              <span
+                v-if="isBackgroundSyncing && !bgSyncIsProbing && bgSyncLoadedBytes > 0"
+                class="text-[10px] font-mono font-bold tabular-nums px-1.5 py-0.5 rounded bg-sky-100 dark:bg-sky-950/80 text-sky-700 dark:text-sky-300 border border-sky-200/70 dark:border-sky-800/70"
+              >
+                {{ displayProgressPercent }}% · {{ (bgSyncLoadedBytes / (1024 * 1024)).toFixed(1) }} MB
               </span>
             </div>
           </div>

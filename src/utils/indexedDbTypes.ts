@@ -384,6 +384,8 @@ export async function getTypesDbStats(): Promise<{
   blobSize: number | null;
   lastSyncTime: number | null;
   etag: string | null;
+  contentLength: number | null;
+  isUsingLz4: boolean;
 }> {
   try {
     const [meta, count, blob] = await Promise.all([
@@ -396,14 +398,18 @@ export async function getTypesDbStats(): Promise<{
       channelCount: count,
       blobSize: blob ? blob.size : null,
       lastSyncTime: meta?.cachedAt || null,
-      etag: meta?.etag || null
+      etag: meta?.etag || null,
+      contentLength: meta?.contentLength ?? (blob ? blob.size : null),
+      isUsingLz4: meta?.isUsingLz4 ?? Boolean(blob)
     };
   } catch {
     return {
       channelCount: 0,
       blobSize: null,
       lastSyncTime: null,
-      etag: null
+      etag: null,
+      contentLength: null,
+      isUsingLz4: false
     };
   }
 }

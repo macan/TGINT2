@@ -11,9 +11,17 @@ export interface Lz4ProbeResult {
   available: boolean;
   endpointUrl: string;
   totalBytes?: number | null;
+  lastModified?: string | null;
+  etag?: string | null;
   error?: string;
   isTimeout?: boolean;
 }
+
+const parsePositiveIntHeader = (value: string | null): number | null => {
+  if (!value) return null;
+  const parsed = parseInt(value.trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
 
 export const CLASSIFY_LZ4_URL = "https://i.gogingko.net/api/v1/v/exchange/classify.json.lz4";
 export const CLASSIFY_RAW_URL = "https://i.gogingko.net/api/v1/v/exchange/classify.json";
@@ -51,16 +59,25 @@ export async function probeLz4Endpoint(
     try {
       const headRes = await fetch(endpointUrl, {
         method: "HEAD",
+        cache: "no-cache",
         signal: controller.signal
       });
       if (headRes.status === 200) {
         clearTimeout(timer);
-        const cl = headRes.headers.get("content-length");
-        const totalBytes = cl ? parseInt(cl, 10) : 16753596;
+        const totalBytes =
+          parsePositiveIntHeader(headRes.headers.get("x-gos-content-length")) ??
+          parsePositiveIntHeader(headRes.headers.get("content-length"));
+        const lastModified = headRes.headers.get("last-modified")?.trim() || null;
+        const etag =
+          headRes.headers.get("etag") ||
+          headRes.headers.get("x-amz-version-id") ||
+          null;
         return {
           available: true,
           endpointUrl,
-          totalBytes
+          totalBytes,
+          lastModified,
+          etag
         };
       } else if (headRes.status === 404) {
         clearTimeout(timer);
@@ -94,18 +111,22 @@ export async function probeLz4Endpoint(
       };
     }
 
-    // Check Content-Range or Content-Length for total size
-    let totalBytes: number | null = null;
+    // Check Content-Range, x-gos-content-length, or Content-Length for total size
+    let totalBytes: number | null =
+      parsePositiveIntHeader(res.headers.get("x-gos-content-length"));
     const cr = res.headers.get("content-range");
-    if (cr) {
+    if (!totalBytes && cr) {
       const match = cr.match(/\/(\d+)/);
-      if (match) totalBytes = parseInt(match[1], 10);
-    } else {
-      const cl = res.headers.get("content-length");
-      if (cl && (res.status === 200 || res.status === 206)) {
-        totalBytes = parseInt(cl, 10);
-      }
+      if (match) totalBytes = parsePositiveIntHeader(match[1]);
     }
+    if (!totalBytes && res.status === 200) {
+      totalBytes = parsePositiveIntHeader(res.headers.get("content-length"));
+    }
+    const lastModified = res.headers.get("last-modified")?.trim() || null;
+    const etag =
+      res.headers.get("etag") ||
+      res.headers.get("x-amz-version-id") ||
+      null;
 
     if (!res.body) {
       return {
@@ -150,7 +171,9 @@ export async function probeLz4Endpoint(
       return {
         available: true,
         endpointUrl,
-        totalBytes: totalBytes || 16753596
+        totalBytes,
+        lastModified,
+        etag
       };
     }
 
