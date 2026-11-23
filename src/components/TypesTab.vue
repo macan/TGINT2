@@ -1095,7 +1095,7 @@ const checkRemoteDatasetChanged = async (cachedEtag: string | null): Promise<'un
     }
 
     const remoteEtag = headRes.headers.get("etag") || headRes.headers.get("x-amz-version-id");
-    const remoteCl = headRes.headers.get("content-length");
+    const remoteCl = headRes.headers.get("content-length") || headRes.headers.get("x-gos-content-length");
     const remoteLastMod = headRes.headers.get("last-modified");
 
     if (remoteEtag && cachedEtag) {

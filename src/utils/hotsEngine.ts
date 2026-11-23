@@ -1330,6 +1330,502 @@ function splitIntoSentences(text: string): string[] {
     .filter(s => s.length > 5);
 }
 
+// ---------------------------------------------------------------------------
+// Light NLP Key-Phrase / Entity Extraction & Semantic Truncation for Single Posts
+// ---------------------------------------------------------------------------
+
+export interface PostKeyInsights {
+  coreSubject: string;
+  entities: string[];
+  keyPhrases: string[];
+  facts: string[];
+  anchorTerms: string[];
+}
+
+const EDITORIAL_BRACKET_PREFIX_RE =
+  /^(?:【[^】]{1,18}】|\[[^\]]{1,22}\]|「[^」]{1,14}」)\s*/u;
+
+const EDITORIAL_RUBRIC_COLON_RE =
+  /^(?:breaking(?:\s+news)?|just\s+in|urgent|update|upd|exclusive|alert|flash|video(?:\s+of\s+the\s+day)?|photo(?:\s+of\s+the\s+day)?|watch|listen|report|news|thread|opinion|analysis|digest|summary|видео\s+дня|фото\s+дня|кадр\s+дня|новость\s+дня|срочно|молния|главное|эксклюзив|новости|важно|обновление|итоги|разбор|мнение|快讯|突发|重磅|速报|独家|最新|观察|评论|热点|焦点|日报|简讯)\s*[:：\-–—]\s*/iu;
+
+function stripEditorialRubricPrefix(text: string): string {
+  if (!text) return '';
+  let current = text.trim();
+  for (let pass = 0; pass < 2; pass++) {
+    const afterBracket = current.replace(EDITORIAL_BRACKET_PREFIX_RE, '').trim();
+    if (afterBracket.length >= 18 && afterBracket !== current) {
+      current = afterBracket;
+      continue;
+    }
+    const afterColon = current.replace(EDITORIAL_RUBRIC_COLON_RE, '').trim();
+    if (afterColon.length >= 18 && afterColon !== current) {
+      current = afterColon;
+      continue;
+    }
+    break;
+  }
+  return current;
+}
+
+const ENTITY_STOPWORDS_EN = new Set([
+  'the', 'this', 'that', 'these', 'those', 'there', 'here', 'when', 'where', 'while', 'which', 'what',
+  'who', 'whom', 'whose', 'after', 'before', 'during', 'under', 'over', 'into', 'from', 'with', 'about',
+  'against', 'between', 'through', 'without', 'within', 'however', 'meanwhile', 'according', 'yesterday',
+  'today', 'tomorrow', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+  'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october',
+  'november', 'december', 'breaking', 'update', 'exclusive', 'video', 'photo', 'watch', 'read', 'more',
+  'just', 'also', 'very', 'many', 'most', 'some', 'such', 'other', 'first', 'second', 'third', 'last',
+  'next', 'another', 'several', 'both', 'each', 'every', 'all', 'any', 'our', 'your', 'their', 'they',
+  'them', 'its', 'his', 'her', 'she', 'he', 'we', 'you', 'new', 'news', 'report', 'reports', 'people',
+  'world', 'time', 'year', 'years', 'day', 'days', 'week', 'month', 'part', 'case', 'fact', 'point'
+]);
+
+const ENTITY_STOPWORDS_RU = new Set([
+  'это', 'этот', 'эта', 'эти', 'того', 'что', 'чтобы', 'как', 'когда', 'после', 'перед', 'между',
+  'через', 'однако', 'также', 'сейчас', 'ранее', 'сегодня', 'вчера', 'завтра', 'теперь', 'потом',
+  'первая', 'первый', 'первое', 'второй', 'вторая', 'отвечая', 'говоря', 'отмечая', 'заявив',
+  'видео', 'фото', 'новости', 'срочно', 'молния', 'главное', 'важно', 'эксклюзив', 'конечно',
+  'людей', 'люди', 'время', 'года', 'году', 'дня', 'дней', 'словам', 'очередь', 'стороны',
+  'если', 'хотя', 'пока', 'даже', 'уже', 'еще', 'ещё', 'очень', 'более', 'менее', 'можно', 'нужно',
+  'есть', 'было', 'были', 'будет', 'будут', 'может', 'могут', 'стал', 'стала', 'стали', 'всего',
+  'всех', 'всем', 'этом', 'этой', 'этого', 'свою', 'свой', 'свои', 'своих', 'который', 'которая',
+  'которые', 'которого', 'нашей', 'наши', 'наших', 'этих', 'таких', 'такой', 'такая', 'такое',
+  'по', 'на', 'во', 'со', 'об', 'из', 'за', 'до', 'от', 'при', 'под', 'над', 'для', 'без', 'но',
+  'мы', 'вы', 'он', 'она', 'они', 'его', 'ее', 'её', 'их', 'все', 'всё', 'там', 'тут', 'где'
+]);
+
+const DANGLING_TAIL_WORDS_EN = new Set([
+  'a', 'an', 'the', 'to', 'of', 'in', 'on', 'at', 'for', 'with', 'by', 'from', 'and', 'or', 'but',
+  'nor', 'yet', 'so', 'that', 'which', 'who', 'whom', 'whose', 'as', 'is', 'are', 'was', 'were',
+  'be', 'been', 'being', 'will', 'would', 'could', 'should', 'can', 'may', 'might', 'must', 'have',
+  'has', 'had', 'do', 'does', 'did', 'its', 'their', 'his', 'her', 'our', 'your', 'my', 'this',
+  'that', 'these', 'those', 'new', 'more', 'most', 'very', 'into', 'onto', 'about', 'after',
+  'before', 'between', 'through', 'during', 'under', 'over', 'against', 'without', 'within', 'not'
+]);
+
+const DANGLING_TAIL_WORDS_RU = new Set([
+  'и', 'а', 'но', 'или', 'либо', 'что', 'чтобы', 'как', 'в', 'во', 'на', 'к', 'ко', 'с', 'со',
+  'о', 'об', 'обо', 'по', 'из', 'изо', 'за', 'для', 'от', 'ото', 'до', 'при', 'под', 'подо', 'над',
+  'между', 'через', 'без', 'про', 'у', 'не', 'ни', 'бы', 'же', 'ли', 'то', 'это', 'этот', 'эта',
+  'эти', 'этого', 'этой', 'этом', 'его', 'ее', 'её', 'их', 'свой', 'свою', 'свои', 'наш', 'наша',
+  'новое', 'новый', 'новая', 'новые', 'нового', 'новой', 'новых', 'более', 'менее', 'очень', 'уже',
+  'еще', 'ещё', 'также', 'могут', 'может', 'будет', 'будут', 'было', 'были', 'стал', 'стала',
+  'самый', 'самая', 'самое', 'другой', 'другая', 'другое', 'один', 'одна', 'одно', 'все', 'всё'
+]);
+
+const DANGLING_MODIFIER_WORDS = new Set([
+  'new', 'major', 'first', 'second', 'third', 'next', 'key', 'top', 'big', 'large', 'massive',
+  'global', 'national', 'local', 'official', 'latest', 'recent', 'more', 'most', 'very', 'own',
+  'новое', 'новый', 'новая', 'новые', 'нового', 'новой', 'новых', 'более', 'главный', 'главная',
+  'главное', 'первый', 'первая', 'первое', 'крупный', 'крупная', 'крупное', 'масштабное',
+  'масштабного', 'гуманитарном', 'гуманитарной', 'католического', 'очередное', 'следующее'
+]);
+
+const DANGLING_TAIL_CJK_RE = /[的了和与及在对将把被为以从向而但并或等这那其新更很要将会正已]$/u;
+
+function isDanglingWord(rawWord: string): boolean {
+  const clean = rawWord.replace(/^["'«„(\[]+|["'»“”)\],.;:!?—–-]+$/g, '').toLowerCase();
+  if (!clean) return true;
+  if (DANGLING_TAIL_WORDS_EN.has(clean) || DANGLING_TAIL_WORDS_RU.has(clean)) return true;
+  if (clean.length === 1 && !/\d/.test(clean)) return true;
+  return false;
+}
+
+function isDanglingModifier(rawWord: string): boolean {
+  const clean = rawWord.replace(/^["'«„(\[]+|["'»“”)\],.;:!?—–-]+$/g, '').toLowerCase();
+  return DANGLING_MODIFIER_WORDS.has(clean);
+}
+
+function normalizeMatchText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function containsAnyTerm(text: string, terms: string[]): boolean {
+  if (!text || terms.length === 0) return false;
+  const lower = normalizeMatchText(text);
+  for (const term of terms) {
+    const t = normalizeMatchText(term);
+    if (t.length >= 2 && lower.includes(t)) return true;
+  }
+  return false;
+}
+
+/**
+ * Lightweight multilingual (EN / RU / CJK) regex + frequency NLP extractor.
+ * Extracts named entities, facts, and high-salience key phrases from a single post
+ * before title construction so summaries anchor cleanly on the core subject.
+ */
+export function extractPostKeyInsights(
+  post: HotPostItem,
+  extracted?: ExtractedClusterInfo
+): PostKeyInsights {
+  const rawBody = [
+    post.linkPreview?.title || '',
+    post.text || '',
+    post.linkPreview?.description || ''
+  ].join('\n');
+
+  const cleanText = stripUnpairedSurrogates(rawBody)
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/t\.me\/\S+/gi, ' ')
+    .replace(/[#*`_~]/g, ' ');
+
+  const entityScores = new Map<string, { display: string; score: number }>();
+  const phraseScores = new Map<string, { display: string; score: number }>();
+  const factsSet = new Set<string>(extracted?.facts || []);
+
+  const addEntity = (raw: string, baseScore: number) => {
+    const display = sanitizeTitle(raw).replace(/^["'«„(\[]+|["'»“”)\],.;:!?]+$/g, '').trim();
+    if (!display || display.length < 2 || display.length > 42) return;
+    const lower = display.toLowerCase();
+    if (ENTITY_STOPWORDS_EN.has(lower) || ENTITY_STOPWORDS_RU.has(lower)) return;
+    if (/^\d+$/.test(display)) return;
+
+    const existing = entityScores.get(lower);
+    if (existing) {
+      existing.score += baseScore;
+      // Prefer mixed/Title case display over all-lowercase
+      if (/[A-ZА-ЯЁ]/.test(display) && !/[A-ZА-ЯЁ]/.test(existing.display)) {
+        existing.display = display;
+      }
+    } else {
+      entityScores.set(lower, { display, score: baseScore });
+    }
+  };
+
+  const addPhrase = (raw: string, baseScore: number) => {
+    const display = sanitizeTitle(raw).replace(/^["'«„(\[]+|["'»“”)\],.;:!?]+$/g, '').trim();
+    if (!display || display.length < 2 || display.length > 44) return;
+    const lower = display.toLowerCase();
+    if (ENTITY_STOPWORDS_EN.has(lower) || ENTITY_STOPWORDS_RU.has(lower)) return;
+    const existing = phraseScores.get(lower);
+    if (existing) {
+      existing.score += baseScore;
+    } else {
+      phraseScores.set(lower, { display, score: baseScore });
+    }
+  };
+
+  // 1. Seed with known extracted cluster persons & entities
+  for (const p of extracted?.persons || []) addEntity(p, 8);
+  for (const e of extracted?.entities || []) addEntity(e, 7);
+
+  // 2. Tickers & acronyms ($BTC, NATO, США, ЕС, AI)
+  const tickerMatches = cleanText.match(/\$[A-Z]{2,8}\b/g) || [];
+  for (const t of tickerMatches) addEntity(t, 5.5);
+
+  const latinAcronyms = cleanText.match(/\b[A-Z]{2,6}\b/g) || [];
+  for (const ac of latinAcronyms) {
+    if (!/^(THE|AND|FOR|NOT|BUT|ALL|NEW|NOW|UPD|FAQ|IMG|URL|HTTP|HTTPS|PDF|GIF|MP4)$/.test(ac)) {
+      addEntity(ac, 3.2);
+    }
+  }
+
+  const cyrAcronyms = cleanText.match(/(?<![\p{L}\p{N}])[А-ЯЁ]{2,5}(?![\p{L}\p{N}])/gu) || [];
+  for (const ac of cyrAcronyms) {
+    if (!/^(НЕ|НА|ПО|ЗА|ОТ|ДО|ИЗ|ВО|СО|ОБ|НО|ДА|ИЛИ|ЧТО|КАК|ВСЕ|ЭТО|УЖЕ|ЕЩЕ|ЕЩЁ|ДЛЯ|ПРИ|БЕЗ|UPD)$/.test(ac)) {
+      addEntity(ac, 3.5);
+    }
+  }
+
+  // 3. Multi-word Latin proper nouns (e.g. "Fox News", "White House", "Melania Trump")
+  const latinMultiRe = /\b([A-Z][a-z]{1,20}(?:\s+(?:of|the|and|for|de|von|al)?\s*[A-Z][a-z]{1,20}){1,3})\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = latinMultiRe.exec(cleanText)) !== null) {
+    const candidate = m[1].trim();
+    const parts = candidate.split(/\s+/);
+    if (parts.length >= 2 && !ENTITY_STOPWORDS_EN.has(parts[0].toLowerCase())) {
+      const posBonus = m.index < 180 ? 2.0 : 0.8;
+      addEntity(candidate, 4.5 + posBonus);
+    }
+  }
+
+  // 4. Mid-sentence single Latin proper nouns
+  const latinSingleRe = /(?<=[\p{L}\p{N},:;—–-]\s+)([A-Z][a-z]{2,22})\b/gu;
+  while ((m = latinSingleRe.exec(cleanText)) !== null) {
+    const word = m[1].trim();
+    if (!ENTITY_STOPWORDS_EN.has(word.toLowerCase())) {
+      addEntity(word, m.index < 180 ? 3.2 : 1.8);
+    }
+  }
+
+  // 5. Multi-word Cyrillic proper nouns (e.g. "Мелания Трамп", "Дональд Трамп")
+  const cyrMultiRe = /(?<![\p{L}\p{N}])([А-ЯЁ][а-яё]{2,20}\s+[А-ЯЁ][а-яё]{2,20})(?![\p{L}\p{N}])/gu;
+  while ((m = cyrMultiRe.exec(cleanText)) !== null) {
+    const candidate = m[1].trim();
+    const parts = candidate.split(/\s+/);
+    if (!ENTITY_STOPWORDS_RU.has(parts[0].toLowerCase()) && !ENTITY_STOPWORDS_RU.has(parts[1].toLowerCase())) {
+      const posBonus = m.index < 180 ? 2.5 : 1.0;
+      addEntity(candidate, 5.0 + posBonus);
+    }
+  }
+
+  // 6. Mid-sentence single Cyrillic proper nouns (e.g. "Россия", "Украина", "Рождеству", "Алешках")
+  const cyrSingleRe = /(?<=[\p{L}\p{N},:;—–-]\s+)([А-ЯЁ][а-яё]{2,22})(?![\p{L}\p{N}])/gu;
+  while ((m = cyrSingleRe.exec(cleanText)) !== null) {
+    const word = m[1].trim();
+    if (!ENTITY_STOPWORDS_RU.has(word.toLowerCase())) {
+      addEntity(word, m.index < 180 ? 3.4 : 1.8);
+    }
+  }
+
+  // 7. CJK quoted / titled entities (《...》, 「...」, 『...』, “...”)
+  const cjkQuotedRe = /[《「『“]([\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}A-Za-z0-9·\s]{2,18})[》」』”]/gu;
+  while ((m = cjkQuotedRe.exec(cleanText)) !== null) {
+    addEntity(m[1], m.index < 180 ? 5.0 : 3.0);
+  }
+
+  // 8. Hashtags from original post text
+  const hashtagRe = /#([\p{L}\p{N}_]{2,26})/gu;
+  while ((m = hashtagRe.exec(rawBody)) !== null) {
+    const tag = m[1].replace(/_/g, ' ').trim();
+    if (!/^(news|video|photo|shorts|viral|breaking|update|новости|видео|фото|срочно)$/i.test(tag)) {
+      addEntity(tag, 3.0);
+    }
+  }
+
+  // 9. Facts, metrics, dates (EN / RU / CJK)
+  const extraFactsPatterns = [
+    /(?:\$|€|£|¥|₽)\s*\d+(?:[.,]\d+)?\s*(?:billion|million|trillion|млрд|млн|тыс|[BMKbmk])?/giu,
+    /\d+(?:[.,]\d+)?\s*(?:%|亿|万|млрд|млн|billion|million)/giu,
+    /(?<![\p{L}\p{N}])\d{1,2}\s+(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря|January|February|March|April|May|June|July|August|September|October|November|December)(?![\p{L}\p{N}])/giu,
+    /\d{4}年(?:\d{1,2}月(?:\d{1,2}日)?)?/gu
+  ];
+  for (const re of extraFactsPatterns) {
+    let fm: RegExpExecArray | null;
+    while ((fm = re.exec(cleanText)) !== null) {
+      const f = sanitizeTitle(fm[0]);
+      if (f.length >= 2 && f.length <= 28) factsSet.add(f);
+    }
+  }
+
+  // 10. Key phrases via lightweight token/bigram frequency (Latin, Cyrillic, CJK)
+  const wordTokens = cleanText
+    .replace(/[^\p{L}\p{N}\s'-]/gu, ' ')
+    .split(/\s+/)
+    .map(w => w.replace(/^['-]+|['-]+$/g, ''))
+    .filter(w => w.length >= 4 && !/^\d+$/.test(w));
+
+  const contentTokens: string[] = [];
+  for (let i = 0; i < wordTokens.length; i++) {
+    const tok = wordTokens[i];
+    const lower = tok.toLowerCase();
+    if (ENTITY_STOPWORDS_EN.has(lower) || ENTITY_STOPWORDS_RU.has(lower)) {
+      contentTokens.push('');
+      continue;
+    }
+    contentTokens.push(tok);
+    const posWeight = i < 24 ? 1.5 : 0.8;
+    addPhrase(tok, posWeight);
+    if (i > 0 && contentTokens[i - 1]) {
+      const bigram = `${contentTokens[i - 1]} ${tok}`;
+      addPhrase(bigram, posWeight * 1.4);
+    }
+  }
+
+  // Recurring CJK 2-4 char chunks
+  const cjkRuns = cleanText.match(/[\p{Script=Han}]{2,12}/gu) || [];
+  const cjkCounts = new Map<string, number>();
+  for (const run of cjkRuns) {
+    if (run.length <= 5) {
+      cjkCounts.set(run, (cjkCounts.get(run) || 0) + 1);
+    } else {
+      for (let len = 2; len <= 4; len++) {
+        for (let i = 0; i <= run.length - len; i++) {
+          const gram = run.slice(i, i + len);
+          if (!DANGLING_TAIL_CJK_RE.test(gram) && !/^[的了和与及在对将把被为以从向而但并或等这那其]/.test(gram)) {
+            cjkCounts.set(gram, (cjkCounts.get(gram) || 0) + 1);
+          }
+        }
+      }
+    }
+  }
+  for (const [gram, count] of cjkCounts.entries()) {
+    if (count >= 2 || gram.length >= 3) {
+      addPhrase(gram, count * 1.6 + (gram.length >= 3 ? 0.6 : 0));
+    }
+  }
+
+  // Rank & deduplicate entities (avoid redundant substring duplicates when a richer multi-word entity exists)
+  const sortedEntitiesRaw = Array.from(entityScores.values()).sort((a, b) => b.score - a.score);
+  const entities: string[] = [];
+  for (const item of sortedEntitiesRaw) {
+    const low = item.display.toLowerCase();
+    const isSubsumed = entities.some(existing => {
+      const exLow = existing.toLowerCase();
+      return exLow === low || (exLow.includes(low) && existing.includes(' '));
+    });
+    if (!isSubsumed) {
+      entities.push(item.display);
+      if (entities.length >= 6) break;
+    }
+  }
+
+  const sortedPhrasesRaw = Array.from(phraseScores.values()).sort((a, b) => b.score - a.score);
+  const keyPhrases: string[] = [];
+  for (const item of sortedPhrasesRaw) {
+    const low = item.display.toLowerCase();
+    const alreadyEntity = entities.some(e => e.toLowerCase() === low);
+    const isSubsumed = keyPhrases.some(existing => existing.toLowerCase().includes(low));
+    if (!alreadyEntity && !isSubsumed) {
+      keyPhrases.push(item.display);
+      if (keyPhrases.length >= 6) break;
+    }
+  }
+
+  const facts = Array.from(factsSet).slice(0, 4);
+  const coreSubject = entities[0] || keyPhrases[0] || '';
+  const anchorTerms = [...entities.slice(0, 4), ...facts.slice(0, 2), ...keyPhrases.slice(0, 3)];
+
+  return {
+    coreSubject,
+    entities,
+    keyPhrases,
+    facts,
+    anchorTerms
+  };
+}
+
+/**
+ * Truncates a title at a natural clause or complete phrase boundary,
+ * avoiding dangling articles/prepositions/modifiers so the result stays semantically meaningful.
+ */
+function semanticTruncate(text: string, maxLen: number, anchorTerms: string[] = []): string {
+  const clean = sanitizeTitle(text);
+  if (!clean) return '';
+  if (clean.length <= maxLen) return clean;
+
+  // If the full text is only slightly over maxLen and ends cleanly, prefer keeping it intact
+  if (clean.length <= maxLen + 10 && !clean.includes('\n')) {
+    return clean;
+  }
+
+  const isMostlyCjk = (clean.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu)?.length || 0) > clean.length * 0.35;
+
+  // 1. Prefer a natural clause boundary inside [maxLen * 0.50, maxLen]
+  const windowSlice = safeSliceUtf16(clean, maxLen);
+  const clauseBoundaries: number[] = [];
+  const clauseRe = /([.!?。！？;；]|(?:\s+[—–-]\s+)|,\s+|，|：)/gu;
+  let cm: RegExpExecArray | null;
+  while ((cm = clauseRe.exec(windowSlice)) !== null) {
+    const boundaryIdx = cm.index + (/[.!?。！？]/.test(cm[1]) ? cm[1].length : 0);
+    if (boundaryIdx >= Math.floor(maxLen * 0.48)) {
+      clauseBoundaries.push(boundaryIdx);
+    }
+  }
+
+  if (clauseBoundaries.length > 0) {
+    const hasAnchorInFull = containsAnyTerm(clean, anchorTerms);
+    // Pick the longest natural clause boundary that keeps at least one anchor term (if any exist)
+    for (let i = clauseBoundaries.length - 1; i >= 0; i--) {
+      const candidate = sanitizeTitle(safeSliceUtf16(windowSlice, clauseBoundaries[i]))
+        .replace(/[,;:\-–—«(\[]+$/g, '')
+        .trim();
+      if (candidate.length >= Math.floor(maxLen * 0.45) && (!hasAnchorInFull || containsAnyTerm(candidate, anchorTerms))) {
+        const endsWithTerminal = /[.!?。！？]$/.test(candidate);
+        return endsWithTerminal ? candidate : `${candidate}...`;
+      }
+    }
+  }
+
+  // 2. CJK-aware truncation: strip trailing dangling CJK particles
+  if (isMostlyCjk) {
+    let cjkCut = safeSliceUtf16(clean, maxLen).replace(/[，、；：—–\-（(《「【]+$/u, '').trim();
+    let guard = 0;
+    while (cjkCut.length > Math.floor(maxLen * 0.5) && DANGLING_TAIL_CJK_RE.test(cjkCut) && guard < 4) {
+      cjkCut = safeSliceUtf16(cjkCut, cjkCut.length - 1).trim();
+      guard++;
+    }
+    return sanitizeTitle(cjkCut) + '...';
+  }
+
+  // 3. Space-delimited languages (EN / RU / etc.): find word boundary and handle dangling tails
+  let cutPos = windowSlice.lastIndexOf(' ');
+  if (cutPos < Math.floor(maxLen * 0.45)) {
+    cutPos = windowSlice.length;
+  }
+  let candidate = safeSliceUtf16(clean, cutPos).trim();
+  const words = candidate.split(/\s+/);
+  const lastWord = words[words.length - 1] || '';
+
+  // Micro-lookahead: if truncation landed right on a dangling adjective/modifier (e.g. "новое" before "перемирие",
+  // or "new" before "ceasefire") or split a figure from its scale unit (e.g. "$10" before "billion"),
+  // extend by 1 completing word if within +16 chars to finish the phrase cleanly!
+  const isScaleUnit = (w: string) =>
+    /^(?:billion|million|trillion|thousand|percent|users|members|years|months|days|hours|млрд|млн|тыс|процентов|человек|лет|дней)\.?$/iu.test(
+      w.replace(/[,;:\-–—«(\["']+$/g, '')
+    );
+  const isBareNumber = (w: string) =>
+    /^(?:[$€£¥₽+-]?\d+(?:[.,]\d+)?)$/.test(w.replace(/[,;:\-–—«(\["']+$/g, ''));
+
+  if (cutPos < clean.length) {
+    const rest = clean.slice(cutPos).trim();
+    const nextWords = rest.split(/\s+/);
+    const shouldCompleteUnit = isBareNumber(lastWord) && nextWords[0] && isScaleUnit(nextWords[0]);
+    if ((shouldCompleteUnit || isDanglingModifier(lastWord) || isDanglingWord(lastWord)) && nextWords.length > 0 && nextWords[0]) {
+      let extended1 = `${candidate} ${nextWords[0]}`.replace(/[,;:\-–—«(\[]+$/g, '').trim();
+      if (isBareNumber(nextWords[0]) && nextWords[1] && isScaleUnit(nextWords[1])) {
+        const withUnit = `${extended1} ${nextWords[1]}`.replace(/[,;:\-–—«(\[]+$/g, '').trim();
+        if (withUnit.length <= maxLen + 20) {
+          extended1 = withUnit;
+        }
+      }
+      if (extended1.length <= maxLen + 20 && !isDanglingWord(nextWords[0])) {
+        const endsWithTerminal = /[.!?]$/.test(extended1);
+        return endsWithTerminal ? sanitizeTitle(extended1) : `${sanitizeTitle(extended1)}...`;
+      }
+      if (!shouldCompleteUnit && nextWords.length > 1 && isDanglingWord(nextWords[0]) && !isDanglingWord(nextWords[1])) {
+        const extended2 = `${candidate} ${nextWords[0]} ${nextWords[1]}`.replace(/[,;:\-–—«(\[]+$/g, '').trim();
+        if (extended2.length <= maxLen + 20) {
+          const endsWithTerminal = /[.!?]$/.test(extended2);
+          return endsWithTerminal ? sanitizeTitle(extended2) : `${sanitizeTitle(extended2)}...`;
+        }
+      }
+    }
+  }
+
+  // Otherwise, trim back dangling prepositions, conjunctions, articles, and incomplete modifiers
+  while (words.length > 3 && (isDanglingWord(words[words.length - 1]) || isDanglingModifier(words[words.length - 1]))) {
+    words.pop();
+  }
+
+  candidate = words.join(' ').replace(/[,;:\-–—«(\["']+$/g, '').trim();
+  if (!candidate) {
+    return truncateAtWordBoundary(clean, maxLen);
+  }
+  const endsWithTerminal = /[.!?]$/.test(candidate);
+  return endsWithTerminal ? sanitizeTitle(candidate) : `${sanitizeTitle(candidate)}...`;
+}
+
+function ensureCoreSubjectInTitle(
+  title: string,
+  insights: PostKeyInsights,
+  maxLen: number
+): string {
+  const clean = sanitizeTitle(title);
+  if (!clean) return '';
+  const topEntities = insights.entities.slice(0, 2);
+  if (topEntities.length === 0 || !insights.coreSubject) {
+    return clean;
+  }
+  // If title already mentions one of the top entities, keep it natural
+  if (containsAnyTerm(clean, topEntities)) {
+    return clean;
+  }
+  // Avoid redundant prefix if subject is too long relative to budget
+  const subject = insights.coreSubject;
+  if (subject.length > Math.floor(maxLen * 0.42)) {
+    return clean;
+  }
+  const hadEllipsis = /\.{3}$/.test(clean);
+  const bodyWithoutEllipsis = hadEllipsis ? clean.slice(0, -3).trim() : clean;
+  const remainingBudget = Math.max(28, maxLen - subject.length - 2);
+  let trimmedBody = semanticTruncate(bodyWithoutEllipsis, remainingBudget, insights.anchorTerms);
+  if (hadEllipsis && !/(\.{3}|[.!?。！？])$/.test(trimmedBody)) {
+    trimmedBody = `${trimmedBody}...`;
+  }
+  return sanitizeTitle(`${subject}: ${trimmedBody}`);
+}
 
 export function detectTopicCategory(text: string, domains: string[] = []): string {
   const lower = (text + ' ' + domains.join(' ')).toLowerCase();
@@ -1392,66 +1888,139 @@ function generateCleanSummary(text: string, fallback: string): string {
   return summary || truncateAtWordBoundary(clean, 180);
 }
 
-function summarizeSinglePost(
+export function summarizeSinglePost(
   post: HotPostItem,
   extracted?: ExtractedClusterInfo
 ): { title: string; summary: string } {
-  const persons = extracted?.persons || [];
-  const entities = extracted?.entities || [];
-  const facts = extracted?.facts || [];
   const fullText = (post.text || '').trim();
   const cleanSnippet = post.cleanSnippet || '';
 
+  // 0. Extract key entities, facts, and salient phrases first via light NLP helper
+  const insights = extractPostKeyInsights(post, extracted);
+  const anchorTerms = insights.anchorTerms;
+
   // 1. Structured link preview headline (editorially created)
   if (post.linkPreview?.title) {
-    const cleanedLp = cleanArticleHeadline(post.linkPreview.title);
-    if (cleanedLp.length >= 10 && cleanedLp.length <= 110) {
+    const cleanedLp = stripEditorialRubricPrefix(cleanArticleHeadline(post.linkPreview.title));
+    if (cleanedLp.length >= 10) {
       const summary = generateCleanSummary(fullText, post.linkPreview.description || cleanSnippet);
-      return { title: cleanedLp, summary };
+      const bounded = cleanedLp.length <= 105
+        ? cleanedLp
+        : semanticTruncate(cleanedLp, 94, anchorTerms);
+      const finalLp = bounded.length < 48
+        ? ensureCoreSubjectInTitle(bounded, insights, 98)
+        : bounded;
+      return { title: sanitizeTitle(finalLp), summary };
     }
   }
 
-  // 2. Distinct first line headline (Telegram bold / markdown / announcement header)
+  // 2. Distinct first-line headline (Telegram bold / markdown / announcement header)
   const lines = fullText.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
   if (lines.length > 1) {
     const firstLine = lines[0];
-    const candidate = extractHeaderLineCandidate(firstLine);
+    const candidate = stripEditorialRubricPrefix(extractHeaderLineCandidate(firstLine));
 
     if (candidate.length >= 10 && !isGenericLead(candidate)) {
       const remaining = lines.slice(1).join(' ');
       const summary = generateCleanSummary(remaining.length > 40 ? remaining : fullText, cleanSnippet);
-      if (candidate.length <= 110) {
-        return { title: candidate, summary };
+
+      if (candidate.length <= 105) {
+        const enriched = candidate.length < 40
+          ? ensureCoreSubjectInTitle(candidate, insights, 98)
+          : candidate;
+        return { title: sanitizeTitle(enriched), summary };
       }
-      if (candidate.length <= 180) {
-        return { title: truncateAtWordBoundary(candidate, 100), summary };
+      if (candidate.length <= 220) {
+        const truncated = semanticTruncate(candidate, 92, anchorTerms);
+        const anchored = ensureCoreSubjectInTitle(truncated, insights, 98);
+        return { title: sanitizeTitle(anchored), summary };
       }
     }
   }
 
-  // 3. For long content: summarize into a crisp title and informative summary
-  const sentences = splitIntoSentences(fullText);
+  // 3. Entity- & key-phrase-guided sentence selection for single-line or long body posts
+  const urlFreeText = fullText
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/t\.me\/\S+/gi, ' ')
+    .trim();
+  const rawSentences = splitIntoSentences(urlFreeText);
+  const candidatePool: string[] = [];
+  if (lines.length > 1 && lines[0].length >= 15) {
+    candidatePool.push(lines[0]);
+  }
+  for (const s of rawSentences) {
+    if (!candidatePool.includes(s)) candidatePool.push(s);
+  }
+  if (candidatePool.length === 0 && lines.length > 0 && lines[0].length >= 15) {
+    candidatePool.push(lines[0]);
+  }
+
   let bestTitle = '';
-  for (const s of sentences) {
-    const clean = sanitizeTitle(stripLeadingDecorators(s));
-    if (clean.length >= 15 && !isGenericLead(clean)) {
+  let bestScore = -Infinity;
+
+  for (let i = 0; i < Math.min(candidatePool.length, 8); i++) {
+    const raw = candidatePool[i];
+    const clean = sanitizeTitle(stripEditorialRubricPrefix(stripLeadingDecorators(raw)));
+    if (clean.length < 15 || isGenericLead(clean)) continue;
+
+    const lower = normalizeMatchText(clean);
+    let score = 0;
+
+    // Position bias: lead lines/sentences usually introduce the main topic
+    score += Math.max(0, 3.0 - i * 0.7);
+
+    // Reward coverage of extracted entities, facts, and key phrases
+    for (const ent of insights.entities.slice(0, 4)) {
+      if (lower.includes(ent.toLowerCase())) score += 3.5;
+    }
+    for (const fact of insights.facts.slice(0, 3)) {
+      if (lower.includes(fact.toLowerCase())) score += 2.0;
+    }
+    for (const phrase of insights.keyPhrases.slice(0, 4)) {
+      if (lower.includes(phrase.toLowerCase())) score += 1.5;
+    }
+
+    // Conciseness bonus for naturally headline-length clauses
+    if (clean.length >= 25 && clean.length <= 110) {
+      score += 1.8;
+    } else if (clean.length > 220) {
+      score -= 0.8;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
       bestTitle = clean;
-      break;
     }
   }
 
-  if (bestTitle.length > 85) {
-    bestTitle = truncateAtWordBoundary(bestTitle, 80);
+  if (bestTitle) {
+    if (bestTitle.length > 92) {
+      bestTitle = semanticTruncate(bestTitle, 88, anchorTerms);
+    }
+    bestTitle = ensureCoreSubjectInTitle(bestTitle, insights, 96);
   }
 
-  // If no single sentence was adequate, synthesize from person / entity / fact
+  // 4. Structured entity + fact / key-phrase synthesis fallback
   if (!bestTitle || bestTitle.length < 12) {
-    const subject = persons[0] || entities[0] || post.channelName;
-    const fact = facts[0];
-    if (fact) {
+    const subject =
+      insights.coreSubject ||
+      extracted?.persons?.[0] ||
+      extracted?.entities?.[0] ||
+      post.channelName;
+    const fact = insights.facts[0];
+    const topPhrases = insights.keyPhrases
+      .filter(p => p.toLowerCase() !== subject.toLowerCase())
+      .slice(0, 2);
+
+    if (fact && topPhrases.length > 0) {
+      bestTitle = sanitizeTitle(`${subject}: ${topPhrases[0]} (${fact})`);
+    } else if (fact) {
       bestTitle = sanitizeTitle(`${subject}: ${fact}`);
+    } else if (topPhrases.length > 0) {
+      bestTitle = sanitizeTitle(`${subject}: ${topPhrases.join(' · ')}`);
     } else {
-      bestTitle = sanitizeTitle(`${subject}: ${truncateAtWordBoundary(sanitizeTitle(stripLeadingDecorators(cleanSnippet)), 65)}`);
+      const cleanedSnippet = sanitizeTitle(stripEditorialRubricPrefix(stripLeadingDecorators(cleanSnippet)));
+      bestTitle = sanitizeTitle(`${subject}: ${semanticTruncate(cleanedSnippet, 68, anchorTerms)}`);
     }
   }
 
