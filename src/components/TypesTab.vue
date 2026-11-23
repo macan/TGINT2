@@ -822,18 +822,21 @@ const startStreaming = async (resume = false) => {
         }
       }
     } else if (res.status === 200) {
-      // Server returned 200 OK (initial request or server ignored Range header)
-      if (resume && loadedBytes.value > 0 && !isUsingLz4.value) {
-        console.warn("Server responded with 200 OK instead of 206 Partial Content. Resetting offset to 0 to prevent duplicates.");
-        items.value = [];
-        channelIndexMap.clear();
+      // Server returned 200 OK (initial request, LZ4 full restart, or server ignored Range header)
+      if (resume && loadedBytes.value > 0) {
+        if (!isUsingLz4.value) {
+          console.warn("Server responded with 200 OK instead of 206 Partial Content. Resetting offset to 0 to prevent duplicates.");
+          items.value = [];
+          channelIndexMap.clear();
+          totalParsedLines.value = 0;
+        }
         loadedBytes.value = 0;
         decompressedBytesCount.value = 0;
-        totalParsedLines.value = 0;
         streamLineRemainder = "";
         lastResumedByteOffset.value = 0;
       }
-      const contentLength = res.headers.get("content-length");
+      const contentLength =
+        res.headers.get("x-gos-content-length") || res.headers.get("content-length");
       if (contentLength) {
         const parsedLen = parseInt(contentLength, 10);
         if (!isNaN(parsedLen) && parsedLen > 0) {
@@ -880,8 +883,10 @@ const startStreaming = async (resume = false) => {
     lastChunkReceivedTime = Date.now();
     startStallWatchdog();
 
+    let streamReachedEof = false;
+
     while (true) {
-      if (isPaused.value) {
+      if (isPaused.value || abortController?.signal.aborted) {
         break;
       }
 
@@ -898,14 +903,18 @@ const startStreaming = async (resume = false) => {
         }
 
         // Check if stream closed prematurely on unreliable network
-        // Only test premature break if we confirmed total from 206 Content-Range
-        if (hasParsedTotalFromContentRange.value && contentRangeTotalLength.value !== null) {
-          const expectedTotal = contentRangeTotalLength.value;
-          if (loadedBytes.value < expectedTotal - 1024 && (items.value.length + batch.length < memoryLimit.value)) {
+        const expectedTotal = contentRangeTotalLength.value ?? serverTotalLength.value;
+        if (expectedTotal !== null && expectedTotal > 0) {
+          if (loadedBytes.value < expectedTotal && (items.value.length + batch.length < memoryLimit.value)) {
             console.warn(`[Stream Premature Break] Reader returned done=true prematurely! Received ${loadedBytes.value} of ${expectedTotal} bytes (missing ${expectedTotal - loadedBytes.value} bytes). Auto-retrying with Range header...`);
             throw new Error(`Connection closed prematurely (${(loadedBytes.value / (1024 * 1024)).toFixed(1)} MB of ${(expectedTotal / (1024 * 1024)).toFixed(1)} MB received)`);
           }
+        } else if (isUsingLz4.value && lz4Decoder && !lz4Decoder.completed && (items.value.length + batch.length < memoryLimit.value)) {
+          console.warn(`[Stream Premature Break] LZ4 stream ended without EndMark at ${loadedBytes.value} bytes. Auto-retrying with Range header...`);
+          throw new Error(`LZ4 stream ended prematurely at ${(loadedBytes.value / (1024 * 1024)).toFixed(1)} MB`);
         }
+
+        streamReachedEof = true;
         break;
       }
 
@@ -968,15 +977,25 @@ const startStreaming = async (resume = false) => {
 
     flushBatch();
 
-    if (!isPaused.value) {
+    if (!isPaused.value && !abortController?.signal.aborted) {
       isCompleted.value = true;
       isCacheLoaded.value = true;
       retryAttempt.value = 0;
       isAutoRetrying.value = false;
       streamError.value = null;
 
-      // Save raw LZ4 blob only if LZ4 was used (not raw NDJSON fallback)
-      if (isUsingLz4.value && lz4Chunks.length > 0) {
+      const expectedFullLength = contentRangeTotalLength.value ?? serverTotalLength.value;
+      const lz4FrameComplete = !isUsingLz4.value || Boolean(lz4Decoder?.completed);
+      const isFullObjectLengthConfirmed =
+        streamReachedEof &&
+        loadedBytes.value > 0 &&
+        lz4FrameComplete &&
+        (expectedFullLength !== null
+          ? loadedBytes.value === expectedFullLength
+          : isUsingLz4.value && lz4FrameComplete);
+
+      // Save raw LZ4 blob only when the entire LZ4 frame & object length are confirmed complete
+      if (isFullObjectLengthConfirmed && isUsingLz4.value && lz4Chunks.length > 0) {
         try {
           const lz4Blob = new Blob(lz4Chunks, { type: "application/octet-stream" });
           await saveLz4Blob(lz4Blob);
@@ -990,9 +1009,9 @@ const startStreaming = async (resume = false) => {
         const lastModified = res.headers.get("last-modified");
         await saveTypesCacheMeta({
           id: "classify_meta",
-          etag,
-          lastModified,
-          contentLength: loadedBytes.value,
+          etag: isFullObjectLengthConfirmed ? etag : null,
+          lastModified: isFullObjectLengthConfirmed ? lastModified : null,
+          contentLength: isFullObjectLengthConfirmed ? loadedBytes.value : null,
           totalChannels: compactItems.value.length,
           cachedAt: Date.now(),
           lastCheckedAt: Date.now(),
@@ -1082,10 +1101,19 @@ const manualResumeNow = () => {
   startStreaming(true);
 };
 
+const parsePositiveHeaderInt = (value: string | null): number | null => {
+  if (!value) return null;
+  const parsed = parseInt(value.trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
 // Check remote dataset via HEAD request and handle non-standard GOS responses
 const checkRemoteDatasetChanged = async (cachedEtag: string | null): Promise<'unchanged' | 'changed' | 'uncertain'> => {
   try {
-    const headRes = await fetch(CLASSIFY_LZ4_URL, {
+    const cachedMeta = await getTypesCacheMeta();
+    const targetUrl = cachedMeta?.isUsingLz4 === false ? CLASSIFY_RAW_URL : CLASSIFY_LZ4_URL;
+
+    const headRes = await fetch(targetUrl, {
       method: "HEAD",
       cache: "no-cache"
     });
@@ -1095,29 +1123,47 @@ const checkRemoteDatasetChanged = async (cachedEtag: string | null): Promise<'un
     }
 
     const remoteEtag = headRes.headers.get("etag") || headRes.headers.get("x-amz-version-id");
-    const remoteCl = headRes.headers.get("content-length") || headRes.headers.get("x-gos-content-length");
-    const remoteLastMod = headRes.headers.get("last-modified");
+    // Prefer x-gos-content-length when exposed (same-origin or via Access-Control-Expose-Headers),
+    // falling back to CORS-safelisted content-length; ignore invalid or "0" values.
+    const remoteClNum =
+      parsePositiveHeaderInt(headRes.headers.get("x-gos-content-length")) ??
+      parsePositiveHeaderInt(headRes.headers.get("content-length"));
+    const remoteLastMod = headRes.headers.get("last-modified")?.trim() || null;
 
-    if (remoteEtag && cachedEtag) {
+    const effectiveCachedEtag = cachedEtag || cachedMeta?.etag || null;
+    if (remoteEtag && effectiveCachedEtag) {
       const cleanRemote = remoteEtag.replace(/^(W\/)?"|"$/g, "");
-      const cleanCached = cachedEtag.replace(/^(W\/)?"|"$/g, "");
+      const cleanCached = effectiveCachedEtag.replace(/^(W\/)?"|"$/g, "");
       return cleanRemote === cleanCached ? 'unchanged' : 'changed';
     }
 
-    if (!remoteEtag && !remoteLastMod && !remoteCl) {
-      return 'uncertain';
+    const cachedLastMod = cachedMeta?.lastModified?.trim() || null;
+    const cachedClNum =
+      typeof cachedMeta?.contentLength === "number" && cachedMeta.contentLength > 0
+        ? cachedMeta.contentLength
+        : null;
+
+    // 1. If Last-Modified is available on both sides and differs, the remote object definitely changed
+    if (remoteLastMod && cachedLastMod && remoteLastMod !== cachedLastMod) {
+      return 'changed';
     }
 
-    const cachedMeta = await getTypesCacheMeta();
-    if (remoteCl && cachedMeta?.contentLength) {
-      const clNum = parseInt(remoteCl, 10);
-      if (clNum > 0 && Math.abs(clNum - cachedMeta.contentLength) > 1024) {
-        return 'changed';
+    // 2. Compare exact object byte length (x-gos-content-length / content-length) against cached length
+    if (remoteClNum !== null && cachedClNum !== null) {
+      if (remoteClNum === cachedClNum) {
+        return 'unchanged';
       }
+      return 'changed';
+    }
+
+    // 3. Fallback to matching Last-Modified when content-length is unavailable
+    if (remoteLastMod && cachedLastMod && remoteLastMod === cachedLastMod) {
+      return 'unchanged';
     }
 
     return 'uncertain';
-  } catch {
+  } catch (err) {
+    console.warn("[Types Cache] Remote HEAD check failed:", err);
     return 'uncertain';
   }
 };
@@ -1204,6 +1250,9 @@ const startBackgroundSync = async (isResume = false) => {
 
     const etag = res.headers.get("etag") || res.headers.get("x-amz-version-id");
     const lastModified = res.headers.get("last-modified");
+    const expectedRemoteLength =
+      parsePositiveHeaderInt(res.headers.get("x-gos-content-length")) ??
+      parsePositiveHeaderInt(res.headers.get("content-length"));
     const reader = res.body.getReader();
     const decoder = new TextDecoder("utf-8");
 
@@ -1211,6 +1260,7 @@ const startBackgroundSync = async (isResume = false) => {
     const lz4Chunks: Uint8Array[] = [];
     let syncLoadedBytes = 0;
     let syncRemainder = "";
+    let streamReachedEof = false;
 
     const flushSyncBatch = async () => {
       if (syncBatch.length > 0) {
@@ -1246,12 +1296,13 @@ const startBackgroundSync = async (isResume = false) => {
     }
 
     while (true) {
-      if (isBackgroundSyncPaused.value) {
+      if (isBackgroundSyncPaused.value || backgroundSyncAbortController?.signal.aborted) {
         break;
       }
       const { done, value } = await reader.read();
       if (done) {
         if (isLz4 && lz4Decoder) lz4Decoder.finish();
+        streamReachedEof = true;
         break;
       }
       if (value) {
@@ -1274,19 +1325,49 @@ const startBackgroundSync = async (isResume = false) => {
       }
     }
 
-    if (syncRemainder.trim()) {
+    const wasStoppedByUser =
+      isBackgroundSyncPaused.value || Boolean(backgroundSyncAbortController?.signal.aborted);
+
+    // Only parse trailing remainder when the stream reached EOF naturally
+    if (!wasStoppedByUser && streamReachedEof && syncRemainder.trim()) {
       const item = parseLineToItem(syncRemainder.trim());
       if (item) syncBatch.push(item);
     }
     await flushSyncBatch();
 
-    // Cache LZ4 blob if LZ4 was used
+    if (wasStoppedByUser) {
+      backgroundSyncStatus.value = "paused";
+      backgroundSyncMessage.value = t("types.syncPaused");
+      return;
+    }
+
+    const lz4FrameComplete = !isLz4 || Boolean(lz4Decoder?.completed);
+    const fullLengthConfirmed =
+      streamReachedEof &&
+      syncLoadedBytes > 0 &&
+      lz4FrameComplete &&
+      (expectedRemoteLength !== null
+        ? syncLoadedBytes === expectedRemoteLength
+        : isLz4 && lz4FrameComplete);
+
+    if (!fullLengthConfirmed) {
+      console.warn(
+        `[Types Cache] Background sync ended with incomplete object (${syncLoadedBytes} bytes received` +
+          `${expectedRemoteLength !== null ? ` of ${expectedRemoteLength} expected` : ""}` +
+          `${isLz4 ? `, lz4FrameComplete=${lz4FrameComplete}` : ""}). Skipping lz4_blob & contentLength metadata save.`
+      );
+      backgroundSyncStatus.value = "error";
+      backgroundSyncMessage.value = t("types.syncInterrupted");
+      return;
+    }
+
+    // Cache LZ4 blob only after confirming the full LZ4 object arrived intact
     if (isLz4 && lz4Chunks.length > 0) {
       const blob = new Blob(lz4Chunks, { type: "application/octet-stream" });
       await saveLz4Blob(blob);
     }
 
-    // Save meta
+    // Save meta only when syncLoadedBytes is verified to be the full object length
     await saveTypesCacheMeta({
       id: "classify_meta",
       etag,
