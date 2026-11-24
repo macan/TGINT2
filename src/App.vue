@@ -166,6 +166,13 @@ import DateRangePicker from "./components/listen/DateRangePicker.vue";
 import ExplorerNerWidget from "./components/explorer/ExplorerNerWidget.vue";
 import type { NerPostSummary } from "./components/explorer/ExplorerNerModal.vue";
 const ExplorerNerModal = defineAsyncComponent(() => import("./components/explorer/ExplorerNerModal.vue"));
+import MemoryQuickToggle from "./components/memory/MemoryQuickToggle.vue";
+import MemoryToast from "./components/memory/MemoryToast.vue";
+const MemoryMonitorWidget = defineAsyncComponent(() => import("./components/memory/MemoryMonitorWidget.vue"));
+import {
+  resolveMemoryChannelTarget,
+  type MemoryItemRecord,
+} from "./utils/indexedDbMemory";
 import {
   aggregateNerIndex,
   applyManualEntityCreate,
@@ -10878,6 +10885,55 @@ const jumpToExplorerFromChannel = (channel: string, channelObj?: any) => {
   searchChannel();
 };
 
+const jumpToExplorerFromMemory = (item: MemoryItemRecord) => {
+  const targetChannel = resolveMemoryChannelTarget(item);
+  if (!targetChannel) return;
+  const targetPostKey = item.type === 'post' ? item.postKey : undefined;
+
+  const findLoadedPostKey = (key?: string): string | undefined => {
+    if (!key || !posts.value?.length) return undefined;
+    const exact = posts.value.find((p: any) => p.key === key);
+    if (exact) return exact.key;
+    const lower = key.toLowerCase();
+    const ci = posts.value.find((p: any) => String(p.key || '').toLowerCase() === lower);
+    return ci?.key;
+  };
+
+  activeTab.value = 'explorer';
+
+  const alreadyLoadedChannel =
+    currentChannelName.value &&
+    currentChannelName.value.replace(/^@/, '').toLowerCase() === targetChannel.toLowerCase();
+
+  const existingMatchedKey = alreadyLoadedChannel ? findLoadedPostKey(targetPostKey) : undefined;
+  if (existingMatchedKey) {
+    nextTick(() => {
+      scrollToPost(existingMatchedKey);
+    });
+    return;
+  }
+
+  channelName.value = targetChannel;
+  searchChannel();
+
+  if (targetPostKey) {
+    let attempts = 0;
+    const tryLocatePost = () => {
+      attempts++;
+      if (activeTab.value !== 'explorer') return;
+      const matchedKey = findLoadedPostKey(targetPostKey);
+      if (matchedKey) {
+        nextTick(() => scrollToPost(matchedKey));
+        return;
+      }
+      if (attempts < 16) {
+        setTimeout(tryLocatePost, 350);
+      }
+    };
+    setTimeout(tryLocatePost, 350);
+  }
+};
+
 const lastTypesScrollY = ref(0);
 const lastTypesChannel = ref("");
 
@@ -21277,6 +21333,13 @@ onUnmounted(() => {
                  :id="'channel-card-' + getChannelCardIdentifier(channel)"
                  :data-channel-identifier="getChannelCardIdentifier(channel)"
                  class="break-inside-avoid bg-white dark:bg-gray-800 p-5 rounded-3xl border border-gray-200/75 dark:border-gray-750 shadow-sm hover:shadow-xl hover:border-teal-500/20 dark:hover:border-teal-500/15 transition-all duration-300 mb-6 relative overflow-hidden group">
+              <MemoryQuickToggle
+                v-if="activeChannelOrUser === 'channel'"
+                item-type="channel"
+                :channel="channel"
+                source-tab="explorer"
+                offset-class="bottom-14 right-4"
+              />
               <!-- Subtle Hover Gradient Accent -->
               <div class="absolute -right-12 -top-12 w-24 h-24 bg-teal-500/[0.03] dark:bg-teal-500/[0.04] rounded-full blur-xl group-hover:scale-150 transition-transform duration-500 pointer-events-none"></div>
 
@@ -21359,6 +21422,13 @@ onUnmounted(() => {
               :data-channel-identifier="getChannelCardIdentifier(channel)"
               class="group relative bg-white dark:bg-gray-800 p-3.5 sm:p-4 rounded-2xl border border-gray-200/80 dark:border-gray-750 shadow-sm hover:shadow-md hover:border-teal-500/30 dark:hover:border-teal-500/30 transition-all duration-200 flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4"
             >
+              <MemoryQuickToggle
+                v-if="activeChannelOrUser === 'channel'"
+                item-type="channel"
+                :channel="channel"
+                source-tab="explorer"
+                offset-class="top-2.5 right-2.5"
+              />
               <!-- Left Section: Avatar + Title/Name + Username/ID -->
               <div 
                 class="flex items-center gap-3 min-w-[220px] max-w-xs shrink-0 cursor-pointer rounded-xl p-1 -m-1 transition-colors hover:bg-teal-500/5 dark:hover:bg-teal-500/10"
@@ -21688,8 +21758,16 @@ onUnmounted(() => {
             class="lg:col-span-4 xl:col-span-3 space-y-6 transition-all duration-500 origin-left"
           >
             <div
-              class="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-200/60 dark:border-gray-700/60 overflow-hidden relative"
+              class="bg-white dark:bg-gray-800 rounded-3xl shadow-sm border border-gray-200/60 dark:border-gray-700/60 overflow-hidden relative group"
             >
+              <MemoryQuickToggle
+                item-type="channel"
+                :metadata="metadata"
+                :channel="{ username: currentChannelName }"
+                source-tab="explorer"
+                size="md"
+                offset-class="top-3 right-3"
+              />
               <div
                 class="h-28 bg-gradient-to-br from-teal-500 via-emerald-600 to-indigo-700 relative overflow-hidden"
               >
@@ -23092,7 +23170,7 @@ onUnmounted(() => {
                     :data-post-key="post.key"
                     :key="post.key || index"
                     :class="[
-                      'rounded-2xl border p-5 hover:shadow-md transition-all duration-300 relative overflow-hidden',
+                      'rounded-2xl border p-5 hover:shadow-md transition-all duration-300 relative overflow-hidden group',
                       post.data?.grouped?.nr > 0
                         ? `${getGroupStyles(post.data.grouped.root).bg} ${
                             getGroupStyles(post.data.grouped.root).border
@@ -23102,6 +23180,14 @@ onUnmounted(() => {
                     ]"
                     :style="{ 'content-visibility': 'auto', 'contain-intrinsic-size': '250px' }"
                   >
+                    <MemoryQuickToggle
+                      item-type="post"
+                      :post="post"
+                      :fallback-channel="metadata?.username || currentChannelName"
+                      :fallback-channel-title="metadata?.title || metadata?.name"
+                      source-tab="explorer"
+                      offset-class="bottom-3 right-3"
+                    />
                     <!-- Decorative Corner Glow -->
                     <div
                       class="absolute -top-10 -right-10 w-24 h-24 bg-teal-500/5 dark:bg-teal-500/5 rounded-full blur-2xl pointer-events-none"
@@ -23634,6 +23720,14 @@ onUnmounted(() => {
                       class="relative overflow-hidden cursor-pointer group/inner"
                       @click="openPostModal(post)"
                     >
+                      <MemoryQuickToggle
+                        item-type="post"
+                        :post="post"
+                        :fallback-channel="metadata?.username || currentChannelName"
+                        :fallback-channel-title="metadata?.title || metadata?.name"
+                        source-tab="explorer"
+                        offset-class="top-3 right-3"
+                      />
                       <!-- ID Badge -->
                       <div
                         class="absolute top-4 left-4 z-10 flex flex-col space-y-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-300"
@@ -23762,6 +23856,14 @@ onUnmounted(() => {
                     class="relative flex flex-col md:flex-row items-start md:justify-between group"
                     :style="{ 'content-visibility': 'auto', 'contain-intrinsic-size': '400px' }"
                   >
+                    <MemoryQuickToggle
+                      item-type="post"
+                      :post="post"
+                      :fallback-channel="metadata?.username || currentChannelName"
+                      :fallback-channel-title="metadata?.title || metadata?.name"
+                      source-tab="explorer"
+                      offset-class="top-2 right-2"
+                    />
                     <!-- Central Timeline Axis with Date -->
                     <div
                       class="absolute left-8 md:left-1/2 w-48 -mx-24 flex flex-col items-center justify-center z-20 pointer-events-none group-hover:scale-105 transition-transform duration-500"
@@ -24455,27 +24557,37 @@ onUnmounted(() => {
               <div
                 class="max-h-[300px] overflow-y-auto space-y-1.5 pr-2 custom-scrollbar"
               >
-                <button
+                <div
                   v-for="channel in allChannels"
                   :key="channel"
-                  @click="toggleChannel(channel)"
-                  :class="[
-                    'w-full text-left px-3 py-2.5 rounded-xl text-xs font-semibold transition-all flex justify-between items-center cursor-pointer',
-                    selectedChannels.includes(channel)
-                      ? 'bg-teal-600 text-white shadow-sm shadow-teal-500/10'
-                      : 'bg-gray-50 dark:bg-gray-900 border border-gray-150/40 dark:border-gray-800/40 text-gray-700 dark:text-gray-300 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400',
-                  ]"
+                  class="relative group flex items-center"
                 >
-                  <span>{{ channel }}</span>
-                  <span
+                  <button
+                    @click="toggleChannel(channel)"
                     :class="[
-                      'text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-md',
+                      'w-full text-left px-3 py-2.5 rounded-xl text-xs font-semibold transition-all flex justify-between items-center cursor-pointer pr-10',
                       selectedChannels.includes(channel)
-                        ? 'opacity-80 bg-white/20 text-white'
-                        : 'opacity-70 bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
+                        ? 'bg-teal-600 text-white shadow-sm shadow-teal-500/10'
+                        : 'bg-gray-50 dark:bg-gray-900 border border-gray-150/40 dark:border-gray-800/40 text-gray-700 dark:text-gray-300 hover:bg-teal-50/50 dark:hover:bg-teal-950/20 hover:text-teal-600 dark:hover:text-teal-400',
                     ]"
-                  >{{ channelPostCounts[channel] || 0 }}</span>
-                </button>
+                  >
+                    <span class="truncate">{{ channel }}</span>
+                    <span
+                      :class="[
+                        'text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-md shrink-0',
+                        selectedChannels.includes(channel)
+                          ? 'opacity-80 bg-white/20 text-white'
+                          : 'opacity-70 bg-gray-200 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
+                      ]"
+                    >{{ channelPostCounts[channel] || 0 }}</span>
+                  </button>
+                  <MemoryQuickToggle
+                    item-type="channel"
+                    :channel="{ username: channel, title: channel }"
+                    source-tab="search"
+                    offset-class="right-1.5 top-1/2 -translate-y-1/2"
+                  />
+                </div>
               </div>
             </div>
           </div>
@@ -24707,7 +24819,7 @@ onUnmounted(() => {
                 :data-search-post-index="index"
                 :key="post.key || index"
                 :class="[
-                  'relative rounded-3xl shadow-sm border p-6 hover:shadow-md transition-all duration-350',
+                  'relative rounded-3xl shadow-sm border p-6 hover:shadow-md transition-all duration-350 group',
                   post.data?.grouped?.nr > 0
                     ? `${getGroupStyles(post.data.grouped.root).bg} ${
                         getGroupStyles(post.data.grouped.root).border
@@ -24717,6 +24829,12 @@ onUnmounted(() => {
                       : 'bg-white dark:bg-gray-800 border-gray-200/60 dark:border-gray-700/60',
                 ]"
               >
+                <MemoryQuickToggle
+                  item-type="post"
+                  :post="post"
+                  source-tab="search"
+                  offset-class="bottom-3.5 right-4"
+                />
                 <!-- Saved in Listen Directory Card Tag Badge -->
                 <div
                   v-if="getPostListenHit(post)"
@@ -25373,9 +25491,19 @@ onUnmounted(() => {
             @click="closePostModal"
           >
             <div
-              class="bg-white dark:bg-gray-800 rounded-3xl shadow-2xl p-6 sm:p-8 max-w-3xl w-full max-h-[90vh] overflow-y-auto relative border border-gray-100 dark:border-gray-700 custom-scrollbar"
+              class="bg-white dark:bg-gray-800 rounded-3xl shadow-2xl p-6 sm:p-8 max-w-3xl w-full max-h-[90vh] overflow-y-auto relative group border border-gray-100 dark:border-gray-700 custom-scrollbar"
               @click.stop
             >
+              <MemoryQuickToggle
+                v-if="selectedPost"
+                item-type="post"
+                :post="selectedPost"
+                :fallback-channel="activeTab === 'explorer' ? (metadata?.username || currentChannelName) : ''"
+                :fallback-channel-title="activeTab === 'explorer' ? (metadata?.title || metadata?.name) : ''"
+                :source-tab="activeTab === 'search' ? 'search' : 'explorer'"
+                size="md"
+                offset-class="top-5 right-16"
+              />
               <!-- Close Button -->
               <button
                 @click="closePostModal"
@@ -26627,6 +26755,9 @@ onUnmounted(() => {
           </div>
         </div>
 
+        <!-- Global Memory (记忆) Favorite Directory Widget -->
+        <MemoryMonitorWidget @jump-to-explorer="jumpToExplorerFromMemory" />
+
         <!-- Reading Attention & Post Engagement Section -->
         <div class="bg-white dark:bg-gray-800 p-6 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm space-y-6">
           <!-- Section Header -->
@@ -27724,6 +27855,16 @@ onUnmounted(() => {
                         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin text-teal-500': getWidgetState(node.id).isSyncing }" />
                       </button>
 
+                      <!-- Quick Save Channel to Memory -->
+                      <MemoryQuickToggle
+                        v-if="node.type === 'channel'"
+                        item-type="channel"
+                        :channel="node"
+                        :metadata="listenChannelMetadataCache[node.argument] || listenChannelMetadataCache[(node.argument || '').replace(/^@/, '')]"
+                        source-tab="listen"
+                        placement="inline"
+                      />
+
                       <!-- Quick Labels & Folder Organize Button -->
                       <button
                         type="button"
@@ -27930,8 +28071,16 @@ onUnmounted(() => {
                   <div
                     v-for="(post, pIdx) in getWidgetState(node.id).posts.slice(0, getWidgetState(node.id).displayLimit)"
                     :key="post.key || pIdx"
-                    class="p-3.5 rounded-xl sm:rounded-2xl border border-gray-200/80 dark:border-gray-700/70 bg-white dark:bg-gray-800/95 hover:border-teal-400/60 dark:hover:border-teal-500/50 hover:shadow-sm transition-all duration-200 space-y-2.5"
+                    class="relative group p-3.5 rounded-xl sm:rounded-2xl border border-gray-200/80 dark:border-gray-700/70 bg-white dark:bg-gray-800/95 hover:border-teal-400/60 dark:hover:border-teal-500/50 hover:shadow-sm transition-all duration-200 space-y-2.5"
                   >
+                    <MemoryQuickToggle
+                      item-type="post"
+                      :post="post"
+                      :fallback-channel="node.type === 'channel' ? (listenChannelMetadataCache[node.argument]?.username || node.argument || '') : ''"
+                      :fallback-channel-title="node.type === 'channel' ? node.name : ''"
+                      source-tab="listen"
+                      offset-class="bottom-2.5 right-2.5"
+                    />
                     <!-- Post Header -->
                     <div class="flex items-start justify-between gap-2">
                       <div class="flex items-center gap-2 min-w-0">
@@ -28354,7 +28503,14 @@ onUnmounted(() => {
                 </div>
 
                 <!-- Channel Metadata Widget in Tile Mode -->
-                <div v-if="selectedListenNode.type === 'channel' && selectedChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col md:flex-row items-stretch relative">
+                <div v-if="selectedListenNode.type === 'channel' && selectedChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col md:flex-row items-stretch relative group">
+                  <MemoryQuickToggle
+                    item-type="channel"
+                    :metadata="selectedChannelMetadata"
+                    :channel="selectedListenNode"
+                    source-tab="listen"
+                    offset-class="bottom-3 right-3"
+                  />
                   <div class="bg-gradient-to-br from-teal-500/20 to-teal-600/5 dark:from-teal-950/40 dark:to-teal-900/10 p-5 sm:p-6 flex flex-row md:flex-col items-center justify-center gap-4 border-b md:border-b-0 md:border-r border-gray-150 dark:border-gray-700 md:w-48 shrink-0 select-none">
                     <div class="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-white dark:bg-gray-800 border-2 shadow-md shrink-0 flex items-center justify-center relative overflow-hidden">
                       <img
@@ -28434,13 +28590,21 @@ onUnmounted(() => {
                       :key="post.key || index"
                       :id="'tile-post-' + (post.key || index)"
                       :data-post-key="post.key"
-                      class="rounded-3xl shadow-sm border p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden bg-white dark:bg-gray-800"
+                      class="rounded-3xl shadow-sm border p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden bg-white dark:bg-gray-800 group"
                       :class="[
                         newlyFetchedListenKeys.has(post.key) || (post.id && newlyFetchedListenKeys.has(post.id))
                           ? 'border-amber-400 dark:border-amber-500 ring-2 ring-amber-500/20'
                           : 'border-gray-150 dark:border-gray-700'
                       ]"
                     >
+                      <MemoryQuickToggle
+                        item-type="post"
+                        :post="post"
+                        :fallback-channel="selectedListenNode?.type === 'channel' ? (selectedChannelMetadata?.username || selectedListenNode.argument || '') : ''"
+                        :fallback-channel-title="selectedListenNode?.type === 'channel' ? (selectedChannelMetadata?.title || selectedListenNode?.name) : ''"
+                        source-tab="listen"
+                        offset-class="bottom-11 right-4"
+                      />
                       <div class="absolute -top-10 -right-10 w-24 h-24 bg-teal-50/50 dark:bg-teal-900/10 rounded-full blur-2xl pointer-events-none"></div>
 
                       <!-- Quoted / Hover actions -->
@@ -30210,7 +30374,14 @@ onUnmounted(() => {
                 </div>
                 
                 <!-- Display Metadata state -->
-                <div v-else-if="selectedChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col md:flex-row items-stretch relative">
+                <div v-else-if="selectedChannelMetadata" class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col md:flex-row items-stretch relative group">
+                  <MemoryQuickToggle
+                    item-type="channel"
+                    :metadata="selectedChannelMetadata"
+                    :channel="selectedListenNode"
+                    source-tab="listen"
+                    offset-class="bottom-3 right-3"
+                  />
                   <!-- Non-intrusive background refresh badge when updating existing channel metadata -->
                   <div v-if="isFetchingChannelMetadata" class="absolute top-3 right-3 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-teal-50 dark:bg-teal-900/60 text-teal-600 dark:text-teal-300 text-[10px] font-bold animate-pulse border border-teal-200/60 dark:border-teal-800/60 z-20 shadow-2xs">
                     <RefreshCw class="h-3 w-3 animate-spin" />
@@ -30328,13 +30499,21 @@ onUnmounted(() => {
                     :key="post.key || index"
                     :id="'listen-post-' + (post.key || index)"
                     :data-post-key="post.key"
-                    class="rounded-3xl shadow-sm border p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden bg-white dark:bg-gray-800"
+                    class="rounded-3xl shadow-sm border p-5 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300 relative overflow-hidden bg-white dark:bg-gray-800 group"
                     :class="[
                       newlyFetchedListenKeys.has(post.key) || (post.id && newlyFetchedListenKeys.has(post.id))
                         ? 'border-amber-400 dark:border-amber-500 ring-2 ring-amber-500/20'
                         : 'border-gray-150 dark:border-gray-700'
                     ]"
                   >
+                    <MemoryQuickToggle
+                      item-type="post"
+                      :post="post"
+                      :fallback-channel="selectedListenNode?.type === 'channel' ? (selectedChannelMetadata?.username || selectedListenNode.argument || '') : ''"
+                      :fallback-channel-title="selectedListenNode?.type === 'channel' ? (selectedChannelMetadata?.title || selectedListenNode?.name) : ''"
+                      source-tab="listen"
+                      offset-class="bottom-11 right-4"
+                    />
                     <div class="absolute -top-10 -right-10 w-24 h-24 bg-teal-50/50 dark:bg-teal-900/10 rounded-full blur-2xl pointer-events-none"></div>
 
                     <!-- Quoted / Hover actions -->
@@ -31050,8 +31229,16 @@ onUnmounted(() => {
                         :key="post.key || index"
                         :id="'listen-post-' + (post.key || index)"
                         :data-post-key="post.key"
-                        class="p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-gray-200/90 dark:border-gray-700/80 bg-white/95 dark:bg-gray-900/70 hover:bg-white dark:hover:bg-gray-900 hover:border-teal-400/60 dark:hover:border-teal-500/50 hover:shadow-md dark:hover:shadow-lg dark:hover:shadow-black/50 transition-all duration-200 space-y-3.5 group/post"
+                        class="relative group p-4 sm:p-5 rounded-2xl sm:rounded-3xl border border-gray-200/90 dark:border-gray-700/80 bg-white/95 dark:bg-gray-900/70 hover:bg-white dark:hover:bg-gray-900 hover:border-teal-400/60 dark:hover:border-teal-500/50 hover:shadow-md dark:hover:shadow-lg dark:hover:shadow-black/50 transition-all duration-200 space-y-3.5 group/post"
                       >
+                        <MemoryQuickToggle
+                          item-type="post"
+                          :post="post"
+                          :fallback-channel="selectedListenNode?.type === 'channel' ? (selectedChannelMetadata?.username || selectedListenNode.argument || '') : ''"
+                          :fallback-channel-title="selectedListenNode?.type === 'channel' ? (selectedChannelMetadata?.title || selectedListenNode?.name) : ''"
+                          source-tab="listen"
+                          offset-class="bottom-3 right-3"
+                        />
                         <!-- Post Header: User/Author Info, Badge & External Actions -->
                         <div class="flex items-start justify-between gap-3">
                           <div class="flex items-center gap-2.5 min-w-0">
@@ -34854,6 +35041,9 @@ onUnmounted(() => {
       @create-folder-and-move="handleQuickCreateFolderAndMove"
       @open-label-manager="isLabelManagerOpen = true"
     />
+
+    <!-- Global Memory (记忆) Toast Notification with Undo -->
+    <MemoryToast />
   </div>
 </template>
 

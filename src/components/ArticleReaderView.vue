@@ -32,6 +32,7 @@ import {
   X,
   ChevronRight
 } from "lucide-vue-next";
+import MemoryQuickToggle from "./memory/MemoryQuickToggle.vue";
 
 export interface ArticleReaderPrefs {
   fontFamily: "serif" | "sans" | "mono";
@@ -883,7 +884,14 @@ const lineHeightClass = computed(() => {
       :class="['mx-auto rounded-3xl p-6 sm:p-12 lg:p-14 shadow-sm border transition-all duration-300 space-y-16', containerMaxWidthClass, themeClasses]"
     >
       <!-- Channel Editorial Masthead -->
-      <header class="pb-10 border-b border-stone-200/80 dark:border-stone-800 text-center space-y-3">
+      <header class="relative group pb-10 border-b border-stone-200/80 dark:border-stone-800 text-center space-y-3">
+        <MemoryQuickToggle
+          item-type="channel"
+          :metadata="metadata"
+          :channel="{ username: channelName, title: channelTitle || channelName }"
+          source-tab="explorer"
+          offset-class="top-0 right-0"
+        />
         <div class="inline-flex items-center justify-center w-14 h-14 rounded-full overflow-hidden border-2 border-stone-300 dark:border-stone-700 bg-stone-100 shadow-sm mx-auto">
           <img
             :src="(channelAvatar && channelAvatar.startsWith('data:')) ? channelAvatar : (channelAvatar || `https://i.gogingko.net/api/v1/v/telegram-profile/${channelName}`)"
@@ -915,8 +923,16 @@ const lineHeightClass = computed(() => {
         :id="`article-${post.key}`"
         :data-article-key="post.key"
         :data-article-index="index"
-        class="space-y-4 pt-4 first:pt-0 scroll-mt-36 sm:scroll-mt-40"
+        class="relative group space-y-4 pt-4 first:pt-0 scroll-mt-36 sm:scroll-mt-40"
       >
+        <MemoryQuickToggle
+          item-type="post"
+          :post="post"
+          :fallback-channel="metadata?.username || channelName"
+          :fallback-channel-title="channelTitle"
+          source-tab="explorer"
+          offset-class="bottom-2 right-0"
+        />
         <!-- Article Metadata Strip (Unboxed Editorial Typography) -->
         <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-stone-500 dark:text-stone-400 font-mono pb-2 border-b border-stone-200/60 dark:border-stone-800/60">
           <div class="flex items-center gap-2">

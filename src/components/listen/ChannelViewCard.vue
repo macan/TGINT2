@@ -11,6 +11,7 @@ import {
   ArrowRight
 } from "lucide-vue-next";
 import { formatDate, formatViews } from "../../utils/hotsEngine";
+import MemoryQuickToggle from "../memory/MemoryQuickToggle.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -115,6 +116,15 @@ function handleClick() {
     class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden flex flex-col md:flex-row items-stretch relative group hover:border-teal-500/50 hover:shadow-md transition-all cursor-pointer"
     @click="handleClick"
   >
+    <!-- Floating Hover Memory Quick-Save Toggle -->
+    <MemoryQuickToggle
+      item-type="channel"
+      :channel="channel"
+      :metadata="metadata"
+      source-tab="listen"
+      offset-class="bottom-3 right-3"
+    />
+
     <!-- Left accent gradient and avatar bar -->
     <div
       class="bg-gradient-to-br from-teal-500/20 to-teal-600/5 dark:from-teal-950/40 dark:to-teal-900/10 p-5 sm:p-6 flex flex-row md:flex-col items-center justify-center gap-4 border-b md:border-b-0 md:border-r border-gray-150 dark:border-gray-700 md:w-52 shrink-0 select-none"
@@ -243,9 +253,16 @@ function handleClick() {
   <!-- Compact View Mode Style (Top 5 Column Card) -->
   <div
     v-else
-    class="pt-3 first:pt-0 group cursor-pointer hover:bg-gray-50/80 dark:hover:bg-gray-700/30 p-2.5 -mx-1 rounded-2xl transition-all"
+    class="pt-3 first:pt-0 relative group cursor-pointer hover:bg-gray-50/80 dark:hover:bg-gray-700/30 p-2.5 -mx-1 rounded-2xl transition-all"
     @click="handleClick"
   >
+    <MemoryQuickToggle
+      item-type="channel"
+      :channel="channel"
+      :metadata="metadata"
+      source-tab="listen"
+      offset-class="bottom-2 right-2"
+    />
     <div class="flex items-start justify-between gap-2.5 mb-1.5">
       <div class="flex items-center gap-2.5 min-w-0">
         <!-- Rank badge -->

@@ -22,6 +22,8 @@ import {
   formatViews,
   formatDate
 } from "../../utils/hotsEngine";
+import MemoryQuickToggle from "../memory/MemoryQuickToggle.vue";
+import { extractPostChannelUsername } from "../../utils/indexedDbMemory";
 
 const props = withDefaults(
   defineProps<{
@@ -47,16 +49,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 
 const channelUsername = computed(() => {
-  if (props.post.channelUsername) return props.post.channelUsername;
-  if (props.post.key && typeof props.post.key === "string" && props.post.key.includes(".")) {
-    return props.post.key.split(".")[0];
-  }
-  const url = props.post.data?.url || props.post.url;
-  if (url && typeof url === "string") {
-    const match = url.match(/t\.me\/([a-zA-Z0-9_+]+)/);
-    if (match && match[1]) return match[1];
-  }
-  return props.post.channelName || "";
+  return extractPostChannelUsername(props.post, props.post.channelUsername || props.post.channelName || "");
 });
 
 const authorTitle = computed(() => {
@@ -146,6 +139,15 @@ function handleChannelJump() {
     @click="$emit('click-post', post)"
   >
     <div class="absolute -top-10 -right-10 w-24 h-24 bg-teal-50/50 dark:bg-teal-900/10 rounded-full blur-2xl pointer-events-none"></div>
+
+    <!-- Floating Hover Memory Quick-Save Toggle -->
+    <MemoryQuickToggle
+      item-type="post"
+      :post="post"
+      :fallback-channel="channelUsername"
+      source-tab="listen"
+      offset-class="bottom-12 right-4"
+    />
 
     <!-- Quoted / Hover actions (Workspace & Share) -->
     <div class="absolute top-4 right-4 flex space-x-1.5 z-20">
