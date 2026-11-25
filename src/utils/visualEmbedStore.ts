@@ -113,6 +113,37 @@ export interface VisualEmbeddingStoreStats {
   approxBytes: number;
 }
 
+export interface VisualEmbeddingExportItem {
+  id: string;
+  modelId: string;
+  entityType: VisualEntityType;
+  entityKey: string;
+  usernameLower: string;
+  photoUrl: string;
+  photoHash: string;
+  vectorB64: string;
+  metadata: VisualProfileMetadataSnapshot;
+  updatedAt: number;
+}
+
+export interface VisualEmbeddingExportBundle {
+  schema: "gingko-visual-profile-embeddings-v2";
+  version: 2;
+  modelId: string;
+  dim: number;
+  exportedAt: string;
+  count: number;
+  items: VisualEmbeddingExportItem[];
+}
+
+export interface VisualEmbeddingImportSummary {
+  added: number;
+  updated: number;
+  skipped: number;
+  incompatible: number;
+  totalImported: number;
+}
+
 // ---------------------------------------------------------------------------
 // Hashing, Entity Canonicalization & Vector Math
 // ---------------------------------------------------------------------------
@@ -1100,4 +1131,272 @@ export async function clearVisualEmbeddingStore(): Promise<void> {
 
 export async function clearAllVisualMlCaches(): Promise<void> {
   await Promise.all([clearVisualModelCaches(), clearVisualEmbeddingStore()]);
+}
+
+// ---------------------------------------------------------------------------
+// 3. IndexedDB Visual Embedding Archive Export & Import (Lossless Float32 Base64)
+// ---------------------------------------------------------------------------
+
+export function encodeFloat32ToBase64(vec: Float32Array): string {
+  const bytes = new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength);
+  let binary = "";
+  const chunkSize = 0x4000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, Math.min(bytes.length, i + chunkSize));
+    binary += String.fromCharCode.apply(null, Array.from(slice));
+  }
+  return btoa(binary);
+}
+
+export function decodeBase64ToFloat32(b64: string): Float32Array | null {
+  if (typeof b64 !== "string" || !b64.trim()) return null;
+  try {
+    const binary = atob(b64.trim());
+    if (binary.length !== VISUAL_EMBED_DIM * 4) return null;
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new Float32Array(bytes.buffer);
+  } catch {
+    return null;
+  }
+}
+
+export async function exportVisualEmbeddingsBundle(): Promise<VisualEmbeddingExportBundle> {
+  const db = await openVisualProfileDb();
+  try {
+    const rows = await new Promise<VisualProfileEmbeddingRecord[]>((resolve, reject) => {
+      const tx = db.transaction(STORE_PROFILES, "readonly");
+      const req = tx.objectStore(STORE_PROFILES).getAll();
+      req.onsuccess = () => resolve((req.result || []) as VisualProfileEmbeddingRecord[]);
+      req.onerror = () => reject(req.error);
+    });
+
+    const items: VisualEmbeddingExportItem[] = [];
+    for (const row of rows) {
+      if (!row || row.modelId !== VISUAL_EMBED_MODEL_ID || !row.vectorBuffer) continue;
+      const vec = readVisualVector(row.vectorBuffer);
+      if (!vec) continue;
+      items.push({
+        id: row.id,
+        modelId: row.modelId,
+        entityType: row.entityType,
+        entityKey: row.entityKey,
+        usernameLower: row.usernameLower || row.entityKey,
+        photoUrl: row.photoUrl || row.metadata?.photoUrl || "",
+        photoHash: row.photoHash || "",
+        vectorB64: encodeFloat32ToBase64(vec),
+        metadata: row.metadata,
+        updatedAt: Number.isFinite(row.updatedAt) ? row.updatedAt : Date.now(),
+      });
+    }
+
+    return {
+      schema: "gingko-visual-profile-embeddings-v2",
+      version: 2,
+      modelId: VISUAL_EMBED_MODEL_ID,
+      dim: VISUAL_EMBED_DIM,
+      exportedAt: new Date().toISOString(),
+      count: items.length,
+      items,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+export async function importVisualEmbeddingsBundle(
+  raw: unknown
+): Promise<VisualEmbeddingImportSummary> {
+  let rawItems: unknown[] | null = null;
+  let bundleModelId: string | null = null;
+
+  if (Array.isArray(raw)) {
+    rawItems = raw;
+  } else if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.modelId === "string" && obj.modelId.trim()) {
+      bundleModelId = obj.modelId.trim();
+    }
+    if (Array.isArray(obj.items)) {
+      rawItems = obj.items;
+    } else if (Array.isArray(obj.records)) {
+      rawItems = obj.records;
+    }
+  }
+
+  if (!rawItems) {
+    throw new Error("INVALID_VISUAL_ARCHIVE_FORMAT");
+  }
+
+  let skipped = 0;
+  let incompatible = 0;
+  const parsedRows: VisualProfileEmbeddingRecord[] = [];
+  const seenIds = new Set<string>();
+  const now = Date.now();
+
+  for (const entry of rawItems) {
+    if (!entry || typeof entry !== "object") {
+      skipped++;
+      continue;
+    }
+    const item = entry as Record<string, unknown>;
+    const itemModelId =
+      typeof item.modelId === "string" && item.modelId.trim()
+        ? item.modelId.trim()
+        : bundleModelId;
+
+    if (itemModelId && itemModelId !== VISUAL_EMBED_MODEL_ID) {
+      incompatible++;
+      continue;
+    }
+
+    let rawVec: Float32Array | null = null;
+    if (typeof item.vectorB64 === "string") {
+      rawVec = decodeBase64ToFloat32(item.vectorB64);
+    } else if (Array.isArray(item.vector) && item.vector.length === VISUAL_EMBED_DIM) {
+      const arr = new Float32Array(VISUAL_EMBED_DIM);
+      let ok = true;
+      for (let i = 0; i < VISUAL_EMBED_DIM; i++) {
+        const v = Number(item.vector[i]);
+        if (!Number.isFinite(v)) {
+          ok = false;
+          break;
+        }
+        arr[i] = v;
+      }
+      if (ok) rawVec = arr;
+    }
+
+    if (!rawVec) {
+      skipped++;
+      continue;
+    }
+
+    const normalized = l2NormalizeVector(rawVec);
+    if (!isValidVisualVector(normalized)) {
+      skipped++;
+      continue;
+    }
+
+    const entityType: VisualEntityType =
+      item.entityType === "user"
+        ? "user"
+        : item.entityType === "channel"
+          ? "channel"
+          : inferVisualEntityType(item.metadata, "channel");
+
+    const rawMeta =
+      item.metadata && typeof item.metadata === "object"
+        ? (item.metadata as Record<string, unknown>)
+        : {};
+    const canonicalMeta = canonicalizeVisualEntity(
+      {
+        ...rawMeta,
+        entityType,
+        photoUrl:
+          (typeof item.photoUrl === "string" && item.photoUrl) ||
+          (typeof rawMeta.photoUrl === "string" && rawMeta.photoUrl) ||
+          undefined,
+        username:
+          (typeof rawMeta.username === "string" && rawMeta.username) ||
+          (typeof item.usernameLower === "string" && item.usernameLower) ||
+          undefined,
+        key:
+          (typeof rawMeta.key === "string" && rawMeta.key) ||
+          (typeof item.entityKey === "string" && item.entityKey) ||
+          undefined,
+      },
+      entityType
+    );
+
+    const entityKey = (
+      (typeof item.entityKey === "string" && item.entityKey.trim()) ||
+      canonicalMeta?.entityKey ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+    if (!entityKey || !canonicalMeta) {
+      skipped++;
+      continue;
+    }
+
+    const id = makeVisualProfileRecordId(entityType, entityKey, VISUAL_EMBED_MODEL_ID);
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+
+    const photoUrl =
+      (typeof item.photoUrl === "string" && item.photoUrl.trim()) || canonicalMeta.photoUrl;
+
+    const finalMeta: VisualProfileMetadataSnapshot = {
+      ...canonicalMeta,
+      entityType,
+      entityKey,
+      photoUrl,
+    };
+
+    const updatedAt =
+      typeof item.updatedAt === "number" && Number.isFinite(item.updatedAt) && item.updatedAt > 0
+        ? item.updatedAt
+        : now;
+
+    parsedRows.push({
+      id,
+      modelId: VISUAL_EMBED_MODEL_ID,
+      entityType,
+      entityKey,
+      usernameLower: (finalMeta.username || entityKey).trim().toLowerCase(),
+      photoUrl,
+      photoHash: typeof item.photoHash === "string" ? item.photoHash : "",
+      vectorBuffer: normalized.slice().buffer,
+      metadata: finalMeta,
+      updatedAt,
+    });
+  }
+
+  let added = 0;
+  let updated = 0;
+
+  if (parsedRows.length > 0) {
+    const db = await openVisualProfileDb();
+    try {
+      const BATCH_SIZE = 500;
+      for (let i = 0; i < parsedRows.length; i += BATCH_SIZE) {
+        const batch = parsedRows.slice(i, i + BATCH_SIZE);
+        const existingKeys = new Set<string>();
+        await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction(STORE_PROFILES, "readwrite");
+          const store = tx.objectStore(STORE_PROFILES);
+          for (const row of batch) {
+            const checkReq = store.getKey(row.id);
+            checkReq.onsuccess = () => {
+              if (checkReq.result !== undefined) {
+                existingKeys.add(row.id);
+                updated++;
+              } else {
+                added++;
+              }
+              store.put(row);
+            };
+          }
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error("Failed importing visual embeddings"));
+        });
+      }
+      await pruneVisualProfilesIfNeeded(db);
+    } finally {
+      db.close();
+    }
+  }
+
+  return {
+    added,
+    updated,
+    skipped,
+    incompatible,
+    totalImported: added + updated,
+  };
 }

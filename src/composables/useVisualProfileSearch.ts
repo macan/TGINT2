@@ -7,14 +7,18 @@ import {
   cleanHandle,
   clearAllVisualMlCaches,
   clearVisualEmbeddingStore,
+  exportVisualEmbeddingsBundle,
   findVisualProfileRecordByHandle,
   getVisualEmbeddingStats,
+  importVisualEmbeddingsBundle,
   inspectVisualModelCache,
   makeVisualProfileRecordId,
   readVisualVector,
   resolveProfilePhotoCandidates,
   saveVisualProfileEmbeddings,
   searchSimilarVisualProfiles,
+  type VisualEmbeddingExportBundle,
+  type VisualEmbeddingImportSummary,
   type VisualEntityType,
   type VisualProfileMetadataSnapshot,
   type VisualSearchScope,
@@ -104,6 +108,8 @@ const maxRetries = ref(5);
 const workerError = ref<string | null>(null);
 
 const isSearching = ref(false);
+const isExporting = ref(false);
+const isImporting = ref(false);
 const queryError = ref<string | null>(null);
 const activeQuery = ref<ActiveVisualQuery | null>(null);
 const lastQueryVector = ref<Float32Array | null>(null);
@@ -778,6 +784,29 @@ export function useVisualProfileSearch() {
     hasSearched.value = false;
   }
 
+  async function exportIndexedEmbeddings(): Promise<VisualEmbeddingExportBundle> {
+    isExporting.value = true;
+    try {
+      return await exportVisualEmbeddingsBundle();
+    } finally {
+      isExporting.value = false;
+    }
+  }
+
+  async function importIndexedEmbeddings(raw: unknown): Promise<VisualEmbeddingImportSummary> {
+    isImporting.value = true;
+    try {
+      const summary = await importVisualEmbeddingsBundle(raw);
+      await refreshStats();
+      if (summary.totalImported > 0) {
+        scheduleLiveRerank();
+      }
+      return summary;
+    } finally {
+      isImporting.value = false;
+    }
+  }
+
   async function clearIndexedVectors(includeModel: boolean = false): Promise<void> {
     if (workerInstance) {
       const w = workerInstance;
@@ -849,6 +878,8 @@ export function useVisualProfileSearch() {
     isModelBusy,
     // Query state
     isSearching,
+    isExporting,
+    isImporting,
     queryError,
     activeQuery,
     results,
@@ -865,6 +896,8 @@ export function useVisualProfileSearch() {
     searchByUploadedFile,
     rerankLastQuery,
     clearQuery,
+    exportIndexedEmbeddings,
+    importIndexedEmbeddings,
     clearIndexedVectors,
   };
 }

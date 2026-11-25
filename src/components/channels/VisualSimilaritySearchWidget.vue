@@ -3,6 +3,8 @@ import { computed, ref, watch } from "vue";
 import { useI18n } from "../../i18n";
 import {
   AlertCircle,
+  CheckCircle2,
+  Download,
   ExternalLink,
   Hash,
   Image as ImageIcon,
@@ -43,6 +45,7 @@ const visual = useVisualProfileSearch();
 
 const rootRef = ref<HTMLElement | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
+const importJsonInputRef = ref<HTMLInputElement | null>(null);
 
 const queryInput = ref("");
 const thresholdPercent = ref(55);
@@ -53,6 +56,8 @@ const isDraggingFile = ref(false);
 const confirmClear = ref(false);
 const failedImageKeys = ref<Record<string, boolean>>({});
 const queryImageFailed = ref(false);
+const transferNotice = ref<{ tone: "success" | "warning" | "error"; message: string } | null>(null);
+let transferNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 
 const topKOptions = [10, 20, 50, 100];
 
@@ -219,6 +224,78 @@ function handleLowerThreshold() {
   thresholdPercent.value = Math.max(35, Math.min(thresholdPercent.value - 15, 40));
 }
 
+function showTransferNotice(tone: "success" | "warning" | "error", message: string) {
+  transferNotice.value = { tone, message };
+  if (transferNoticeTimer) clearTimeout(transferNoticeTimer);
+  transferNoticeTimer = setTimeout(() => {
+    transferNotice.value = null;
+    transferNoticeTimer = null;
+  }, 6000);
+}
+
+async function handleExportEmbeddings() {
+  if (visual.isExporting.value || visual.indexedTotal.value === 0) return;
+  try {
+    const bundle = await visual.exportIndexedEmbeddings();
+    const blob = new Blob([JSON.stringify(bundle)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `gingko-visual-embeddings-${stamp}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showTransferNotice("success", t("channels.visualExportSuccess", { count: bundle.count }));
+  } catch (err) {
+    console.error("[VisualEmbeddings] Export failed:", err);
+    showTransferNotice("error", t("channels.visualExportError"));
+  }
+}
+
+function triggerImportEmbeddingsDialog() {
+  if (visual.isImporting.value) return;
+  importJsonInputRef.value?.click();
+}
+
+async function handleImportEmbeddingsSelected(ev: Event) {
+  const input = ev.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const summary = await visual.importIndexedEmbeddings(parsed);
+    const ignored = summary.skipped + summary.incompatible;
+    if (summary.totalImported === 0 && ignored > 0) {
+      showTransferNotice(
+        "warning",
+        t("channels.visualImportEmpty", { skipped: ignored })
+      );
+    } else if (ignored > 0) {
+      showTransferNotice(
+        "warning",
+        t("channels.visualImportPartial", {
+          added: summary.added,
+          updated: summary.updated,
+          skipped: ignored,
+        })
+      );
+    } else {
+      showTransferNotice(
+        "success",
+        t("channels.visualImportSuccess", {
+          added: summary.added,
+          updated: summary.updated,
+        })
+      );
+    }
+  } catch (err) {
+    console.error("[VisualEmbeddings] Import failed:", err);
+    showTransferNotice("error", t("channels.visualImportError"));
+  }
+}
+
 async function handleClearIndex() {
   if (!confirmClear.value) {
     confirmClear.value = true;
@@ -322,6 +399,38 @@ defineExpose({
           <span>{{ visual.indexedUsers.value.toLocaleString() }} {{ t("channels.users") }}</span>
         </div>
 
+        <input
+          ref="importJsonInputRef"
+          type="file"
+          accept=".json,application/json"
+          class="hidden"
+          @change="handleImportEmbeddingsSelected"
+        />
+
+        <button
+          type="button"
+          @click="triggerImportEmbeddingsDialog"
+          :disabled="visual.isImporting.value"
+          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-700/70 text-gray-700 dark:text-gray-200 border-gray-200 dark:border-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          :title="t('channels.visualImportIndexTooltip')"
+        >
+          <Loader2 v-if="visual.isImporting.value" class="w-3.5 h-3.5 animate-spin shrink-0" />
+          <Upload v-else class="w-3.5 h-3.5 shrink-0" />
+          <span>{{ t("channels.visualImportIndex") }}</span>
+        </button>
+
+        <button
+          type="button"
+          @click="handleExportEmbeddings"
+          :disabled="visual.isExporting.value || visual.indexedTotal.value === 0"
+          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-700/70 text-gray-700 dark:text-gray-200 border-gray-200 dark:border-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          :title="t('channels.visualExportIndexTooltip')"
+        >
+          <Loader2 v-if="visual.isExporting.value" class="w-3.5 h-3.5 animate-spin shrink-0" />
+          <Download v-else class="w-3.5 h-3.5 shrink-0" />
+          <span>{{ t("channels.visualExportIndex") }}</span>
+        </button>
+
         <button
           type="button"
           @click="visual.togglePauseIndexing()"
@@ -355,6 +464,31 @@ defineExpose({
           <span>{{ confirmClear ? t("channels.visualConfirmClear") : t("channels.visualClearIndex") }}</span>
         </button>
       </div>
+    </div>
+
+    <!-- Export / Import Transfer Notice -->
+    <div
+      v-if="transferNotice"
+      :class="[
+        'flex items-center gap-2.5 px-4 py-2.5 rounded-2xl border text-xs',
+        transferNotice.tone === 'success'
+          ? 'bg-emerald-50/80 dark:bg-emerald-950/30 border-emerald-200/80 dark:border-emerald-900/60 text-emerald-800 dark:text-emerald-300'
+          : transferNotice.tone === 'warning'
+            ? 'bg-amber-50/80 dark:bg-amber-950/30 border-amber-200/80 dark:border-amber-900/60 text-amber-800 dark:text-amber-300'
+            : 'bg-rose-50/80 dark:bg-rose-950/30 border-rose-200/80 dark:border-rose-900/60 text-rose-700 dark:text-rose-300',
+      ]"
+    >
+      <CheckCircle2 v-if="transferNotice.tone === 'success'" class="w-4 h-4 shrink-0" />
+      <AlertCircle v-else class="w-4 h-4 shrink-0" />
+      <span class="flex-1">{{ transferNotice.message }}</span>
+      <button
+        type="button"
+        @click="transferNotice = null"
+        class="p-0.5 hover:opacity-80 cursor-pointer"
+        :aria-label="t('common.close')"
+      >
+        <X class="w-3.5 h-3.5" />
+      </button>
     </div>
 
     <!-- Real Activity Strip (only visible during model download or active/paused background queue) -->
