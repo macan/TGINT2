@@ -114,6 +114,7 @@ import {
   PieChart,
   Flame,
   TrendingUp,
+  ScanSearch,
 } from "lucide-vue-next";
 
 import MarkdownIt from "markdown-it";
@@ -169,6 +170,8 @@ const ExplorerNerModal = defineAsyncComponent(() => import("./components/explore
 import MemoryQuickToggle from "./components/memory/MemoryQuickToggle.vue";
 import MemoryToast from "./components/memory/MemoryToast.vue";
 const MemoryMonitorWidget = defineAsyncComponent(() => import("./components/memory/MemoryMonitorWidget.vue"));
+import VisualSimilaritySearchWidget from "./components/channels/VisualSimilaritySearchWidget.vue";
+import { useVisualProfileSearch } from "./composables/useVisualProfileSearch";
 import {
   resolveMemoryChannelTarget,
   type MemoryItemRecord,
@@ -1859,6 +1862,10 @@ const fetchTelegramUser = async () => {
         }
 
         telegramUser.value = userData;
+        visualProfileSearch.enqueueProfilesForVisualIndexing(
+            [userData],
+            userData.isChannel ? "channel" : "user"
+        );
 
         if (!lookupUserHistory.value.includes(username)) {
             lookupUserHistory.value.unshift(username);
@@ -9385,11 +9392,34 @@ const computedFlag = computed(() => {
     return getFlagEmoji(countryCode);
 });
 
+const visualProfileSearch = useVisualProfileSearch();
+const visualSimilarityWidgetRef = ref<InstanceType<typeof VisualSimilaritySearchWidget> | null>(null);
+
+const handleVisualFindSimilar = (profile: any, entityType: "channel" | "user") => {
+    void visualSimilarityWidgetRef.value?.triggerFindSimilarForProfile(profile, entityType);
+};
+
+const handleVisualInspectProfile = (handle: string) => {
+    if (!handle) return;
+    telegramUsername.value = handle.replace(/^@/, "");
+    void fetchTelegramUser();
+};
+
+const handleVisualIndexLoadedBatch = () => {
+    if (!channels.value.length) return;
+    if (visualProfileSearch.isPaused.value) {
+        visualProfileSearch.resumeIndexing();
+    }
+    visualProfileSearch.enqueueProfilesForVisualIndexing(channels.value, activeChannelOrUser.value);
+};
+
 const fetchChannels = async (forceFetch: boolean = false) => {
     if (!forceFetch) {
         const cached = localStorage.getItem('telegram' + activeChannelOrUser.value);
         if (cached) {
-            channels.value = JSON.parse(cached);
+            const parsed = JSON.parse(cached);
+            channels.value = parsed;
+            visualProfileSearch.enqueueProfilesForVisualIndexing(parsed, activeChannelOrUser.value);
             return;
         }
     }
@@ -9425,6 +9455,7 @@ const fetchChannels = async (forceFetch: boolean = false) => {
                         }
                         userData.cdnNumber = cdnNumber
                         userData.cdnRegion = cdnRegion
+                        if (!userData.key) userData.key = name
                         return userData;
                     }
                 } catch (e) {
@@ -9435,6 +9466,7 @@ const fetchChannels = async (forceFetch: boolean = false) => {
             const results = await Promise.all(channelPromises);
             channels.value = results;
             localStorage.setItem('telegram' + activeChannelOrUser.value, JSON.stringify(results));
+            visualProfileSearch.enqueueProfilesForVisualIndexing(results, activeChannelOrUser.value);
         }
     } catch (e) {
         console.error(e);
@@ -9471,6 +9503,7 @@ const handleLangFetch = async () => {
                         };
                         userData.cdnNumber = cdnNumber
                         userData.cdnRegion = cdnRegion
+                        if (!userData.key) userData.key = channelName
                         return userData;
                     }
                 } catch (e) {
@@ -9478,7 +9511,9 @@ const handleLangFetch = async () => {
                 }
                 return { name: channelName }; 
             });
-            channels.value = await Promise.all(channelPromises);
+            const langResults = await Promise.all(channelPromises);
+            channels.value = langResults;
+            visualProfileSearch.enqueueProfilesForVisualIndexing(langResults, "channel");
         } else {
             channels.value = [];
         }
@@ -17063,6 +17098,7 @@ const handleChannelSearch = async () => {
   try {
     const results = await channelFulltextSearch(channelSearchQuery.value.trim(), 50);
     channels.value = results;
+    visualProfileSearch.enqueueProfilesForVisualIndexing(results, "channel");
   } catch (e) {
     console.error("Failed to perform channel search", e);
   } finally {
@@ -20983,6 +21019,15 @@ onUnmounted(() => {
                           >
                             {{ t('explorer.channelOrGroupProfile') }}
                           </span>
+                          <button
+                            type="button"
+                            @click="handleVisualFindSimilar(telegramUser, telegramUser.isChannel ? 'channel' : 'user')"
+                            class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium bg-gray-50 dark:bg-gray-900 hover:bg-teal-600 text-teal-700 dark:text-teal-400 hover:text-white border border-gray-200 dark:border-gray-700 hover:border-transparent transition-colors cursor-pointer whitespace-nowrap"
+                            :title="t('channels.visualFindSimilarAction')"
+                          >
+                            <ScanSearch class="h-3.5 w-3.5 shrink-0" />
+                            <span>{{ t('channels.visualSimilarShort') }}</span>
+                          </button>
                           <button 
                             @click="telegramUser = null" 
                             class="p-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
@@ -21112,6 +21157,15 @@ onUnmounted(() => {
             </transition>
           </div>
         </div>
+
+        <!-- Visual Profile Similarity Search Widget (SigLIP Local Embeddings) -->
+        <VisualSimilaritySearchWidget
+          ref="visualSimilarityWidgetRef"
+          :loaded-profiles-count="channels.length"
+          @open-explorer="({ handle, channel }) => jumpToExplorerFromChannel(handle, channel)"
+          @inspect-profile="handleVisualInspectProfile"
+          @index-loaded-batch="handleVisualIndexLoadedBatch"
+        />
 
         <!-- Control Bar Card -->
         <div class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200/80 dark:border-gray-700 p-6 shadow-sm relative overflow-hidden">
@@ -21401,15 +21455,29 @@ onUnmounted(() => {
                 <span v-if="channel.cdnRegion" class="opacity-70">({{ channel.cdnRegion[1] }})</span>
               </div>
 
-              <!-- View Action button -->
-              <button 
-                v-if="activeChannelOrUser === 'channel'" 
-                @click="jumpToExplorerFromChannel(channel.username || channel.name || channel.key, channel)" 
-                class="w-full mt-2 py-2 bg-gray-50 hover:bg-teal-650 text-teal-600 hover:text-white dark:bg-gray-900/80 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black tracking-wide rounded-xl border border-gray-150 dark:border-gray-800/80 hover:border-transparent cursor-pointer transition-all duration-300 hover:shadow-md hover:shadow-teal-500/10 text-center flex items-center justify-center gap-1.5"
-              >
-                <span>{{ t('channels.viewChannelArchive') }}</span>
-                <ExternalLink class="h-3 w-3" />
-              </button>
+              <!-- View & Visual Similarity Action buttons -->
+              <div class="flex items-center gap-2 mt-2">
+                <button 
+                  v-if="activeChannelOrUser === 'channel'" 
+                  @click="jumpToExplorerFromChannel(channel.username || channel.name || channel.key, channel)" 
+                  class="flex-1 py-2 bg-gray-50 hover:bg-teal-650 text-teal-600 hover:text-white dark:bg-gray-900/80 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black tracking-wide rounded-xl border border-gray-150 dark:border-gray-800/80 hover:border-transparent cursor-pointer transition-all duration-300 hover:shadow-md hover:shadow-teal-500/10 text-center flex items-center justify-center gap-1.5 whitespace-nowrap"
+                >
+                  <span>{{ t('channels.viewChannelArchive') }}</span>
+                  <ExternalLink class="h-3 w-3 shrink-0" />
+                </button>
+                <button
+                  type="button"
+                  @click.stop="handleVisualFindSimilar(channel, activeChannelOrUser)"
+                  :class="[
+                    'py-2 px-3 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900/80 dark:hover:bg-gray-700/80 text-gray-700 dark:text-gray-200 text-xs font-medium rounded-xl border border-gray-200/80 dark:border-gray-700/80 transition-colors cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0',
+                    activeChannelOrUser === 'user' ? 'w-full' : ''
+                  ]"
+                  :title="t('channels.visualFindSimilarAction')"
+                >
+                  <ScanSearch class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 shrink-0" />
+                  <span v-if="activeChannelOrUser === 'user'">{{ t('channels.visualFindSimilarAction') }}</span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -21485,14 +21553,23 @@ onUnmounted(() => {
                   {{ channel.bot ? t('channels.bot') : t('channels.user') }}
                 </span>
 
-                <!-- Action Button -->
+                <!-- Action Buttons -->
                 <button 
                   v-if="activeChannelOrUser === 'channel'" 
                   @click="jumpToExplorerFromChannel(channel.username || channel.name || channel.key, channel)" 
-                  class="px-3 py-1.5 bg-gray-50 hover:bg-teal-600 text-teal-600 hover:text-white dark:bg-gray-900 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black rounded-xl border border-gray-200 dark:border-gray-700 hover:border-transparent transition-all cursor-pointer flex items-center gap-1 shadow-xs"
+                  class="px-3 py-1.5 bg-gray-50 hover:bg-teal-600 text-teal-600 hover:text-white dark:bg-gray-900 dark:hover:bg-teal-600 dark:text-teal-400 dark:hover:text-white text-xs font-black rounded-xl border border-gray-200 dark:border-gray-700 hover:border-transparent transition-all cursor-pointer flex items-center gap-1 shadow-xs whitespace-nowrap"
                 >
                   <span>{{ t('channels.archive') }}</span>
-                  <ExternalLink class="h-3 w-3" />
+                  <ExternalLink class="h-3 w-3 shrink-0" />
+                </button>
+                <button
+                  type="button"
+                  @click.stop="handleVisualFindSimilar(channel, activeChannelOrUser)"
+                  class="px-2.5 py-1.5 bg-gray-50 hover:bg-gray-100 dark:bg-gray-900 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200 text-xs font-medium rounded-xl border border-gray-200 dark:border-gray-700 transition-colors cursor-pointer flex items-center gap-1 whitespace-nowrap shrink-0"
+                  :title="t('channels.visualFindSimilarAction')"
+                >
+                  <ScanSearch class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 shrink-0" />
+                  <span class="hidden sm:inline">{{ t('channels.visualSimilarShort') }}</span>
                 </button>
               </div>
 
