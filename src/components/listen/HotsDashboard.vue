@@ -74,6 +74,7 @@ import VirtualPostList from "./VirtualPostList.vue";
 import ChannelViewCard from "./ChannelViewCard.vue";
 import PostVolumeTrendCard from "./PostVolumeTrendCard.vue";
 import ClusterActivityHeatmapCard from "./ClusterActivityHeatmapCard.vue";
+import ClusterTopicTrendCard from "./ClusterTopicTrendCard.vue";
 
 export interface ListenDbSyncPayload {
   timestamp: number;
@@ -1920,11 +1921,11 @@ onUnmounted(() => {
     <!-- ===================================================================== -->
     <div
       v-if="isDrillDownOpen"
-      class="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200"
+      class="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 lg:p-5 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200"
       @click.self="isDrillDownOpen = false"
     >
       <div
-        class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-2xl w-full max-w-6xl xl:max-w-7xl max-h-[95vh] flex flex-col overflow-hidden"
+        class="bg-white dark:bg-gray-800 rounded-3xl border border-gray-200 dark:border-gray-700 shadow-2xl w-[96vw] max-w-[1640px] max-h-[95vh] flex flex-col overflow-hidden"
       >
         <!-- Modal Top Bar -->
         <div class="p-4 sm:p-5 border-b border-gray-100 dark:border-gray-700/80 flex items-center justify-between gap-3 shrink-0">
@@ -2028,99 +2029,113 @@ onUnmounted(() => {
           <template v-if="drillDownTab === 'topics'">
             <!-- If inspecting single topic cluster posts -->
             <div v-if="inspectedTopic" class="space-y-4">
-              <div class="p-4 rounded-2xl bg-teal-50/60 dark:bg-teal-950/30 border border-teal-200/70 dark:border-teal-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div class="min-w-0 flex-1">
-                  <button
-                    @click="inspectedTopic = null"
-                    class="text-xs font-bold text-teal-600 dark:text-teal-400 hover:underline flex items-center gap-1 cursor-pointer mb-2"
-                  >
-                    ← Back to All Topics
-                  </button>
+              <div class="rounded-2xl bg-teal-50/45 dark:bg-teal-950/25 border border-teal-200/70 dark:border-teal-800/50 overflow-hidden">
+                <div class="p-4 sm:p-5 flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+                  <div class="min-w-0 flex-1">
+                    <button
+                      @click="inspectedTopic = null"
+                      class="text-xs font-bold text-teal-600 dark:text-teal-400 hover:underline flex items-center gap-1 cursor-pointer mb-2"
+                    >
+                      ← Back to All Topics
+                    </button>
 
-                  <!-- Badges in Inspected Topic Title Header -->
-                  <div class="flex items-center flex-wrap gap-1.5 mb-2">
-                    <span
-                      v-if="inspectedTopic.isAiGenerated || inspectedTopic.clusterSource === 'ai'"
-                      class="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 px-2 py-0.5 rounded-md border border-indigo-200/60 dark:border-indigo-800/50 shrink-0"
-                    >
-                      <Sparkles class="h-2.5 w-2.5" />
-                      AI
-                    </span>
-                    <span
-                      v-else-if="inspectedTopic.clusterSource === 'neural'"
-                      class="inline-flex items-center gap-1 text-[10px] font-bold text-cyan-700 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-950/60 px-2 py-0.5 rounded-md border border-cyan-200/60 dark:border-cyan-800/50 shrink-0"
-                    >
-                      <Cpu class="h-2.5 w-2.5" />
-                      {{ t('listen.hots.badgeNeural') || 'Neural' }}
-                    </span>
-                    <span
-                      v-else
-                      class="inline-flex items-center gap-1 text-[10px] font-bold text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-950/60 px-2 py-0.5 rounded-md border border-teal-200/60 dark:border-teal-800/50 shrink-0"
-                    >
-                      {{ t('listen.hots.badgeRule') || 'Rule' }}
-                    </span>
-
-                    <span
-                      v-if="inspectedTopic.category"
-                      class="text-[10px] font-bold text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700/60 px-2 py-0.5 rounded-md border border-gray-200/60 dark:border-gray-600/60 shrink-0"
-                    >
-                      {{ inspectedTopic.category }}
-                    </span>
-
-                    <span
-                      class="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md border shrink-0"
-                      :class="getSentimentBadgeClass(inspectedTopic.sentiment)"
-                      :title="getSentimentTooltip(inspectedTopic)"
-                    >
-                      <Smile v-if="inspectedTopic.sentiment === 'positive'" class="h-3 w-3 shrink-0" />
-                      <Frown v-else-if="inspectedTopic.sentiment === 'negative'" class="h-3 w-3 shrink-0" />
-                      <Meh v-else class="h-3 w-3 shrink-0" />
-                      <span>{{ getSentimentLabel(inspectedTopic.sentiment) }}</span>
+                    <!-- Badges in Inspected Topic Title Header -->
+                    <div class="flex items-center flex-wrap gap-1.5 mb-2">
                       <span
-                        v-if="inspectedTopic.sentimentBreakdown && inspectedTopic.postCount > 1"
-                        class="ml-1 pl-1 border-l border-current/25 font-mono text-[9px] opacity-80 tabular-nums"
+                        v-if="inspectedTopic.isAiGenerated || inspectedTopic.clusterSource === 'ai'"
+                        class="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 px-2 py-0.5 rounded-md border border-indigo-200/60 dark:border-indigo-800/50 shrink-0"
                       >
-                        +{{ inspectedTopic.sentimentBreakdown.positive }} / ={{ inspectedTopic.sentimentBreakdown.neutral }} / -{{ inspectedTopic.sentimentBreakdown.negative }}
+                        <Sparkles class="h-2.5 w-2.5" />
+                        AI
                       </span>
-                    </span>
+                      <span
+                        v-else-if="inspectedTopic.clusterSource === 'neural'"
+                        class="inline-flex items-center gap-1 text-[10px] font-bold text-cyan-700 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-950/60 px-2 py-0.5 rounded-md border border-cyan-200/60 dark:border-cyan-800/50 shrink-0"
+                      >
+                        <Cpu class="h-2.5 w-2.5" />
+                        {{ t('listen.hots.badgeNeural') || 'Neural' }}
+                      </span>
+                      <span
+                        v-else
+                        class="inline-flex items-center gap-1 text-[10px] font-bold text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-950/60 px-2 py-0.5 rounded-md border border-teal-200/60 dark:border-teal-800/50 shrink-0"
+                      >
+                        {{ t('listen.hots.badgeRule') || 'Rule' }}
+                      </span>
 
-                    <span
-                      v-for="(tag, tIdx) in (inspectedTopic.tags || [])"
-                      :key="tIdx"
-                      class="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-lg border transition-all shrink-0"
-                      :class="getTagBadgeClass(tag.type)"
+                      <span
+                        v-if="inspectedTopic.category"
+                        class="text-[10px] font-bold text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700/60 px-2 py-0.5 rounded-md border border-gray-200/60 dark:border-gray-600/60 shrink-0"
+                      >
+                        {{ inspectedTopic.category }}
+                      </span>
+
+                      <span
+                        class="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-md border shrink-0"
+                        :class="getSentimentBadgeClass(inspectedTopic.sentiment)"
+                        :title="getSentimentTooltip(inspectedTopic)"
+                      >
+                        <Smile v-if="inspectedTopic.sentiment === 'positive'" class="h-3 w-3 shrink-0" />
+                        <Frown v-else-if="inspectedTopic.sentiment === 'negative'" class="h-3 w-3 shrink-0" />
+                        <Meh v-else class="h-3 w-3 shrink-0" />
+                        <span>{{ getSentimentLabel(inspectedTopic.sentiment) }}</span>
+                        <span
+                          v-if="inspectedTopic.sentimentBreakdown && inspectedTopic.postCount > 1"
+                          class="ml-1 pl-1 border-l border-current/25 font-mono text-[9px] opacity-80 tabular-nums"
+                        >
+                          +{{ inspectedTopic.sentimentBreakdown.positive }} / ={{ inspectedTopic.sentimentBreakdown.neutral }} / -{{ inspectedTopic.sentimentBreakdown.negative }}
+                        </span>
+                      </span>
+
+                      <span
+                        v-for="(tag, tIdx) in (inspectedTopic.tags || [])"
+                        :key="tIdx"
+                        class="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-lg border transition-all shrink-0"
+                        :class="getTagBadgeClass(tag.type)"
+                      >
+                        <User v-if="tag.type === 'person'" class="h-2.5 w-2.5 opacity-80 shrink-0" />
+                        <Building2 v-else-if="tag.type === 'entity'" class="h-2.5 w-2.5 opacity-80 shrink-0" />
+                        <BarChart2 v-else-if="tag.type === 'fact'" class="h-2.5 w-2.5 opacity-80 shrink-0" />
+                        <Scale v-else-if="tag.type === 'option'" class="h-2.5 w-2.5 opacity-80 shrink-0" />
+                        <Hash v-else class="h-2.5 w-2.5 opacity-80 shrink-0" />
+                        <span>{{ tag.label }}</span>
+                      </span>
+                    </div>
+
+                    <h4 class="text-base sm:text-lg font-black text-gray-900 dark:text-white leading-tight">
+                      {{ inspectedTopic.title }}
+                    </h4>
+                    <div
+                      v-if="inspectedTopic.titleZh && inspectedTopic.titleZh !== inspectedTopic.title"
+                      class="flex items-start gap-1.5 text-xs sm:text-sm font-semibold text-teal-700 dark:text-teal-300 mt-1 mb-1"
                     >
-                      <User v-if="tag.type === 'person'" class="h-2.5 w-2.5 opacity-80 shrink-0" />
-                      <Building2 v-else-if="tag.type === 'entity'" class="h-2.5 w-2.5 opacity-80 shrink-0" />
-                      <BarChart2 v-else-if="tag.type === 'fact'" class="h-2.5 w-2.5 opacity-80 shrink-0" />
-                      <Scale v-else-if="tag.type === 'option'" class="h-2.5 w-2.5 opacity-80 shrink-0" />
-                      <Hash v-else class="h-2.5 w-2.5 opacity-80 shrink-0" />
-                      <span>{{ tag.label }}</span>
-                    </span>
+                      <span class="text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-teal-100/80 dark:bg-teal-900/60 text-teal-800 dark:text-teal-200 shrink-0">
+                        中译
+                      </span>
+                      <span class="leading-snug">
+                        {{ inspectedTopic.titleZh }}
+                      </span>
+                    </div>
+                    <p class="text-xs text-gray-600 dark:text-gray-300 mt-1 leading-relaxed">
+                      {{ inspectedTopic.summary }}
+                    </p>
                   </div>
+                  <div class="text-left lg:text-right shrink-0 font-mono text-xs text-gray-500 dark:text-gray-400 tabular-nums lg:pt-6">
+                    <span class="font-bold text-gray-900 dark:text-white">{{ inspectedTopic.postCount }} {{ inspectedTopic.postCount === 1 ? 'post' : 'posts' }}</span>
+                    <span aria-hidden="true" class="mx-1.5 text-gray-300 dark:text-gray-600">·</span>
+                    <span class="font-semibold text-amber-700 dark:text-amber-300">{{ formatNumber(inspectedTopic.totalViews) }} views</span>
+                    <template v-if="inspectedTopic.channels && inspectedTopic.channels.length > 0">
+                      <span aria-hidden="true" class="mx-1.5 text-gray-300 dark:text-gray-600">·</span>
+                      <span>{{ inspectedTopic.channels.length }} {{ inspectedTopic.channels.length === 1 ? 'channel' : 'channels' }}</span>
+                    </template>
+                  </div>
+                </div>
 
-                  <h4 class="text-base sm:text-lg font-black text-gray-900 dark:text-white leading-tight">
-                    {{ inspectedTopic.title }}
-                  </h4>
-                  <div
-                    v-if="inspectedTopic.titleZh && inspectedTopic.titleZh !== inspectedTopic.title"
-                    class="flex items-start gap-1.5 text-xs sm:text-sm font-semibold text-teal-700 dark:text-teal-300 mt-1 mb-1"
-                  >
-                    <span class="text-[9px] uppercase font-bold tracking-wider px-1.5 py-0.5 rounded bg-teal-100/80 dark:bg-teal-900/60 text-teal-800 dark:text-teal-200 shrink-0">
-                      中译
-                    </span>
-                    <span class="leading-snug">
-                      {{ inspectedTopic.titleZh }}
-                    </span>
-                  </div>
-                  <p class="text-xs text-gray-600 dark:text-gray-300 mt-1 leading-relaxed">
-                    {{ inspectedTopic.summary }}
-                  </p>
-                </div>
-                <div class="text-right shrink-0 font-mono text-xs text-gray-500 dark:text-gray-400 tabular-nums">
-                  <span class="font-bold text-gray-900 dark:text-white">{{ inspectedTopic.postCount }} {{ inspectedTopic.postCount === 1 ? 'post' : 'posts' }}</span> ·
-                  <span>{{ formatNumber(inspectedTopic.totalViews) }} views</span>
-                </div>
+                <!-- Dual-Series Timeline Chart: Posts Trend & Views Trend inside Cluster Metadata -->
+                <ClusterTopicTrendCard
+                  :topic="inspectedTopic"
+                  :date-range="effectiveChartDateRange"
+                  :is-dark="isDark"
+                />
               </div>
 
               <!-- Cluster Member Posts (Uses Virtualized List for performance) -->
