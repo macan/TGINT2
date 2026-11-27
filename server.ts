@@ -92,13 +92,13 @@ app.post('/api/gemini/cluster', async (req, res) => {
     }
 
     const prompt = `You are an expert news intelligence analyst.
-Analyze these ${samplePosts.length} Telegram posts from time range "${dateRange}".
+Analyze these ${samplePosts.length} Telegram posts (some entries include "additionalSnippets", "clusterKeywords", and "clusterPostCount" representing multiple already-grouped posts) from time range "${dateRange}".
 Task:
 1. Cluster related posts into distinct high-impact news topics or thematic developments based on semantic meaning, news events, and link preview metadata.
 2. For each cluster, write:
-   - "title": A concise, informative, human-grade editorial headline (6 to 12 words, title case). Reflect the key person, entity, action, or fact. Do NOT use generic labels like "Tech News".
+   - "title": A concise, informative, human-grade editorial headline (6 to 12 words, title case) strictly grounded in the shared consensus topic across ALL posts (including "additionalSnippets") in the cluster. Reflect the key person, entity, action, or fact. Do NOT use generic labels like "Tech News", editorial rubric prefixes ("Breaking:", "快讯："), or peripheral details from a single outlier post.
    - "titleZh": If the title is NOT in Chinese (including English, Russian, Arabic, Japanese, Korean, French, German, Spanish, etc.), provide an accurate, natural Simplified Chinese translation of the title. Only if the title is already in Chinese, set this to null.
-   - "summary": A crisp 1-2 sentence briefing of the topic.
+   - "summary": A crisp 1-2 sentence briefing of the topic covering the shared consensus across the cluster.
    - "category": One of "Tech", "Business", "World", "Crypto", "Science", "Culture", "Security", or "General".
    - "sentiment": Overall sentiment of the grouped posts — strictly one of "positive", "neutral", or "negative".
    - "sentimentScore": Numeric polarity score from -1.0 (strongly negative) to 1.0 (strongly positive), with values near 0 for neutral.

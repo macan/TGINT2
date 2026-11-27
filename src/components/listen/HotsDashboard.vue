@@ -73,6 +73,7 @@ import PostItemView from "./PostItemView.vue";
 import VirtualPostList from "./VirtualPostList.vue";
 import ChannelViewCard from "./ChannelViewCard.vue";
 import PostVolumeTrendCard from "./PostVolumeTrendCard.vue";
+import ClusterActivityHeatmapCard from "./ClusterActivityHeatmapCard.vue";
 
 export interface ListenDbSyncPayload {
   timestamp: number;
@@ -429,12 +430,35 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
 
     const syncInspectedTopic = (topics: HotTopicCluster[]) => {
       if (!inspectedTopic.value || topics.length === 0) return;
+      const prevKeys = new Set(inspectedTopic.value.posts.map(p => p.key));
       const prevRepKey = inspectedTopic.value.representativePost?.key || inspectedTopic.value.posts[0]?.key;
-      const matched =
-        topics.find(tp => tp.id === inspectedTopic.value?.id) ||
-        (prevRepKey ? topics.find(tp => tp.posts.some(p => p.key === prevRepKey)) : undefined);
-      if (matched) {
-        inspectedTopic.value = matched;
+
+      let bestMatch: HotTopicCluster | undefined;
+      let bestOverlap = 0;
+      let bestHasRep = false;
+
+      for (const tp of topics) {
+        let overlap = 0;
+        let hasRep = false;
+        for (const p of tp.posts) {
+          if (prevKeys.has(p.key)) overlap++;
+          if (prevRepKey && p.key === prevRepKey) hasRep = true;
+        }
+        if (
+          overlap > bestOverlap ||
+          (overlap > 0 && overlap === bestOverlap && hasRep && !bestHasRep)
+        ) {
+          bestOverlap = overlap;
+          bestHasRep = hasRep;
+          bestMatch = tp;
+        }
+      }
+
+      if (bestMatch) {
+        inspectedTopic.value = bestMatch;
+        if (isNonChineseTitle(bestMatch.title) && (!bestMatch.titleZh || bestMatch.titleZh === bestMatch.title)) {
+          void translateTopicTitlesOnDemand([bestMatch]);
+        }
       }
     };
 
@@ -1013,7 +1037,8 @@ function executePendingRecalculation() {
   if (checkAndHandleCalendarDayChange()) {
     return;
   }
-  runAnalysis(false);
+  clearHotsAnalysisCache();
+  runAnalysis(true);
 }
 
 // Watch for background database updates from listen sync with date range filtering & extended debounce
@@ -1122,8 +1147,9 @@ async function flushLazyTitleTranslations() {
 function enqueueLazyTopicTranslation(topic: HotTopicCluster) {
   if (!isNonChineseTitle(topic.title)) return;
   if (topic.titleZh && topic.titleZh !== topic.title) return;
-  if (pendingLazyTopicsMap.has(topic.id)) return;
-  pendingLazyTopicsMap.set(topic.id, topic);
+  const dedupeKey = `${topic.id}::${topic.title}`;
+  if (pendingLazyTopicsMap.has(dedupeKey)) return;
+  pendingLazyTopicsMap.set(dedupeKey, topic);
 
   if (lazyTranslateTimer) clearTimeout(lazyTranslateTimer);
   lazyTranslateTimer = setTimeout(() => {
@@ -1513,6 +1539,17 @@ onUnmounted(() => {
       :day-key="activeCalendarDayKey"
       :is-dark="isDark"
       :is-computing="isComputing"
+    />
+
+    <!-- Cluster Activity Density Heat Map (Last 24h & Active Date Range) -->
+    <ClusterActivityHeatmapCard
+      v-if="analysisResult && analysisResult.hotPosts.length > 0"
+      :topics="analysisResult.hotTopics"
+      :date-range="effectiveChartDateRange"
+      :day-key="activeCalendarDayKey"
+      :is-dark="isDark"
+      :is-computing="isTopicsComputing"
+      @inspect-topic="inspectTopic"
     />
 
     <!-- Main 3-Column Bento Grid: Hot Topics, Hot Posts, Hot Channels -->

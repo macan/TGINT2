@@ -88,6 +88,7 @@ export interface HotTopicCluster {
   channels: string[];
   hotScore: number;
   representativePost?: HotPostItem;
+  membershipSignature?: string;
   timeSpan: {
     start: number;
     end: number;
@@ -946,7 +947,7 @@ function buildCorpusFeatureBags(posts: HotPostItem[]): PostFeatureBag[] {
 
     const topTokens = Array.from(tfidf.entries())
       .sort((a, b) => b[1] - a[1])
-      .slice(0, 7)
+      .slice(0, 12)
       .map((e) => e[0]);
 
     const { hi, lo } = computeSimHash64(tfidf);
@@ -979,6 +980,13 @@ function computeSparseCosine(a: Map<string, number>, b: Map<string, number>): nu
   return sum;
 }
 
+const GENERIC_CLUSTER_HASHTAGS = new Set([
+  '#news', '#breaking', '#update', '#upd', '#video', '#photo', '#shorts', '#viral',
+  '#live', '#watch', '#alert', '#exclusive', '#digest', '#summary', '#report',
+  '#новости', '#срочно', '#молния', '#видео', '#фото', '#главное', '#важно', '#итоги',
+  '#快讯', '#突发', '#新闻', '#热点', '#重磅', '#速报', '#最新', '#视频', '#图片', '#日报',
+]);
+
 function computeStage1BagToCentroidSim(
   bag: PostFeatureBag,
   centroidTfidf: Map<string, number>,
@@ -995,7 +1003,7 @@ function computeStage1BagToCentroidSim(
   let hashtagBonus = 0;
   if (bag.hashtags.size > 0 && centroidHashtags.size > 0) {
     for (const h of bag.hashtags) {
-      if (centroidHashtags.has(h)) {
+      if (!GENERIC_CLUSTER_HASHTAGS.has(h) && centroidHashtags.has(h)) {
         hashtagBonus = 0.22;
         break;
       }
@@ -1008,7 +1016,7 @@ function computeStage1BagToCentroidSim(
     centroidDomains.has(bag.domain) &&
     bag.domain !== 't.me' &&
     bag.domain !== 'telegram.org' &&
-    tfidfCos >= 0.12
+    tfidfCos >= 0.14
   ) {
     domainBonus = 0.1;
   }
@@ -1069,11 +1077,51 @@ export interface ExtractedClusterInfo {
   tags: ClusterTag[];
 }
 
+const GENERIC_LINK_ENTITY_DOMAINS = new Set([
+  't', 'telegram', 'youtube', 'youtu', 'twitter', 'x', 'reddit', 'medium', 'substack',
+  'github', 'instagram', 'facebook', 'tiktok', 'vk', 'ok', 'dzen', 'zen', 'wikipedia',
+  'bit', 'tinyurl', 'telegra', 'telegraph', 'imgur', 'vimeo', 'twitch', 'discord',
+  'linkedin', 'threads', 'bsky', 'bluesky', 'news', 'blog', 'web', 'app'
+]);
+
 export function extractClusterMetadata(clusterPosts: HotPostItem[]): ExtractedClusterInfo {
-  const personsSet = new Set<string>();
-  const entitiesSet = new Set<string>();
-  const factsSet = new Set<string>();
-  const optionsSet = new Set<string>();
+  interface FreqEntry {
+    display: string;
+    postCount: number;
+    totalHits: number;
+    firstIndex: number;
+  }
+
+  const personsMap = new Map<string, FreqEntry>();
+  const entitiesMap = new Map<string, FreqEntry>();
+  const factsMap = new Map<string, FreqEntry>();
+  const optionsMap = new Map<string, FreqEntry>();
+
+  const bump = (
+    map: Map<string, FreqEntry>,
+    seenInPost: Set<string>,
+    raw: string,
+    postIdx: number,
+    weight: number = 1
+  ) => {
+    const display = raw.trim();
+    if (!display) return;
+    const key = display.toLowerCase();
+    const existing = map.get(key);
+    if (existing) {
+      existing.totalHits += weight;
+      if (!seenInPost.has(key)) {
+        existing.postCount += 1;
+        seenInPost.add(key);
+      }
+      if (/[A-ZА-ЯЁ]/.test(display) && !/[A-ZА-ЯЁ]/.test(existing.display)) {
+        existing.display = display;
+      }
+    } else {
+      seenInPost.add(key);
+      map.set(key, { display, postCount: 1, totalHits: weight, firstIndex: postIdx });
+    }
+  };
 
   // Known entity and person patterns
   const PERSON_KNOWN_RE = /\b(Pavel Durov|Durov|Elon Musk|Musk|Sam Altman|Vitalik Buterin|Vitalik|Donald Trump|Trump|Joe Biden|Biden|Kamala Harris|Jerome Powell|Satoshi Nakamoto|Satoshi|Changpeng Zhao|CZ|Jensen Huang|Mark Zuckerberg|Tim Cook|Satya Nadella|Sundar Pichai|Edward Snowden|Julian Assange)\b/gi;
@@ -1090,13 +1138,19 @@ export function extractClusterMetadata(clusterPosts: HotPostItem[]): ExtractedCl
   const OPTION_PATTERN_RE = /\b(?:Option [A-D1-4]|Choice [A-D1-4]|Plan [A-D1-4]|Scenario [1-4]|Bullish vs Bearish|Pros & Cons|For vs Against|Vote:?)\s*[:—\-]?\s*([^\n,;.]{3,35})/gi;
   const OPTION_DEBATE_RE = /\b(Yes\s*[/vs]\s*No|Bullish\s*[/vs]\s*Bearish|Approve\s*[/vs]\s*Reject|Support\s*[/vs]\s*Oppose)\b/gi;
 
-  for (const p of clusterPosts) {
+  for (let postIdx = 0; postIdx < clusterPosts.length; postIdx++) {
+    const p = clusterPosts[postIdx];
+    const seenPersons = new Set<string>();
+    const seenEntities = new Set<string>();
+    const seenFacts = new Set<string>();
+    const seenOptions = new Set<string>();
+
     // 1. Author metadata
     const author = p.data?.author || p.raw?.author;
     if (author && typeof author === 'string') {
       const cleanAuthor = author.replace(/^@/, '').trim();
       if (cleanAuthor.length >= 2 && cleanAuthor.length <= 25 && !/^(admin|bot|channel|group|telegram)$/i.test(cleanAuthor)) {
-        personsSet.add(cleanAuthor);
+        bump(personsMap, seenPersons, cleanAuthor, postIdx, 0.7);
       }
     }
 
@@ -1105,32 +1159,33 @@ export function extractClusterMetadata(clusterPosts: HotPostItem[]): ExtractedCl
     if (poll) {
       if (poll.question && typeof poll.question === 'string') {
         const q = poll.question.trim();
-        if (q.length > 5 && q.length < 50) {
-          optionsSet.add(q);
+        if (q.length > 5 && q.length < 70) {
+          bump(optionsMap, seenOptions, q, postIdx, 2.0);
         }
       }
       if (Array.isArray(poll.answers)) {
         for (const ans of poll.answers) {
           const text = ans.text || ans.option;
           if (text && typeof text === 'string' && text.trim().length <= 25) {
-            optionsSet.add(text.trim());
+            bump(optionsMap, seenOptions, text.trim(), postIdx, 0.8);
           }
         }
       }
     }
 
-    // 3. LinkPreview domains / site_name
+    // 3. LinkPreview domains / site_name (exclude generic social/platform domains from hijacking entities)
     if (p.linkPreview) {
       if (p.linkPreview.site_name) {
         const sn = p.linkPreview.site_name.trim();
-        if (sn.length >= 2 && sn.length <= 25 && !/^t\.me$/i.test(sn)) {
-          entitiesSet.add(sn);
+        const snNorm = sn.toLowerCase().replace(/^www\./, '').replace(/\.(com|org|net|io|me|app|ai)$/, '');
+        if (sn.length >= 2 && sn.length <= 25 && !GENERIC_LINK_ENTITY_DOMAINS.has(snNorm)) {
+          bump(entitiesMap, seenEntities, sn, postIdx, 0.6);
         }
       }
       if (p.linkPreview.domain) {
-        const dom = p.linkPreview.domain.replace(/^www\./, '').replace(/\.(com|org|net|io|me|app|ai)$/, '');
-        if (dom.length >= 3 && dom.length <= 20 && !/^(t|telegram)$/i.test(dom)) {
-          entitiesSet.add(dom.charAt(0).toUpperCase() + dom.slice(1));
+        const dom = p.linkPreview.domain.replace(/^www\./, '').replace(/\.(com|org|net|io|me|app|ai)$/, '').toLowerCase();
+        if (dom.length >= 3 && dom.length <= 20 && !GENERIC_LINK_ENTITY_DOMAINS.has(dom)) {
+          bump(entitiesMap, seenEntities, dom.charAt(0).toUpperCase() + dom.slice(1), postIdx, 0.5);
         }
       }
     }
@@ -1146,60 +1201,66 @@ export function extractClusterMetadata(clusterPosts: HotPostItem[]): ExtractedCl
       if (name.toLowerCase() === 'musk') name = 'Elon Musk';
       if (name.toLowerCase() === 'altman') name = 'Sam Altman';
       if (name.toLowerCase() === 'trump') name = 'Donald Trump';
-      personsSet.add(name);
+      bump(personsMap, seenPersons, name, postIdx, 1.5);
     }
 
     PERSON_SPEECH_RE.lastIndex = 0;
     while ((match = PERSON_SPEECH_RE.exec(textToScan)) !== null) {
       const candidate = match[1].trim();
       if (candidate.length >= 3 && candidate.length <= 25 && !/^(The|A|An|This|That|Some|New|Telegram|Channel|Users|Message)$/i.test(candidate)) {
-        personsSet.add(candidate);
+        bump(personsMap, seenPersons, candidate, postIdx, 1.0);
       }
     }
 
     // Scan for entities
     ENTITY_KNOWN_RE.lastIndex = 0;
     while ((match = ENTITY_KNOWN_RE.exec(textToScan)) !== null) {
-      entitiesSet.add(match[0].trim());
+      bump(entitiesMap, seenEntities, match[0].trim(), postIdx, 1.5);
     }
 
     // Scan for facts & metrics
     FACT_CURRENCY_RE.lastIndex = 0;
     while ((match = FACT_CURRENCY_RE.exec(textToScan)) !== null) {
-      factsSet.add(match[0].trim());
+      bump(factsMap, seenFacts, match[0].trim(), postIdx, 1.2);
     }
     FACT_PERCENT_RE.lastIndex = 0;
     while ((match = FACT_PERCENT_RE.exec(textToScan)) !== null) {
-      factsSet.add(match[0].trim());
+      bump(factsMap, seenFacts, match[0].trim(), postIdx, 1.0);
     }
     FACT_MILESTONE_RE.lastIndex = 0;
     while ((match = FACT_MILESTONE_RE.exec(textToScan)) !== null) {
-      factsSet.add(match[0].trim());
+      bump(factsMap, seenFacts, match[0].trim(), postIdx, 1.2);
     }
     FACT_VERSION_RE.lastIndex = 0;
     while ((match = FACT_VERSION_RE.exec(textToScan)) !== null) {
-      factsSet.add(match[0].trim());
+      bump(factsMap, seenFacts, match[0].trim(), postIdx, 1.1);
     }
     FACT_EVENT_RE.lastIndex = 0;
     while ((match = FACT_EVENT_RE.exec(textToScan)) !== null) {
-      factsSet.add(match[0].trim());
+      bump(factsMap, seenFacts, match[0].trim(), postIdx, 1.1);
     }
 
     // Scan for options & debates
     OPTION_PATTERN_RE.lastIndex = 0;
     while ((match = OPTION_PATTERN_RE.exec(textToScan)) !== null) {
-      optionsSet.add(match[1].trim());
+      bump(optionsMap, seenOptions, match[1].trim(), postIdx, 1.0);
     }
     OPTION_DEBATE_RE.lastIndex = 0;
     while ((match = OPTION_DEBATE_RE.exec(textToScan)) !== null) {
-      optionsSet.add(match[0].trim());
+      bump(optionsMap, seenOptions, match[0].trim(), postIdx, 1.0);
     }
   }
 
-  const persons = Array.from(personsSet).slice(0, 3);
-  const entities = Array.from(entitiesSet).slice(0, 4);
-  const facts = Array.from(factsSet).slice(0, 4);
-  const options = Array.from(optionsSet).slice(0, 3);
+  const rankByConsensus = (map: Map<string, FreqEntry>, limit: number): string[] =>
+    Array.from(map.values())
+      .sort((a, b) => b.postCount - a.postCount || b.totalHits - a.totalHits || a.firstIndex - b.firstIndex)
+      .slice(0, limit)
+      .map((e) => e.display);
+
+  const persons = rankByConsensus(personsMap, 3);
+  const entities = rankByConsensus(entitiesMap, 4);
+  const facts = rankByConsensus(factsMap, 4);
+  const options = rankByConsensus(optionsMap, 3);
 
   // Assemble unified tags
   const tags: ClusterTag[] = [];
@@ -2028,97 +2089,693 @@ export function summarizeSinglePost(
   return { title: sanitizeTitle(bestTitle), summary };
 }
 
-function synthesizeClusterTitle(
+export interface ClusterTitleContext {
+  topKeywords?: string[];
+  centroidTfidf?: Map<string, number>;
+  postCentrality?: Map<string, number>;
+  postTokens?: Map<string, Set<string>>;
+}
+
+const BOILERPLATE_HEADLINE_RE =
+  /(?:subscribe\s+to|join\s+(?:our|the)\s+channel|follow\s+us|daily\s+(?:digest|roundup|briefing)|morning\s+(?:briefing|roundup|digest)|evening\s+(?:briefing|roundup|digest)|подпис(?:ывайт|аться|ись)|наш\s+канал|итоги\s+дня|главное\s+за\s+день|утренний\s+дайджест|вечерний\s+дайджест|关注我们|订阅频道|每日早报|每日晚报|今日要闻汇总|早间快讯汇总)/iu;
+
+function computeClusterMembershipSignature(posts: HotPostItem[]): string {
+  const keys = posts
+    .map((p) => String(p.key || p.id || ''))
+    .sort()
+    .join('|');
+  return `${posts.length}:${fnv1aHash64(keys)}`;
+}
+
+function buildPostTokenSetForTitle(post: HotPostItem): Set<string> {
+  const combined = `${post.linkPreview?.title || ''} ${post.text || ''} ${post.linkPreview?.description || ''}`;
+  const set = new Set<string>(tokenizeMultilingual(combined));
+  for (const h of extractHashtags(post.text || '')) {
+    if (!GENERIC_CLUSTER_HASHTAGS.has(h)) {
+      set.add(h.replace(/^#/, ''));
+    }
+  }
+  return set;
+}
+
+function generateConsensusSummary(
+  post: HotPostItem,
+  consensusTokens: Set<string>,
+  anchorTerms: string[]
+): string {
+  const source = (post.text || post.linkPreview?.description || post.cleanSnippet || '').trim();
+  if (!source) return '';
+
+  const clean = source
+    .replace(/https?:\/\/\S+/gi, '')
+    .replace(/t\.me\/\S+/gi, '')
+    .replace(/[#*`_~]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (clean.length <= 165) {
+    return clean;
+  }
+
+  const sentences = splitIntoSentences(clean).filter((s) => !isGenericLead(s));
+  if (sentences.length === 0) {
+    return generateCleanSummary(post.text, post.cleanSnippet);
+  }
+
+  // Score sentences so multi-topic digest posts summarize the cluster-relevant portion
+  let bestIdx = 0;
+  let bestScore = -1;
+  for (let i = 0; i < Math.min(sentences.length, 10); i++) {
+    const s = sentences[i];
+    const sTokens = tokenizeMultilingual(s);
+    let hits = 0;
+    for (const t of sTokens) {
+      if (consensusTokens.has(t)) hits++;
+    }
+    const anchorHits = anchorTerms.filter((term) => containsAnyTerm(s, [term])).length;
+    const score = hits * 1.4 + anchorHits * 2.0 + Math.max(0, 1.2 - i * 0.2);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  }
+
+  let summary = '';
+  for (let i = bestIdx; i < sentences.length; i++) {
+    const s = sentences[i];
+    if ((summary + ' ' + s).length > 210) {
+      if (!summary) {
+        summary = semanticTruncate(s, 185, anchorTerms);
+      }
+      break;
+    }
+    summary += (summary ? ' ' : '') + s;
+  }
+
+  return summary || generateCleanSummary(post.text, post.cleanSnippet);
+}
+
+export function synthesizeClusterTitle(
   clusterPosts: HotPostItem[],
-  extracted?: ExtractedClusterInfo
+  extracted?: ExtractedClusterInfo,
+  context?: ClusterTitleContext
 ): { title: string; summary: string } {
   if (clusterPosts.length === 0) {
     return { title: 'Broadcasts', summary: '' };
   }
 
-  // If only one post in the cluster: summarize its content if long!
+  // Single-post cluster: preserve full single-post NLP summarization principles
   if (clusterPosts.length === 1) {
     return summarizeSinglePost(clusterPosts[0], extracted);
   }
 
-  const persons = extracted?.persons || [];
-  const entities = extracted?.entities || [];
-  const facts = extracted?.facts || [];
-  const options = extracted?.options || [];
+  const clusterSize = clusterPosts.length;
+  const topKeywords = (context?.topKeywords || [])
+    .map((k) => k.replace(/^#/, '').trim())
+    .filter((k) => k.length >= 2 && !STOPWORDS.has(k.toLowerCase()));
+  const centroidTfidf = context?.centroidTfidf;
+  const postCentrality = context?.postCentrality;
 
-  // 1. If cluster has a clear debate or poll question
+  // 1. Build per-post token sets & cluster-wide token document frequency (how many posts share each token)
+  const sampleForDf = clusterPosts.slice(0, 32);
+  const perPostTokens: Array<{ post: HotPostItem; tokens: Set<string> }> = sampleForDf.map((p) => {
+    const pre = context?.postTokens?.get(p.key);
+    return { post: p, tokens: pre ? new Set(pre) : buildPostTokenSetForTitle(p) };
+  });
+
+  const clusterTokenDf = new Map<string, number>();
+  for (const entry of perPostTokens) {
+    for (const tok of entry.tokens) {
+      const cleanTok = tok.replace(/^#/, '');
+      if (cleanTok.length < 2 || STOPWORDS.has(cleanTok)) continue;
+      clusterTokenDf.set(cleanTok, (clusterTokenDf.get(cleanTok) || 0) + 1);
+    }
+  }
+
+  // Consensus token weights: strongly reward terms appearing across >= 2 distinct posts in the cluster,
+  // reinforced by c-TF-IDF topKeywords and centroidTfidf weights.
+  const consensusTokenWeights = new Map<string, number>();
+  const denomPosts = Math.max(2, perPostTokens.length);
+  for (const [tok, df] of clusterTokenDf.entries()) {
+    if (df >= 2) {
+      const ratio = df / denomPosts;
+      consensusTokenWeights.set(tok, 1.0 + ratio * 2.5);
+    }
+  }
+  if (centroidTfidf) {
+    const topCentroid = Array.from(centroidTfidf.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 20);
+    for (const [rawTok, weight] of topCentroid) {
+      const tok = rawTok.replace(/^#/, '');
+      if (tok.length < 2 || STOPWORDS.has(tok)) continue;
+      const df = clusterTokenDf.get(tok) || 1;
+      const dfMult = df >= 2 ? 1.6 : 0.75;
+      consensusTokenWeights.set(tok, (consensusTokenWeights.get(tok) || 0) + weight * 3.0 * dfMult);
+    }
+  }
+  for (let i = 0; i < topKeywords.length; i++) {
+    const kw = topKeywords[i].toLowerCase();
+    const df = clusterTokenDf.get(kw) || 1;
+    const bonus = (2.6 - i * 0.3) * (df >= 2 ? 1.4 : 0.8);
+    consensusTokenWeights.set(kw, (consensusTokenWeights.get(kw) || 0) + Math.max(0.8, bonus));
+    for (const sub of tokenizeMultilingual(kw)) {
+      if (sub.length >= 2 && !STOPWORDS.has(sub)) {
+        consensusTokenWeights.set(sub, (consensusTokenWeights.get(sub) || 0) + 1.0);
+      }
+    }
+  }
+
+  const sortedConsensusTokens = Array.from(consensusTokenWeights.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 18);
+  const topConsensusTokenSet = new Set(sortedConsensusTokens.map(([t]) => t));
+  const maxConsensusWeightSum = Math.max(
+    1,
+    sortedConsensusTokens.slice(0, 8).reduce((acc, [, w]) => acc + w, 0)
+  );
+
+  // 2. Compute true post centrality (preferring passed neural/TF-IDF centrality; otherwise cluster-token overlap)
+  const maxQuality = Math.max(1, ...clusterPosts.map((p) => p.qualityScore));
+  const resolvedCentrality = new Map<string, number>();
+
+  for (let i = 0; i < clusterPosts.length; i++) {
+    const p = clusterPosts[i];
+    if (postCentrality && postCentrality.has(p.key)) {
+      resolvedCentrality.set(p.key, Math.max(0, Math.min(1, postCentrality.get(p.key)!)));
+    } else {
+      const pToks = perPostTokens.find((x) => x.post.key === p.key)?.tokens || buildPostTokenSetForTitle(p);
+      let overlapWeight = 0;
+      for (const tok of pToks) {
+        const w = consensusTokenWeights.get(tok.replace(/^#/, ''));
+        if (w) overlapWeight += w;
+      }
+      const lexicalCentrality = Math.min(1, overlapWeight / maxConsensusWeightSum);
+      // Slight anchor nudge for index 0 (caller-supplied medoid) when no explicit centrality map was given
+      const medoidNudge = i === 0 ? 0.12 : 0;
+      resolvedCentrality.set(p.key, Math.min(1, lexicalCentrality + medoidNudge));
+    }
+  }
+
+  // Order posts by cluster centrality first (medoid & core posts lead — high-view outliers cannot hijack!)
+  const rankedPosts = [...clusterPosts].sort((a, b) => {
+    const cA = resolvedCentrality.get(a.key) ?? 0;
+    const cB = resolvedCentrality.get(b.key) ?? 0;
+    const sA = 0.78 * cA + 0.22 * (a.qualityScore / maxQuality);
+    const sB = 0.78 * cB + 0.22 * (b.qualityScore / maxQuality);
+    return sB - sA;
+  });
+
+  // 3. Build cluster-wide consensus entities, facts, and key phrases via multi-post document frequency
+  const entityDf = new Map<string, { display: string; postCount: number; score: number }>();
+  const factDf = new Map<string, { display: string; postCount: number }>();
+  const phraseDf = new Map<string, { display: string; postCount: number; score: number }>();
+
+  const insightPosts = rankedPosts.slice(0, 12);
+  for (let i = 0; i < insightPosts.length; i++) {
+    const p = insightPosts[i];
+    const pCentrality = resolvedCentrality.get(p.key) ?? 0.5;
+    const ins = extractPostKeyInsights(p);
+    const seenEnt = new Set<string>();
+    const seenFact = new Set<string>();
+    const seenPhrase = new Set<string>();
+
+    for (let eIdx = 0; eIdx < ins.entities.length; eIdx++) {
+      const ent = ins.entities[eIdx];
+      const key = ent.toLowerCase();
+      if (seenEnt.has(key) || GENERIC_LINK_ENTITY_DOMAINS.has(key)) continue;
+      seenEnt.add(key);
+      const cur = entityDf.get(key);
+      const pts = (1.5 - eIdx * 0.15) * (0.6 + pCentrality);
+      if (cur) {
+        cur.postCount += 1;
+        cur.score += pts;
+        if (/[A-ZА-ЯЁ]/.test(ent) && !/[A-ZА-ЯЁ]/.test(cur.display)) cur.display = ent;
+      } else {
+        entityDf.set(key, { display: ent, postCount: 1, score: pts });
+      }
+    }
+
+    for (const f of ins.facts) {
+      const key = f.toLowerCase();
+      if (seenFact.has(key)) continue;
+      seenFact.add(key);
+      const cur = factDf.get(key);
+      if (cur) cur.postCount += 1;
+      else factDf.set(key, { display: f, postCount: 1 });
+    }
+
+    for (let kIdx = 0; kIdx < ins.keyPhrases.length; kIdx++) {
+      const ph = ins.keyPhrases[kIdx];
+      const key = ph.toLowerCase();
+      if (seenPhrase.has(key)) continue;
+      seenPhrase.add(key);
+      const cur = phraseDf.get(key);
+      const pts = (1.2 - kIdx * 0.12) * (0.6 + pCentrality);
+      if (cur) {
+        cur.postCount += 1;
+        cur.score += pts;
+      } else {
+        phraseDf.set(key, { display: ph, postCount: 1, score: pts });
+      }
+    }
+  }
+
+  // Merge consensus-ranked extracted persons/entities/facts
+  const seedFromExtracted = (items: string[] | undefined, boost: number) => {
+    for (const raw of items || []) {
+      const clean = sanitizeTitle(raw);
+      const key = clean.toLowerCase();
+      if (!clean || GENERIC_LINK_ENTITY_DOMAINS.has(key)) continue;
+      let supportCount = 0;
+      for (const p of insightPosts) {
+        const hay = `${p.text} ${p.linkPreview?.title || ''}`.toLowerCase();
+        if (hay.includes(key)) supportCount++;
+      }
+      if (supportCount === 0) continue;
+      const cur = entityDf.get(key);
+      if (cur) {
+        cur.postCount = Math.max(cur.postCount, supportCount);
+        cur.score += boost * supportCount;
+      } else {
+        entityDf.set(key, { display: clean, postCount: supportCount, score: boost * supportCount });
+      }
+    }
+  };
+  seedFromExtracted(extracted?.persons, 1.3);
+  seedFromExtracted(extracted?.entities, 1.1);
+
+  const rankedEntities = Array.from(entityDf.values()).sort(
+    (a, b) => b.postCount - a.postCount || b.score - a.score
+  );
+  const sharedEntities = rankedEntities.filter((e) => e.postCount >= 2).map((e) => e.display);
+  const consensusEntities = (
+    sharedEntities.length > 0 ? sharedEntities : rankedEntities.map((e) => e.display)
+  ).slice(0, 6);
+
+  const rankedFacts = Array.from(factDf.values()).sort((a, b) => b.postCount - a.postCount);
+  const consensusFacts = rankedFacts.map((f) => f.display).slice(0, 4);
+
+  const rankedPhrases = Array.from(phraseDf.values()).sort(
+    (a, b) => b.postCount - a.postCount || b.score - a.score
+  );
+  const consensusPhrases = rankedPhrases.map((p) => p.display).slice(0, 6);
+
+  // Only allow coreSubject anchoring when the subject is genuinely shared by >= 2 posts (or is a top c-TF-IDF keyword)
+  const verifiedCoreSubject =
+    sharedEntities[0] ||
+    (topKeywords[0] && (clusterTokenDf.get(topKeywords[0].toLowerCase()) || 0) >= 2
+      ? topKeywords[0]
+      : '');
+
+  const consensusAnchorTerms = Array.from(
+    new Set([
+      ...consensusEntities.slice(0, 4),
+      ...consensusFacts.slice(0, 2),
+      ...topKeywords.slice(0, 4),
+      ...consensusPhrases.slice(0, 3),
+    ])
+  );
+
+  const consensusInsights: PostKeyInsights = {
+    coreSubject: verifiedCoreSubject,
+    entities: sharedEntities.length > 0 ? sharedEntities.slice(0, 4) : consensusEntities.slice(0, 2),
+    keyPhrases: consensusPhrases,
+    facts: consensusFacts,
+    anchorTerms: consensusAnchorTerms,
+  };
+
+  // 4. Preserve Poll & Debate principle when the poll question aligns with the cluster
+  const options = extracted?.options || [];
   if (options.length > 0 && options[0].includes('?')) {
-    const topPost = clusterPosts[0];
+    const pollQ = sanitizeTitle(options[0]);
+    const pollToks = tokenizeMultilingual(pollQ);
+    const pollMatchesCluster =
+      rankedPosts[0]?.data?.poll?.question === options[0] ||
+      rankedPosts[0]?.raw?.poll?.question === options[0] ||
+      pollToks.some((t) => topConsensusTokenSet.has(t));
+    if (pollMatchesCluster && pollQ.length >= 8) {
+      const leadPost = rankedPosts[0];
+      return {
+        title: sanitizeTitle(`Poll & Debate: ${pollQ}`),
+        summary: generateConsensusSummary(leadPost, topConsensusTokenSet, consensusAnchorTerms),
+      };
+    }
+  }
+
+  // 5. Gather & score candidate titles from the top central posts (link previews, header lines, body sentences)
+  interface TitleCandidate {
+    text: string;
+    post: HotPostItem;
+    postRank: number;
+    centrality: number;
+    kind: 'linkPreview' | 'header' | 'sentence';
+    lineOrSentenceIdx: number;
+  }
+
+  const candidates: TitleCandidate[] = [];
+  const seenCandNorm = new Set<string>();
+
+  const pushCandidate = (
+    raw: string,
+    post: HotPostItem,
+    postRank: number,
+    centrality: number,
+    kind: 'linkPreview' | 'header' | 'sentence',
+    lineOrSentenceIdx: number
+  ) => {
+    const cleaned = sanitizeTitle(
+      stripEditorialRubricPrefix(
+        kind === 'linkPreview'
+          ? cleanArticleHeadline(raw)
+          : kind === 'header'
+            ? extractHeaderLineCandidate(raw)
+            : stripLeadingDecorators(raw)
+      )
+    );
+    if (!cleaned || cleaned.length < 12) return;
+    if (isGenericLead(cleaned)) return;
+    // Skip bare URLs or single channel handles
+    if (/^(?:https?:\/\/|t\.me\/|@)\S+$/i.test(cleaned)) return;
+    const norm = normalizeMatchText(cleaned);
+    if (seenCandNorm.has(norm)) return;
+    seenCandNorm.add(norm);
+    candidates.push({
+      text: cleaned,
+      post,
+      postRank,
+      centrality,
+      kind,
+      lineOrSentenceIdx,
+    });
+  };
+
+  const maxSourcePosts = Math.min(rankedPosts.length, 8);
+  for (let pIdx = 0; pIdx < maxSourcePosts; pIdx++) {
+    const post = rankedPosts[pIdx];
+    const centrality = resolvedCentrality.get(post.key) ?? 0.5;
+
+    // A) Link preview title (evaluated by cluster relevance — never blindly accepted!)
+    if (post.linkPreview?.title) {
+      pushCandidate(post.linkPreview.title, post, pIdx, centrality, 'linkPreview', 0);
+    }
+
+    const fullText = (post.text || '').trim();
+    if (!fullText) continue;
+
+    // B) First 3 non-empty lines (catches real headline even if line 0 is a rubric/digest header)
+    const lines = fullText
+      .split(/[\r\n]+/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    for (let lIdx = 0; lIdx < Math.min(lines.length, 3); lIdx++) {
+      pushCandidate(lines[lIdx], post, pIdx, centrality, 'header', lIdx);
+    }
+
+    // C) Salient sentences from the body (up to first 6 sentences — handles multi-topic digest posts!)
+    const urlFree = fullText
+      .replace(/https?:\/\/\S+/gi, ' ')
+      .replace(/t\.me\/\S+/gi, ' ')
+      .trim();
+    const sentences = splitIntoSentences(urlFree);
+    for (let sIdx = 0; sIdx < Math.min(sentences.length, 6); sIdx++) {
+      if (sentences[sIdx].length >= 14) {
+        pushCandidate(sentences[sIdx], post, pIdx, centrality, 'sentence', sIdx);
+      }
+    }
+  }
+
+  // Score every candidate strictly prioritizing IN-CLUSTER RELEVANCE & CONSENSUS
+  let bestCandidate: TitleCandidate | null = null;
+  let bestScore = -Infinity;
+  let bestSupportPosts = 0;
+  let bestConsensusRatio = 0;
+
+  for (const cand of candidates) {
+    const candTokensArr = tokenizeMultilingual(cand.text);
+    const candTokenSet = new Set(candTokensArr.map((t) => t.replace(/^#/, '')));
+    const candLower = normalizeMatchText(cand.text);
+
+    // Metric 1: Cluster consensus token coverage (weighted by cluster DF + c-TF-IDF + centroid)
+    let matchedWeight = 0;
+    let matchedSharedTokenCount = 0;
+    for (const tok of candTokenSet) {
+      const w = consensusTokenWeights.get(tok);
+      if (w) {
+        matchedWeight += w;
+        if ((clusterTokenDf.get(tok) || 0) >= 2) {
+          matchedSharedTokenCount++;
+        }
+      }
+    }
+    const consensusRatio = Math.min(1, matchedWeight / maxConsensusWeightSum);
+
+    // Keyword substring/token matches (especially helpful for CJK & multi-word phrases)
+    let kwHits = 0;
+    for (const kw of topKeywords.slice(0, 5)) {
+      const kwLow = kw.toLowerCase();
+      if (candTokenSet.has(kwLow) || (kwLow.length >= 2 && candLower.includes(kwLow))) {
+        kwHits++;
+      }
+    }
+
+    // Metric 2: Multi-post support count — how many distinct in-cluster posts share substantive terms with this candidate?
+    let supportPosts = 0;
+    if (candTokenSet.size > 0) {
+      for (const entry of perPostTokens) {
+        let shared = false;
+        for (const tok of candTokenSet) {
+          if (entry.tokens.has(tok)) {
+            shared = true;
+            break;
+          }
+        }
+        if (!shared && sharedEntities.length > 0) {
+          for (const ent of sharedEntities.slice(0, 3)) {
+            const eLow = ent.toLowerCase();
+            if (candLower.includes(eLow) && entry.post.text.toLowerCase().includes(eLow)) {
+              shared = true;
+              break;
+            }
+          }
+        }
+        if (shared) supportPosts++;
+      }
+    }
+    const supportRatio = supportPosts / perPostTokens.length;
+
+    // Metric 3: Consensus entity & fact coverage
+    let entityScore = 0;
+    for (const entEntry of rankedEntities.slice(0, 5)) {
+      if (candLower.includes(entEntry.display.toLowerCase())) {
+        entityScore += entEntry.postCount >= 2 ? 2.4 : 0.8;
+      }
+    }
+    entityScore = Math.min(6.0, entityScore);
+
+    let factScore = 0;
+    for (const fEntry of rankedFacts.slice(0, 3)) {
+      if (candLower.includes(fEntry.display.toLowerCase())) {
+        factScore += fEntry.postCount >= 2 ? 1.5 : 0.5;
+      }
+    }
+    factScore = Math.min(2.5, factScore);
+
+    // Combine relevance + centrality + headline form
+    let score = 0;
+    score += consensusRatio * 12.5;
+    score += Math.min(3, matchedSharedTokenCount) * 1.1;
+    score += Math.min(3, kwHits) * 1.4;
+    score += supportRatio * 6.5;
+    score += entityScore;
+    score += factScore;
+    score += cand.centrality * 3.8;
+    score += Math.max(0, 1.4 - cand.postRank * 0.25);
+
+    // Strong guard against unrelated single-post outliers / peripheral link previews / unrelated digest bullets:
+    // If a candidate matches only <= 1 post in a multi-post cluster AND misses consensus tokens, penalize heavily!
+    const hasConsensusAlignment =
+      supportPosts >= 2 || consensusRatio >= 0.22 || kwHits >= 2 || entityScore >= 2.4;
+    if (!hasConsensusAlignment) {
+      score -= 6.5;
+    }
+
+    // Editorial form bonus ONLY when aligned with cluster consensus
+    if (hasConsensusAlignment) {
+      if (cand.kind === 'linkPreview') {
+        score += 1.4;
+      } else if (cand.kind === 'header' && cand.lineOrSentenceIdx === 0) {
+        score += 1.2;
+      } else if (cand.kind === 'sentence' && cand.lineOrSentenceIdx === 0) {
+        score += 0.8;
+      } else if (cand.kind === 'header') {
+        score += 0.3;
+      }
+    } else if (cand.kind === 'linkPreview') {
+      // Unrelated link preview gets extra penalty so it never hijacks the cluster
+      score -= 2.5;
+    }
+
+    // Penalize mid-post continuation sentences (e.g. "Also ...", "Meanwhile ...", "Кроме того...", "此外...")
+    if (/^(?:also|meanwhile|in\s+addition|furthermore|moreover|however|additionally|также|кроме\s+того|при\s+этом|однако|вместе\s+с\s+тем|此外|另外|同时|不过)\b/iu.test(cand.text)) {
+      score -= 1.4;
+    }
+
+    // Conciseness & readability shape
+    const len = cand.text.length;
+    if (len >= 22 && len <= 96) {
+      score += 1.8;
+    } else if (len >= 16 && len <= 125) {
+      score += 0.9;
+    } else if (len > 200) {
+      score -= 1.2;
+    }
+
+    // Penalize channel boilerplate / generic digest headers
+    if (BOILERPLATE_HEADLINE_RE.test(cand.text)) {
+      score -= 5.0;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = cand;
+      bestSupportPosts = supportPosts;
+      bestConsensusRatio = consensusRatio;
+    }
+  }
+
+  // 6. Finalize winning candidate with all existing formatting principles (semanticTruncate, coreSubject anchoring, sanitizeTitle)
+  if (bestCandidate && (bestSupportPosts >= 2 || bestConsensusRatio >= 0.12 || bestCandidate.centrality >= 0.55)) {
+    let finalTitle = bestCandidate.text;
+    if (finalTitle.length > 94) {
+      finalTitle = semanticTruncate(finalTitle, 90, consensusAnchorTerms);
+    }
+    if (finalTitle.length < 48 && verifiedCoreSubject) {
+      finalTitle = ensureCoreSubjectInTitle(finalTitle, consensusInsights, 98);
+    }
+    const cleanFinal = sanitizeTitle(finalTitle);
+    if (cleanFinal.length >= 10 && !isGenericLead(cleanFinal)) {
+      const summaryPost =
+        bestCandidate.centrality >= 0.45 ? bestCandidate.post : rankedPosts[0];
+      return {
+        title: cleanFinal,
+        summary: generateConsensusSummary(summaryPost, topConsensusTokenSet, consensusAnchorTerms),
+      };
+    }
+  }
+
+  // 7. Fallback: Consensus-driven synthesis from shared entities + c-TF-IDF keywords / facts, or medoid summary
+  const medoidSummary = summarizeSinglePost(rankedPosts[0], extracted);
+  if (
+    medoidSummary.title &&
+    medoidSummary.title !== 'Broadcasts' &&
+    !isGenericLead(medoidSummary.title) &&
+    !BOILERPLATE_HEADLINE_RE.test(medoidSummary.title)
+  ) {
+    let title = medoidSummary.title;
+    if (title.length < 48 && verifiedCoreSubject) {
+      title = ensureCoreSubjectInTitle(title, consensusInsights, 98);
+    }
     return {
-      title: `Poll & Debate: ${options[0]}`,
-      summary: generateCleanSummary(topPost.text, topPost.cleanSnippet)
+      title: sanitizeTitle(title),
+      summary: generateConsensusSummary(rankedPosts[0], topConsensusTokenSet, consensusAnchorTerms),
     };
   }
 
-  // 2. Check for a clean, informative linkPreview title
-  for (const p of clusterPosts) {
-    if (p.linkPreview?.title) {
-      const cleaned = cleanArticleHeadline(p.linkPreview.title);
-      if (cleaned.length >= 10 && cleaned.length <= 110) {
-        let enriched = cleaned;
-        if (entities.length > 0 && !cleaned.toLowerCase().includes(entities[0].toLowerCase()) && cleaned.length < 55) {
-          enriched = `${entities[0]}: ${cleaned}`;
-        } else if (persons.length > 0 && !cleaned.toLowerCase().includes(persons[0].toLowerCase()) && cleaned.length < 50) {
-          enriched = `${persons[0]}: ${cleaned}`;
-        }
-        const summary = generateCleanSummary(p.text, p.linkPreview.description || p.cleanSnippet);
-        return { title: enriched, summary };
-      }
-    }
+  // Clean synthesized consensus headline (never output "(N posts)" or generic labels)
+  const subject =
+    verifiedCoreSubject ||
+    consensusEntities[0] ||
+    extracted?.persons?.[0] ||
+    extracted?.entities?.[0] ||
+    topKeywords[0] ||
+    rankedPosts[0]?.channelName ||
+    'Broadcasts';
+  const supportingTerms = [
+    ...consensusEntities.filter((e) => e.toLowerCase() !== subject.toLowerCase()),
+    ...topKeywords.filter((k) => k.toLowerCase() !== subject.toLowerCase()),
+  ].slice(0, 2);
+  const fact = consensusFacts[0] || extracted?.facts?.[0];
+
+  let fallbackTitle: string;
+  if (fact && supportingTerms.length > 0) {
+    fallbackTitle = `${subject}: ${supportingTerms[0]} (${fact})`;
+  } else if (supportingTerms.length > 0) {
+    fallbackTitle = `${subject}: ${supportingTerms.join(' · ')}`;
+  } else if (fact) {
+    fallbackTitle = `${subject}: ${fact}`;
+  } else {
+    fallbackTitle = `${subject}: ${semanticTruncate(rankedPosts[0]?.cleanSnippet || '', 68, consensusAnchorTerms)}`;
   }
 
-  // 3. Best post headline or lead sentence
-  const bestPost = [...clusterPosts].sort((a, b) => b.qualityScore - a.qualityScore)[0];
-  if (bestPost && bestPost.text) {
-    const rawLines = bestPost.text.split(/[\n\r]+/);
-    for (const line of rawLines) {
-      const trimmed = line.trim();
-      const cand = extractHeaderLineCandidate(trimmed);
-      if (cand.length >= 10 && cand.length <= 110 && !isGenericLead(cand)) {
-        return {
-          title: cand,
-          summary: generateCleanSummary(bestPost.text, bestPost.cleanSnippet)
-        };
-      }
-    }
-
-    // 4. Try lead sentence from best post
-    const sentences = splitIntoSentences(bestPost.text);
-    for (const s of sentences) {
-      const cleanS = sanitizeTitle(stripLeadingDecorators(s));
-      if (cleanS.length >= 12 && cleanS.length <= 85 && !isGenericLead(cleanS)) {
-        return {
-          title: cleanS,
-          summary: generateCleanSummary(bestPost.text, bestPost.cleanSnippet)
-        };
-      }
-      if (cleanS.length > 85 && cleanS.length <= 150) {
-        return {
-          title: truncateAtWordBoundary(cleanS, 80),
-          summary: generateCleanSummary(bestPost.text, bestPost.cleanSnippet)
-        };
-      }
-    }
-  }
-
-  // 5. Clean synthesized subject headline (never output "(N posts)")
-  const subject = persons[0] || entities[0] || clusterPosts[0]?.channelName || 'Broadcasts';
-  const fact = facts[0];
-  const title = fact ? `${subject}: ${fact}` : `${subject} Developing Story`;
   return {
-    title,
-    summary: generateCleanSummary(clusterPosts[0]?.text || '', clusterPosts[0]?.cleanSnippet || '')
+    title: sanitizeTitle(fallbackTitle),
+    summary: generateConsensusSummary(rankedPosts[0], topConsensusTokenSet, consensusAnchorTerms),
   };
 }
 
 // ---------------------------------------------------------------------------
 // AI-Powered Clustering via Gemini 3.1 Flash Lite (with Cluster Medoid Pre-Grouping)
 // ---------------------------------------------------------------------------
+
+function isAiTitleRelevantToCluster(
+  title: string,
+  titleZh: string | undefined,
+  clusterPosts: HotPostItem[],
+  extracted: ExtractedClusterInfo,
+  topKeywords: string[]
+): boolean {
+  const clean = sanitizeTitle(title);
+  if (!clean || clean.length < 6 || isGenericLead(clean)) return false;
+  if (/^(?:trending\s+topic|hot\s+topic|tech\s+news|news\s+update|broadcasts)\b/i.test(clean)) {
+    return false;
+  }
+
+  // Build union of tokens & text from the cluster (check both original title and titleZh so
+  // valid cross-lingual AI headlines pass cleanly)
+  const combinedCandidate = `${clean} ${titleZh || ''}`;
+  const candTokens = tokenizeMultilingual(combinedCandidate);
+  if (candTokens.length === 0) return false;
+
+  const clusterCorpus = clusterPosts
+    .slice(0, 20)
+    .map((p) => `${p.linkPreview?.title || ''} ${p.text || ''}`)
+    .join(' ');
+  const clusterTokens = new Set(tokenizeMultilingual(clusterCorpus));
+
+  for (const tok of candTokens) {
+    if (clusterTokens.has(tok)) return true;
+  }
+
+  const candLower = combinedCandidate.toLowerCase();
+  const knownTerms = [
+    ...extracted.persons,
+    ...extracted.entities,
+    ...extracted.facts,
+    ...topKeywords,
+  ];
+  for (const term of knownTerms) {
+    const t = term.trim().toLowerCase();
+    if (t.length >= 2 && candLower.includes(t)) return true;
+  }
+
+  // If the AI title is in a different script than the cluster (e.g. English headline for Cyrillic/Arabic posts
+  // with no shared Latin tokens), allow it rather than falsely discarding a valid cross-lingual translation.
+  const candHasHan = /[\u4e00-\u9fff]/.test(clean);
+  const candHasCyr = /[\u0400-\u04ff]/.test(clean);
+  const candHasLat = /[a-zA-Z]{3,}/.test(clean);
+  const corpusHasHan = /[\u4e00-\u9fff]/.test(clusterCorpus);
+  const corpusHasCyr = /[\u0400-\u04ff]/.test(clusterCorpus);
+  const corpusHasLat = /[a-zA-Z]{3,}/.test(clusterCorpus);
+
+  const sharesScript =
+    (candHasHan && corpusHasHan) ||
+    (candHasCyr && corpusHasCyr) ||
+    (candHasLat && corpusHasLat);
+
+  // Reject only when they share the same script yet have ZERO lexical/entity overlap
+  return !sharesScript;
+}
 
 export async function clusterWithGeminiAI(
   apiKey: string,
@@ -2131,8 +2788,10 @@ export async function clusterWithGeminiAI(
   }
 
   // Prefer diverse medoid representatives from Stage 1 / Stage 2 clusters so Gemini
-  // sees distinct stories instead of 40 duplicates of the same breaking post
+  // sees distinct stories AND full multi-post cluster context (including newly added posts!)
   let selectedForPrompt: HotPostItem[] = [];
+  const repIdToPreCluster = new Map<string, HotTopicCluster>();
+
   if (Array.isArray(preGroupedClusters) && preGroupedClusters.length > 0) {
     const seenKeys = new Set<string>();
     for (const cl of preGroupedClusters) {
@@ -2140,6 +2799,7 @@ export async function clusterWithGeminiAI(
       if (rep && !seenKeys.has(rep.key)) {
         seenKeys.add(rep.key);
         selectedForPrompt.push(rep);
+        repIdToPreCluster.set(String(rep.id), cl);
         if (selectedForPrompt.length >= 42) break;
       }
     }
@@ -2156,16 +2816,31 @@ export async function clusterWithGeminiAI(
     selectedForPrompt = posts.slice(0, 40);
   }
 
-  const samplePosts = selectedForPrompt.map((p) => ({
-    id: String(p.id),
-    channel: p.channelName,
-    text: p.cleanSnippet.slice(0, 180),
-    linkTitle: p.linkPreview?.title,
-    linkDesc: p.linkPreview?.description?.slice(0, 120),
-    domain: p.linkPreview?.domain,
-    views: p.views,
-    forwards: p.forwards,
-  }));
+  const samplePosts = selectedForPrompt.map((p) => {
+    const preCl = repIdToPreCluster.get(String(p.id));
+    const additionalSnippets =
+      preCl && preCl.posts.length > 1
+        ? preCl.posts
+            .filter((cp) => cp.key !== p.key)
+            .slice(0, 2)
+            .map((cp) => cp.cleanSnippet.slice(0, 120))
+            .filter(Boolean)
+        : undefined;
+
+    return {
+      id: String(p.id),
+      channel: p.channelName,
+      text: p.cleanSnippet.slice(0, 200),
+      linkTitle: p.linkPreview?.title,
+      linkDesc: p.linkPreview?.description?.slice(0, 120),
+      domain: p.linkPreview?.domain,
+      views: p.views,
+      forwards: p.forwards,
+      clusterPostCount: preCl && preCl.posts.length > 1 ? preCl.posts.length : undefined,
+      clusterKeywords: preCl && preCl.keywords?.length > 0 ? preCl.keywords.slice(0, 4) : undefined,
+      additionalSnippets: additionalSnippets && additionalSnippets.length > 0 ? additionalSnippets : undefined,
+    };
+  });
 
   try {
     const backendCap = await probeApiBackend();
@@ -2209,10 +2884,26 @@ export async function clusterWithGeminiAI(
       const item = parsed[i];
       if (!item || !Array.isArray(item.postIds)) continue;
 
+      // Expand pre-grouped Stage-1 siblings so newly fetched posts inside a pre-grouped cluster are never dropped
       const clusterPosts: HotPostItem[] = [];
+      const seenClusterPostKeys = new Set<string>();
       for (const pid of item.postIds) {
-        const found = postMap.get(String(pid));
-        if (found) clusterPosts.push(found);
+        const pidStr = String(pid);
+        const preCl = repIdToPreCluster.get(pidStr);
+        if (preCl) {
+          for (const sibling of preCl.posts) {
+            if (!seenClusterPostKeys.has(sibling.key)) {
+              seenClusterPostKeys.add(sibling.key);
+              clusterPosts.push(sibling);
+            }
+          }
+        } else {
+          const found = postMap.get(pidStr);
+          if (found && !seenClusterPostKeys.has(found.key)) {
+            seenClusterPostKeys.add(found.key);
+            clusterPosts.push(found);
+          }
+        }
       }
 
       if (clusterPosts.length === 0) continue;
@@ -2261,63 +2952,96 @@ export async function clusterWithGeminiAI(
       for (const o of options.slice(0, 1)) tags.push({ type: 'option', label: String(o) });
 
       // If keywords exist, include top ones as keyword tags
-      const kws = Array.isArray(item.keywords) ? item.keywords : [];
+      const kws = Array.isArray(item.keywords) ? item.keywords.map((k: any) => String(k)) : [];
       for (const kw of kws.slice(0, 2)) {
         if (!tags.some(t => t.label.toLowerCase() === kw.toLowerCase())) {
           tags.push({ type: 'keyword', label: kw });
         }
       }
 
-        const clusterCategory = item.category || detectTopicCategory(sortedPosts.map(p => p.text).join(' '), Array.from(domainsSet));
-        const titleZh = (item.titleZh && typeof item.titleZh === 'string' && item.titleZh.trim() !== '' && item.titleZh.trim() !== item.title?.trim()) ? item.titleZh.trim() : undefined;
-        const localSentiment = analyzeClusterSentiment(sortedPosts);
-        const aiSentiment = normalizeSentimentLabel(item.sentiment);
-        const resolvedSentiment: TopicSentimentLabel = aiSentiment || localSentiment.label;
-        const rawAiScore = typeof item.sentimentScore === 'number' && Number.isFinite(item.sentimentScore)
-          ? Math.max(-1, Math.min(1, Number(item.sentimentScore.toFixed(2))))
-          : undefined;
-        const resolvedSentimentScore = rawAiScore ?? localSentiment.score;
+      const clusterCategory = item.category || detectTopicCategory(sortedPosts.map(p => p.text).join(' '), Array.from(domainsSet));
 
-        clusters.push({
-          id: `ai-cluster-${i}-${Date.now()}`,
-          title: item.title || `Trending Topic ${i + 1}`,
-          titleZh,
-          summary: item.summary || sortedPosts[0]?.cleanSnippet || '',
-          isAiGenerated: true,
-          clusterSource: 'ai',
-          category: clusterCategory,
-          sentiment: resolvedSentiment,
-          sentimentScore: resolvedSentimentScore,
-          sentimentBreakdown: localSentiment.counts,
-          keywords: kws,
-          domains: Array.from(domainsSet),
-          persons,
-          entities,
-          facts,
-          options,
-          tags,
-          posts: sortedPosts,
-          postCount: clusterPosts.length,
-          totalViews,
-          totalForwards,
-          totalReplies,
-          channels: Array.from(channelsSet),
-          hotScore,
-          representativePost: sortedPosts[0],
-          timeSpan: {
-            start: minTime === Infinity ? Date.now() : minTime,
-            end: maxTime === 0 ? Date.now() : maxTime
-          }
-        });
+      // Sanitize & validate AI title against actual in-cluster posts; fall back to consensus synthesis if off-topic/generic
+      const rawAiTitle = typeof item.title === 'string'
+        ? sanitizeTitle(stripEditorialRubricPrefix(item.title))
+        : '';
+      const rawAiTitleZh = (
+        item.titleZh &&
+        typeof item.titleZh === 'string' &&
+        item.titleZh.trim() !== '' &&
+        item.titleZh.trim() !== rawAiTitle
+      ) ? sanitizeTitle(item.titleZh) : undefined;
+
+      const aiTitleValid = isAiTitleRelevantToCluster(
+        rawAiTitle,
+        rawAiTitleZh,
+        clusterPosts,
+        extracted,
+        kws
+      );
+
+      let finalTitle = rawAiTitle;
+      let finalTitleZh = rawAiTitleZh;
+      let finalSummary = item.summary || sortedPosts[0]?.cleanSnippet || '';
+
+      if (!aiTitleValid) {
+        const localSynthesis = synthesizeClusterTitle(clusterPosts, extracted, { topKeywords: kws });
+        finalTitle = localSynthesis.title;
+        finalTitleZh = undefined; // Force fresh Chinese translation for newly synthesized title
+        if (!item.summary) {
+          finalSummary = localSynthesis.summary;
+        }
       }
 
-      clusters.sort((a, b) => b.hotScore - a.hotScore);
-      return clusters;
-    } catch (err) {
-      console.warn("AI clustering with Gemini failed, falling back to local clustering:", err);
-      return [];
+      const localSentiment = analyzeClusterSentiment(sortedPosts);
+      const aiSentiment = normalizeSentimentLabel(item.sentiment);
+      const resolvedSentiment: TopicSentimentLabel = aiSentiment || localSentiment.label;
+      const rawAiScore = typeof item.sentimentScore === 'number' && Number.isFinite(item.sentimentScore)
+        ? Math.max(-1, Math.min(1, Number(item.sentimentScore.toFixed(2))))
+        : undefined;
+      const resolvedSentimentScore = rawAiScore ?? localSentiment.score;
+
+      clusters.push({
+        id: `ai-cluster-${i}-${Date.now()}`,
+        title: finalTitle,
+        titleZh: finalTitleZh,
+        summary: finalSummary,
+        isAiGenerated: aiTitleValid,
+        clusterSource: 'ai',
+        category: clusterCategory,
+        sentiment: resolvedSentiment,
+        sentimentScore: resolvedSentimentScore,
+        sentimentBreakdown: localSentiment.counts,
+        keywords: kws,
+        domains: Array.from(domainsSet),
+        persons,
+        entities,
+        facts,
+        options,
+        tags,
+        posts: sortedPosts,
+        postCount: clusterPosts.length,
+        totalViews,
+        totalForwards,
+        totalReplies,
+        channels: Array.from(channelsSet),
+        hotScore,
+        representativePost: sortedPosts[0],
+        membershipSignature: computeClusterMembershipSignature(clusterPosts),
+        timeSpan: {
+          start: minTime === Infinity ? Date.now() : minTime,
+          end: maxTime === 0 ? Date.now() : maxTime
+        }
+      });
     }
+
+    clusters.sort((a, b) => b.hotScore - a.hotScore);
+    return clusters;
+  } catch (err) {
+    console.warn("AI clustering with Gemini failed, falling back to local clustering:", err);
+    return [];
   }
+}
 
   // ---------------------------------------------------------------------------
   // Topic Title Language Detection & Translation Helper
@@ -3037,11 +3761,13 @@ interface Stage1ClusterBucket {
 function mergeTfidfIntoCentroid(
   centroid: Map<string, number>,
   existingCount: number,
-  nextVec: Map<string, number>
+  nextVec: Map<string, number>,
+  incomingCount: number = 1
 ): Map<string, number> {
   const blended = new Map<string, number>();
-  const oldWeight = existingCount / (existingCount + 1);
-  const newWeight = 1 / (existingCount + 1);
+  const total = Math.max(1, existingCount + incomingCount);
+  const oldWeight = existingCount / total;
+  const newWeight = incomingCount / total;
 
   for (const [k, v] of centroid.entries()) {
     blended.set(k, v * oldWeight);
@@ -3213,12 +3939,13 @@ export async function clusterPostsStage1(
       if (!active[b]) continue;
       const cos = computeSparseCosine(clusters[a].centroidTfidf, clusters[b].centroidTfidf);
       if (cos >= STAGE1_MERGE_THRESHOLD) {
-        clusters[a].items.push(...clusters[b].items);
         clusters[a].centroidTfidf = mergeTfidfIntoCentroid(
           clusters[a].centroidTfidf,
           clusters[a].items.length,
-          clusters[b].centroidTfidf
+          clusters[b].centroidTfidf,
+          clusters[b].items.length
         );
+        clusters[a].items.push(...clusters[b].items);
         clusters[b].hashtags.forEach((h) => clusters[a].hashtags.add(h));
         clusters[b].urls.forEach((u) => clusters[a].urls.add(u));
         clusters[b].domains.forEach((d) => clusters[a].domains.add(d));
@@ -3229,11 +3956,22 @@ export async function clusterPostsStage1(
 
   const consolidated = clusters.filter((_, idx) => active[idx]);
   return finalizeHotTopicClusters(
-    consolidated.map((cl) => ({
-      items: cl.items,
-      medoidPost: pickStage1Medoid(cl.items, cl.centroidTfidf),
-      cohesionScore: cl.items.length > 1 ? 0.65 : 0.4,
-    })),
+    consolidated.map((cl) => {
+      const postCentrality = new Map<string, number>();
+      let simSum = 0;
+      for (const it of cl.items) {
+        const sim = cl.items.length > 1 ? computeSparseCosine(it.tfidf, cl.centroidTfidf) : 1;
+        postCentrality.set(it.post.key, sim);
+        simSum += sim;
+      }
+      return {
+        items: cl.items,
+        medoidPost: pickStage1Medoid(cl.items, cl.centroidTfidf),
+        cohesionScore: cl.items.length > 1 ? Math.max(0.45, simSum / cl.items.length) : 0.4,
+        centroidTfidf: cl.centroidTfidf,
+        postCentrality,
+      };
+    }),
     'rule',
     nerMap
   );
@@ -3251,7 +3989,7 @@ function pickStage1Medoid(
   for (const it of items) {
     const sim = computeSparseCosine(it.tfidf, centroidTfidf);
     const normQ = it.post.qualityScore / maxQ;
-    const combined = 0.65 * sim + 0.35 * normQ;
+    const combined = 0.72 * sim + 0.28 * normQ;
     if (combined > bestScore) {
       bestScore = combined;
       best = it.post;
@@ -3331,7 +4069,7 @@ export async function clusterPostsWithEmbeddings(
           let hashBonus = 0;
           if (bag.hashtags.size > 0 && cl.hashtags.size > 0) {
             for (const h of bag.hashtags) {
-              if (cl.hashtags.has(h)) {
+              if (!GENERIC_CLUSTER_HASHTAGS.has(h) && cl.hashtags.has(h)) {
                 hashBonus = 0.09;
                 break;
               }
@@ -3342,7 +4080,7 @@ export async function clusterPostsWithEmbeddings(
             cl.domains.has(bag.domain) &&
             bag.domain !== 't.me' &&
             bag.domain !== 'telegram.org' &&
-            cos >= 0.42
+            cos >= 0.48
               ? 0.05
               : 0;
           const timePenalty = computeTemporalPenalty(bag.post.date, cl.medianTime, dateRange);
@@ -3377,7 +4115,8 @@ export async function clusterPostsWithEmbeddings(
       target.centroidTfidf = mergeTfidfIntoCentroid(
         target.centroidTfidf,
         target.items.length,
-        bag.tfidf
+        bag.tfidf,
+        1
       );
       target.items.push({ bag, vec });
       bag.hashtags.forEach((h) => target.hashtags.add(h));
@@ -3442,12 +4181,13 @@ export async function clusterPostsWithEmbeddings(
           }
           clusters[a].vectorCount += clusters[b].vectorCount;
           clusters[a].centroidVec = l2Normalize(clusters[a].sumVec);
-          clusters[a].items.push(...clusters[b].items);
           clusters[a].centroidTfidf = mergeTfidfIntoCentroid(
             clusters[a].centroidTfidf,
             clusters[a].items.length,
-            clusters[b].centroidTfidf
+            clusters[b].centroidTfidf,
+            clusters[b].items.length
           );
+          clusters[a].items.push(...clusters[b].items);
           clusters[b].hashtags.forEach((h) => clusters[a].hashtags.add(h));
           clusters[b].urls.forEach((u) => clusters[a].urls.add(u));
           clusters[b].domains.forEach((d) => clusters[a].domains.add(d));
@@ -3466,23 +4206,31 @@ export async function clusterPostsWithEmbeddings(
       let medoid = cl.items[0].bag.post;
       let cohesionSum = 0;
       let cohesionCount = 0;
+      const postCentrality = new Map<string, number>();
 
       if (cl.items.length > 1 && cl.vectorCount > 0) {
         const maxQ = Math.max(1, ...cl.items.map((it) => it.bag.post.qualityScore));
         let bestScore = -Infinity;
         for (const it of cl.items) {
-          const sim = it.vec ? dotProductVectors(it.vec, cl.centroidVec) : 0.4;
+          const vecSim = it.vec ? dotProductVectors(it.vec, cl.centroidVec) : 0.4;
+          const lexSim = computeSparseCosine(it.bag.tfidf, cl.centroidTfidf);
+          const centrality = it.vec ? 0.78 * vecSim + 0.22 * lexSim : lexSim;
+          postCentrality.set(it.bag.post.key, Math.max(0, Math.min(1, centrality)));
           if (it.vec) {
-            cohesionSum += sim;
+            cohesionSum += vecSim;
             cohesionCount++;
           }
-          const score = 0.72 * sim + 0.28 * (it.bag.post.qualityScore / maxQ);
+          const score = 0.76 * centrality + 0.24 * (it.bag.post.qualityScore / maxQ);
           if (score > bestScore) {
             bestScore = score;
             medoid = it.bag.post;
           }
         }
       } else {
+        for (const it of cl.items) {
+          const lexSim = cl.items.length > 1 ? computeSparseCosine(it.bag.tfidf, cl.centroidTfidf) : 1;
+          postCentrality.set(it.bag.post.key, lexSim);
+        }
         medoid = pickStage1Medoid(
           cl.items.map((it) => it.bag),
           cl.centroidTfidf
@@ -3493,6 +4241,8 @@ export async function clusterPostsWithEmbeddings(
         items: cl.items.map((it) => it.bag),
         medoidPost: medoid,
         cohesionScore: cohesionCount > 0 ? cohesionSum / cohesionCount : 0.65,
+        centroidTfidf: cl.centroidTfidf,
+        postCentrality,
       };
     }),
     'neural',
@@ -3505,6 +4255,8 @@ function finalizeHotTopicClusters(
     items: PostFeatureBag[];
     medoidPost: HotPostItem;
     cohesionScore: number;
+    centroidTfidf?: Map<string, number>;
+    postCentrality?: Map<string, number>;
   }>,
   source: 'rule' | 'neural',
   nerMap?: Map<string, CachedNerPostSummary>
@@ -3549,6 +4301,7 @@ function finalizeHotTopicClusters(
     let totalReplies = 0;
     const channelsSet = new Set<string>();
     const domainsSet = new Set<string>();
+    const postTokens = new Map<string, Set<string>>();
     let minTime = Infinity;
     let maxTime = 0;
 
@@ -3561,13 +4314,26 @@ function finalizeHotTopicClusters(
       if (item.domain) domainsSet.add(item.domain);
       if (p.date < minTime) minTime = p.date;
       if (p.date > maxTime) maxTime = p.date;
+      const mergedToks = new Set<string>(item.tokenSet);
+      for (const h of item.hashtags) {
+        if (!GENERIC_CLUSTER_HASHTAGS.has(h)) {
+          mergedToks.add(h.replace(/^#/, ''));
+        }
+      }
+      postTokens.set(p.key, mergedToks);
     }
 
-    // Order posts with medoid anchored for cleanest title synthesis, views descending for list display
+    // Order posts with medoid anchored first, followed by remaining posts sorted by cluster centrality
     const medoidKey = cl.medoidPost?.key;
     const postsForSynthesis = [
       cl.medoidPost,
-      ...clusterPosts.filter((p) => p.key !== medoidKey).sort((a, b) => b.qualityScore - a.qualityScore),
+      ...clusterPosts
+        .filter((p) => p.key !== medoidKey)
+        .sort((a, b) => {
+          const cA = cl.postCentrality?.get(a.key) ?? 0;
+          const cB = cl.postCentrality?.get(b.key) ?? 0;
+          return cB - cA || b.qualityScore - a.qualityScore;
+        }),
     ];
 
     const extracted = extractClusterMetadata(postsForSynthesis);
@@ -3620,7 +4386,12 @@ function finalizeHotTopicClusters(
       }
     }
 
-    const { title, summary } = synthesizeClusterTitle(postsForSynthesis, extracted);
+    const { title, summary } = synthesizeClusterTitle(postsForSynthesis, extracted, {
+      topKeywords,
+      centroidTfidf: cl.centroidTfidf,
+      postCentrality: cl.postCentrality,
+      postTokens,
+    });
 
     if (clusterPosts.length === 1) {
       if (!title || title === 'Broadcasts' || isGenericLead(title)) {
@@ -3671,6 +4442,7 @@ function finalizeHotTopicClusters(
       channels: Array.from(channelsSet),
       hotScore,
       representativePost: cl.medoidPost || sortedClusterPosts[0],
+      membershipSignature: computeClusterMembershipSignature(clusterPosts),
       timeSpan: {
         start: minTime === Infinity ? Date.now() : minTime,
         end: maxTime === 0 ? Date.now() : maxTime,
