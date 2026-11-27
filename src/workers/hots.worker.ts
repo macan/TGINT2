@@ -15,6 +15,8 @@ import {
   type HotsClusterMode,
   type HotsDateRange,
   type HotsEngineProgress,
+  type HotsSpamFilterMode,
+  type HotsSpamSensitivity,
 } from '../utils/hotsEngine';
 
 export interface HotsWorkerRequestPayload {
@@ -24,6 +26,8 @@ export interface HotsWorkerRequestPayload {
   useAiMode?: boolean;
   clusterMode?: HotsClusterMode;
   skipTopicClustering?: boolean;
+  spamFilterMode?: HotsSpamFilterMode;
+  spamSensitivity?: HotsSpamSensitivity;
   listenItems?: any[];
   channelMetadataCache?: Record<string, any>;
 }

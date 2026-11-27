@@ -37,7 +37,10 @@ import {
   Zap,
   Smile,
   Meh,
-  Frown
+  Frown,
+  ShieldCheck,
+  ShieldAlert,
+  ShieldOff
 } from "lucide-vue-next";
 import {
   HotsDateRange,
@@ -68,6 +71,14 @@ import {
   type HotsNeuralCacheStatus
 } from "../../utils/hotsWorkerClient";
 import { HOTS_EMBED_MODEL_ID } from "../../utils/hotsVectorStore";
+import {
+  type HotsSpamFilterMode,
+  type HotsSpamSensitivity,
+  getSavedSpamFilterMode,
+  saveSpamFilterMode,
+  getSavedSpamSensitivity,
+  saveSpamSensitivity
+} from "../../utils/hotsSpamFilter";
 import { getAllCachedPostsIndexedDB } from "../../utils/indexedDbPosts";
 import PostItemView from "./PostItemView.vue";
 import VirtualPostList from "./VirtualPostList.vue";
@@ -75,6 +86,7 @@ import ChannelViewCard from "./ChannelViewCard.vue";
 import PostVolumeTrendCard from "./PostVolumeTrendCard.vue";
 import ClusterActivityHeatmapCard from "./ClusterActivityHeatmapCard.vue";
 import ClusterTopicTrendCard from "./ClusterTopicTrendCard.vue";
+import HotsSpamFilterModal from "./HotsSpamFilterModal.vue";
 
 export interface ListenDbSyncPayload {
   timestamp: number;
@@ -216,6 +228,43 @@ const isWarmingUpModel = ref(false);
 const isClearingEmbedCache = ref(false);
 const embedActionFeedback = ref("");
 
+// Pre-Clustering Spam Filter State
+const spamFilterMode = ref<HotsSpamFilterMode>(getSavedSpamFilterMode());
+const spamSensitivity = ref<HotsSpamSensitivity>(getSavedSpamSensitivity());
+const isSpamModalOpen = ref(false);
+
+const spamFilterShortLabel = computed(() => {
+  switch (spamFilterMode.value) {
+    case "local":
+      return t("listen.hots.spamModeLocalShort") || "Local AI";
+    case "hybrid":
+      return t("listen.hots.spamModeHybridShort") || "Hybrid";
+    case "systemone":
+      return t("listen.hots.spamModeSystemOneShort") || "SystemOne";
+    case "off":
+      return t("listen.hots.spamModeOff") || "Off";
+  }
+});
+
+function handleSpamFilterModeChange(nextMode: HotsSpamFilterMode) {
+  spamFilterMode.value = nextMode;
+  saveSpamFilterMode(nextMode);
+  clearHotsAnalysisCache();
+  runAnalysis(true);
+}
+
+function handleSpamSensitivityChange(nextSensitivity: HotsSpamSensitivity) {
+  spamSensitivity.value = nextSensitivity;
+  saveSpamSensitivity(nextSensitivity);
+  clearHotsAnalysisCache();
+  runAnalysis(true);
+}
+
+function handleSpamRecompute() {
+  clearHotsAnalysisCache();
+  runAnalysis(true);
+}
+
 const effectiveClusterMode = computed<HotsClusterMode>(() => {
   if (selectedClusterMode.value === "ai" && !serverHasGemini.value && !geminiApiKey.value) {
     return "rule";
@@ -347,7 +396,9 @@ let activeAnalysisRunKey = "";
 async function runAnalysis(force: boolean = false, allowModelDownload: boolean = false) {
   const targetRange = selectedDateRange.value;
   const activeMode = effectiveClusterMode.value;
-  const runKey = `${targetRange}:${activeMode}`;
+  const activeSpamMode = spamFilterMode.value;
+  const activeSpamSens = spamSensitivity.value;
+  const runKey = `${targetRange}:${activeMode}:${activeSpamMode}:${activeSpamSens}`;
 
   if (isComputing.value && !force && activeAnalysisRunKey === runKey) return;
 
@@ -360,7 +411,7 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
     pruneStaleDayHotsCache(currentDayKey);
   }
 
-  const cached = getCachedHotsAnalysis(targetRange, activeMode);
+  const cached = getCachedHotsAnalysis(targetRange, activeMode, activeSpamMode, activeSpamSens);
   const existingIsSameWindow = Boolean(
     analysisResult.value &&
     analysisResult.value.dateRange === targetRange &&
@@ -370,7 +421,8 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
   );
   const existingMatchesMode = Boolean(
     existingIsSameWindow &&
-    analysisResult.value?.clusterModeUsed === activeMode
+    analysisResult.value?.clusterModeUsed === activeMode &&
+    (analysisResult.value?.spamFilterModeUsed ?? "local") === activeSpamMode
   );
 
   if (cached && !force) {
@@ -415,6 +467,9 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
         totalPostsAnalyzed: 0,
         filteredPostsCount: 0,
         meaninglessPostsCount: 0,
+        spamPostsCount: 0,
+        filteredSpamPosts: [],
+        spamFilterModeUsed: activeSpamMode,
         substantivePostsCount: 0,
         totalChannelsScanned: 0,
         activeChannelsCount: 0,
@@ -471,12 +526,15 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
       clusterMode: activeMode,
       allowModelDownload,
       executorPreference: executorPreference.value,
+      spamFilterMode: activeSpamMode,
+      spamSensitivity: activeSpamSens,
       listenItems: props.listenItems,
       channelMetadataCache: props.channelMetadataCache,
       onProgress: p => {
         if (runId !== activeAnalysisRunId) return;
         computeProgress.value = p;
         if (
+          p.step === "spam_filtering" ||
           p.step === "clustering" ||
           p.step === "ai_clustering" ||
           p.step === "embedding_download" ||
@@ -523,6 +581,9 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
             totalPostsAnalyzed: partial.totalPostsAnalyzed,
             filteredPostsCount: partial.filteredPostsCount,
             meaninglessPostsCount: partial.meaninglessPostsCount || 0,
+            spamPostsCount: partial.spamPostsCount || 0,
+            filteredSpamPosts: partial.filteredSpamPosts || [],
+            spamFilterModeUsed: activeSpamMode,
             substantivePostsCount: partial.substantivePostsCount || 0,
             totalChannelsScanned: partial.totalChannelsScanned,
             activeChannelsCount: partial.activeChannelsCount,
@@ -541,6 +602,9 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
             totalPostsAnalyzed: partial.totalPostsAnalyzed,
             filteredPostsCount: partial.filteredPostsCount,
             meaninglessPostsCount: partial.meaninglessPostsCount ?? analysisResult.value.meaninglessPostsCount ?? 0,
+            spamPostsCount: partial.spamPostsCount ?? analysisResult.value.spamPostsCount ?? 0,
+            filteredSpamPosts: partial.filteredSpamPosts ?? analysisResult.value.filteredSpamPosts ?? [],
+            spamFilterModeUsed: activeSpamMode,
             substantivePostsCount: partial.substantivePostsCount ?? analysisResult.value.substantivePostsCount ?? 0,
             totalChannelsScanned: partial.totalChannelsScanned,
             activeChannelsCount: partial.activeChannelsCount,
@@ -1100,7 +1164,12 @@ onMounted(() => {
   // Instant restore from day-validated in-memory cache if available (0ms render time)
   const cached = initialDateRolloverReset
     ? undefined
-    : getCachedHotsAnalysis(selectedDateRange.value, effectiveClusterMode.value);
+    : getCachedHotsAnalysis(
+        selectedDateRange.value,
+        effectiveClusterMode.value,
+        spamFilterMode.value,
+        spamSensitivity.value
+      );
   if (cached) {
     analysisResult.value = cached;
   }
@@ -1273,6 +1342,16 @@ onUnmounted(() => {
                   <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span>
                   {{ formatNumber(analysisResult.meaninglessPostsCount) }} meaningless filtered
                 </span>
+                <button
+                  v-if="spamFilterMode !== 'off' && (analysisResult.spamPostsCount || 0) > 0"
+                  type="button"
+                  @click="isSpamModalOpen = true"
+                  class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/60 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 font-medium border border-rose-200/70 dark:border-rose-800/60 transition-colors cursor-pointer"
+                  :title="t('listen.hots.spamFilteredBadgeTooltip') || 'Inspect or restore posts filtered as spam before clustering'"
+                >
+                  <ShieldAlert class="h-3 w-3 shrink-0" />
+                  <span>{{ formatNumber(analysisResult.spamPostsCount || 0) }} {{ t('listen.hots.spamFilteredSuffix') || 'spam filtered' }}</span>
+                </button>
                 <span class="text-gray-400 dark:text-gray-500">/</span>
                 <span class="text-gray-600 dark:text-gray-300 font-medium">
                   {{ formatNumber(analysisResult.totalPostsAnalyzed) }} total cached
@@ -1426,6 +1505,29 @@ onUnmounted(() => {
             <Key class="h-3 w-3" />
           </button>
         </div>
+
+        <!-- Spam Filter Settings & Inspector Trigger -->
+        <button
+          type="button"
+          @click="isSpamModalOpen = true"
+          class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-2xl text-xs font-bold bg-white hover:bg-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700/70 text-gray-700 dark:text-gray-200 border border-gray-200/80 dark:border-gray-700/80 transition-all cursor-pointer select-none shadow-2xs whitespace-nowrap shrink-0"
+          :title="t('listen.hots.spamModalTitle') || 'Pre-Clustering Spam Filter'"
+        >
+          <ShieldOff v-if="spamFilterMode === 'off'" class="h-3.5 w-3.5 text-gray-400 dark:text-gray-500 shrink-0" />
+          <ShieldAlert
+            v-else-if="(analysisResult?.spamPostsCount || 0) > 0"
+            class="h-3.5 w-3.5 text-rose-500 dark:text-rose-400 shrink-0"
+          />
+          <ShieldCheck v-else class="h-3.5 w-3.5 text-teal-600 dark:text-teal-400 shrink-0" />
+          <span class="hidden xl:inline">{{ t('listen.hots.spamFilterBtn') || 'Spam Filter' }}:</span>
+          <span class="text-[11px] font-semibold text-gray-600 dark:text-gray-300">{{ spamFilterShortLabel }}</span>
+          <span
+            v-if="spamFilterMode !== 'off' && (analysisResult?.spamPostsCount || 0) > 0"
+            class="px-1.5 py-0.25 rounded-md text-[10px] font-mono font-bold tabular-nums bg-rose-50 dark:bg-rose-950/70 text-rose-600 dark:text-rose-300 border border-rose-200/70 dark:border-rose-800/60"
+          >
+            {{ formatNumber(analysisResult?.spamPostsCount || 0) }}
+          </span>
+        </button>
 
         <!-- Local Embedding Cache Modal Trigger -->
         <button
@@ -2631,5 +2733,22 @@ onUnmounted(() => {
         </div>
       </div>
     </div>
+
+    <!-- ===================================================================== -->
+    <!-- PRE-CLUSTERING SPAM FILTER SETTINGS & INSPECTOR MODAL                 -->
+    <!-- ===================================================================== -->
+    <HotsSpamFilterModal
+      :is-open="isSpamModalOpen"
+      :mode="spamFilterMode"
+      :sensitivity="spamSensitivity"
+      :filtered-spam-posts="analysisResult?.filteredSpamPosts || []"
+      :substantive-posts="analysisResult?.substantivePosts || []"
+      :is-computing="isComputing"
+      @close="isSpamModalOpen = false"
+      @update:mode="handleSpamFilterModeChange"
+      @update:sensitivity="handleSpamSensitivityChange"
+      @recompute="handleSpamRecompute"
+      @select-channel="(ch) => { isSpamModalOpen = false; emit('select-channel', ch); }"
+    />
   </div>
 </template>

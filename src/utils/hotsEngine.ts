@@ -18,8 +18,24 @@ import {
   type TopicSentimentBreakdown,
   type TopicSentimentLabel,
 } from './hotsSentiment';
+import {
+  computeSpamContentHash,
+  evaluateBatchHeuristicSpam,
+  getCachedSpamEvaluations,
+  getSpamThreshold,
+  type FilteredSpamPostItem,
+  type HotsSpamFilterMode,
+  type HotsSpamSensitivity,
+  type SpamEvaluationResult,
+} from './hotsSpamFilter';
 
-export type { TopicSentimentBreakdown, TopicSentimentLabel };
+export type {
+  TopicSentimentBreakdown,
+  TopicSentimentLabel,
+  FilteredSpamPostItem,
+  HotsSpamFilterMode,
+  HotsSpamSensitivity,
+};
 export type HotsDateRange = 'today' | 'yesterday' | '3days' | 'week' | 'all';
 export type HotsClusterMode = 'rule' | 'neural' | 'ai';
 
@@ -294,6 +310,7 @@ export interface HotsEngineProgress {
     | 'ranking'
     | 'embedding_download'
     | 'embedding'
+    | 'spam_filtering'
     | 'ai_clustering'
     | 'done';
   percent: number;
@@ -313,6 +330,7 @@ export interface HotsAnalysisResult {
   totalPostsAnalyzed: number;
   filteredPostsCount: number;
   meaninglessPostsCount: number;
+  spamPostsCount?: number;
   substantivePostsCount: number;
   totalChannelsScanned: number;
   activeChannelsCount: number;
@@ -320,6 +338,8 @@ export interface HotsAnalysisResult {
   hotPosts: HotPostItem[];
   hotChannels: HotChannelItem[];
   substantivePosts?: HotPostItem[];
+  filteredSpamPosts?: FilteredSpamPostItem[];
+  spamFilterModeUsed?: HotsSpamFilterMode;
   clusterModeUsed?: HotsClusterMode;
   computedAt: number;
   isTopicsComputing?: boolean;
@@ -3332,6 +3352,8 @@ export async function processListenHotsData(options: {
   useAiMode?: boolean;
   clusterMode?: HotsClusterMode;
   skipTopicClustering?: boolean;
+  spamFilterMode?: HotsSpamFilterMode;
+  spamSensitivity?: HotsSpamSensitivity;
   listenItems?: any[];
   channelMetadataCache?: Record<string, any>;
   onProgress?: (p: HotsEngineProgress) => void;
@@ -3340,9 +3362,11 @@ export async function processListenHotsData(options: {
     hotChannels: HotChannelItem[];
     hotTopics?: HotTopicCluster[];
     substantivePosts?: HotPostItem[];
+    filteredSpamPosts?: FilteredSpamPostItem[];
     totalPostsAnalyzed: number;
     filteredPostsCount: number;
     meaninglessPostsCount?: number;
+    spamPostsCount?: number;
     substantivePostsCount?: number;
     totalChannelsScanned: number;
     activeChannelsCount: number;
@@ -3354,6 +3378,8 @@ export async function processListenHotsData(options: {
     geminiApiKey,
     useAiMode,
     skipTopicClustering = false,
+    spamFilterMode = 'local',
+    spamSensitivity = 'balanced',
     listenItems,
     channelMetadataCache,
     onProgress,
@@ -3619,8 +3645,93 @@ export async function processListenHotsData(options: {
   hotChannels.sort((a, b) => b.activityScore - a.activityScore);
 
   // Filter out posts that only contain media or have shorter/meaningless text content
-  const substantivePosts = inRangePosts.filter(isSubstantivePostForTopicClustering);
-  const meaninglessPostsCount = Math.max(0, inRangePosts.length - substantivePosts.length);
+  const rawSubstantivePosts = inRangePosts.filter(isSubstantivePostForTopicClustering);
+  const meaninglessPostsCount = Math.max(0, inRangePosts.length - rawSubstantivePosts.length);
+
+  // Layer 1 + Cached Verdict Spam Filtering BEFORE topic clustering
+  let substantivePosts: HotPostItem[] = rawSubstantivePosts;
+  const filteredSpamPosts: FilteredSpamPostItem[] = [];
+
+  if (spamFilterMode !== 'off' && rawSubstantivePosts.length > 0) {
+    const threshold = getSpamThreshold(spamSensitivity);
+    const spamChannelKeys = new Set<string>();
+    if (Array.isArray(listenItems)) {
+      for (const it of listenItems) {
+        if (String(it?.auto_class?.class || '').toLowerCase() === 'spam') {
+          const k1 = String(it?.argument || '').toLowerCase().replace(/^@/, '');
+          const k2 = String(it?.name || '').toLowerCase().replace(/^@/, '');
+          if (k1) spamChannelKeys.add(k1);
+          if (k2) spamChannelKeys.add(k2);
+        }
+      }
+    }
+
+    const heuristicMap = evaluateBatchHeuristicSpam(rawSubstantivePosts, spamChannelKeys);
+    const cachedMap = await getCachedSpamEvaluations(
+      rawSubstantivePosts.map((p) => ({
+        postKey: p.key,
+        contentHash: computeSpamContentHash(p),
+      }))
+    );
+
+    const cleanPosts: HotPostItem[] = [];
+    const nowTs = Date.now();
+
+    for (const post of rawSubstantivePosts) {
+      const cached = cachedMap.get(post.key);
+      const heur = heuristicMap.get(post.key);
+
+      if (cached?.userOverride === 'ham') {
+        cleanPosts.push(post);
+        continue;
+      }
+
+      if (cached?.userOverride === 'spam') {
+        filteredSpamPosts.push({ post, evaluation: cached });
+        continue;
+      }
+
+      // Use authoritative cached SystemOne or local-neural verdict when available
+      if (cached && (cached.source === 'systemone' || cached.source === 'local-neural')) {
+        const effectiveScore = cached.spamScore;
+        const isSpam = effectiveScore >= threshold;
+        if (isSpam) {
+          filteredSpamPosts.push({
+            post,
+            evaluation: { ...cached, isSpam: true },
+          });
+          continue;
+        }
+        // If SystemOne explicitly cleared the post, trust it; otherwise still let explicit ad disclosures catch it
+        if (cached.source === 'systemone' || !heur?.hasExplicitAdDisclosure) {
+          cleanPosts.push(post);
+          continue;
+        }
+      }
+
+      if (heur && heur.score >= threshold) {
+        const evaluation: SpamEvaluationResult = {
+          postKey: post.key,
+          contentHash: computeSpamContentHash(post),
+          spamScore: heur.score,
+          isSpam: true,
+          label: heur.label,
+          source: 'rule',
+          reasons: heur.reasons.length > 0 ? heur.reasons : ['Promotional/spam pattern'],
+          localRuleScore: heur.score,
+          updatedAt: nowTs,
+        };
+        filteredSpamPosts.push({ post, evaluation });
+      } else {
+        cleanPosts.push(post);
+      }
+    }
+
+    filteredSpamPosts.sort((a, b) => b.evaluation.spamScore - a.evaluation.spamScore);
+    substantivePosts = cleanPosts;
+  }
+
+  const spamPostsCount = filteredSpamPosts.length;
   const substantivePostsCount = substantivePosts.length;
 
   const clusterMode: HotsClusterMode =
@@ -3633,9 +3744,11 @@ export async function processListenHotsData(options: {
       hotPosts,
       hotChannels,
       substantivePosts,
+      filteredSpamPosts,
       totalPostsAnalyzed,
       filteredPostsCount: inRangePosts.length,
       meaninglessPostsCount,
+      spamPostsCount,
       substantivePostsCount,
       totalChannelsScanned: cachedChannels.length,
       activeChannelsCount: channelStatsMap.size,
@@ -3647,6 +3760,7 @@ export async function processListenHotsData(options: {
       totalPostsAnalyzed,
       filteredPostsCount: inRangePosts.length,
       meaninglessPostsCount,
+      spamPostsCount,
       substantivePostsCount,
       totalChannelsScanned: cachedChannels.length,
       activeChannelsCount: channelStatsMap.size,
@@ -3654,6 +3768,8 @@ export async function processListenHotsData(options: {
       hotPosts,
       hotChannels,
       substantivePosts,
+      filteredSpamPosts,
+      spamFilterModeUsed: spamFilterMode,
       clusterModeUsed: clusterMode,
       computedAt: Date.now(),
     };
@@ -3679,9 +3795,11 @@ export async function processListenHotsData(options: {
     hotChannels,
     hotTopics: stage1Topics,
     substantivePosts,
+    filteredSpamPosts,
     totalPostsAnalyzed,
     filteredPostsCount: inRangePosts.length,
     meaninglessPostsCount,
+    spamPostsCount,
     substantivePostsCount,
     totalChannelsScanned: cachedChannels.length,
     activeChannelsCount: channelStatsMap.size,
@@ -3732,6 +3850,7 @@ export async function processListenHotsData(options: {
     totalPostsAnalyzed,
     filteredPostsCount: inRangePosts.length,
     meaninglessPostsCount,
+    spamPostsCount,
     substantivePostsCount,
     totalChannelsScanned: cachedChannels.length,
     activeChannelsCount: channelStatsMap.size,
@@ -3739,6 +3858,8 @@ export async function processListenHotsData(options: {
     hotPosts,
     hotChannels,
     substantivePosts,
+    filteredSpamPosts,
+    spamFilterModeUsed: spamFilterMode,
     clusterModeUsed: hotTopics.some((t) => t.clusterSource === 'ai') ? 'ai' : 'rule',
     computedAt: Date.now(),
   };

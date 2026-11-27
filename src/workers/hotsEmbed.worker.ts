@@ -35,6 +35,12 @@ import {
   writeHotsModelMeta,
   type HotsModelDownloadMeta,
 } from "../utils/hotsVectorStore";
+import {
+  LEGIT_PROTOTYPE_TEXTS,
+  SPAM_PROTOTYPE_TEXTS,
+  scoreVectorAgainstSpamPrototypes,
+  type SemanticSpamScore,
+} from "../utils/hotsSpamFilter";
 
 export type HotsEmbedExecutorPreference = "auto" | "wasm" | "webgpu";
 
@@ -54,6 +60,13 @@ export type HotsEmbedWorkerInMessage =
   | {
       id: number;
       type: "embed-batch";
+      items: HotsEmbedPostInput[];
+      executor?: HotsEmbedExecutorPreference;
+      includeSpamScores?: boolean;
+    }
+  | {
+      id: number;
+      type: "score-spam";
       items: HotsEmbedPostInput[];
       executor?: HotsEmbedExecutorPreference;
     }
@@ -106,6 +119,13 @@ export type HotsEmbedWorkerOutMessage =
       cachedHits: number;
       newlyEmbedded: number;
       vectors: Array<{ postKey: string; vector: Float32Array }>;
+      semanticSpamScores?: SemanticSpamScore[];
+    }
+  | {
+      id: number;
+      type: "spam-scores-done";
+      provider: "webgpu" | "wasm";
+      scores: SemanticSpamScore[];
     }
   | {
       id: number;
@@ -147,6 +167,8 @@ let embedSession: ortCpu.InferenceSession | null = null;
 let embedOrtRuntime: typeof ortCpu | null = null;
 let embedProvider: "webgpu" | "wasm" | null = null;
 let embedInitPromise: Promise<{ provider: "webgpu" | "wasm"; cached: boolean }> | null = null;
+let spamProtoVectorsCache: Float32Array[] | null = null;
+let legitProtoVectorsCache: Float32Array[] | null = null;
 
 let activeAbortController: AbortController | null = null;
 let abortRequested = false;
@@ -1005,6 +1027,8 @@ self.onmessage = async (ev: MessageEvent<HotsEmbedWorkerInMessage>) => {
     embedTokenizer = null;
     embedOrtRuntime = null;
     embedProvider = null;
+    spamProtoVectorsCache = null;
+    legitProtoVectorsCache = null;
     await clearAllHotsMlCaches();
     emit({ id: msg.id, type: "clear-done" });
     return;
@@ -1165,6 +1189,41 @@ self.onmessage = async (ev: MessageEvent<HotsEmbedWorkerInMessage>) => {
         provider = embedProvider || ((await detectWebGpuSupport()) ? "webgpu" : "wasm");
       }
 
+      const vectorsList = collectCurrentVectors();
+      let semanticSpamScores: SemanticSpamScore[] | undefined;
+
+      if (msg.includeSpamScores !== false && vectorsList.length > 0) {
+        try {
+          if (!spamProtoVectorsCache || !legitProtoVectorsCache) {
+            if (!embedSession || !embedTokenizer) {
+              await ensureEmbedModelInitialized(controller.signal, msg.executor || "auto");
+            }
+            const protoAll = [...SPAM_PROTOTYPE_TEXTS, ...LEGIT_PROTOTYPE_TEXTS];
+            const protoVecs = await runEmbedForwardPass(
+              protoAll,
+              controller.signal,
+              msg.executor || "auto"
+            );
+            spamProtoVectorsCache = protoVecs.slice(0, SPAM_PROTOTYPE_TEXTS.length);
+            legitProtoVectorsCache = protoVecs.slice(SPAM_PROTOTYPE_TEXTS.length);
+          }
+
+          semanticSpamScores = vectorsList.map((entry) => ({
+            postKey: entry.postKey,
+            ...scoreVectorAgainstSpamPrototypes(
+              entry.vector,
+              spamProtoVectorsCache!,
+              legitProtoVectorsCache!
+            ),
+          }));
+        } catch (spamErr) {
+          if (controller.signal.aborted || (spamErr as { name?: string })?.name === "AbortError") {
+            throw spamErr;
+          }
+          // Non-fatal: continue clustering with heuristic scores if prototype init failed
+        }
+      }
+
       emit({
         id: msg.id,
         type: "embed-done",
@@ -1172,7 +1231,90 @@ self.onmessage = async (ev: MessageEvent<HotsEmbedWorkerInMessage>) => {
         modelCached,
         cachedHits,
         newlyEmbedded: missing.length,
-        vectors: collectCurrentVectors(),
+        vectors: vectorsList,
+        semanticSpamScores,
+      });
+      return;
+    }
+
+    if (msg.type === "score-spam") {
+      const items = Array.isArray(msg.items) ? msg.items : [];
+      if (items.length === 0) {
+        emit({ id: msg.id, type: "spam-scores-done", provider: embedProvider || "wasm", scores: [] });
+        return;
+      }
+
+      const vectorsMap = await getCachedPostEmbeddings(
+        items.map((it) => ({ postKey: it.postKey, contentHash: it.contentHash }))
+      );
+      const missing = items.filter((it) => !vectorsMap.has(it.postKey) && it.text.trim().length > 0);
+
+      const initInfo = await ensureEmbedModelInitialized(
+        controller.signal,
+        msg.executor || "auto"
+      );
+
+      if (!spamProtoVectorsCache || !legitProtoVectorsCache) {
+        const protoAll = [...SPAM_PROTOTYPE_TEXTS, ...LEGIT_PROTOTYPE_TEXTS];
+        const protoVecs = await runEmbedForwardPass(
+          protoAll,
+          controller.signal,
+          msg.executor || "auto"
+        );
+        spamProtoVectorsCache = protoVecs.slice(0, SPAM_PROTOTYPE_TEXTS.length);
+        legitProtoVectorsCache = protoVecs.slice(SPAM_PROTOTYPE_TEXTS.length);
+      }
+
+      if (missing.length > 0) {
+        for (let i = 0; i < missing.length; i += EMBED_BATCH_SIZE) {
+          if (abortRequested || controller.signal.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
+          const batch = missing.slice(i, i + EMBED_BATCH_SIZE);
+          const batchVecs = await runEmbedForwardPass(
+            batch.map((b) => b.text),
+            controller.signal,
+            msg.executor || "auto"
+          );
+          const toSave: Array<{
+            postKey: string;
+            contentHash: string;
+            vector: Float32Array;
+            langHint?: string;
+          }> = [];
+          for (let j = 0; j < batch.length; j++) {
+            const vec = batchVecs[j] || new Float32Array(HOTS_EMBED_DIM);
+            vectorsMap.set(batch[j].postKey, vec);
+            toSave.push({
+              postKey: batch[j].postKey,
+              contentHash: batch[j].contentHash,
+              vector: vec,
+              langHint: batch[j].langHint,
+            });
+          }
+          await saveCachedPostEmbeddings(toSave);
+        }
+      }
+
+      const scores: SemanticSpamScore[] = [];
+      for (const it of items) {
+        const vec = vectorsMap.get(it.postKey);
+        if (!vec) continue;
+        scores.push({
+          postKey: it.postKey,
+          ...scoreVectorAgainstSpamPrototypes(
+            vec,
+            spamProtoVectorsCache!,
+            legitProtoVectorsCache!
+          ),
+        });
+      }
+
+      emit({
+        id: msg.id,
+        type: "spam-scores-done",
+        provider: initInfo.provider,
+        scores,
       });
     }
   } catch (err: unknown) {

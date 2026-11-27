@@ -28,6 +28,20 @@ import {
   inspectHotsEmbedModelCache,
   type HotsEmbedModelCacheStatus,
 } from './hotsVectorStore';
+import {
+  classifyPostsWithSystemOneBatch,
+  computeSpamContentHash,
+  evaluateBatchHeuristicSpam,
+  fuseLocalSpamScores,
+  getCachedSpamEvaluations,
+  getSpamThreshold,
+  saveCachedSpamEvaluations,
+  type FilteredSpamPostItem,
+  type HotsSpamFilterMode,
+  type HotsSpamSensitivity,
+  type SemanticSpamScore,
+  type SpamEvaluationResult,
+} from './hotsSpamFilter';
 import type {
   HotsEmbedExecutorPreference,
   HotsEmbedPostInput,
@@ -35,7 +49,13 @@ import type {
   HotsEmbedWorkerOutMessage,
 } from '../workers/hotsEmbed.worker';
 
-export type { HotsClusterMode, HotsEmbedExecutorPreference };
+export type {
+  HotsClusterMode,
+  HotsEmbedExecutorPreference,
+  HotsSpamFilterMode,
+  HotsSpamSensitivity,
+  FilteredSpamPostItem,
+};
 
 export interface HotsNeuralCacheStatus extends HotsEmbedModelCacheStatus {
   count: number;
@@ -51,6 +71,8 @@ export interface ComputeHotsBackgroundOptions {
   clusterMode?: HotsClusterMode;
   allowModelDownload?: boolean;
   executorPreference?: HotsEmbedExecutorPreference;
+  spamFilterMode?: HotsSpamFilterMode;
+  spamSensitivity?: HotsSpamSensitivity;
   listenItems?: any[];
   channelMetadataCache?: Record<string, any>;
   onProgress?: (p: HotsEngineProgress) => void;
@@ -59,9 +81,11 @@ export interface ComputeHotsBackgroundOptions {
     hotChannels: HotChannelItem[];
     hotTopics?: HotTopicCluster[];
     clusterModeUsed?: HotsClusterMode;
+    filteredSpamPosts?: FilteredSpamPostItem[];
     totalPostsAnalyzed: number;
     filteredPostsCount: number;
     meaninglessPostsCount?: number;
+    spamPostsCount?: number;
     substantivePostsCount?: number;
     totalChannelsScanned: number;
     activeChannelsCount: number;
@@ -78,13 +102,16 @@ const hotsMemoryCache = new Map<string, HotsAnalysisResult>();
 export function getHotsCacheKey(
   dateRange: HotsDateRange,
   modeOrAi: boolean | HotsClusterMode,
-  dayKey: string = getLocalCalendarDayKey()
+  dayKey: string = getLocalCalendarDayKey(),
+  spamFilterMode: HotsSpamFilterMode = 'local',
+  spamSensitivity: HotsSpamSensitivity = 'balanced'
 ): string {
   const mode: HotsClusterMode =
     typeof modeOrAi === 'boolean' ? (modeOrAi ? 'ai' : 'rule') : modeOrAi;
+  const spamSuffix = `${spamFilterMode}_${spamSensitivity}`;
   return isRelativeCalendarDateRange(dateRange)
-    ? `${dateRange}_${mode}_${dayKey}`
-    : `${dateRange}_${mode}`;
+    ? `${dateRange}_${mode}_${spamSuffix}_${dayKey}`
+    : `${dateRange}_${mode}_${spamSuffix}`;
 }
 
 export function pruneStaleDayHotsCache(currentDayKey: string = getLocalCalendarDayKey()): number {
@@ -102,11 +129,13 @@ export function pruneStaleDayHotsCache(currentDayKey: string = getLocalCalendarD
 
 export function getCachedHotsAnalysis(
   dateRange: HotsDateRange,
-  modeOrAi: boolean | HotsClusterMode
+  modeOrAi: boolean | HotsClusterMode,
+  spamFilterMode: HotsSpamFilterMode = 'local',
+  spamSensitivity: HotsSpamSensitivity = 'balanced'
 ): HotsAnalysisResult | undefined {
   const todayKey = getLocalCalendarDayKey();
   pruneStaleDayHotsCache(todayKey);
-  const key = getHotsCacheKey(dateRange, modeOrAi, todayKey);
+  const key = getHotsCacheKey(dateRange, modeOrAi, todayKey, spamFilterMode, spamSensitivity);
   const cached = hotsMemoryCache.get(key);
   if (!cached) return undefined;
   if (
@@ -122,13 +151,18 @@ export function getCachedHotsAnalysis(
 
 export function setCachedHotsAnalysis(
   result: HotsAnalysisResult,
-  modeOrAi: boolean | HotsClusterMode
+  modeOrAi: boolean | HotsClusterMode,
+  spamFilterMode: HotsSpamFilterMode = 'local',
+  spamSensitivity: HotsSpamSensitivity = 'balanced'
 ): void {
   const dayKey = result.computedAt
     ? getLocalCalendarDayKey(new Date(result.computedAt))
     : getLocalCalendarDayKey();
   pruneStaleDayHotsCache(getLocalCalendarDayKey());
-  hotsMemoryCache.set(getHotsCacheKey(result.dateRange, modeOrAi, dayKey), result);
+  hotsMemoryCache.set(
+    getHotsCacheKey(result.dateRange, modeOrAi, dayKey, spamFilterMode, spamSensitivity),
+    result
+  );
 }
 
 export function clearHotsAnalysisCache(): void {
@@ -141,13 +175,26 @@ export function clearHotsAnalysisCache(): void {
 
 function sanitizeListenItems(
   items: any[] | undefined
-): Array<{ id: string; name: string; argument?: string; enableHotTopics?: boolean }> {
+): Array<{
+  id: string;
+  name: string;
+  argument?: string;
+  enableHotTopics?: boolean;
+  auto_class?: { class?: string; confidence?: number };
+}> {
   if (!Array.isArray(items)) return [];
   return items.map((it) => ({
     id: String(it?.id || ''),
     name: String(it?.name || it?.title || it?.argument || ''),
     argument: it?.argument ? String(it.argument) : undefined,
     enableHotTopics: it?.enableHotTopics !== false,
+    auto_class: it?.auto_class?.class
+      ? {
+          class: String(it.auto_class.class),
+          confidence:
+            typeof it.auto_class.confidence === 'number' ? it.auto_class.confidence : undefined,
+        }
+      : undefined,
   }));
 }
 
@@ -261,7 +308,17 @@ function getOrCreateEmbedWorker(): Worker | null {
   }
 }
 
+let activeSpamAbortController: AbortController | null = null;
+
 export function abortHotsEmbedWorker(): void {
+  if (activeSpamAbortController) {
+    try {
+      activeSpamAbortController.abort();
+    } catch {
+      // ignore
+    }
+    activeSpamAbortController = null;
+  }
   if (!embedWorkerInstance) return;
   try {
     embedWorkerInstance.postMessage({ id: 0, type: 'abort' } satisfies HotsEmbedWorkerInMessage);
@@ -375,6 +432,7 @@ async function computePostEmbeddingsInWorker(
   posts: HotPostItem[],
   executor: HotsEmbedExecutorPreference,
   requestId: number,
+  includeSpamScores: boolean,
   onProgress?: (p: HotsEngineProgress) => void,
   onPartialVectors?: (snap: {
     vectors: Array<{ postKey: string; vector: Float32Array }>;
@@ -385,6 +443,7 @@ async function computePostEmbeddingsInWorker(
   }) => void
 ): Promise<{
   vectors: Array<{ postKey: string; vector: Float32Array }>;
+  semanticSpamScores?: SemanticSpamScore[];
   provider: 'webgpu' | 'wasm';
   cachedHits: number;
   newlyEmbedded: number;
@@ -479,6 +538,7 @@ async function computePostEmbeddingsInWorker(
         cleanup();
         resolve({
           vectors: m.vectors,
+          semanticSpamScores: m.semanticSpamScores,
           provider: m.provider,
           cachedHits: m.cachedHits,
           newlyEmbedded: m.newlyEmbedded,
@@ -500,8 +560,316 @@ async function computePostEmbeddingsInWorker(
       type: 'embed-batch',
       items,
       executor,
+      includeSpamScores,
     } satisfies HotsEmbedWorkerInMessage);
   });
+}
+
+async function scorePostsSpamInEmbedWorker(
+  posts: HotPostItem[],
+  executor: HotsEmbedExecutorPreference,
+  requestId: number
+): Promise<SemanticSpamScore[]> {
+  if (!posts.length) return [];
+  const w = getOrCreateEmbedWorker();
+  if (!w) return [];
+
+  const items: HotsEmbedPostInput[] = posts.map((p) => {
+    const prep = buildPostEmbeddingInput(p);
+    return {
+      postKey: p.key,
+      text: prep.text,
+      contentHash: prep.contentHash,
+      langHint: prep.langHint,
+    };
+  });
+
+  const rpcId = ++embedRpcCounter;
+
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      w.removeEventListener('message', onMsg);
+      w.removeEventListener('error', onErr);
+    };
+
+    const onErr = () => {
+      cleanup();
+      resolve([]);
+    };
+
+    const onMsg = (ev: MessageEvent<HotsEmbedWorkerOutMessage>) => {
+      if (requestId !== currentRequestId) {
+        cleanup();
+        resolve([]);
+        return;
+      }
+      const m = ev.data;
+      if (!m || !('id' in m) || m.id !== rpcId) return;
+      if (m.type === 'spam-scores-done') {
+        lastKnownEmbedProvider = m.provider;
+        cleanup();
+        resolve(m.scores || []);
+      } else if (m.type === 'error') {
+        cleanup();
+        resolve([]);
+      }
+    };
+
+    w.addEventListener('message', onMsg);
+    w.addEventListener('error', onErr);
+    w.postMessage({
+      id: rpcId,
+      type: 'score-spam',
+      items,
+      executor,
+    } satisfies HotsEmbedWorkerInMessage);
+  });
+}
+
+/**
+ * Applies Stage-2 Local Neural semantic fusion and/or Kev SystemOne API verification
+ * over surviving substantive posts before final clustering.
+ */
+async function applyStage2SpamRefinement(options: {
+  posts: HotPostItem[];
+  stage1Filtered: FilteredSpamPostItem[];
+  spamFilterMode: HotsSpamFilterMode;
+  spamSensitivity: HotsSpamSensitivity;
+  semanticScores?: SemanticSpamScore[];
+  listenItems?: any[];
+  signal: AbortSignal;
+  onProgress?: (p: HotsEngineProgress) => void;
+}): Promise<{
+  cleanPosts: HotPostItem[];
+  allFilteredSpam: FilteredSpamPostItem[];
+  newlyFilteredCount: number;
+}> {
+  const {
+    posts,
+    stage1Filtered,
+    spamFilterMode,
+    spamSensitivity,
+    semanticScores,
+    listenItems,
+    signal,
+    onProgress,
+  } = options;
+
+  if (spamFilterMode === 'off' || posts.length === 0) {
+    return {
+      cleanPosts: posts,
+      allFilteredSpam: stage1Filtered,
+      newlyFilteredCount: 0,
+    };
+  }
+
+  const threshold = getSpamThreshold(spamSensitivity);
+  const spamChannelKeys = new Set<string>();
+  if (Array.isArray(listenItems)) {
+    for (const it of listenItems) {
+      if (String(it?.auto_class?.class || '').toLowerCase() === 'spam') {
+        const k1 = String(it?.argument || '').toLowerCase().replace(/^@/, '');
+        const k2 = String(it?.name || '').toLowerCase().replace(/^@/, '');
+        if (k1) spamChannelKeys.add(k1);
+        if (k2) spamChannelKeys.add(k2);
+      }
+    }
+  }
+
+  const heuristicMap = evaluateBatchHeuristicSpam(posts, spamChannelKeys);
+  const semanticMap = new Map<string, SemanticSpamScore>();
+  if (Array.isArray(semanticScores)) {
+    for (const s of semanticScores) {
+      semanticMap.set(s.postKey, s);
+    }
+  }
+
+  const cachedMap = await getCachedSpamEvaluations(
+    posts.map((p) => ({
+      postKey: p.key,
+      contentHash: computeSpamContentHash(p),
+    }))
+  );
+
+  const evalMap = new Map<string, SpamEvaluationResult>();
+  const toPersistLocal: SpamEvaluationResult[] = [];
+  const systemOneCandidates: Array<{ post: HotPostItem; priority: number }> = [];
+  const nowTs = Date.now();
+
+  for (const post of posts) {
+    const cached = cachedMap.get(post.key);
+    const heur = heuristicMap.get(post.key)!;
+    const sem = semanticMap.get(post.key);
+    const contentHash = computeSpamContentHash(post);
+
+    if (cached?.userOverride) {
+      evalMap.set(post.key, cached);
+      continue;
+    }
+
+    if (cached?.source === 'systemone') {
+      evalMap.set(post.key, { ...cached, isSpam: cached.spamScore >= threshold });
+      continue;
+    }
+
+    const fused = fuseLocalSpamScores(heur, sem, threshold);
+    const evaluation: SpamEvaluationResult = {
+      postKey: post.key,
+      contentHash,
+      spamScore: fused.spamScore,
+      isSpam: fused.isSpam,
+      label: fused.label,
+      source: fused.source,
+      reasons: fused.reasons,
+      localRuleScore: heur.score,
+      localNeuralScore: sem?.neuralScore,
+      updatedAt: nowTs,
+    };
+    evalMap.set(post.key, evaluation);
+
+    if (sem) {
+      toPersistLocal.push(evaluation);
+    }
+
+    // Queue candidates for SystemOne remote verification if enabled
+    if (spamFilterMode === 'hybrid') {
+      // Only send ambiguous/borderline posts to SystemOne (saves latency & bandwidth)
+      const isBorderline =
+        (fused.spamScore >= 0.30 && fused.spamScore < threshold + 0.14) ||
+        (heur.hasPromoCues && !heur.isNewsGuarded && fused.spamScore >= 0.22);
+      if (isBorderline) {
+        // Prioritize scores closest to the decision boundary
+        const dist = Math.abs(fused.spamScore - threshold);
+        systemOneCandidates.push({ post, priority: 1 - dist + (heur.hasPromoCues ? 0.25 : 0) });
+      }
+    } else if (spamFilterMode === 'systemone') {
+      // Tag uncached posts via SystemOne, prioritizing suspicious/high-view posts first
+      const priority = fused.spamScore * 2 + (heur.hasPromoCues ? 0.5 : 0) + Math.min(0.4, (post.views || 0) / 50000);
+      systemOneCandidates.push({ post, priority });
+    }
+  }
+
+  if (toPersistLocal.length > 0) {
+    await saveCachedSpamEvaluations(toPersistLocal);
+  }
+
+  // Optional Layer 3: SystemOne remote tagging on uncached candidates
+  if (systemOneCandidates.length > 0 && !signal.aborted) {
+    systemOneCandidates.sort((a, b) => b.priority - a.priority);
+    const maxRemote = spamFilterMode === 'hybrid' ? 32 : 60;
+    const batchPosts = systemOneCandidates.slice(0, maxRemote).map((c) => c.post);
+
+    onProgress?.({
+      step: 'spam_filtering',
+      stage: 'stage2',
+      percent: 82,
+      message: `Verifying ${batchPosts.length} posts for spam via SystemOne API...`,
+    });
+
+    const sysResults = await classifyPostsWithSystemOneBatch(batchPosts, {
+      threshold,
+      concurrency: 4,
+      signal,
+      onProgress: (done, total) => {
+        onProgress?.({
+          step: 'spam_filtering',
+          stage: 'stage2',
+          percent: 82 + Math.round((done / Math.max(1, total)) * 8),
+          message: `SystemOne spam verification (${done}/${total})...`,
+        });
+      },
+    });
+
+    for (const [k, ev] of sysResults.entries()) {
+      const prev = evalMap.get(k);
+      evalMap.set(k, {
+        ...ev,
+        localRuleScore: prev?.localRuleScore,
+        localNeuralScore: prev?.localNeuralScore,
+      });
+    }
+  }
+
+  const cleanPosts: HotPostItem[] = [];
+  const newlyFiltered: FilteredSpamPostItem[] = [];
+
+  for (const post of posts) {
+    const ev = evalMap.get(post.key);
+    if (ev && ev.isSpam) {
+      newlyFiltered.push({ post, evaluation: ev });
+    } else {
+      cleanPosts.push(post);
+    }
+  }
+
+  const combinedMap = new Map<string, FilteredSpamPostItem>();
+  for (const item of stage1Filtered) {
+    combinedMap.set(item.post.key, item);
+  }
+  for (const item of newlyFiltered) {
+    combinedMap.set(item.post.key, item);
+  }
+
+  const allFilteredSpam = Array.from(combinedMap.values()).sort(
+    (a, b) => b.evaluation.spamScore - a.evaluation.spamScore
+  );
+
+  return {
+    cleanPosts,
+    allFilteredSpam,
+    newlyFilteredCount: newlyFiltered.length,
+  };
+}
+
+/**
+ * On-demand SystemOne verification triggered by the user from the Spam Filter Inspector modal.
+ */
+export async function verifyPostsWithSystemOneOnDemand(
+  posts: HotPostItem[],
+  sensitivity: HotsSpamSensitivity,
+  onProgress?: (done: number, total: number) => void,
+  signal?: AbortSignal
+): Promise<{ checked: number; flaggedSpam: number }> {
+  if (!Array.isArray(posts) || posts.length === 0) {
+    return { checked: 0, flaggedSpam: 0 };
+  }
+  const threshold = getSpamThreshold(sensitivity);
+  const cachedMap = await getCachedSpamEvaluations(
+    posts.map((p) => ({ postKey: p.key, contentHash: computeSpamContentHash(p) }))
+  );
+  const heuristicMap = evaluateBatchHeuristicSpam(posts);
+
+  // Pick uncached posts not overridden by user, prioritizing highest heuristic/promo signals
+  const uncached = posts
+    .filter((p) => {
+      const c = cachedMap.get(p.key);
+      return !c?.userOverride && c?.source !== 'systemone';
+    })
+    .map((p) => ({
+      post: p,
+      score: heuristicMap.get(p.key)?.score || 0,
+      hasPromo: heuristicMap.get(p.key)?.hasPromoCues ? 1 : 0,
+    }))
+    .sort((a, b) => (b.score + b.hasPromo * 0.35) - (a.score + a.hasPromo * 0.35))
+    .slice(0, 40)
+    .map((x) => x.post);
+
+  if (uncached.length === 0) {
+    return { checked: 0, flaggedSpam: 0 };
+  }
+
+  const results = await classifyPostsWithSystemOneBatch(uncached, {
+    threshold,
+    concurrency: 4,
+    signal,
+    onProgress,
+  });
+
+  let flaggedSpam = 0;
+  for (const ev of results.values()) {
+    if (ev.isSpam) flaggedSpam++;
+  }
+  return { checked: results.size, flaggedSpam };
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +908,8 @@ async function runStage1Compute(options: {
   geminiApiKey?: string;
   clusterMode: HotsClusterMode;
   skipTopicClustering?: boolean;
+  spamFilterMode?: HotsSpamFilterMode;
+  spamSensitivity?: HotsSpamSensitivity;
   listenItems: any[];
   channelMetadataCache: Record<string, any>;
   onProgress?: (p: HotsEngineProgress) => void;
@@ -552,6 +922,8 @@ async function runStage1Compute(options: {
     geminiApiKey,
     clusterMode,
     skipTopicClustering = false,
+    spamFilterMode = 'local',
+    spamSensitivity = 'balanced',
     listenItems,
     channelMetadataCache,
     onProgress,
@@ -603,6 +975,8 @@ async function runStage1Compute(options: {
             useAiMode: stage1Mode === 'ai',
             clusterMode: stage1Mode,
             skipTopicClustering,
+            spamFilterMode,
+            spamSensitivity,
             listenItems,
             channelMetadataCache,
             onProgress,
@@ -622,6 +996,8 @@ async function runStage1Compute(options: {
           useAiMode: stage1Mode === 'ai',
           clusterMode: stage1Mode,
           skipTopicClustering,
+          spamFilterMode,
+          spamSensitivity,
           listenItems,
           channelMetadataCache,
           onProgress,
@@ -642,6 +1018,8 @@ async function runStage1Compute(options: {
             useAiMode: stage1Mode === 'ai',
             clusterMode: stage1Mode,
             skipTopicClustering,
+            spamFilterMode,
+            spamSensitivity,
             listenItems,
             channelMetadataCache,
           },
@@ -655,6 +1033,8 @@ async function runStage1Compute(options: {
           useAiMode: stage1Mode === 'ai',
           clusterMode: stage1Mode,
           skipTopicClustering,
+          spamFilterMode,
+          spamSensitivity,
           listenItems,
           channelMetadataCache,
           onProgress,
@@ -673,6 +1053,8 @@ async function runStage1Compute(options: {
     useAiMode: stage1Mode === 'ai',
     clusterMode: stage1Mode,
     skipTopicClustering,
+    spamFilterMode,
+    spamSensitivity,
     listenItems,
     channelMetadataCache,
     onProgress,
@@ -791,6 +1173,8 @@ export async function computeListenHotsInBackground(
     clusterMode: explicitMode,
     allowModelDownload = false,
     executorPreference = 'auto',
+    spamFilterMode = 'local',
+    spamSensitivity = 'balanced',
     listenItems,
     channelMetadataCache,
     onProgress,
@@ -805,10 +1189,13 @@ export async function computeListenHotsInBackground(
   abortHotsEmbedWorker();
   terminateProgressiveRefineWorker();
 
+  const spamAbortCtrl = new AbortController();
+  activeSpamAbortController = spamAbortCtrl;
+
   // Check whether multilingual ONNX model is already cached BEFORE running Stage 1
-  // so Neural mode can skip throwaway Rule topic clustering & translations completely.
+  // (used both for Neural clustering and for zero-download Local Neural spam scoring).
   let modelCacheState: Awaited<ReturnType<typeof inspectHotsEmbedModelCache>> | null = null;
-  if (clusterMode === 'neural') {
+  if (clusterMode === 'neural' || spamFilterMode === 'local' || spamFilterMode === 'hybrid') {
     modelCacheState = await inspectHotsEmbedModelCache();
     if (requestId !== currentRequestId) {
       throw new DOMException('Superseded', 'AbortError');
@@ -830,6 +1217,8 @@ export async function computeListenHotsInBackground(
     geminiApiKey,
     clusterMode,
     skipTopicClustering: neuralReadyToRun,
+    spamFilterMode,
+    spamSensitivity,
     listenItems: cleanListenItems,
     channelMetadataCache: cleanMetadataCache,
     onProgress,
@@ -841,20 +1230,99 @@ export async function computeListenHotsInBackground(
   }
 
   const substantivePosts = stage1Result.substantivePosts || [];
+  const stage1FilteredSpam = stage1Result.filteredSpamPosts || [];
 
   // Rule / AI mode, or zero substantive posts
   if (clusterMode !== 'neural' || substantivePosts.length === 0) {
+    if (spamFilterMode !== 'off' && substantivePosts.length > 0) {
+      try {
+        let semanticScores: SemanticSpamScore[] | undefined;
+        // Leverage cached local MiniLM ONNX model for semantic spam scoring with zero extra download
+        if ((spamFilterMode === 'local' || spamFilterMode === 'hybrid') && modelCacheState?.isCached) {
+          onProgress?.({
+            step: 'spam_filtering',
+            stage: 'stage2',
+            percent: 76,
+            message: 'Scoring posts for spam with local multilingual neural model...',
+          });
+          semanticScores = await scorePostsSpamInEmbedWorker(
+            substantivePosts,
+            executorPreference,
+            requestId
+          );
+        }
+
+        if (requestId !== currentRequestId) {
+          throw new DOMException('Superseded', 'AbortError');
+        }
+
+        if (semanticScores?.length || spamFilterMode === 'hybrid' || spamFilterMode === 'systemone') {
+          const spamRefined = await applyStage2SpamRefinement({
+            posts: substantivePosts,
+            stage1Filtered: stage1FilteredSpam,
+            spamFilterMode,
+            spamSensitivity,
+            semanticScores,
+            listenItems: cleanListenItems,
+            signal: spamAbortCtrl.signal,
+            onProgress,
+          });
+
+          if (requestId !== currentRequestId) {
+            throw new DOMException('Superseded', 'AbortError');
+          }
+
+          if (spamRefined.newlyFilteredCount > 0) {
+            // Re-run fast Stage-1 clustering now that newly caught spam verdicts are cached in IndexedDB
+            const reclustered = await runStage1Compute({
+              requestId,
+              cleanChannels,
+              dateRange,
+              geminiApiKey,
+              clusterMode,
+              skipTopicClustering: false,
+              spamFilterMode,
+              spamSensitivity,
+              listenItems: cleanListenItems,
+              channelMetadataCache: cleanMetadataCache,
+              onProgress,
+            });
+            const finalClean: HotsAnalysisResult = {
+              ...reclustered,
+              spamPostsCount: spamRefined.allFilteredSpam.length,
+              filteredSpamPosts: spamRefined.allFilteredSpam,
+              substantivePosts: spamRefined.cleanPosts,
+              substantivePostsCount: spamRefined.cleanPosts.length,
+              spamFilterModeUsed: spamFilterMode,
+              computedAt: Date.now(),
+            };
+            setCachedHotsAnalysis(finalClean, clusterMode, spamFilterMode, spamSensitivity);
+            return finalClean;
+          }
+        }
+      } catch (err: unknown) {
+        if ((err as { name?: string })?.name === 'AbortError' || requestId !== currentRequestId) {
+          throw new DOMException('Superseded', 'AbortError');
+        }
+        console.warn('Stage-2 spam refinement skipped:', err);
+      }
+    }
+
     const completedResult: HotsAnalysisResult =
       clusterMode === 'neural'
         ? {
             ...stage1Result,
             hotTopics: [],
             clusterModeUsed: 'neural',
+            spamFilterModeUsed: spamFilterMode,
             computedAt: Date.now(),
             isTopicsComputing: false,
           }
-        : stage1Result;
-    setCachedHotsAnalysis(completedResult, clusterMode);
+        : {
+            ...stage1Result,
+            spamFilterModeUsed: spamFilterMode,
+          };
+    setCachedHotsAnalysis(completedResult, clusterMode, spamFilterMode, spamSensitivity);
     return completedResult;
   }
 
@@ -869,8 +1337,9 @@ export async function computeListenHotsInBackground(
     const previewRes: HotsAnalysisResult = {
       ...stage1Result,
       clusterModeUsed: 'rule',
+      spamFilterModeUsed: spamFilterMode,
     };
-    setCachedHotsAnalysis(previewRes, 'rule');
+    setCachedHotsAnalysis(previewRes, 'rule', spamFilterMode, spamSensitivity);
     onProgress?.({
       step: 'done',
       percent: 100,
@@ -921,9 +1390,11 @@ export async function computeListenHotsInBackground(
             hotChannels: stage1Result.hotChannels,
             hotTopics: partialTopics,
             clusterModeUsed: 'neural',
+            filteredSpamPosts: stage1FilteredSpam,
             totalPostsAnalyzed: stage1Result.totalPostsAnalyzed,
             filteredPostsCount: stage1Result.filteredPostsCount,
             meaninglessPostsCount: stage1Result.meaninglessPostsCount,
+            spamPostsCount: stage1FilteredSpam.length,
             substantivePostsCount: stage1Result.substantivePostsCount,
             totalChannelsScanned: stage1Result.totalChannelsScanned,
             activeChannelsCount: stage1Result.activeChannelsCount,
@@ -942,6 +1413,7 @@ export async function computeListenHotsInBackground(
       substantivePosts,
       executorPreference,
       requestId,
+      spamFilterMode !== 'off',
       onProgress,
       (snap) => {
         if (requestId !== currentRequestId) return;
@@ -957,15 +1429,47 @@ export async function computeListenHotsInBackground(
       throw new DOMException('Superseded', 'AbortError');
     }
 
-    const neuralTopics = await runStage2VectorClustering({
-      requestId,
-      substantivePosts,
-      vectors: embedRes.vectors,
-      dateRange,
-      skipTranslation: true,
-      isProgressive: false,
-      onProgress,
-    });
+    // Fuse local neural semantic spam scores (computed during the same ONNX pass) + optional SystemOne verification
+    let clusteringPosts = substantivePosts;
+    let clusteringVectors = embedRes.vectors;
+    let allFilteredSpam = stage1FilteredSpam;
+
+    if (spamFilterMode !== 'off') {
+      const spamRefined = await applyStage2SpamRefinement({
+        posts: substantivePosts,
+        stage1Filtered: stage1FilteredSpam,
+        spamFilterMode,
+        spamSensitivity,
+        semanticScores: embedRes.semanticSpamScores,
+        listenItems: cleanListenItems,
+        signal: spamAbortCtrl.signal,
+        onProgress,
+      });
+
+      if (requestId !== currentRequestId) {
+        throw new DOMException('Superseded', 'AbortError');
+      }
+
+      clusteringPosts = spamRefined.cleanPosts;
+      allFilteredSpam = spamRefined.allFilteredSpam;
+      if (spamRefined.newlyFilteredCount > 0) {
+        const allowedKeys = new Set(clusteringPosts.map((p) => p.key));
+        clusteringVectors = embedRes.vectors.filter((v) => allowedKeys.has(v.postKey));
+      }
+    }
+
+    const neuralTopics =
+      clusteringPosts.length > 0
+        ? await runStage2VectorClustering({
+            requestId,
+            substantivePosts: clusteringPosts,
+            vectors: clusteringVectors,
+            dateRange,
+            skipTranslation: true,
+            isProgressive: false,
+            onProgress,
+          })
+        : [];
 
     if (requestId !== currentRequestId) {
       throw new DOMException('Superseded', 'AbortError');
@@ -988,6 +1492,11 @@ export async function computeListenHotsInBackground(
     const finalResult: HotsAnalysisResult = {
       ...stage1Result,
       hotTopics: neuralTopics,
+      substantivePosts: clusteringPosts,
+      substantivePostsCount: clusteringPosts.length,
+      spamPostsCount: allFilteredSpam.length,
+      filteredSpamPosts: allFilteredSpam,
+      spamFilterModeUsed: spamFilterMode,
       clusterModeUsed: 'neural',
       computedAt: Date.now(),
       isTopicsComputing: false,
@@ -997,12 +1506,12 @@ export async function computeListenHotsInBackground(
       step: 'done',
       stage: 'stage2',
       percent: 100,
-      message: `Refined with multilingual embeddings (${embedRes.cachedHits} cached, ${embedRes.newlyEmbedded} embedded).`,
+      message: `Refined with multilingual embeddings (${embedRes.cachedHits} cached, ${embedRes.newlyEmbedded} embedded, ${allFilteredSpam.length} spam filtered).`,
       provider: embedRes.provider,
       cachedHits: embedRes.cachedHits,
     });
 
-    setCachedHotsAnalysis(finalResult, 'neural');
+    setCachedHotsAnalysis(finalResult, 'neural', spamFilterMode, spamSensitivity);
     return finalResult;
   } catch (err: unknown) {
     pendingPartialSnap = null;
@@ -1017,11 +1526,12 @@ export async function computeListenHotsInBackground(
     const preservedTopics =
       latestProgressiveTopics.length > 0
         ? latestProgressiveTopics
-        : getCachedHotsAnalysis(dateRange, 'neural')?.hotTopics || [];
+        : getCachedHotsAnalysis(dateRange, 'neural', spamFilterMode, spamSensitivity)?.hotTopics || [];
     const fallbackResult: HotsAnalysisResult = {
       ...stage1Result,
       hotTopics: preservedTopics,
       clusterModeUsed: 'neural',
+      spamFilterModeUsed: spamFilterMode,
       computedAt: Date.now(),
       isTopicsComputing: false,
     };
@@ -1031,5 +1541,9 @@ export async function computeListenHotsInBackground(
       message: 'Neural embedding interrupted.',
     });
     return fallbackResult;
+  } finally {
+    if (activeSpamAbortController === spamAbortCtrl) {
+      activeSpamAbortController = null;
+    }
   }
 }
