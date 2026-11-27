@@ -3352,6 +3352,7 @@ export async function processListenHotsData(options: {
   useAiMode?: boolean;
   clusterMode?: HotsClusterMode;
   skipTopicClustering?: boolean;
+  suppressDoneProgress?: boolean;
   spamFilterMode?: HotsSpamFilterMode;
   spamSensitivity?: HotsSpamSensitivity;
   listenItems?: any[];
@@ -3378,6 +3379,7 @@ export async function processListenHotsData(options: {
     geminiApiKey,
     useAiMode,
     skipTopicClustering = false,
+    suppressDoneProgress = false,
     spamFilterMode = 'local',
     spamSensitivity = 'balanced',
     listenItems,
@@ -3389,8 +3391,8 @@ export async function processListenHotsData(options: {
 
   onProgress?.({
     step: 'scanning',
-    percent: 10,
-    message: `Filtering posts across ${cachedChannels.length} channels...`
+    percent: 8,
+    message: `Scanning posts across ${cachedChannels.length} channels...`
   });
 
   // 1. Scan and filter posts within the requested date bounds
@@ -3588,11 +3590,11 @@ export async function processListenHotsData(options: {
 
     // Yield execution periodically to preserve UI responsiveness
     if (cIdx % CHUNK_SIZE === 0 && cIdx > 0) {
-      const pct = 10 + Math.floor((cIdx / cachedChannels.length) * 35);
+      const pct = 8 + Math.floor((cIdx / cachedChannels.length) * 24);
       onProgress?.({
         step: 'scanning',
         percent: pct,
-        message: `Processed ${cIdx}/${cachedChannels.length} channels...`
+        message: `Scanning channels (${cIdx}/${cachedChannels.length})...`
       });
       await yieldToMain();
     }
@@ -3601,7 +3603,7 @@ export async function processListenHotsData(options: {
   // 2. Sort Hot Posts (Primary sort: Views DSC)
   onProgress?.({
     step: 'ranking',
-    percent: 50,
+    percent: 36,
     message: 'Ranking hot posts and channels...'
   });
 
@@ -3779,7 +3781,7 @@ export async function processListenHotsData(options: {
   onProgress?.({
     step: 'clustering',
     stage: 'stage1',
-    percent: 62,
+    percent: 52,
     message: 'Running multilingual Stage-1 topic clustering...',
   });
 
@@ -3838,11 +3840,13 @@ export async function processListenHotsData(options: {
     await attachChineseTranslationsForForeignTitles(hotTopics);
   }
 
-  onProgress?.({
-    step: 'done',
-    percent: 100,
-    message: 'Finished calculating hot intelligence.',
-  });
+  if (!suppressDoneProgress) {
+    onProgress?.({
+      step: 'done',
+      percent: 100,
+      message: 'Finished calculating hot intelligence.',
+    });
+  }
 
   return {
     dateRange,

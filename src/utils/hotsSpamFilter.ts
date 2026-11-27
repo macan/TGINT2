@@ -672,13 +672,65 @@ export function fuseLocalSpamScores(
 
 // ---------------------------------------------------------------------------
 // Layer 3: Kev SystemOne API Remote Post Spam Tagger
+/**
+ * Determines whether a post is genuinely ambiguous / difficult for Local Rule + Local AI
+ * to judge on its own (used by Hybrid mode so SystemOne API is ONLY called on truly
+ * uncertain posts rather than clearly clean or clearly spam posts).
+ */
+export function isPostAmbiguousForLocalSpam(
+  heuristic: SpamHeuristicResult,
+  semantic: SemanticSpamScore | null | undefined,
+  fusedScore: number,
+  threshold: number
+): { ambiguous: boolean; uncertaintyPriority: number } {
+  // Explicit ad disclosures (erid, #ad, #广告, #реклама) are already certain spam
+  if (heuristic.hasExplicitAdDisclosure) {
+    return { ambiguous: false, uncertaintyPriority: 0 };
+  }
+
+  // Protected news articles with sub-threshold scores are clearly legitimate
+  if (heuristic.isNewsGuarded && fusedScore < threshold - 0.06) {
+    return { ambiguous: false, uncertaintyPriority: 0 };
+  }
+
+  // Case 1: Score falls inside the narrow uncertainty band straddling the decision boundary
+  const lowBand = Math.max(0.42, threshold - 0.14);
+  const highBand = Math.min(0.86, threshold + 0.08);
+  const inBoundaryBand = fusedScore >= lowBand && fusedScore < highBand;
+
+  // Case 2: Strong disagreement between Local Rule and Local Neural AI
+  let hasLayerConflict = false;
+  let conflictStrength = 0;
+  if (semantic) {
+    if (semantic.neuralScore >= 0.68 && heuristic.score < 0.25 && !heuristic.isNewsGuarded) {
+      hasLayerConflict = true;
+      conflictStrength = semantic.neuralScore - heuristic.score;
+    } else if (heuristic.score >= 0.48 && heuristic.score < 0.78 && semantic.neuralScore <= 0.28) {
+      hasLayerConflict = true;
+      conflictStrength = heuristic.score - semantic.neuralScore;
+    }
+  }
+
+  if (!inBoundaryBand && !hasLayerConflict) {
+    return { ambiguous: false, uncertaintyPriority: 0 };
+  }
+
+  // Priority favors posts closest to the decision threshold and with strongest rule/AI conflict
+  const distToThreshold = Math.abs(fusedScore - threshold);
+  const boundaryPriority = inBoundaryBand ? Math.max(0, 1 - distToThreshold * 4) : 0;
+  const priority = Number((boundaryPriority + conflictStrength * 0.6).toFixed(3));
+  return { ambiguous: true, uncertaintyPriority: priority };
+}
+
+// ---------------------------------------------------------------------------
+// Layer 3: Kev SystemOne API Remote High-Precision Spam Tagger (Single-Post)
 // ---------------------------------------------------------------------------
 
 export const SYSTEM_ONE_POST_SPAM_QUESTIONS = {
   spam_check: {
     type: 'choice',
     instructions:
-      'Determine whether this Telegram post is spam/unsolicited advertisement/scam, low-value self-promotion, or legitimate news/informational content.',
+      'Determine whether this single Telegram post is spam/unsolicited advertisement/scam, low-value self-promotion, or legitimate news/informational content.',
     criteria: {
       spam: 'unsolicited advertisement, paid sponsored promotion (erid, #ad, #广告, #реклама), gambling/casino/betting ad, crypto pump/airdrop/VIP trading signals scam, phishing, adult/escort solicitation, VPN/account selling, fake job/brush-order recruitment, or bulk affiliate sales spam',
       promotional: 'channel cross-promotion, giveaway/contest funnel, discount coupon blast, or direct commercial product sales pitch without substantive news value',
@@ -696,11 +748,12 @@ export async function classifyPostWithSystemOne(
   reason: string;
 }> {
   const prep = buildPostEmbeddingInput(post);
-  const rawSnippet = (post.text || post.cleanSnippet || prep.text || '').trim().slice(0, 900);
+  const rawSnippet = (post.text || post.cleanSnippet || prep.text || '').trim().slice(0, 650);
+  // Always send a single-post object (never a batch array) so the classification maps 1-to-1 to this post
   const state = {
     channel: post.channelName || post.channelUsername || '',
     text: rawSnippet,
-    linkTitle: post.linkPreview?.title || undefined,
+    linkTitle: post.linkPreview?.title ? post.linkPreview.title.slice(0, 140) : undefined,
     linkDomain: post.linkPreview?.domain || undefined,
   };
 
@@ -775,11 +828,10 @@ export async function classifyPostsWithSystemOneBatch(
   const results = new Map<string, SpamEvaluationResult>();
   if (!Array.isArray(posts) || posts.length === 0) return results;
 
-  const concurrency = Math.max(1, Math.min(6, options.concurrency ?? 4));
+  const concurrency = Math.max(1, Math.min(4, options.concurrency ?? 3));
   const total = posts.length;
   let nextIdx = 0;
   let completed = 0;
-  const toPersist: SpamEvaluationResult[] = [];
 
   const workerLoop = async () => {
     while (nextIdx < total) {
@@ -802,7 +854,8 @@ export async function classifyPostsWithSystemOneBatch(
           updatedAt: Date.now(),
         };
         results.set(post.key, evaluation);
-        toPersist.push(evaluation);
+        // Persist immediately per-post so completed SystemOne verdicts are never lost if aborted
+        await saveCachedSpamEvaluations([evaluation]);
       } catch (err: unknown) {
         if (options.signal?.aborted || (err as { name?: string })?.name === 'AbortError') {
           return;
@@ -817,10 +870,6 @@ export async function classifyPostsWithSystemOneBatch(
 
   const workers = Array.from({ length: Math.min(concurrency, total) }, () => workerLoop());
   await Promise.all(workers);
-
-  if (toPersist.length > 0) {
-    await saveCachedSpamEvaluations(toPersist);
-  }
 
   return results;
 }

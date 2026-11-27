@@ -35,6 +35,7 @@ import {
   fuseLocalSpamScores,
   getCachedSpamEvaluations,
   getSpamThreshold,
+  isPostAmbiguousForLocalSpam,
   saveCachedSpamEvaluations,
   type FilteredSpamPostItem,
   type HotsSpamFilterMode,
@@ -489,7 +490,7 @@ async function computePostEmbeddingsInWorker(
       if (m.type === 'progress') {
         if (m.provider) lastKnownEmbedProvider = m.provider;
         if (m.stage === 'embedding') {
-          const pct = 72 + Math.round((m.percent / 100) * 16);
+          const pct = 48 + Math.round((m.percent / 100) * 28);
           onProgress?.({
             step: 'embedding',
             stage: 'stage2',
@@ -512,7 +513,7 @@ async function computePostEmbeddingsInWorker(
           onProgress?.({
             step: 'embedding_download',
             stage: 'stage2',
-            percent: m.stage === 'downloading' ? m.percent : 68,
+            percent: m.stage === 'downloading' ? m.percent : 44,
             message: dlMsg,
             loadedBytes: m.loadedBytes,
             totalBytes: m.totalBytes,
@@ -733,14 +734,10 @@ async function applyStage2SpamRefinement(options: {
 
     // Queue candidates for SystemOne remote verification if enabled
     if (spamFilterMode === 'hybrid') {
-      // Only send ambiguous/borderline posts to SystemOne (saves latency & bandwidth)
-      const isBorderline =
-        (fused.spamScore >= 0.30 && fused.spamScore < threshold + 0.14) ||
-        (heur.hasPromoCues && !heur.isNewsGuarded && fused.spamScore >= 0.22);
-      if (isBorderline) {
-        // Prioritize scores closest to the decision boundary
-        const dist = Math.abs(fused.spamScore - threshold);
-        systemOneCandidates.push({ post, priority: 1 - dist + (heur.hasPromoCues ? 0.25 : 0) });
+      // ONLY invoke SystemOne (single post per call) when Local Rule + Local AI genuinely find the post ambiguous
+      const ambiguity = isPostAmbiguousForLocalSpam(heur, sem, fused.spamScore, threshold);
+      if (ambiguity.ambiguous) {
+        systemOneCandidates.push({ post, priority: ambiguity.uncertaintyPriority });
       }
     } else if (spamFilterMode === 'systemone') {
       // Tag uncached posts via SystemOne, prioritizing suspicious/high-view posts first
@@ -753,28 +750,28 @@ async function applyStage2SpamRefinement(options: {
     await saveCachedSpamEvaluations(toPersistLocal);
   }
 
-  // Optional Layer 3: SystemOne remote tagging on uncached candidates
+  // Optional Layer 3: SystemOne remote tagging (1 single post per request) on uncertain candidates
   if (systemOneCandidates.length > 0 && !signal.aborted) {
     systemOneCandidates.sort((a, b) => b.priority - a.priority);
-    const maxRemote = spamFilterMode === 'hybrid' ? 32 : 60;
+    const maxRemote = spamFilterMode === 'hybrid' ? 10 : 40;
     const batchPosts = systemOneCandidates.slice(0, maxRemote).map((c) => c.post);
 
     onProgress?.({
       step: 'spam_filtering',
       stage: 'stage2',
-      percent: 82,
-      message: `Verifying ${batchPosts.length} posts for spam via SystemOne API...`,
+      percent: 79,
+      message: `Verifying ${batchPosts.length} ambiguous post${batchPosts.length === 1 ? '' : 's'} via SystemOne API...`,
     });
 
     const sysResults = await classifyPostsWithSystemOneBatch(batchPosts, {
       threshold,
-      concurrency: 4,
+      concurrency: 3,
       signal,
       onProgress: (done, total) => {
         onProgress?.({
           step: 'spam_filtering',
           stage: 'stage2',
-          percent: 82 + Math.round((done / Math.max(1, total)) * 8),
+          percent: 79 + Math.round((done / Math.max(1, total)) * 8),
           message: `SystemOne spam verification (${done}/${total})...`,
         });
       },
@@ -908,6 +905,7 @@ async function runStage1Compute(options: {
   geminiApiKey?: string;
   clusterMode: HotsClusterMode;
   skipTopicClustering?: boolean;
+  suppressDoneProgress?: boolean;
   spamFilterMode?: HotsSpamFilterMode;
   spamSensitivity?: HotsSpamSensitivity;
   listenItems: any[];
@@ -922,6 +920,7 @@ async function runStage1Compute(options: {
     geminiApiKey,
     clusterMode,
     skipTopicClustering = false,
+    suppressDoneProgress = false,
     spamFilterMode = 'local',
     spamSensitivity = 'balanced',
     listenItems,
@@ -975,6 +974,7 @@ async function runStage1Compute(options: {
             useAiMode: stage1Mode === 'ai',
             clusterMode: stage1Mode,
             skipTopicClustering,
+            suppressDoneProgress,
             spamFilterMode,
             spamSensitivity,
             listenItems,
@@ -996,6 +996,7 @@ async function runStage1Compute(options: {
           useAiMode: stage1Mode === 'ai',
           clusterMode: stage1Mode,
           skipTopicClustering,
+          suppressDoneProgress,
           spamFilterMode,
           spamSensitivity,
           listenItems,
@@ -1018,6 +1019,7 @@ async function runStage1Compute(options: {
             useAiMode: stage1Mode === 'ai',
             clusterMode: stage1Mode,
             skipTopicClustering,
+            suppressDoneProgress,
             spamFilterMode,
             spamSensitivity,
             listenItems,
@@ -1033,6 +1035,7 @@ async function runStage1Compute(options: {
           useAiMode: stage1Mode === 'ai',
           clusterMode: stage1Mode,
           skipTopicClustering,
+          suppressDoneProgress,
           spamFilterMode,
           spamSensitivity,
           listenItems,
@@ -1053,6 +1056,7 @@ async function runStage1Compute(options: {
     useAiMode: stage1Mode === 'ai',
     clusterMode: stage1Mode,
     skipTopicClustering,
+    suppressDoneProgress,
     spamFilterMode,
     spamSensitivity,
     listenItems,
@@ -1210,6 +1214,23 @@ export async function computeListenHotsInBackground(
   const cleanListenItems = sanitizeListenItems(listenItems);
   const cleanMetadataCache = sanitizeChannelMetadataCache(channelMetadataCache);
 
+  // Monotonic single-pass progress wrapper so a loop never jumps backwards or replays stages
+  let highestProgressPct = 5;
+  const reportProgress = (p: HotsEngineProgress) => {
+    if (!onProgress) return;
+    if (p.step === 'embedding_download' && p.totalBytes) {
+      onProgress(p);
+      return;
+    }
+    const clampedPct = p.step === 'done'
+      ? 100
+      : Math.max(highestProgressPct, Math.min(99, p.percent));
+    highestProgressPct = clampedPct;
+    onProgress({ ...p, percent: clampedPct });
+  };
+
+  const willRunStage2 = neuralReadyToRun || spamFilterMode !== 'off';
+
   const stage1Result = await runStage1Compute({
     requestId,
     cleanChannels,
@@ -1217,11 +1238,12 @@ export async function computeListenHotsInBackground(
     geminiApiKey,
     clusterMode,
     skipTopicClustering: neuralReadyToRun,
+    suppressDoneProgress: willRunStage2,
     spamFilterMode,
     spamSensitivity,
     listenItems: cleanListenItems,
     channelMetadataCache: cleanMetadataCache,
-    onProgress,
+    onProgress: reportProgress,
     onPartialResult,
   });
 
@@ -1239,10 +1261,10 @@ export async function computeListenHotsInBackground(
         let semanticScores: SemanticSpamScore[] | undefined;
         // Leverage cached local MiniLM ONNX model for semantic spam scoring with zero extra download
         if ((spamFilterMode === 'local' || spamFilterMode === 'hybrid') && modelCacheState?.isCached) {
-          onProgress?.({
+          reportProgress({
             step: 'spam_filtering',
             stage: 'stage2',
-            percent: 76,
+            percent: 72,
             message: 'Scoring posts for spam with local multilingual neural model...',
           });
           semanticScores = await scorePostsSpamInEmbedWorker(
@@ -1265,7 +1287,7 @@ export async function computeListenHotsInBackground(
             semanticScores,
             listenItems: cleanListenItems,
             signal: spamAbortCtrl.signal,
-            onProgress,
+            onProgress: reportProgress,
           });
 
           if (requestId !== currentRequestId) {
@@ -1273,7 +1295,13 @@ export async function computeListenHotsInBackground(
           }
 
           if (spamRefined.newlyFilteredCount > 0) {
-            // Re-run fast Stage-1 clustering now that newly caught spam verdicts are cached in IndexedDB
+            reportProgress({
+              step: 'clustering',
+              stage: 'stage2',
+              percent: 92,
+              message: 'Updating topic clusters after spam filtering...',
+            });
+            // Re-run fast Stage-1 clustering silently (suppressing duplicate scanning/ranking progress)
             const reclustered = await runStage1Compute({
               requestId,
               cleanChannels,
@@ -1281,11 +1309,11 @@ export async function computeListenHotsInBackground(
               geminiApiKey,
               clusterMode,
               skipTopicClustering: false,
+              suppressDoneProgress: true,
               spamFilterMode,
               spamSensitivity,
               listenItems: cleanListenItems,
               channelMetadataCache: cleanMetadataCache,
-              onProgress,
             });
             const finalClean: HotsAnalysisResult = {
               ...reclustered,
@@ -1296,6 +1324,11 @@ export async function computeListenHotsInBackground(
               spamFilterModeUsed: spamFilterMode,
               computedAt: Date.now(),
             };
+            reportProgress({
+              step: 'done',
+              percent: 100,
+              message: 'Finished calculating hot intelligence.',
+            });
             setCachedHotsAnalysis(finalClean, clusterMode, spamFilterMode, spamSensitivity);
             return finalClean;
           }
@@ -1322,6 +1355,11 @@ export async function computeListenHotsInBackground(
             ...stage1Result,
             spamFilterModeUsed: spamFilterMode,
           };
+    reportProgress({
+      step: 'done',
+      percent: 100,
+      message: 'Finished calculating hot intelligence.',
+    });
     setCachedHotsAnalysis(completedResult, clusterMode, spamFilterMode, spamSensitivity);
     return completedResult;
   }
@@ -1340,7 +1378,7 @@ export async function computeListenHotsInBackground(
       spamFilterModeUsed: spamFilterMode,
     };
     setCachedHotsAnalysis(previewRes, 'rule', spamFilterMode, spamSensitivity);
-    onProgress?.({
+    reportProgress({
       step: 'done',
       percent: 100,
       message: 'Download semantic model to enable Neural topic ranking.',
@@ -1414,7 +1452,7 @@ export async function computeListenHotsInBackground(
       executorPreference,
       requestId,
       spamFilterMode !== 'off',
-      onProgress,
+      reportProgress,
       (snap) => {
         if (requestId !== currentRequestId) return;
         pendingPartialSnap = snap;
@@ -1443,7 +1481,7 @@ export async function computeListenHotsInBackground(
         semanticScores: embedRes.semanticSpamScores,
         listenItems: cleanListenItems,
         signal: spamAbortCtrl.signal,
-        onProgress,
+        onProgress: reportProgress,
       });
 
       if (requestId !== currentRequestId) {
@@ -1467,7 +1505,7 @@ export async function computeListenHotsInBackground(
             dateRange,
             skipTranslation: true,
             isProgressive: false,
-            onProgress,
+            onProgress: reportProgress,
           })
         : [];
 
@@ -1476,7 +1514,7 @@ export async function computeListenHotsInBackground(
     }
 
     if (neuralTopics.length > 0) {
-      onProgress?.({
+      reportProgress({
         step: 'clustering',
         stage: 'stage2',
         percent: 96,
@@ -1502,7 +1540,7 @@ export async function computeListenHotsInBackground(
       isTopicsComputing: false,
     };
 
-    onProgress?.({
+    reportProgress({
       step: 'done',
       stage: 'stage2',
       percent: 100,
@@ -1535,7 +1573,7 @@ export async function computeListenHotsInBackground(
       computedAt: Date.now(),
       isTopicsComputing: false,
     };
-    onProgress?.({
+    reportProgress({
       step: 'done',
       percent: 100,
       message: 'Neural embedding interrupted.',

@@ -26,6 +26,7 @@ export interface HotsWorkerRequestPayload {
   useAiMode?: boolean;
   clusterMode?: HotsClusterMode;
   skipTopicClustering?: boolean;
+  suppressDoneProgress?: boolean;
   spamFilterMode?: HotsSpamFilterMode;
   spamSensitivity?: HotsSpamSensitivity;
   listenItems?: any[];
@@ -95,7 +96,7 @@ self.onmessage = async (e: MessageEvent<HotsWorkerRequest>) => {
         data: {
           step: 'clustering',
           stage: 'stage2',
-          percent: 88,
+          percent: 90,
           message: 'Consolidating neural semantic clusters...',
         } satisfies HotsEngineProgress,
       });

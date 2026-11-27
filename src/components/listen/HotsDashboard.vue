@@ -247,6 +247,7 @@ const spamFilterShortLabel = computed(() => {
 });
 
 function handleSpamFilterModeChange(nextMode: HotsSpamFilterMode) {
+  clearPendingRecalculation();
   spamFilterMode.value = nextMode;
   saveSpamFilterMode(nextMode);
   clearHotsAnalysisCache();
@@ -254,6 +255,7 @@ function handleSpamFilterModeChange(nextMode: HotsSpamFilterMode) {
 }
 
 function handleSpamSensitivityChange(nextSensitivity: HotsSpamSensitivity) {
+  clearPendingRecalculation();
   spamSensitivity.value = nextSensitivity;
   saveSpamSensitivity(nextSensitivity);
   clearHotsAnalysisCache();
@@ -261,6 +263,7 @@ function handleSpamSensitivityChange(nextSensitivity: HotsSpamSensitivity) {
 }
 
 function handleSpamRecompute() {
+  clearPendingRecalculation();
   clearHotsAnalysisCache();
   runAnalysis(true);
 }
@@ -306,6 +309,7 @@ const inspectedPost = ref<HotPostItem | null>(null);
 let debounceTimer: any = null;
 let maxWaitTimer: any = null;
 let countdownInterval: any = null;
+let pendingSyncAfterCompute = false;
 const isRecalculationPending = ref(false);
 const pendingCountdownSeconds = ref(0);
 const pendingBatchesCount = ref(0);
@@ -640,6 +644,10 @@ async function runAnalysis(force: boolean = false, allowModelDownload: boolean =
       isComputing.value = false;
       isTopicsComputing.value = false;
       activeAnalysisRunKey = "";
+      if (pendingSyncAfterCompute) {
+        pendingSyncAfterCompute = false;
+        scheduleDeferredRecalculation();
+      }
     }
   }
 }
@@ -710,6 +718,7 @@ function selectClusterMode(mode: HotsClusterMode) {
     return;
   }
   if (selectedClusterMode.value === mode) return;
+  clearPendingRecalculation();
   selectedClusterMode.value = mode;
   localStorage.setItem("listen_hots_cluster_mode", mode);
   localStorage.setItem("listen_hots_ai_mode", mode === "ai" ? "true" : "false");
@@ -980,6 +989,7 @@ function clearPendingRecalculation() {
     clearInterval(countdownInterval);
     countdownInterval = null;
   }
+  pendingSyncAfterCompute = false;
   isRecalculationPending.value = false;
   pendingCountdownSeconds.value = 0;
   pendingBatchesCount.value = 0;
@@ -1069,6 +1079,26 @@ function triggerImmediateRecalculation() {
 function scheduleDeferredRecalculation() {
   isRecalculationPending.value = true;
   pendingBatchesCount.value++;
+
+  // Never preempt/abort an active clustering loop for passive background sync batches.
+  // Queue a single coalesced follow-up pass to run cleanly after the current loop completes.
+  if (isComputing.value) {
+    pendingSyncAfterCompute = true;
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    if (maxWaitTimer) {
+      clearTimeout(maxWaitTimer);
+      maxWaitTimer = null;
+    }
+    if (countdownInterval) {
+      clearInterval(countdownInterval);
+      countdownInterval = null;
+    }
+    return;
+  }
+
   pendingCountdownSeconds.value = Math.round(DEBOUNCE_DELAY_MS / 1000);
 
   if (debounceTimer) {
@@ -1098,6 +1128,22 @@ function scheduleDeferredRecalculation() {
 }
 
 function executePendingRecalculation() {
+  if (isComputing.value) {
+    pendingSyncAfterCompute = true;
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    if (maxWaitTimer) {
+      clearTimeout(maxWaitTimer);
+      maxWaitTimer = null;
+    }
+    if (countdownInterval) {
+      clearInterval(countdownInterval);
+      countdownInterval = null;
+    }
+    return;
+  }
   clearPendingRecalculation();
   if (checkAndHandleCalendarDayChange()) {
     return;
