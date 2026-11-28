@@ -624,11 +624,12 @@ const STOPWORDS = new Set([
   'more', 'very', 'much', 'many', 'should', 'could', 'being', 'before', 'since', 'while', 'where',
   'http', 'https', 't.me', 'com', 'org', 'net', 'telegram', 'channel', 'post', 'join', 'view', 'click',
   'here', 'read', 'via', 'source', 'subscribe', 'follow', 'photo', 'video', 'update', 'breaking',
-  // Common Chinese stopwords, particles & Telegram boilerplate
-  '的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很', '到', '说',
-  '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这', '那', '与', '及', '等', '之', '为', '以', '对',
-  '我们', '他们', '她们', '它们', '这个', '那个', '可以', '已经', '因为', '所以', '如果', '但是', '而且', '或者',
-  '关注', '订阅', '频道', '来源', '转发', '点击', '更多', '消息', '表示', '进行', '目前', '已经', '通过',
+  // Common Chinese stopwords, particles & Telegram boilerplate (Simplified + Traditional)
+  '的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '一個', '上', '也', '很', '到', '说', '說',
+  '要', '去', '你', '会', '會', '着', '著', '没有', '沒有', '看', '好', '自己', '这', '這', '那', '与', '與', '及', '等', '之', '为', '為', '以', '对', '對',
+  '我们', '我們', '他们', '他們', '她们', '她們', '它们', '它們', '这个', '這個', '那个', '那個', '可以', '已经', '已經', '因为', '因為', '所以', '如果', '但是', '而且', '或者',
+  '关注', '關注', '订阅', '訂閱', '频道', '頻道', '来源', '來源', '转发', '轉發', '点击', '點擊', '更多', '消息', '表示', '进行', '進行', '目前', '通过', '通過',
+  '报道', '報道', '报导', '報導', '全文', '阅读', '閱讀', '查看', '视频', '視頻', '图片', '圖片',
   // Common Russian stopwords & particles
   'и', 'в', 'во', 'не', 'что', 'он', 'на', 'я', 'с', 'со', 'как', 'а', 'то', 'все', 'она', 'так', 'его',
   'но', 'да', 'ты', 'к', 'у', 'же', 'вы', 'за', 'бы', 'по', 'только', 'ее', 'мне', 'было', 'вот', 'от',
@@ -841,17 +842,135 @@ export function isSubstantivePostForTopicClustering(post: HotPostItem): boolean 
 // Client-Side Semantic Clustering Pipeline (Stage 1 TF-IDF/SimHash + Stage 2 Vector)
 // ---------------------------------------------------------------------------
 
+type PostScriptBucket = 'cjk' | 'cyrillic' | 'latin' | 'other';
+
 interface PostFeatureBag {
   post: HotPostItem;
   tokens: string[];
   tokenSet: Set<string>;
   tfidf: Map<string, number>;
+  matchTfidf: Map<string, number>;
+  matchTokenSet: Set<string>;
+  distinctiveTokens: Set<string>;
+  script: PostScriptBucket;
   topTokens: string[];
   simHashHi: number;
   simHashLo: number;
   hashtags: Set<string>;
   domain?: string;
   linkUrlClean?: string;
+}
+
+// Lightweight Traditional -> Simplified CJK normalization table for cross-script lexical matching
+// (keeps display tokens untouched while allowing HK/TW Traditional & Mainland Simplified news to match)
+const TRAD_TO_SIMP_PAIRS =
+  '臺台灣湾聞闻報报經经緯纬線线陳陈鐵铁國国選选舉举蔣蒋萬万電电視视會会議议專专題题節节黨党開开關关發发對对為为與与說说時时間间進进機机華华東东車车軍军馬马長长門门問问網网絡络總总統统區区導导體体業业務务員员場场號号實实際际學学應应當当稱称達达過过還还這这運运动动記记論论證证調调變变讓让責责質质買买賣卖資资費费貿贸銀银錢钱錯错錄录鎮镇鏈链鏡镜險险離离難难雲云飛飞飯饭館馆點点齊齐龍龙廣广慶庆廠厂廳厅庫库張张強强彈弹歸归影影後后復复徵征態态愛爱憲宪戰战戶户擴扩據据擁拥擔担擊击撥拨擬拟擾扰攝摄敵敌數数斷断無无曉晓暫暂書书條条來来極极構构標标權权檢检歡欢歲岁氣气漢汉決决沒没沖冲況况滬沪測测準准溫温滅灭滿满演演漲涨潤润災灾燒烧營营爭争爾尔牆墙狀状獨独獄狱獲获現现環环產产畫画異异監监盡尽盧卢眾众確确碼码禮礼種种稅税穩稳積积競竞筆笔籌筹簽签簡简紀纪約约紅红級级納纳純纯紙纸紛纷索索緊紧細细紹绍終终組组結结絕绝給给絲丝綁绑定定綜综綠绿維维緒绪緝缉締缔緣缘編编緩缓練练縣县縮缩縱纵績绩織织繞绕繪绘繳缴繼继續续罰罚罷罢羅罗義义習习聯联聲声職职聽听肅肃勝胜脫脱臉脸興兴舊旧艦舰範范葉叶補补裝装製制複复襲袭見见規规覺觉覽览觀观觸触計计訊讯討讨訓训託托訟讼訪访設设許许訴诉診诊証证評评詞词詢询試试詩诗話话該该詳详誇夸認认語语誠诚誤误誰谁課课談谈請请諸诸謀谋謂谓講讲謝谢識识警警譯译護护譽誉讀读讚赞';
+
+const TRAD_TO_SIMP_MAP: Map<string, string> = (() => {
+  const m = new Map<string, string>();
+  for (let i = 0; i + 1 < TRAD_TO_SIMP_PAIRS.length; i += 2) {
+    const trad = TRAD_TO_SIMP_PAIRS[i];
+    const simp = TRAD_TO_SIMP_PAIRS[i + 1];
+    if (trad !== simp) m.set(trad, simp);
+  }
+  return m;
+})();
+
+export function normalizeCjkForMatching(text: string): string {
+  if (!text) return '';
+  let changed = false;
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const mapped = TRAD_TO_SIMP_MAP.get(ch);
+    if (mapped) {
+      out += mapped;
+      changed = true;
+    } else {
+      out += ch;
+    }
+  }
+  return changed ? out : text;
+}
+
+function detectPostScript(text: string): PostScriptBucket {
+  if (!text) return 'other';
+  const cleaned = text
+    .replace(/<[^>]*>?/gm, ' ')
+    .replace(/https?:\/\/\S+/gi, ' ')
+    .replace(/@[a-zA-Z0-9_]+/g, ' ');
+  const cjkCount = (cleaned.match(/[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uac00-\ud7af]/g) || []).length;
+  const cyrillicCount = (cleaned.match(/[\u0400-\u04ff]/g) || []).length;
+  const latinCount = (cleaned.match(/[a-zA-Z]/g) || []).length;
+
+  // CJK characters encode roughly ~2.5x the semantic content of individual Latin characters
+  const cjkScore = cjkCount * 2.5;
+  if (cjkCount >= 6 && cjkScore >= latinCount && cjkScore >= cyrillicCount) return 'cjk';
+  if (cyrillicCount >= 8 && cyrillicCount >= latinCount) return 'cyrillic';
+  if (latinCount >= 8) return 'latin';
+  if (cjkCount >= 3) return 'cjk';
+  if (cyrillicCount >= 3) return 'cyrillic';
+  return 'other';
+}
+
+// Generic news/politics/media/time words that appear across unrelated stories and must NOT
+// be treated as event-specific lexical grounding when deciding whether two same-script posts
+// belong in the same cluster.
+const GENERIC_GROUNDING_TOKENS = new Set([
+  // Chinese (normalized Simplified)
+  '新闻', '新闻台', '报道', '报导', '全文', '事件', '消息', '表示', '指出', '认为', '解释', '强调',
+  '透露', '宣布', '发布', '发表', '举行', '文章', '媒体', '专题', '节目', '政府', '官方', '政治',
+  '国家', '地区', '社会', '中国', '今天', '昨天', '明天', '当天', '第二天', '目前', '近日', '日前',
+  '最新', '突发', '快讯', '视频', '图片', '点击', '查看', '来源', '关注', '订阅', '频道', '转发',
+  '记者', '内部', '会议', '问题', '工作', '时间', '情况', '影响', '方面', '相关', '主要', '重要',
+  '可能', '应该', '需要', '已经', '开始', '继续', '发展', '成为', '出现', '发现', '调查', '回应',
+  '评论', '分析', '网友', '大众', '公众', '民众', '市民', '专家', '教授', '人士', '人员', '部门',
+  '机构', '组织', '系统', '平台', '网络', '互联网', '市场', '经济', '公司', '企业', '行业', '世界',
+  '全球', '国际', '国内', '地方', '城市', '中心', '现场', '此前', '随后', '之后', '之前', '同时',
+  '此外', '另外', '不过', '然而', '因此', '所以', '因为', '如果', '虽然', '但是', '而且', '或者',
+  '以及', '包括', '根据', '通过', '关于', '针对', '对于', '由于', '作为', '其中', '其他', '部分',
+  '全部', '一些', '许多', '很多', '非常', '十分', '更加', '依然', '仍然', '正在', '将会', '曾经',
+  '一直', '完全', '直接', '正式', '公开', '明确', '严重', '重大', '紧急', '特别', '专门', '具体',
+  '详细', '全面', '彻底', '近期', '今年', '去年', '明年', '本月', '上月', '本周', '上周', '今日',
+  '昨日', '明日', '周年', '前夕', '希望', '命运', '改变', '舞台', '证明', '形容', '提示', '内容',
+  '违规', '无法', '访问', '总监', '官员', '领导',
+  // English
+  'news', 'report', 'reports', 'reported', 'according', 'says', 'said', 'breaking', 'update',
+  'latest', 'today', 'yesterday', 'tomorrow', 'week', 'month', 'year', 'years', 'government',
+  'official', 'officials', 'political', 'politics', 'state', 'country', 'national', 'international',
+  'world', 'global', 'local', 'public', 'media', 'press', 'article', 'post', 'video', 'photo',
+  'image', 'watch', 'read', 'full', 'story', 'source', 'statement', 'announced', 'announces',
+  'confirmed', 'claims', 'claimed', 'meeting', 'conference', 'event', 'incident', 'situation',
+  'issue', 'problem', 'market', 'company', 'people', 'group', 'leader', 'leaders', 'minister',
+  'president', 'china', 'chinese', 'breakingnews', 'analysis', 'opinion',
+  // Russian
+  'новости', 'сообщает', 'сообщил', 'сообщили', 'заявил', 'заявили', 'рассказал', 'сегодня',
+  'вчера', 'завтра', 'неделя', 'месяц', 'год', 'года', 'правительство', 'власти', 'политика',
+  'государство', 'страна', 'страны', 'мир', 'мире', 'сми', 'статья', 'пост', 'видео', 'фото',
+  'источник', 'заявление', 'ситуация', 'событие', 'встреча', 'компания', 'рынок', 'люди', 'группа',
+]);
+
+const PURE_DATE_OR_NUM_TOKEN_RE = /^(?:\d+(?:月|日|年|号|號|周|週|天|时|時|分|秒|%|st|nd|rd|th)?|周[一二三四五六日天]|週[一二三四五六日天]|星期[一二三四五六日天])$/i;
+
+function isDistinctiveGroundingToken(
+  normToken: string,
+  docFreq: number,
+  corpusSize: number
+): boolean {
+  if (!normToken) return false;
+  if (STOPWORDS.has(normToken) || GENERIC_GROUNDING_TOKENS.has(normToken)) return false;
+  if (PURE_DATE_OR_NUM_TOKEN_RE.test(normToken)) return false;
+  const isCjk = CJK_CHAR_RE.test(normToken);
+  if (isCjk) {
+    if (normToken.length < 2) return false;
+  } else {
+    if (normToken.length < 3) return false;
+  }
+  // Reject tokens ubiquitous across the current corpus window (e.g., recurring channel signatures or broad region names)
+  if (corpusSize >= 15 && docFreq / corpusSize > 0.18) {
+    return false;
+  }
+  return true;
 }
 
 function computeSimHash64(weights: Map<string, number>): { hi: number; lo: number } {
@@ -894,13 +1013,33 @@ function hammingDistance64(aHi: number, aLo: number, bHi: number, bLo: number): 
   return count;
 }
 
+const GENERIC_URL_SECTION_PATHS = new Set([
+  '', '/', '/index', '/index.html', '/index.htm', '/home', '/news', '/latest',
+  '/zh', '/zh-cn', '/zh-tw', '/zh-hk', '/en', '/ru', '/ja', '/hk', '/tw', '/cn',
+  '/articles', '/posts', '/feed', '/world', '/politics', '/china', '/live',
+]);
+
 function extractCleanLinkUrl(lp?: StructuredLinkPreview): string | undefined {
   if (!lp?.url) return undefined;
   try {
     const parsed = new URL(lp.url.startsWith('http') ? lp.url : `https://${lp.url}`);
     const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
-    if (host === 't.me' || host === 'telegram.me') return undefined;
-    return `${host}${parsed.pathname.replace(/\/$/, '')}`.toLowerCase();
+    if (host === 't.me' || host === 'telegram.me' || host === 'telegram.org') return undefined;
+    const cleanPath = parsed.pathname.replace(/\/+$/, '').toLowerCase();
+    const idParam =
+      parsed.searchParams.get('v') ||
+      parsed.searchParams.get('id') ||
+      parsed.searchParams.get('p') ||
+      parsed.searchParams.get('article') ||
+      parsed.searchParams.get('story');
+    if (idParam && idParam.length >= 2) {
+      return `${host}${cleanPath}?id=${idParam.toLowerCase()}`;
+    }
+    // Never treat bare site homepages or top-level section indices as an exact article match
+    if (GENERIC_URL_SECTION_PATHS.has(cleanPath) || cleanPath.length < 4) {
+      return undefined;
+    }
+    return `${host}${cleanPath}`;
   } catch {
     return undefined;
   }
@@ -912,12 +1051,15 @@ function buildCorpusFeatureBags(posts: HotPostItem[]): PostFeatureBag[] {
     post: HotPostItem;
     tokens: string[];
     tf: Map<string, number>;
+    matchTf: Map<string, number>;
+    script: PostScriptBucket;
     hashtags: Set<string>;
     domain?: string;
     linkUrlClean?: string;
   }> = [];
 
   const df = new Map<string, number>();
+  const matchDf = new Map<string, number>();
 
   for (const post of posts) {
     const lp = post.linkPreview;
@@ -926,22 +1068,34 @@ function buildCorpusFeatureBags(posts: HotPostItem[]): PostFeatureBag[] {
     const tokens = tokenizeMultilingual(combinedText);
     const hashtags = new Set(extractHashtags(post.text || ''));
     const tf = new Map<string, number>();
+    const matchTf = new Map<string, number>();
 
     for (const t of tokens) {
       tf.set(t, (tf.get(t) || 0) + 1);
+      const mt = normalizeCjkForMatching(t);
+      if (mt && !STOPWORDS.has(mt)) {
+        matchTf.set(mt, (matchTf.get(mt) || 0) + 1);
+      }
     }
     for (const h of hashtags) {
       tf.set(h, (tf.get(h) || 0) + 2.2);
+      const mh = normalizeCjkForMatching(h);
+      matchTf.set(mh, (matchTf.get(mh) || 0) + 2.2);
     }
 
     for (const t of tf.keys()) {
       df.set(t, (df.get(t) || 0) + 1);
+    }
+    for (const mt of matchTf.keys()) {
+      matchDf.set(mt, (matchDf.get(mt) || 0) + 1);
     }
 
     rawDocs.push({
       post,
       tokens,
       tf,
+      matchTf,
+      script: detectPostScript(combinedText),
       hashtags,
       domain: lp?.domain,
       linkUrlClean: extractCleanLinkUrl(lp),
@@ -965,6 +1119,29 @@ function buildCorpusFeatureBags(posts: HotPostItem[]): PostFeatureBag[] {
       tfidf.set(term, w / norm);
     }
 
+    const matchTfidf = new Map<string, number>();
+    const distinctiveTokens = new Set<string>();
+    let matchNormSq = 0;
+
+    for (const [term, count] of doc.matchTf.entries()) {
+      const docFreq = matchDf.get(term) || 1;
+      const idf = Math.log(1 + (N + 1) / (docFreq + 0.5));
+      const genericDamp = GENERIC_GROUNDING_TOKENS.has(term) ? 0.25 : 1.0;
+      const w = (1 + Math.log(count)) * idf * genericDamp;
+      matchTfidf.set(term, w);
+      matchNormSq += w * w;
+
+      const bare = term.startsWith('#') ? term.slice(1) : term;
+      if (isDistinctiveGroundingToken(bare, docFreq, N)) {
+        distinctiveTokens.add(bare);
+      }
+    }
+
+    const matchNorm = Math.sqrt(matchNormSq) || 1;
+    for (const [term, w] of matchTfidf.entries()) {
+      matchTfidf.set(term, w / matchNorm);
+    }
+
     const topTokens = Array.from(tfidf.entries())
       .sort((a, b) => b[1] - a[1])
       .slice(0, 12)
@@ -977,6 +1154,10 @@ function buildCorpusFeatureBags(posts: HotPostItem[]): PostFeatureBag[] {
       tokens: doc.tokens,
       tokenSet: new Set(doc.tokens),
       tfidf,
+      matchTfidf,
+      matchTokenSet: new Set(doc.matchTf.keys()),
+      distinctiveTokens,
+      script: doc.script,
       topTokens,
       simHashHi: hi,
       simHashLo: lo,
@@ -4129,21 +4310,39 @@ function pickStage1Medoid(
 }
 
 // ---------------------------------------------------------------------------
-// Stage 2: Hybrid Multilingual ONNX Embedding Clustering (Cosine + Lexical + 2-Pass Merge)
+// Stage 2: Hybrid Multilingual ONNX Embedding Clustering
+//   - Per-script anisotropy mean-centering (eliminates MiniLM same-language cone inflation)
+//   - Same-script lexical/entity grounding + anchor verification (prevents centroid drift)
+//   - Best-first medoid/complete-linkage consolidation (Pass 2)
+//   - Medoid-anchored coherence verification & outlier ejection/re-clustering (Pass 3)
 // ---------------------------------------------------------------------------
 
+interface Stage2ClusterMember {
+  bag: PostFeatureBag;
+  vec?: Float32Array;
+  centeredVec?: Float32Array;
+  centeringAlpha: number;
+  nerEntities: Set<string>;
+}
+
 interface Stage2VectorCluster {
-  items: Array<{
-    bag: PostFeatureBag;
-    vec?: Float32Array;
-  }>;
+  items: Stage2ClusterMember[];
+  seedMember: Stage2ClusterMember;
   sumVec: Float32Array;
   centroidVec: Float32Array;
   vectorCount: number;
+  centeredSumVec: Float32Array;
+  centeredCentroidVec: Float32Array;
+  centeredVectorCount: number;
   centroidTfidf: Map<string, number>;
+  centroidMatchTfidf: Map<string, number>;
+  distinctiveTokenCounts: Map<string, number>;
+  nerEntityCounts: Map<string, number>;
   hashtags: Set<string>;
   urls: Set<string>;
   domains: Set<string>;
+  dominantScript: PostScriptBucket;
+  scriptCounts: Record<PostScriptBucket, number>;
   medianTime: number;
 }
 
@@ -4159,6 +4358,591 @@ function computeTemporalPenalty(
   return Math.min(0.1, (diffDays - 4) * 0.015);
 }
 
+function buildNormalizedNerSet(
+  postKey: string,
+  nerMap?: Map<string, CachedNerPostSummary>
+): Set<string> {
+  const out = new Set<string>();
+  const hit = nerMap?.get(postKey);
+  if (!hit) return out;
+  for (const raw of [...(hit.persons || []), ...(hit.entities || [])]) {
+    const clean = normalizeCjkForMatching((raw || '').trim().toLowerCase());
+    if (clean.length >= 2 && !GENERIC_GROUNDING_TOKENS.has(clean) && !STOPWORDS.has(clean)) {
+      out.add(clean);
+    }
+  }
+  return out;
+}
+
+/**
+ * Computes per-script (and global fallback) anisotropy-corrected unit vectors.
+ * In `paraphrase-multilingual-MiniLM-L12-v2`, same-language news posts occupy a narrow cone
+ * around a shared language/genre mean vector, inflating cosine similarity between completely
+ * unrelated articles (e.g. different Chinese political stories scoring 0.65-0.75).
+ * Subtracting the dispersion-scaled script mean collapses the shared genre direction while
+ * preserving same-event residual alignment and keeping homogeneous single-topic batches safe.
+ */
+function buildAnisotropyCenteredVectors(
+  bags: PostFeatureBag[],
+  vectorsMap: Map<string, Float32Array>
+): Map<string, { centeredVec: Float32Array; alpha: number }> {
+  const result = new Map<string, { centeredVec: Float32Array; alpha: number }>();
+  const byScript: Record<PostScriptBucket, Array<{ key: string; vec: Float32Array }>> = {
+    cjk: [],
+    cyrillic: [],
+    latin: [],
+    other: [],
+  };
+  const allEntries: Array<{ key: string; vec: Float32Array }> = [];
+  let dim = 0;
+
+  for (const bag of bags) {
+    const v = vectorsMap.get(bag.post.key);
+    if (!v || v.length === 0) continue;
+    if (!dim) dim = v.length;
+    const entry = { key: bag.post.key, vec: v };
+    byScript[bag.script].push(entry);
+    allEntries.push(entry);
+  }
+
+  if (allEntries.length === 0 || dim === 0) return result;
+
+  const computeGroupStats = (entries: Array<{ key: string; vec: Float32Array }>) => {
+    const mean = new Float32Array(dim);
+    for (const e of entries) {
+      const len = Math.min(dim, e.vec.length);
+      for (let d = 0; d < len; d++) mean[d] += e.vec[d];
+    }
+    const inv = 1 / Math.max(1, entries.length);
+    for (let d = 0; d < dim; d++) mean[d] *= inv;
+    const unitMean = l2Normalize(mean);
+
+    let cosSum = 0;
+    for (const e of entries) {
+      cosSum += dotProductVectors(e.vec, unitMean);
+    }
+    const avgCosToMean = cosSum / Math.max(1, entries.length);
+    // Only apply strong centering when the group genuinely spans multiple topics (avgCosToMean < 0.86)
+    const dispersion = Math.max(0, Math.min(1, (0.86 - avgCosToMean) / 0.24));
+    const sampleConf = Math.max(0, Math.min(1, (entries.length - 5) / 10));
+    const alpha = dispersion * sampleConf;
+    return { mean, alpha };
+  };
+
+  const globalStats = allEntries.length >= 12 ? computeGroupStats(allEntries) : null;
+
+  for (const script of ['cjk', 'cyrillic', 'latin', 'other'] as PostScriptBucket[]) {
+    const entries = byScript[script];
+    if (entries.length === 0) continue;
+    const stats = entries.length >= 8 ? computeGroupStats(entries) : globalStats;
+
+    if (!stats || stats.alpha < 0.15) {
+      for (const e of entries) {
+        result.set(e.key, { centeredVec: e.vec, alpha: 0 });
+      }
+      continue;
+    }
+
+    const { mean, alpha } = stats;
+    for (const e of entries) {
+      const shifted = new Float32Array(dim);
+      const len = Math.min(dim, e.vec.length);
+      for (let d = 0; d < len; d++) {
+        shifted[d] = e.vec[d] - alpha * mean[d];
+      }
+      result.set(e.key, { centeredVec: l2Normalize(shifted), alpha });
+    }
+  }
+
+  return result;
+}
+
+function getDominantScript(counts: Record<PostScriptBucket, number>): PostScriptBucket {
+  let best: PostScriptBucket = 'other';
+  let bestCount = -1;
+  for (const s of ['cjk', 'cyrillic', 'latin', 'other'] as PostScriptBucket[]) {
+    if (counts[s] > bestCount) {
+      bestCount = counts[s];
+      best = s;
+    }
+  }
+  return best;
+}
+
+function createStage2Cluster(member: Stage2ClusterMember): Stage2VectorCluster {
+  const dim = member.vec ? member.vec.length : 384;
+  const sumVec = member.vec ? new Float32Array(member.vec) : new Float32Array(dim);
+  const centroidVec = member.vec ? new Float32Array(member.vec) : new Float32Array(dim);
+  const hasCentered = Boolean(member.centeredVec && member.centeringAlpha >= 0.2);
+  const centeredSumVec = hasCentered && member.centeredVec
+    ? new Float32Array(member.centeredVec)
+    : new Float32Array(dim);
+  const centeredCentroidVec = hasCentered && member.centeredVec
+    ? new Float32Array(member.centeredVec)
+    : new Float32Array(dim);
+
+  const distinctiveTokenCounts = new Map<string, number>();
+  for (const t of member.bag.distinctiveTokens) {
+    distinctiveTokenCounts.set(t, 1);
+  }
+  const nerEntityCounts = new Map<string, number>();
+  for (const e of member.nerEntities) {
+    nerEntityCounts.set(e, 1);
+  }
+
+  const urls = new Set<string>();
+  if (member.bag.linkUrlClean) urls.add(member.bag.linkUrlClean);
+  const domains = new Set<string>();
+  if (member.bag.domain) domains.add(member.bag.domain);
+
+  const scriptCounts: Record<PostScriptBucket, number> = {
+    cjk: 0,
+    cyrillic: 0,
+    latin: 0,
+    other: 0,
+  };
+  scriptCounts[member.bag.script] = 1;
+
+  return {
+    items: [member],
+    seedMember: member,
+    sumVec,
+    centroidVec,
+    vectorCount: member.vec ? 1 : 0,
+    centeredSumVec,
+    centeredCentroidVec,
+    centeredVectorCount: hasCentered ? 1 : 0,
+    centroidTfidf: new Map(member.bag.tfidf),
+    centroidMatchTfidf: new Map(member.bag.matchTfidf),
+    distinctiveTokenCounts,
+    nerEntityCounts,
+    hashtags: new Set(member.bag.hashtags),
+    urls,
+    domains,
+    dominantScript: member.bag.script,
+    scriptCounts,
+    medianTime: member.bag.post.date,
+  };
+}
+
+function addMemberToStage2Cluster(target: Stage2VectorCluster, member: Stage2ClusterMember): void {
+  const prevLen = target.items.length;
+  if (member.vec) {
+    for (let d = 0; d < member.vec.length; d++) {
+      target.sumVec[d] += member.vec[d];
+    }
+    target.vectorCount++;
+    target.centroidVec = l2Normalize(target.sumVec);
+  }
+  if (member.centeredVec && member.centeringAlpha >= 0.2) {
+    for (let d = 0; d < member.centeredVec.length; d++) {
+      target.centeredSumVec[d] += member.centeredVec[d];
+    }
+    target.centeredVectorCount++;
+    target.centeredCentroidVec = l2Normalize(target.centeredSumVec);
+  }
+  target.centroidTfidf = mergeTfidfIntoCentroid(
+    target.centroidTfidf,
+    prevLen,
+    member.bag.tfidf,
+    1
+  );
+  target.centroidMatchTfidf = mergeTfidfIntoCentroid(
+    target.centroidMatchTfidf,
+    prevLen,
+    member.bag.matchTfidf,
+    1
+  );
+  target.items.push(member);
+  for (const t of member.bag.distinctiveTokens) {
+    target.distinctiveTokenCounts.set(t, (target.distinctiveTokenCounts.get(t) || 0) + 1);
+  }
+  for (const e of member.nerEntities) {
+    target.nerEntityCounts.set(e, (target.nerEntityCounts.get(e) || 0) + 1);
+  }
+  member.bag.hashtags.forEach((h) => target.hashtags.add(h));
+  if (member.bag.linkUrlClean) target.urls.add(member.bag.linkUrlClean);
+  if (member.bag.domain) target.domains.add(member.bag.domain);
+  target.scriptCounts[member.bag.script] = (target.scriptCounts[member.bag.script] || 0) + 1;
+  target.dominantScript = getDominantScript(target.scriptCounts);
+}
+
+function rebuildStage2ClusterFromMembers(members: Stage2ClusterMember[]): Stage2VectorCluster {
+  const ordered = [...members].sort(
+    (a, b) => b.bag.post.qualityScore - a.bag.post.qualityScore || b.bag.post.date - a.bag.post.date
+  );
+  const cl = createStage2Cluster(ordered[0]);
+  for (let i = 1; i < ordered.length; i++) {
+    addMemberToStage2Cluster(cl, ordered[i]);
+  }
+  // Recompute medianTime accurately
+  const times = ordered
+    .map((m) => m.bag.post.date)
+    .filter((t) => t > 0)
+    .sort((a, b) => a - b);
+  if (times.length > 0) {
+    cl.medianTime = times[Math.floor(times.length / 2)];
+  }
+  return cl;
+}
+
+function selectStage2MedoidMember(cl: Stage2VectorCluster): {
+  medoid: Stage2ClusterMember;
+  postCentrality: Map<string, number>;
+  cohesionScore: number;
+} {
+  const postCentrality = new Map<string, number>();
+  if (cl.items.length === 1) {
+    postCentrality.set(cl.items[0].bag.post.key, 1);
+    return { medoid: cl.items[0], postCentrality, cohesionScore: 1 };
+  }
+
+  if (cl.vectorCount > 0) {
+    const maxQ = Math.max(1, ...cl.items.map((it) => it.bag.post.qualityScore));
+    let bestScore = -Infinity;
+    let medoid = cl.items[0];
+    let cohesionSum = 0;
+    let cohesionCount = 0;
+
+    for (const it of cl.items) {
+      const rawSim = it.vec ? dotProductVectors(it.vec, cl.centroidVec) : 0.4;
+      const useCentered = Boolean(it.centeredVec && it.centeringAlpha >= 0.2 && cl.centeredVectorCount > 0);
+      const centeredSim = useCentered && it.centeredVec
+        ? dotProductVectors(it.centeredVec, cl.centeredCentroidVec)
+        : rawSim;
+      const vecSim = useCentered ? 0.55 * rawSim + 0.45 * centeredSim : rawSim;
+      const lexSim = computeSparseCosine(it.bag.matchTfidf, cl.centroidMatchTfidf);
+      const centrality = it.vec ? 0.76 * vecSim + 0.24 * lexSim : lexSim;
+      postCentrality.set(it.bag.post.key, Math.max(0, Math.min(1, centrality)));
+      if (it.vec) {
+        cohesionSum += rawSim;
+        cohesionCount++;
+      }
+      const score = 0.76 * centrality + 0.24 * (it.bag.post.qualityScore / maxQ);
+      if (score > bestScore) {
+        bestScore = score;
+        medoid = it;
+      }
+    }
+
+    return {
+      medoid,
+      postCentrality,
+      cohesionScore: cohesionCount > 0 ? cohesionSum / cohesionCount : 0.65,
+    };
+  }
+
+  for (const it of cl.items) {
+    const lexSim = computeSparseCosine(it.bag.matchTfidf, cl.centroidMatchTfidf);
+    postCentrality.set(it.bag.post.key, lexSim);
+  }
+  const stage1MedoidPost = pickStage1Medoid(
+    cl.items.map((it) => it.bag),
+    cl.centroidTfidf
+  );
+  const medoid = cl.items.find((it) => it.bag.post.key === stage1MedoidPost.key) || cl.items[0];
+  return { medoid, postCentrality, cohesionScore: 0.65 };
+}
+
+function hasSharedSpecificHashtag(a: Set<string>, b: Set<string>): boolean {
+  if (a.size === 0 || b.size === 0) return false;
+  for (const h of a) {
+    if (!GENERIC_CLUSTER_HASHTAGS.has(h) && b.has(h)) return true;
+  }
+  return false;
+}
+
+function countSharedSetEntries(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  const smaller = a.size <= b.size ? a : b;
+  const larger = a.size <= b.size ? b : a;
+  let count = 0;
+  for (const x of smaller) {
+    if (larger.has(x)) count++;
+  }
+  return count;
+}
+
+function countSharedDistinctiveWithCluster(
+  memberTokens: Set<string>,
+  clusterTokenCounts: Map<string, number>,
+  minSupportCount: number = 1
+): number {
+  if (memberTokens.size === 0 || clusterTokenCounts.size === 0) return 0;
+  let count = 0;
+  for (const tok of memberTokens) {
+    const c = clusterTokenCounts.get(tok);
+    if (c !== undefined && c >= minSupportCount) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Evaluates whether `member` genuinely belongs in `cl` with respect to BOTH the cluster
+ * centroid AND a designated anchor member (seed in Pass 1, final medoid in Pass 3).
+ * Returns a positive match score (>= 0.5) if accepted, or -1 if rejected.
+ */
+function evaluateNeuralMemberToClusterMatch(
+  member: Stage2ClusterMember,
+  cl: Stage2VectorCluster,
+  anchor: Stage2ClusterMember,
+  dateRange: HotsDateRange,
+  strictMode: 'assign' | 'verify' = 'assign'
+): number {
+  // Exact cleaned article URL match (bare homepages/sections are already excluded by extractCleanLinkUrl)
+  if (member.bag.linkUrlClean && cl.urls.has(member.bag.linkUrlClean)) {
+    return 0.97;
+  }
+
+  const timePenalty = computeTemporalPenalty(member.bag.post.date, cl.medianTime, dateRange);
+
+  // Sparse fallback when either side lacks an embedding vector
+  if (!member.vec || cl.vectorCount === 0) {
+    const lexCentroid = computeSparseCosine(member.bag.matchTfidf, cl.centroidMatchTfidf);
+    const lexAnchor = computeSparseCosine(member.bag.matchTfidf, anchor.bag.matchTfidf);
+    const hashBonus = hasSharedSpecificHashtag(member.bag.hashtags, cl.hashtags) ? 0.14 : 0;
+    const score = lexCentroid + hashBonus - timePenalty;
+    if (score >= 0.34 && lexAnchor >= 0.22) {
+      return Math.min(0.95, 0.55 + score * 0.5);
+    }
+    return -1;
+  }
+
+  const rawCosCentroid = dotProductVectors(member.vec, cl.centroidVec);
+  const rawCosAnchor = anchor.vec ? dotProductVectors(member.vec, anchor.vec) : rawCosCentroid;
+
+  const sameScript =
+    member.bag.script === cl.dominantScript && member.bag.script !== 'other';
+  const useCentered = Boolean(
+    sameScript &&
+      member.centeredVec &&
+      member.centeringAlpha >= 0.25 &&
+      cl.centeredVectorCount > 0 &&
+      anchor.centeredVec &&
+      anchor.centeringAlpha >= 0.25
+  );
+
+  const centeredCosCentroid =
+    useCentered && member.centeredVec
+      ? dotProductVectors(member.centeredVec, cl.centeredCentroidVec)
+      : rawCosCentroid;
+  const centeredCosAnchor =
+    useCentered && member.centeredVec && anchor.centeredVec
+      ? dotProductVectors(member.centeredVec, anchor.centeredVec)
+      : rawCosAnchor;
+
+  const lexCentroid = computeSparseCosine(member.bag.matchTfidf, cl.centroidMatchTfidf);
+  const lexAnchor = computeSparseCosine(member.bag.matchTfidf, anchor.bag.matchTfidf);
+  const maxLex = Math.max(lexCentroid, lexAnchor);
+
+  const sharedHash = hasSharedSpecificHashtag(member.bag.hashtags, cl.hashtags);
+  const sharedNerAnchor = countSharedSetEntries(member.nerEntities, anchor.nerEntities);
+  const sharedNerCluster = countSharedDistinctiveWithCluster(member.nerEntities, cl.nerEntityCounts, 1);
+  const hasSharedNer = sharedNerAnchor >= 1 || sharedNerCluster >= 1;
+
+  const sharedDistinctiveAnchor = countSharedSetEntries(
+    member.bag.distinctiveTokens,
+    anchor.bag.distinctiveTokens
+  );
+  // Require token support from >= 2 items in larger clusters so a single drifted peripheral item
+  // cannot pull unrelated posts into the cluster via a one-off keyword.
+  const clusterSupportMin = cl.items.length >= 4 ? 2 : 1;
+  const sharedDistinctiveCluster = countSharedDistinctiveWithCluster(
+    member.bag.distinctiveTokens,
+    cl.distinctiveTokenCounts,
+    clusterSupportMin
+  );
+
+  const hasStrongGrounding =
+    sharedHash ||
+    hasSharedNer ||
+    sharedDistinctiveAnchor >= 1 ||
+    (sharedDistinctiveCluster >= 2 && lexCentroid >= 0.08) ||
+    lexAnchor >= 0.12 ||
+    lexCentroid >= 0.16;
+
+  // Slightly tighten acceptance for very large clusters to avoid catch-all gravity wells
+  const sizeMargin = cl.items.length >= 25 ? 0.03 : 0;
+  const verifyMargin = strictMode === 'verify' ? 0.0 : 0;
+
+  if (sameScript) {
+    // 1. Hard drift floors — reject immediately if too far from either centroid or anchor/medoid
+    const minRawCentroid = 0.68 + sizeMargin;
+    const minRawAnchor = 0.63 + sizeMargin;
+    if (rawCosCentroid - timePenalty < minRawCentroid || rawCosAnchor - timePenalty < minRawAnchor) {
+      return -1;
+    }
+
+    if (useCentered) {
+      const minCenteredCentroid = 0.44 + sizeMargin;
+      const minCenteredAnchor = 0.36 + sizeMargin;
+      if (
+        centeredCosCentroid - timePenalty < minCenteredCentroid ||
+        centeredCosAnchor - timePenalty < minCenteredAnchor
+      ) {
+        return -1;
+      }
+    }
+
+    if (hasStrongGrounding) {
+      const hashBonus = sharedHash ? 0.06 : 0;
+      const nerBonus = hasSharedNer ? 0.05 : 0;
+      const blended = useCentered
+        ? 0.45 * rawCosCentroid +
+          0.35 * centeredCosCentroid +
+          0.16 * maxLex +
+          hashBonus +
+          nerBonus -
+          timePenalty
+        : 0.78 * rawCosCentroid +
+          0.18 * maxLex +
+          hashBonus +
+          nerBonus -
+          timePenalty;
+      const threshold = (useCentered ? 0.64 : 0.72) + sizeMargin + verifyMargin;
+      return blended >= threshold ? blended : -1;
+    }
+
+    // Same-script post with ZERO shared distinctive tokens, entities, or hashtags:
+    // Must clear a strict paraphrase-level neural similarity bar to prevent unrelated same-genre
+    // news (e.g. different Chinese political stories) from collapsing into one cluster.
+    const minParaphraseRawCentroid = 0.83 + sizeMargin;
+    const minParaphraseRawAnchor = 0.79 + sizeMargin;
+    if (
+      rawCosCentroid - timePenalty < minParaphraseRawCentroid ||
+      rawCosAnchor - timePenalty < minParaphraseRawAnchor
+    ) {
+      return -1;
+    }
+    if (useCentered) {
+      const minParaphraseCenteredCentroid = 0.65 + sizeMargin;
+      const minParaphraseCenteredAnchor = 0.58 + sizeMargin;
+      if (
+        centeredCosCentroid - timePenalty < minParaphraseCenteredCentroid ||
+        centeredCosAnchor - timePenalty < minParaphraseCenteredAnchor
+      ) {
+        return -1;
+      }
+    }
+    return 0.55 * rawCosCentroid + 0.45 * centeredCosCentroid - timePenalty;
+  }
+
+  // Cross-lingual match (e.g., English article + Chinese article about the same event):
+  // Do NOT require lexical overlap; rely on MiniLM's cross-lingual alignment to both centroid & anchor.
+  const crossGrounded = sharedHash || hasSharedNer || sharedDistinctiveAnchor >= 1;
+  const crossRawCentroidMin = (crossGrounded ? 0.68 : 0.75) + sizeMargin;
+  const crossRawAnchorMin = (crossGrounded ? 0.63 : 0.70) + sizeMargin;
+  if (
+    rawCosCentroid - timePenalty < crossRawCentroidMin ||
+    rawCosAnchor - timePenalty < crossRawAnchorMin
+  ) {
+    return -1;
+  }
+  return rawCosCentroid + (crossGrounded ? 0.05 : 0) - timePenalty;
+}
+
+function getTopCoreMembers(cl: Stage2VectorCluster, maxCount: number = 3): Stage2ClusterMember[] {
+  if (cl.items.length <= maxCount) return cl.items;
+  return [...cl.items]
+    .sort((a, b) => {
+      const simA = a.vec ? dotProductVectors(a.vec, cl.centroidVec) : 0;
+      const simB = b.vec ? dotProductVectors(b.vec, cl.centroidVec) : 0;
+      return simB - simA || b.bag.post.qualityScore - a.bag.post.qualityScore;
+    })
+    .slice(0, maxCount);
+}
+
+/**
+ * Strict compatibility check for Pass-2 cluster consolidation.
+ * Prevents the classic average-linkage bug where two centroids of unrelated same-language
+ * political clusters have inflated cosine similarity even though their actual posts do not match.
+ */
+function evaluateNeuralClusterMerge(
+  clA: Stage2VectorCluster,
+  clB: Stage2VectorCluster,
+  dateRange: HotsDateRange
+): number {
+  if (clA.vectorCount === 0 || clB.vectorCount === 0) return -1;
+  if (clA.items.length + clB.items.length > 45) return -1;
+
+  const timePenalty = computeTemporalPenalty(clA.medianTime, clB.medianTime, dateRange);
+  const centroidRawCos = dotProductVectors(clA.centroidVec, clB.centroidVec);
+  if (centroidRawCos - timePenalty < 0.78) return -1;
+
+  const sameScript =
+    clA.dominantScript === clB.dominantScript && clA.dominantScript !== 'other';
+  const useCentered = Boolean(
+    sameScript && clA.centeredVectorCount > 0 && clB.centeredVectorCount > 0
+  );
+  const centroidCenteredCos = useCentered
+    ? dotProductVectors(clA.centeredCentroidVec, clB.centeredCentroidVec)
+    : centroidRawCos;
+
+  if (useCentered && centroidCenteredCos - timePenalty < 0.58) return -1;
+
+  const medoidA = selectStage2MedoidMember(clA).medoid;
+  const medoidB = selectStage2MedoidMember(clB).medoid;
+  if (!medoidA.vec || !medoidB.vec) return -1;
+
+  const medoidRawCos = dotProductVectors(medoidA.vec, medoidB.vec);
+  if (medoidRawCos - timePenalty < 0.75) return -1;
+
+  const medoidCenteredCos =
+    useCentered && medoidA.centeredVec && medoidB.centeredVec
+      ? dotProductVectors(medoidA.centeredVec, medoidB.centeredVec)
+      : medoidRawCos;
+  if (useCentered && medoidCenteredCos - timePenalty < 0.54) return -1;
+
+  // Verify average pairwise cosine across top-3 core members of each cluster
+  const coreA = getTopCoreMembers(clA, 3);
+  const coreB = getTopCoreMembers(clB, 3);
+  let pairRawSum = 0;
+  let pairCenteredSum = 0;
+  let pairCount = 0;
+  for (const a of coreA) {
+    if (!a.vec) continue;
+    for (const b of coreB) {
+      if (!b.vec) continue;
+      pairRawSum += dotProductVectors(a.vec, b.vec);
+      pairCenteredSum +=
+        useCentered && a.centeredVec && b.centeredVec
+          ? dotProductVectors(a.centeredVec, b.centeredVec)
+          : dotProductVectors(a.vec, b.vec);
+      pairCount++;
+    }
+  }
+  if (pairCount === 0) return -1;
+  const avgPairRaw = pairRawSum / pairCount;
+  const avgPairCentered = pairCenteredSum / pairCount;
+  if (avgPairRaw - timePenalty < 0.72) return -1;
+  if (useCentered && avgPairCentered - timePenalty < 0.50) return -1;
+
+  if (sameScript) {
+    const lexAB = computeSparseCosine(clA.centroidMatchTfidf, clB.centroidMatchTfidf);
+    const sharedHash = hasSharedSpecificHashtag(clA.hashtags, clB.hashtags);
+    const sharedMedoidDistinctive = countSharedSetEntries(
+      medoidA.bag.distinctiveTokens,
+      medoidB.bag.distinctiveTokens
+    );
+    const sharedMedoidNer = countSharedSetEntries(medoidA.nerEntities, medoidB.nerEntities);
+    const grounded =
+      sharedHash ||
+      sharedMedoidNer >= 1 ||
+      sharedMedoidDistinctive >= 1 ||
+      lexAB >= 0.11;
+
+    if (!grounded) {
+      // Zero shared distinctive terms between same-language cluster cores: require true paraphrase-level match
+      if (medoidRawCos - timePenalty < 0.85) return -1;
+      if (useCentered && medoidCenteredCos - timePenalty < 0.68) return -1;
+    }
+  }
+
+  return 0.45 * medoidRawCos + 0.35 * avgPairRaw + 0.20 * centroidCenteredCos - timePenalty;
+}
+
 export async function clusterPostsWithEmbeddings(
   substantivePosts: HotPostItem[],
   vectorsMap: Map<string, Float32Array>,
@@ -4172,61 +4956,43 @@ export async function clusterPostsWithEmbeddings(
     (a, b) => b.qualityScore - a.qualityScore || b.date - a.date
   );
   const bags = buildCorpusFeatureBags(orderedPosts);
+  const centeredMap = buildAnisotropyCenteredVectors(bags, vectorsMap);
 
+  const members: Stage2ClusterMember[] = bags.map((bag) => {
+    const vec = vectorsMap.get(bag.post.key);
+    const centeredInfo = centeredMap.get(bag.post.key);
+    return {
+      bag,
+      vec,
+      centeredVec: centeredInfo?.centeredVec,
+      centeringAlpha: centeredInfo?.alpha ?? 0,
+      nerEntities: buildNormalizedNerSet(bag.post.key, nerMap),
+    };
+  });
+
+  // Pass 1: Anchor-verified & anisotropy-corrected online clustering
   const clusters: Stage2VectorCluster[] = [];
   const urlToCluster = new Map<string, number>();
 
-  const TAU_PASS1 = 0.58;
-
-  for (let i = 0; i < bags.length; i++) {
-    const bag = bags[i];
-    const vec = vectorsMap.get(bag.post.key);
-
+  for (let i = 0; i < members.length; i++) {
+    const member = members[i];
     let bestClusterIdx = -1;
-    let highestSim = 0;
+    let highestSim = -1;
 
-    if (bag.linkUrlClean && urlToCluster.has(bag.linkUrlClean)) {
-      bestClusterIdx = urlToCluster.get(bag.linkUrlClean)!;
+    if (member.bag.linkUrlClean && urlToCluster.has(member.bag.linkUrlClean)) {
+      bestClusterIdx = urlToCluster.get(member.bag.linkUrlClean)!;
       highestSim = 0.97;
     } else {
       for (let c = 0; c < clusters.length; c++) {
         const cl = clusters[c];
-
-        let sim = 0;
-        if (vec && cl.vectorCount > 0) {
-          const cos = dotProductVectors(vec, cl.centroidVec);
-          const lex = computeSparseCosine(bag.tfidf, cl.centroidTfidf);
-          let hashBonus = 0;
-          if (bag.hashtags.size > 0 && cl.hashtags.size > 0) {
-            for (const h of bag.hashtags) {
-              if (!GENERIC_CLUSTER_HASHTAGS.has(h) && cl.hashtags.has(h)) {
-                hashBonus = 0.09;
-                break;
-              }
-            }
-          }
-          const domBonus =
-            bag.domain &&
-            cl.domains.has(bag.domain) &&
-            bag.domain !== 't.me' &&
-            bag.domain !== 'telegram.org' &&
-            cos >= 0.48
-              ? 0.05
-              : 0;
-          const timePenalty = computeTemporalPenalty(bag.post.date, cl.medianTime, dateRange);
-          sim = 0.80 * cos + 0.14 * lex + hashBonus + domBonus - timePenalty;
-        } else {
-          // Graceful sparse fallback for unembedded items
-          sim = computeStage1BagToCentroidSim(
-            bag,
-            cl.centroidTfidf,
-            cl.hashtags,
-            cl.urls,
-            cl.domains
-          ) * 1.45;
-        }
-
-        if (sim > highestSim && sim >= TAU_PASS1) {
+        const sim = evaluateNeuralMemberToClusterMatch(
+          member,
+          cl,
+          cl.seedMember,
+          dateRange,
+          'assign'
+        );
+        if (sim > highestSim) {
           highestSim = sim;
           bestClusterIdx = c;
         }
@@ -4235,50 +5001,17 @@ export async function clusterPostsWithEmbeddings(
 
     if (bestClusterIdx >= 0) {
       const target = clusters[bestClusterIdx];
-      if (vec) {
-        for (let d = 0; d < vec.length; d++) {
-          target.sumVec[d] += vec[d];
-        }
-        target.vectorCount++;
-        target.centroidVec = l2Normalize(target.sumVec);
+      addMemberToStage2Cluster(target, member);
+      if (member.bag.linkUrlClean) {
+        urlToCluster.set(member.bag.linkUrlClean, bestClusterIdx);
       }
-      target.centroidTfidf = mergeTfidfIntoCentroid(
-        target.centroidTfidf,
-        target.items.length,
-        bag.tfidf,
-        1
-      );
-      target.items.push({ bag, vec });
-      bag.hashtags.forEach((h) => target.hashtags.add(h));
-      if (bag.linkUrlClean) {
-        target.urls.add(bag.linkUrlClean);
-        urlToCluster.set(bag.linkUrlClean, bestClusterIdx);
-      }
-      if (bag.domain) target.domains.add(bag.domain);
     } else {
-      const dim = vec ? vec.length : 384;
-      const sumVec = vec ? new Float32Array(vec) : new Float32Array(dim);
-      const centroidVec = vec ? new Float32Array(vec) : new Float32Array(dim);
       const newIdx = clusters.length;
-      const urls = new Set<string>();
-      if (bag.linkUrlClean) {
-        urls.add(bag.linkUrlClean);
-        urlToCluster.set(bag.linkUrlClean, newIdx);
+      const created = createStage2Cluster(member);
+      clusters.push(created);
+      if (member.bag.linkUrlClean) {
+        urlToCluster.set(member.bag.linkUrlClean, newIdx);
       }
-      const domains = new Set<string>();
-      if (bag.domain) domains.add(bag.domain);
-
-      clusters.push({
-        items: [{ bag, vec }],
-        sumVec,
-        centroidVec,
-        vectorCount: vec ? 1 : 0,
-        centroidTfidf: new Map(bag.tfidf),
-        hashtags: new Set(bag.hashtags),
-        urls,
-        domains,
-        medianTime: bag.post.date,
-      });
     }
 
     if (i % 80 === 0 && i > 0) {
@@ -4286,91 +5019,149 @@ export async function clusterPostsWithEmbeddings(
     }
   }
 
-  // Pass 2: Agglomerative consolidation of split neural clusters
-  const TAU_PASS2 = 0.72;
+  // Pass 2: Best-first medoid/complete-linkage consolidation of split neural clusters
   const active = new Array<boolean>(clusters.length).fill(true);
 
   for (let pass = 0; pass < 2; pass++) {
-    let mergedAny = false;
+    const candidates: Array<{ a: number; b: number; score: number }> = [];
     for (let a = 0; a < clusters.length; a++) {
       if (!active[a] || clusters[a].vectorCount === 0) continue;
       for (let b = a + 1; b < clusters.length; b++) {
         if (!active[b] || clusters[b].vectorCount === 0) continue;
-        // Avoid merging massive catch-all clusters recklessly
-        if (clusters[a].items.length + clusters[b].items.length > 60) continue;
-
-        const cos = dotProductVectors(clusters[a].centroidVec, clusters[b].centroidVec);
-        const timePenalty = computeTemporalPenalty(
-          clusters[a].medianTime,
-          clusters[b].medianTime,
-          dateRange
-        );
-        if (cos - timePenalty >= TAU_PASS2) {
-          for (let d = 0; d < clusters[a].sumVec.length; d++) {
-            clusters[a].sumVec[d] += clusters[b].sumVec[d];
-          }
-          clusters[a].vectorCount += clusters[b].vectorCount;
-          clusters[a].centroidVec = l2Normalize(clusters[a].sumVec);
-          clusters[a].centroidTfidf = mergeTfidfIntoCentroid(
-            clusters[a].centroidTfidf,
-            clusters[a].items.length,
-            clusters[b].centroidTfidf,
-            clusters[b].items.length
-          );
-          clusters[a].items.push(...clusters[b].items);
-          clusters[b].hashtags.forEach((h) => clusters[a].hashtags.add(h));
-          clusters[b].urls.forEach((u) => clusters[a].urls.add(u));
-          clusters[b].domains.forEach((d) => clusters[a].domains.add(d));
-          active[b] = false;
-          mergedAny = true;
+        const score = evaluateNeuralClusterMerge(clusters[a], clusters[b], dateRange);
+        if (score > 0) {
+          candidates.push({ a, b, score });
         }
       }
     }
+    if (candidates.length === 0) break;
+
+    candidates.sort((x, y) => y.score - x.score);
+    const touched = new Set<number>();
+    let mergedAny = false;
+
+    for (const cand of candidates) {
+      if (!active[cand.a] || !active[cand.b]) continue;
+      if (touched.has(cand.a) || touched.has(cand.b)) continue;
+      // Re-validate before merging
+      const recheck = evaluateNeuralClusterMerge(clusters[cand.a], clusters[cand.b], dateRange);
+      if (recheck <= 0) continue;
+
+      clusters[cand.a] = rebuildStage2ClusterFromMembers([
+        ...clusters[cand.a].items,
+        ...clusters[cand.b].items,
+      ]);
+      active[cand.b] = false;
+      touched.add(cand.a);
+      touched.add(cand.b);
+      mergedAny = true;
+    }
+
     if (!mergedAny) break;
   }
 
-  const consolidated = clusters.filter((_, idx) => active[idx]);
+  let consolidated = clusters.filter((_, idx) => active[idx]);
+
+  // Pass 3: Medoid-anchored coherence verification & outlier ejection
+  // Guarantees every member post inside a multi-post cluster is genuinely coherent with
+  // the cluster's final medoid (which drives the cluster title).
+  const ejectedOutliers: Stage2ClusterMember[] = [];
+
+  for (let c = 0; c < consolidated.length; c++) {
+    const cl = consolidated[c];
+    if (cl.items.length <= 1) continue;
+
+    const { medoid } = selectStage2MedoidMember(cl);
+    const retained: Stage2ClusterMember[] = [medoid];
+    const retainedUrls = new Set<string>();
+    if (medoid.bag.linkUrlClean) retainedUrls.add(medoid.bag.linkUrlClean);
+    let anyEjected = false;
+
+    for (const it of cl.items) {
+      if (it.bag.post.key === medoid.bag.post.key) continue;
+      if (it.bag.linkUrlClean && retainedUrls.has(it.bag.linkUrlClean)) {
+        retained.push(it);
+        continue;
+      }
+      const verifyScore = evaluateNeuralMemberToClusterMatch(
+        it,
+        cl,
+        medoid,
+        dateRange,
+        'verify'
+      );
+      if (verifyScore > 0) {
+        retained.push(it);
+        if (it.bag.linkUrlClean) retainedUrls.add(it.bag.linkUrlClean);
+      } else {
+        ejectedOutliers.push(it);
+        anyEjected = true;
+      }
+    }
+
+    if (anyEjected) {
+      consolidated[c] = rebuildStage2ClusterFromMembers(retained);
+    }
+  }
+
+  // Re-home ejected outliers: either attach to another cluster whose medoid they strictly match,
+  // or form clean new clusters among the ejected outliers themselves.
+  if (ejectedOutliers.length > 0) {
+    const outlierClusters: Stage2VectorCluster[] = [];
+    for (const outlier of ejectedOutliers) {
+      let bestExistingIdx = -1;
+      let bestExistingScore = -1;
+
+      for (let c = 0; c < consolidated.length; c++) {
+        const cl = consolidated[c];
+        const { medoid } = selectStage2MedoidMember(cl);
+        const sim = evaluateNeuralMemberToClusterMatch(outlier, cl, medoid, dateRange, 'verify');
+        if (sim > bestExistingScore) {
+          bestExistingScore = sim;
+          bestExistingIdx = c;
+        }
+      }
+
+      if (bestExistingIdx >= 0) {
+        addMemberToStage2Cluster(consolidated[bestExistingIdx], outlier);
+        continue;
+      }
+
+      let bestOutlierIdx = -1;
+      let bestOutlierScore = -1;
+      for (let oc = 0; oc < outlierClusters.length; oc++) {
+        const ocl = outlierClusters[oc];
+        const sim = evaluateNeuralMemberToClusterMatch(
+          outlier,
+          ocl,
+          ocl.seedMember,
+          dateRange,
+          'assign'
+        );
+        if (sim > bestOutlierScore) {
+          bestOutlierScore = sim;
+          bestOutlierIdx = oc;
+        }
+      }
+
+      if (bestOutlierIdx >= 0) {
+        addMemberToStage2Cluster(outlierClusters[bestOutlierIdx], outlier);
+      } else {
+        outlierClusters.push(createStage2Cluster(outlier));
+      }
+    }
+
+    consolidated = [...consolidated, ...outlierClusters];
+  }
 
   return finalizeHotTopicClusters(
     consolidated.map((cl) => {
-      let medoid = cl.items[0].bag.post;
-      let cohesionSum = 0;
-      let cohesionCount = 0;
-      const postCentrality = new Map<string, number>();
-
-      if (cl.items.length > 1 && cl.vectorCount > 0) {
-        const maxQ = Math.max(1, ...cl.items.map((it) => it.bag.post.qualityScore));
-        let bestScore = -Infinity;
-        for (const it of cl.items) {
-          const vecSim = it.vec ? dotProductVectors(it.vec, cl.centroidVec) : 0.4;
-          const lexSim = computeSparseCosine(it.bag.tfidf, cl.centroidTfidf);
-          const centrality = it.vec ? 0.78 * vecSim + 0.22 * lexSim : lexSim;
-          postCentrality.set(it.bag.post.key, Math.max(0, Math.min(1, centrality)));
-          if (it.vec) {
-            cohesionSum += vecSim;
-            cohesionCount++;
-          }
-          const score = 0.76 * centrality + 0.24 * (it.bag.post.qualityScore / maxQ);
-          if (score > bestScore) {
-            bestScore = score;
-            medoid = it.bag.post;
-          }
-        }
-      } else {
-        for (const it of cl.items) {
-          const lexSim = cl.items.length > 1 ? computeSparseCosine(it.bag.tfidf, cl.centroidTfidf) : 1;
-          postCentrality.set(it.bag.post.key, lexSim);
-        }
-        medoid = pickStage1Medoid(
-          cl.items.map((it) => it.bag),
-          cl.centroidTfidf
-        );
-      }
+      const { medoid, postCentrality, cohesionScore } = selectStage2MedoidMember(cl);
 
       return {
         items: cl.items.map((it) => it.bag),
-        medoidPost: medoid,
-        cohesionScore: cohesionCount > 0 ? cohesionSum / cohesionCount : 0.65,
+        medoidPost: medoid.bag.post,
+        cohesionScore,
         centroidTfidf: cl.centroidTfidf,
         postCentrality,
       };
