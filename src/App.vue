@@ -3657,16 +3657,37 @@ const formatFileSize = (bytes: number): string => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 };
 
+const normalizeListenTreeConfig = (nodes: ListenItem[]): ListenItem[] => {
+  if (!Array.isArray(nodes)) return [];
+  return nodes.map((node) => {
+    if (!node || typeof node !== "object") return node;
+    if (node.isFolder) {
+      const normalizedFolder: ListenItem = {
+        ...node,
+        children: Array.isArray(node.children) ? normalizeListenTreeConfig(node.children) : []
+      };
+      delete normalizedFolder.enableHotTopics;
+      delete normalizedFolder.enableScrape;
+      return normalizedFolder;
+    }
+    return {
+      ...node,
+      enableHotTopics: node.enableHotTopics !== false,
+      enableScrape: node.enableScrape !== false
+    };
+  });
+};
+
 const loadListenDirectory = () => {
   const cached = localStorage.getItem("listen_directory_tree");
   if (cached) {
     try {
       const parsed = JSON.parse(cached);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        listenDirectory.value = parsed.tree || [];
+        listenDirectory.value = normalizeListenTreeConfig(parsed.tree || []);
         listenDirectoryTimestamp.value = typeof parsed.timestamp === "number" ? parsed.timestamp : 0;
       } else if (Array.isArray(parsed)) {
-        listenDirectory.value = parsed;
+        listenDirectory.value = normalizeListenTreeConfig(parsed);
         listenDirectoryTimestamp.value = 0;
       }
     } catch (e) {
@@ -3686,8 +3707,10 @@ const loadListenDirectory = () => {
 
 const saveListenDirectory = (customTimestamp: number | null = null) => {
   listenDirectoryTimestamp.value = customTimestamp !== null ? customTimestamp : Date.now();
+  const normalizedTree = normalizeListenTreeConfig(listenDirectory.value);
+  listenDirectory.value = normalizedTree;
   const data = {
-    tree: listenDirectory.value,
+    tree: normalizedTree,
     timestamp: listenDirectoryTimestamp.value
   };
   localStorage.setItem("listen_directory_tree", JSON.stringify(data));
@@ -3696,7 +3719,7 @@ const saveListenDirectory = (customTimestamp: number | null = null) => {
 const copyListenDirectoryToClipboard = async () => {
   try {
     const data = {
-      tree: listenDirectory.value,
+      tree: normalizeListenTreeConfig(listenDirectory.value),
       timestamp: listenDirectoryTimestamp.value,
       labels: Object.values(listenLabelDefinitions.value)
     };
@@ -3748,7 +3771,7 @@ const exportListenDirectoryToFile = async () => {
   isExportingTreeFile.value = true;
   try {
     const data = {
-      tree: listenDirectory.value,
+      tree: normalizeListenTreeConfig(listenDirectory.value),
       timestamp: listenDirectoryTimestamp.value,
       labels: Object.values(listenLabelDefinitions.value)
     };
@@ -4089,7 +4112,7 @@ const confirmListenDirectoryImport = () => {
     }
 
     if (Array.isArray(treeData)) {
-      listenDirectory.value = treeData;
+      listenDirectory.value = normalizeListenTreeConfig(treeData);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.labels) {
         const importedLabels = parseImportedLabels(parsed.labels);
         if (importedLabels.length > 0) {
@@ -4143,7 +4166,7 @@ const syncListenDirectory = async () => {
 
     if (response.status === 404) {
       await saveProfileRemotely(`LDT-${username}`, loginToken.value, {
-        tree: listenDirectory.value,
+        tree: normalizeListenTreeConfig(listenDirectory.value),
         timestamp: listenDirectoryTimestamp.value,
         labels: Object.values(listenLabelDefinitions.value)
       });
@@ -4183,7 +4206,7 @@ const syncListenDirectory = async () => {
 
     if (remoteTimestamp < listenDirectoryTimestamp.value) {
       await saveProfileRemotely(`LDT-${username}`, loginToken.value, {
-        tree: listenDirectory.value,
+        tree: normalizeListenTreeConfig(listenDirectory.value),
         timestamp: listenDirectoryTimestamp.value,
         labels: Object.values(listenLabelDefinitions.value)
       });
@@ -4193,7 +4216,7 @@ const syncListenDirectory = async () => {
       toastMessage.value = t("listen.toastDirectoryUpToDate");
       toastType.value = "info";
     } else {
-      listenDirectory.value = remoteTree;
+      listenDirectory.value = normalizeListenTreeConfig(remoteTree);
       if (parsedRemote && typeof parsedRemote === "object" && !Array.isArray(parsedRemote) && parsedRemote.labels) {
         const importedLabels = parseImportedLabels(parsedRemote.labels);
         if (importedLabels.length > 0) {
@@ -4227,6 +4250,8 @@ const addChannelToListenDirectory = (name: string, username: string) => {
     type: "channel",
     argument: username,
     description: `Auto-added channel: @${username}`,
+    enableHotTopics: true,
+    enableScrape: true,
     children: []
   };
   listenDirectory.value.push(newItem);
@@ -4335,22 +4360,6 @@ const saveListenItemForm = () => {
 
   saveListenDirectory();
   isListenModalOpen.value = false;
-};
-
-const toggleListenItemScrape = (item: ListenItem) => {
-  if (!item || item.isFolder) return;
-  const nextEnabled = item.enableScrape === false;
-  findNodeAndPerform(listenDirectory.value, item.id, (nodes, idx) => {
-    const updated: ListenItem = {
-      ...nodes[idx],
-      enableScrape: nextEnabled
-    };
-    nodes[idx] = updated;
-    if (selectedListenNode.value && selectedListenNode.value.id === item.id) {
-      selectedListenNode.value = updated;
-    }
-  });
-  saveListenDirectory();
 };
 
 const isDeleteConfirmOpen = ref(false);
@@ -29880,6 +29889,16 @@ onUnmounted(() => {
                     <span class="hidden xl:inline text-[8px] uppercase tracking-wider font-semibold">{{ t('listen.excludedFromHots') || 'No Hots' }}</span>
                   </span>
 
+                  <!-- Scrape Disabled Badge in Directory Tree Node -->
+                  <span
+                    v-if="!node.item.isFolder && node.item.enableScrape === false"
+                    class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-750 inline-flex items-center gap-1 select-none shrink-0"
+                    :title="t('listen.scrapeDisabled') || 'Scrape Disabled'"
+                  >
+                    <RefreshCw class="h-2.5 w-2.5 opacity-40" />
+                    <span class="hidden xl:inline text-[8px] uppercase tracking-wider font-semibold">{{ t('listen.scrapeDisabled') || 'No Scrape' }}</span>
+                  </span>
+
                   <!-- Color-coded Item Labels (compact in View mode, full wrap in Rearrange mode) -->
                   <div 
                     v-if="!node.item.isFolder && node.item.tags && node.item.tags.length > 0"
@@ -29984,26 +30003,6 @@ onUnmounted(() => {
 
                 <!-- Action Button Hover Overlay -->
                 <div class="flex items-center gap-1 relative z-20 shrink-0 pl-1">
-                  <!-- Backend Scrape Toggle Switch (non-folder Listen items only) -->
-                  <button
-                    v-if="!node.item.isFolder"
-                    type="button"
-                    role="switch"
-                    :aria-checked="node.item.enableScrape !== false"
-                    :aria-label="node.item.enableScrape !== false ? (t('listen.scrapeToggleDisableTip') || 'Backend scrape enabled — click to disable') : (t('listen.scrapeToggleEnableTip') || 'Backend scrape disabled — click to enable')"
-                    @click.stop="toggleListenItemScrape(node.item)"
-                    class="relative inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors cursor-pointer mr-0.5 focus:outline-none focus:ring-2 focus:ring-teal-500/30"
-                    :class="node.item.enableScrape !== false
-                      ? 'bg-teal-600 border-teal-600 dark:bg-teal-500 dark:border-teal-500'
-                      : 'bg-gray-200 border-gray-300 dark:bg-gray-700 dark:border-gray-600'"
-                    :title="node.item.enableScrape !== false ? (t('listen.scrapeToggleDisableTip') || 'Backend scrape enabled — click to disable') : (t('listen.scrapeToggleEnableTip') || 'Backend scrape disabled — click to enable')"
-                  >
-                    <span
-                      class="pointer-events-none inline-block h-3 w-3 rounded-full bg-white shadow-xs transform transition-transform"
-                      :class="node.item.enableScrape !== false ? 'translate-x-3' : 'translate-x-0.5'"
-                    ></span>
-                  </button>
-
                   <!-- Add submenu trigger to folders -->
                   <button
                     v-if="node.item.isFolder"
