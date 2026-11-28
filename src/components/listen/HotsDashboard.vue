@@ -105,7 +105,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: "select-channel", channelId: string): void;
+  (e: "select-channel", channelUsername: string, channelId?: string): void;
   (e: "open-post", payload: { channelId: string; postId: string | number; postUrl?: string }): void;
   (e: "add-to-workspace", post: any): void;
   (e: "share-post", post: any): void;
@@ -854,9 +854,9 @@ function inspectPost(post: HotPostItem) {
   inspectedPost.value = post;
 }
 
-function handleChannelClick(channelId: string) {
-  if (!channelId) return;
-  emit("select-channel", channelId);
+function handleChannelClick(channelUsername: string, channelId?: string) {
+  if (!channelUsername && !channelId) return;
+  emit("select-channel", channelUsername || channelId || "", channelId);
   isDrillDownOpen.value = false;
   inspectedPost.value = null;
 }

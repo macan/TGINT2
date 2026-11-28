@@ -28,18 +28,36 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
-  (e: "select-channel", channelId: string): void;
+  (e: "select-channel", channelUsername: string, channelId?: string): void;
 }>();
 
 const { t } = useI18n();
 
+function cleanChannelHandle(raw: unknown): string {
+  if (!raw || typeof raw !== "string") return "";
+  let cleaned = raw
+    .trim()
+    .replace(/^https?:\/\/(?:t\.me|telegram\.me)\//i, "")
+    .replace(/^@/, "")
+    .trim();
+  const dotIdx = cleaned.indexOf(".");
+  if (dotIdx > 0 && /^\d+$/.test(cleaned.slice(dotIdx + 1))) {
+    cleaned = cleaned.slice(0, dotIdx);
+  }
+  return cleaned;
+}
+
 const username = computed(() => {
   const meta = props.metadata;
-  if (meta?.username) return meta.username.replace(/^@/, "");
-  if (meta?.name) return meta.name.replace(/^@/, "");
-  if (props.channel.channelUsername) return props.channel.channelUsername.replace(/^@/, "");
-  if (props.channel.channelName) return props.channel.channelName.replace(/^@/, "");
-  return String(props.channel.channelId || "").replace(/^@/, "");
+  const fromMetaUsername = cleanChannelHandle(meta?.username);
+  if (fromMetaUsername) return fromMetaUsername;
+  const fromChannelUsername = cleanChannelHandle(props.channel.channelUsername);
+  if (fromChannelUsername) return fromChannelUsername;
+  const fromChannelName = cleanChannelHandle(props.channel.channelName);
+  if (fromChannelName) return fromChannelName;
+  const fromMetaName = cleanChannelHandle(meta?.name);
+  if (fromMetaName && !/\s/.test(fromMetaName)) return fromMetaName;
+  return cleanChannelHandle(String(props.channel.channelId || ""));
 });
 
 const isPrivate = computed(() => {
@@ -105,7 +123,8 @@ function handleImageError(event: Event) {
 }
 
 function handleClick() {
-  emit("select-channel", props.channel.channelId || username.value);
+  const targetUsername = username.value;
+  emit("select-channel", targetUsername || String(props.channel.channelId || ""), props.channel.channelId);
 }
 </script>
 

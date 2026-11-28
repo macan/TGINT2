@@ -3430,13 +3430,13 @@ export async function processListenHotsData(options: {
     let channelUsername = '';
     let channelTitle = '';
 
-    // Check listenItems
+    // Check listenItems (only treat channel items as channelUsername, never keyword items)
     let matchedListenItem: any = null;
     if (Array.isArray(listenItems)) {
       matchedListenItem = listenItems.find(
         (it: any) => it.id === channelId || it.argument === channelId
       );
-      if (matchedListenItem) {
+      if (matchedListenItem && (!matchedListenItem.type || matchedListenItem.type === 'channel')) {
         channelUsername = (matchedListenItem.argument || '').replace(/^@/, '').trim();
         channelTitle = matchedListenItem.name || channelUsername;
       }
@@ -3454,8 +3454,13 @@ export async function processListenHotsData(options: {
         }
         const url = p.data?.url || p.url;
         if (url && typeof url === 'string') {
+          const privMatch = url.match(/t\.me\/c\/(\d+)/);
+          if (privMatch && privMatch[1]) {
+            channelUsername = `-100${privMatch[1]}`;
+            break;
+          }
           const match = url.match(/t\.me\/([a-zA-Z0-9_+]+)/);
-          if (match && match[1]) {
+          if (match && match[1] && match[1].toLowerCase() !== 'c') {
             channelUsername = match[1];
             break;
           }

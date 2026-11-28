@@ -2837,6 +2837,7 @@ const listenDirectory = ref<ListenItem[]>([
         description: "Official channel of Telegram founder Pavel Durov",
         tags: ["founder", "telegram", "official"],
         enableHotTopics: true,
+        enableScrape: true,
         auto_class: {
           class: "technology",
           confidence: 0.94
@@ -2852,6 +2853,7 @@ const listenDirectory = ref<ListenItem[]>([
         description: "Post stream containing key AI phrases",
         tags: ["ai", "deepmind", "research"],
         enableHotTopics: true,
+        enableScrape: true,
         auto_class: {
           class: "technology",
           confidence: 0.98
@@ -2869,6 +2871,7 @@ const listenDirectory = ref<ListenItem[]>([
     description: "Updates about TON network",
     tags: ["crypto", "ton", "web3"],
     enableHotTopics: true,
+    enableScrape: true,
     auto_class: {
       class: "financial",
       confidence: 0.91
@@ -3095,7 +3098,8 @@ const listenItemForm = ref({
   description: "",
   parentId: "",
   tags: [] as string[],
-  enableHotTopics: true
+  enableHotTopics: true,
+  enableScrape: true
 });
 
 // Tag configuration state within Add/Edit Item modal
@@ -4247,7 +4251,8 @@ const openAddModal = (parentId: string = "", isFolder: boolean = false) => {
     description: "",
     parentId,
     tags: [],
-    enableHotTopics: true
+    enableHotTopics: true,
+    enableScrape: true
   };
   isListenModalOpen.value = true;
 };
@@ -4266,7 +4271,8 @@ const openEditModal = (item: ListenItem) => {
     description: item.description || "",
     parentId: "",
     tags: item.tags && Array.isArray(item.tags) ? [...item.tags] : [],
-    enableHotTopics: item.enableHotTopics !== false
+    enableHotTopics: item.enableHotTopics !== false,
+    enableScrape: item.enableScrape !== false
   };
   isListenModalOpen.value = true;
 };
@@ -4284,6 +4290,7 @@ const saveListenItemForm = () => {
     : undefined;
 
   const enableHotTopicsValue = listenItemForm.value.isFolder ? undefined : (listenItemForm.value.enableHotTopics !== false);
+  const enableScrapeValue = listenItemForm.value.isFolder ? undefined : (listenItemForm.value.enableScrape !== false);
 
   if (isEditingListenItem.value) {
     findNodeAndPerform(listenDirectory.value, listenItemForm.value.id, (nodes, idx) => {
@@ -4295,7 +4302,8 @@ const saveListenItemForm = () => {
         argument: listenItemForm.value.argument,
         description: listenItemForm.value.description,
         tags: itemTags,
-        enableHotTopics: enableHotTopicsValue
+        enableHotTopics: enableHotTopicsValue,
+        enableScrape: enableScrapeValue
       };
       if (selectedListenNode.value && selectedListenNode.value.id === original.id) {
         selectedListenNode.value = nodes[idx];
@@ -4313,7 +4321,8 @@ const saveListenItemForm = () => {
       description: listenItemForm.value.description,
       children: listenItemForm.value.isFolder ? [] : undefined,
       tags: itemTags,
-      enableHotTopics: enableHotTopicsValue
+      enableHotTopics: enableHotTopicsValue,
+      enableScrape: enableScrapeValue
     };
 
     if (listenItemForm.value.parentId) {
@@ -4326,6 +4335,22 @@ const saveListenItemForm = () => {
 
   saveListenDirectory();
   isListenModalOpen.value = false;
+};
+
+const toggleListenItemScrape = (item: ListenItem) => {
+  if (!item || item.isFolder) return;
+  const nextEnabled = item.enableScrape === false;
+  findNodeAndPerform(listenDirectory.value, item.id, (nodes, idx) => {
+    const updated: ListenItem = {
+      ...nodes[idx],
+      enableScrape: nextEnabled
+    };
+    nodes[idx] = updated;
+    if (selectedListenNode.value && selectedListenNode.value.id === item.id) {
+      selectedListenNode.value = updated;
+    }
+  });
+  saveListenDirectory();
 };
 
 const isDeleteConfirmOpen = ref(false);
@@ -7862,6 +7887,11 @@ const scheduleScrapeForListen = async (channelName: string, showToast: boolean =
 const checkAndScheduleScrapeForListenItem = async (item: ListenItem): Promise<boolean> => {
   if (!item || item.isFolder) return false;
 
+  // Respect per-item backend scrape switch (default enabled when undefined)
+  if (item.enableScrape === false) {
+    return false;
+  }
+
   // 1. Must have valid loginToken
   if (!isLoginTokenValid.value || !loginToken.value) {
     return false;
@@ -9169,8 +9199,8 @@ const startListenPolling = () => {
   listenRefreshInterval = setInterval(async () => {
     if (selectedListenNode.value) {
       fetchListenPosts(selectedListenNode.value);
-      // random issue q0 scrape
-      if (selectedListenNode.value.type === 'channel' && Math.random() < 0.25) {
+      // random issue q0 scrape (respects per-item enableScrape switch)
+      if (selectedListenNode.value.type === 'channel' && selectedListenNode.value.enableScrape !== false && Math.random() < 0.25) {
         await scheduleScrapeForListen(selectedListenNode.value.argument);
       }
     }
@@ -10722,29 +10752,47 @@ const jumpToExplorerFromListen = (channel: string, postKey?: string) => {
   searchChannel();
 };
 
-const handleHotsSelectChannel = (channelId: string) => {
-  if (!channelId) return;
-  const cleanId = channelId.replace(/^@/, '').trim();
-  const dotIdx = cleanId.indexOf('.');
-  const chName = dotIdx > 0 ? cleanId.slice(0, dotIdx) : cleanId;
+const handleHotsSelectChannel = (channelUsername: string, channelId?: string) => {
+  const rawPrimary = (channelUsername || channelId || '').trim();
+  if (!rawPrimary) return;
 
-  const leaf = allListenLeafItems.value.find(item =>
-    item.id === channelId ||
-    item.id === cleanId ||
-    item.id === chName ||
-    item.argument === channelId ||
-    item.argument === cleanId ||
-    item.argument === chName ||
-    (item.argument && item.argument.replace(/^@/, '') === cleanId) ||
-    (item.argument && item.argument.replace(/^@/, '') === chName) ||
-    item.name.toLowerCase() === cleanId.toLowerCase() ||
-    item.name.toLowerCase() === chName.toLowerCase()
+  const normalizeHandle = (val?: string) => {
+    if (!val) return '';
+    let cleaned = val
+      .trim()
+      .replace(/^https?:\/\/(?:t\.me|telegram\.me)\//i, '')
+      .replace(/^@/, '')
+      .trim();
+    const dotIdx = cleaned.indexOf('.');
+    if (dotIdx > 0 && /^\d+$/.test(cleaned.slice(dotIdx + 1))) {
+      cleaned = cleaned.slice(0, dotIdx);
+    }
+    return cleaned;
+  };
+
+  const cleanUsername = normalizeHandle(channelUsername);
+  const cleanId = normalizeHandle(channelId);
+  const candidates = Array.from(
+    new Set([channelUsername, cleanUsername, channelId, cleanId].filter(Boolean) as string[])
   );
+  const candidatesLower = new Set(candidates.map(c => c.toLowerCase()));
+
+  const leaf = allListenLeafItems.value.find(item => {
+    const itemId = (item.id || '').trim().toLowerCase();
+    const itemArg = normalizeHandle(item.argument).toLowerCase();
+    const itemName = (item.name || '').trim().toLowerCase();
+    return (
+      (itemId && candidatesLower.has(itemId)) ||
+      (itemArg && candidatesLower.has(itemArg)) ||
+      (itemName && candidatesLower.has(itemName))
+    );
+  });
+
   if (leaf) {
     selectListenItem(leaf);
     setListenLayoutMode('view');
   } else {
-    jumpToExplorerFromListen(chName || cleanId);
+    jumpToExplorerFromListen(cleanUsername || cleanId || rawPrimary.replace(/^@/, ''));
   }
 };
 
@@ -13781,7 +13829,8 @@ const openAddChannelModalWithDetails = (name: string, username: string, parentId
     description: `Channel: @${username}`,
     parentId,
     tags: [],
-    enableHotTopics: true
+    enableHotTopics: true,
+    enableScrape: true
   };
   isListenModalOpen.value = true;
 };
@@ -29935,6 +29984,26 @@ onUnmounted(() => {
 
                 <!-- Action Button Hover Overlay -->
                 <div class="flex items-center gap-1 relative z-20 shrink-0 pl-1">
+                  <!-- Backend Scrape Toggle Switch (non-folder Listen items only) -->
+                  <button
+                    v-if="!node.item.isFolder"
+                    type="button"
+                    role="switch"
+                    :aria-checked="node.item.enableScrape !== false"
+                    :aria-label="node.item.enableScrape !== false ? (t('listen.scrapeToggleDisableTip') || 'Backend scrape enabled — click to disable') : (t('listen.scrapeToggleEnableTip') || 'Backend scrape disabled — click to enable')"
+                    @click.stop="toggleListenItemScrape(node.item)"
+                    class="relative inline-flex h-4 w-7 shrink-0 items-center rounded-full border transition-colors cursor-pointer mr-0.5 focus:outline-none focus:ring-2 focus:ring-teal-500/30"
+                    :class="node.item.enableScrape !== false
+                      ? 'bg-teal-600 border-teal-600 dark:bg-teal-500 dark:border-teal-500'
+                      : 'bg-gray-200 border-gray-300 dark:bg-gray-700 dark:border-gray-600'"
+                    :title="node.item.enableScrape !== false ? (t('listen.scrapeToggleDisableTip') || 'Backend scrape enabled — click to disable') : (t('listen.scrapeToggleEnableTip') || 'Backend scrape disabled — click to enable')"
+                  >
+                    <span
+                      class="pointer-events-none inline-block h-3 w-3 rounded-full bg-white shadow-xs transform transition-transform"
+                      :class="node.item.enableScrape !== false ? 'translate-x-3' : 'translate-x-0.5'"
+                    ></span>
+                  </button>
+
                   <!-- Add submenu trigger to folders -->
                   <button
                     v-if="node.item.isFolder"
@@ -32236,6 +32305,41 @@ onUnmounted(() => {
                     <input
                       id="enable-hot-topics-toggle"
                       v-model="listenItemForm.enableHotTopics"
+                      type="checkbox"
+                      class="sr-only peer"
+                    />
+                    <div class="w-10 h-5.5 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4.5 after:w-4.5 after:transition-all dark:border-gray-600 peer-checked:bg-teal-600"></div>
+                  </label>
+                </div>
+
+                <!-- Backend Scrape Capability Toggle -->
+                <div class="p-3.5 bg-gray-50/80 dark:bg-gray-900/40 rounded-2xl border border-gray-150 dark:border-gray-700/80 flex items-center justify-between gap-3">
+                  <div class="flex items-start gap-2.5 min-w-0 flex-1">
+                    <div class="p-2 rounded-xl bg-teal-50 dark:bg-teal-950/40 border border-teal-200/50 dark:border-teal-800/40 text-teal-600 dark:text-teal-400 shrink-0 mt-0.5">
+                      <RefreshCw class="h-4 w-4" />
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <div class="flex items-center gap-2">
+                        <label for="enable-scrape-toggle" class="text-xs font-bold text-gray-800 dark:text-gray-200 cursor-pointer">
+                          {{ t('listen.enableScrapeLabel') || 'Allow Backend Scrape Scheduling' }}
+                        </label>
+                        <span
+                          v-if="!listenItemForm.enableScrape"
+                          class="px-1.5 py-0.5 text-[10px] font-bold rounded-md bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 border border-rose-200/60 dark:border-rose-900/60 shrink-0"
+                        >
+                          {{ t('listen.scrapeDisabled') || 'Disabled' }}
+                        </span>
+                      </div>
+                      <p class="text-[11px] text-gray-400 dark:text-gray-500 mt-0.5 leading-relaxed">
+                        {{ t('listen.enableScrapeDesc') || 'Allow background sync and polling to schedule backend scrape tasks for this item when fresh posts are needed.' }}
+                      </p>
+                    </div>
+                  </div>
+                  <!-- Switch Toggle -->
+                  <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                    <input
+                      id="enable-scrape-toggle"
+                      v-model="listenItemForm.enableScrape"
                       type="checkbox"
                       class="sr-only peer"
                     />

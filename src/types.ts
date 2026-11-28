@@ -15,6 +15,7 @@ export interface ListenItem {
   tags?: string[];
   auto_class?: ListenAutoClass;
   enableHotTopics?: boolean;
+  enableScrape?: boolean;
 }
 
 export interface AutoFindingCell {
